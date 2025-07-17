@@ -1550,6 +1550,7 @@ def render_sidebar(session: UserSession):
                 logger.error(f"PDF generation error: {e}")
                 st.error("Failed to generate PDF")
 
+# Add this at the very beginning of main() function for debugging
 def main():
     """Main application function."""
     st.set_page_config(
@@ -1558,9 +1559,20 @@ def main():
         layout="wide"
     )
     
+    # DEBUG: Show current Streamlit version and environment
+    st.write(f"**Debug Info:**")
+    st.write(f"- Streamlit version: {st.__version__}")
+    st.write(f"- Environment vars: {list(os.environ.keys())[:5]}...")  # Show first 5 env vars
+    st.write(f"- Session state keys: {list(st.session_state.keys())}")
+    
     try:
+        # DEBUG: Step by step initialization
+        st.write("🔄 Starting initialization...")
+        
         # Initialize session state
+        st.write("📝 Initializing session state...")
         init_session_state()
+        st.write("✅ Session state initialized")
         
         # Check if initialization was successful
         if not st.session_state.get('initialized', False):
@@ -1573,6 +1585,7 @@ def main():
                 st.rerun()
             return
         
+        # Rest of your main() function...        
         # Check if session manager is available
         if not hasattr(st.session_state, 'session_manager') or st.session_state.session_manager is None:
             st.error("Session manager not available.")
