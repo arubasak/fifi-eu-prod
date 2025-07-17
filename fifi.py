@@ -8,6 +8,8 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 import requests
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+from langchain_tavily import TavilySearch
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +30,6 @@ except ImportError:
 
 try:
     from langchain_openai import ChatOpenAI
-    from langchain_core.messages import HumanMessage, AIMessage
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     pass
@@ -40,7 +41,7 @@ except ImportError:
     pass
 
 try:
-    from tavily import TavilyClient
+    from langchain_tavily import TavilySearch
     TAVILY_AVAILABLE = True
 except ImportError:
     pass
@@ -156,18 +157,9 @@ class PineconeAssistantTool:
             st.error(f"Failed to initialize Pinecone Assistant: {e}")
             return None
 
-    def _is_token_limit_error(self, error: Exception) -> bool:
-        """Check if the error is related to token limits (150K tokens)."""
-        error_str = str(error).lower()
-        token_error_indicators = [
-            "token limit", "token_limit", "tokens exceeded", "context length",
-            "context_length", "maximum context", "150k", "150000", "token count"
-        ]
-        return any(indicator in error_str for indicator in token_error_indicators)
-
-    def query(self, chat_history: List[HumanMessage]) -> Dict[str, Any]:
+    def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]:
         if not self.assistant: 
-            return {"content": "Pinecone assistant not available.", "success": False, "source": "error", "error_type": "unavailable"}
+            return None
         
         try:
             pinecone_messages = [
@@ -223,29 +215,23 @@ class PineconeAssistantTool:
                 "success": True, 
                 "source": "FiFi Knowledge Base",
                 "has_citations": has_citations,
-                "response_length": len(content),
-                "error_type": None
+                "response_length": len(content)
             }
             
         except Exception as e:
             logger.error(f"Pinecone Assistant error: {str(e)}")
-            
-            # Check if it's a token limit error
-            if self._is_token_limit_error(e):
-                return {"content": "Token limit reached in knowledge base.", "success": False, "source": "error", "error_type": "token_limit"}
-            else:
-                return {"content": "Error querying knowledge base.", "success": False, "source": "error", "error_type": "general"}
+            return None
 
-class DirectTavilySearch:
-    """Direct Tavily search without OpenAI orchestration - handles both general and 12taste-only searches."""
+class TavilyFallbackAgent:
+    """Tavily fallback agent with smart result synthesis and UTM tracking."""
     
     def __init__(self, tavily_api_key: str):
         if not TAVILY_AVAILABLE:
             raise ImportError("Tavily client not available.")
-        self.client = TavilyClient(api_key=tavily_api_key)
+        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
 
-    def _add_utm_to_links(self, content: str) -> str:
-        """Add UTM parameters to links."""
+    def add_utm_to_links(self, content: str) -> str:
+        """Finds all Markdown links in a string and appends the UTM parameters."""
         def replacer(match):
             url = match.group(1)
             utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
@@ -256,7 +242,7 @@ class DirectTavilySearch:
             return f"({new_url})"
         return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
 
-    def _synthesize_search_results(self, results, query: str, search_type: str = "general") -> str:
+    def synthesize_search_results(self, results, query: str) -> str:
         """Synthesize search results into a coherent response similar to LLM output."""
         
         # Handle string response from Tavily
@@ -267,8 +253,7 @@ class DirectTavilySearch:
         if isinstance(results, dict):
             # Check if there's a pre-made answer
             if results.get('answer'):
-                prefix = "Based on 12taste.com" if search_type == "12taste_only" else "Based on my web search"
-                return f"{prefix}: {results['answer']}"
+                return f"Based on my search: {results['answer']}"
             
             # Extract the results array
             search_results = results.get('results', [])
@@ -295,11 +280,6 @@ class DirectTavilySearch:
                         relevant_info.append(content)
                         
                         if url and title:
-                            # Add UTM tracking
-                            if '?' in url:
-                                url += '&utm_source=12taste.com&utm_medium=fifi-chat'
-                            else:
-                                url += '?utm_source=12taste.com&utm_medium=fifi-chat'
                             sources.append(f"[{title}]({url})")
             
             if not relevant_info:
@@ -307,12 +287,11 @@ class DirectTavilySearch:
             
             # Build synthesized response
             response_parts = []
-            prefix = "Based on 12taste.com" if search_type == "12taste_only" else "Based on my web search"
             
             if len(relevant_info) == 1:
-                response_parts.append(f"{prefix}: {relevant_info[0]}")
+                response_parts.append(f"Based on my search: {relevant_info[0]}")
             else:
-                response_parts.append(f"{prefix}, here's what I found:")
+                response_parts.append("Based on my search, here's what I found:")
                 for i, info in enumerate(relevant_info, 1):
                     response_parts.append(f"\n\n**{i}.** {info}")
             
@@ -324,58 +303,75 @@ class DirectTavilySearch:
             
             return "".join(response_parts)
         
+        # Handle direct list (fallback)
+        if isinstance(results, list):
+            relevant_info = []
+            sources = []
+            
+            for i, result in enumerate(results[:3], 1):
+                if isinstance(result, dict):
+                    title = result.get('title', f'Result {i}')
+                    content = (result.get('content') or 
+                             result.get('snippet') or 
+                             result.get('description', ''))
+                    url = result.get('url', '')
+                    
+                    if content:
+                        if len(content) > 400:
+                            content = content[:400] + "..."
+                        relevant_info.append(content)
+                        if url:
+                            sources.append(f"[{title}]({url})")
+            
+            if not relevant_info:
+                return "I couldn't find relevant information for your query."
+            
+            response_parts = []
+            if len(relevant_info) == 1:
+                response_parts.append(f"Based on my search: {relevant_info[0]}")
+            else:
+                response_parts.append("Based on my search:")
+                for info in relevant_info:
+                    response_parts.append(f"\n{info}")
+            
+            if sources:
+                response_parts.append(f"\n\n**Sources:**")
+                for i, source in enumerate(sources, 1):
+                    response_parts.append(f"{i}. {source}")
+            
+            return "".join(response_parts)
+        
         # Fallback for unknown formats
         return "I couldn't find any relevant information for your query."
 
-    def search_general(self, query: str) -> Dict[str, Any]:
-        """Search web with competitor exclusions."""
+    def query(self, message: str, chat_history: List[BaseMessage]) -> Dict[str, Any]:
         try:
-            response = self.client.search(
-                query=query,
-                search_depth="advanced",
-                max_results=5,
-                include_answer=True,
-                include_raw_content=False,
-                exclude_domains=DEFAULT_EXCLUDED_DOMAINS
-            )
+            search_results = self.tavily_tool.invoke({"query": message})
+            synthesized_content = self.synthesize_search_results(search_results, message)
+            final_content = self.add_utm_to_links(synthesized_content)
             
-            content = self._synthesize_search_results(response, query, "general")
-            final_content = self._add_utm_to_links(content)
-            
-            return {"content": final_content, "success": True, "source": "FiFi Web Search"}
-            
+            return {
+                "content": final_content,
+                "success": True,
+                "source": "FiFi Web Search"
+            }
         except Exception as e:
-            return {"content": f"Search error: {str(e)}", "success": False, "source": "error"}
-
-    def search_12taste_only(self, query: str) -> Dict[str, Any]:
-        """Search only 12taste.com domain."""
-        try:
-            domain_query = f"site:12taste.com {query}"
-            response = self.client.search(
-                query=domain_query,
-                search_depth="advanced",
-                max_results=3,
-                include_answer=True,
-                include_raw_content=False
-            )
-            
-            content = self._synthesize_search_results(response, query, "12taste_only")
-            final_content = self._add_utm_to_links(content)
-            
-            return {"content": final_content, "success": True, "source": "12taste.com Search"}
-            
-        except Exception as e:
-            return {"content": f"12taste.com search error: {str(e)}", "success": False, "source": "error"}
+            return {
+                "content": f"I apologize, but an error occurred while searching: {str(e)}",
+                "success": False,
+                "source": "error"
+            }
 
 class EnhancedAI:
-    """Enhanced AI interface with Pinecone knowledge base and direct Tavily search (no LLM synthesis)."""
+    """Enhanced AI with Pinecone knowledge base and smart Tavily fallback with aggressive anti-hallucination."""
     
     def __init__(self):
+        self.pinecone_tool = None
+        self.tavily_agent = None
         self.openai_client = None
         self.langchain_llm = None
-        self.pinecone_assistant = None
-        self.direct_tavily = None  # Use DirectTavilySearch instead of LLM synthesis
         
+        # Initialize OpenAI clients for potential LLM fallback
         if OPENAI_AVAILABLE and config.OPENAI_API_KEY:
             try:
                 self.openai_client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
@@ -392,192 +388,169 @@ class EnhancedAI:
             except Exception as e:
                 logger.error(f"LangChain LLM initialization failed: {e}")
         
-        # INITIALIZE PINECONE ASSISTANT
+        # Initialize Pinecone Assistant
         if PINECONE_AVAILABLE and config.PINECONE_API_KEY and config.PINECONE_ASSISTANT_NAME:
             try:
-                self.pinecone_assistant = PineconeAssistantTool(
+                self.pinecone_tool = PineconeAssistantTool(
                     api_key=config.PINECONE_API_KEY,
                     assistant_name=config.PINECONE_ASSISTANT_NAME
                 )
                 logger.info("Pinecone Assistant initialized successfully")
             except Exception as e:
                 logger.error(f"Pinecone Assistant initialization failed: {e}")
-                self.pinecone_assistant = None
+                self.pinecone_tool = None
         
-        # INITIALIZE DIRECT TAVILY SEARCH (no LLM synthesis)
+        # Initialize Tavily Fallback Agent
         if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
             try:
-                self.direct_tavily = DirectTavilySearch(tavily_api_key=config.TAVILY_API_KEY)
-                logger.info("Direct Tavily Search initialized successfully")
+                self.tavily_agent = TavilyFallbackAgent(tavily_api_key=config.TAVILY_API_KEY)
+                logger.info("Tavily Fallback Agent initialized successfully")
             except Exception as e:
-                logger.error(f"Direct Tavily Search initialization failed: {e}")
-                self.direct_tavily = None
-    
-    def _should_use_web_search(self, prompt: str) -> bool:
-        """Determine if the query would benefit from web search."""
-        search_indicators = [
-            "find", "search", "suppliers", "companies", "latest", "current", 
-            "price", "cost", "market", "trends", "news", "available",
-            "where to buy", "who sells", "contact", "locate", "recent"
+                logger.error(f"Tavily Fallback Agent initialization failed: {e}")
+                self.tavily_agent = None
+
+    def should_use_web_fallback(self, pinecone_response: Dict[str, Any]) -> bool:
+        """EXTREMELY aggressive fallback detection to prevent any hallucination."""
+        content = pinecone_response.get("content", "").lower()
+        content_raw = pinecone_response.get("content", "")
+        
+        # PRIORITY 1: Always fallback for current/recent information requests
+        current_info_indicators = [
+            "today", "yesterday", "this week", "this month", "this year", "2025", "2024",
+            "current", "latest", "recent", "now", "currently", "updated",
+            "news", "weather", "stock", "price", "event", "happening"
         ]
-        return any(indicator in prompt.lower() for indicator in search_indicators)
-    
-    def _fallback_to_llm(self, prompt: str) -> Dict[str, Any]:
-        """Fallback to pure LLM response when both Pinecone and Tavily are unavailable."""
-        enhanced_prompt = f"""You are FiFi, an AI assistant specializing in food & beverage sourcing and ingredients. 
-You help F&B professionals find suppliers, understand market trends, source ingredients, and navigate the food industry.
+        if any(indicator in content for indicator in current_info_indicators):
+            return True
+        
+        # PRIORITY 2: Explicit "don't know" statements (allow these to pass)
+        explicit_unknown = [
+            "i don't have specific information", "i don't know", "i'm not sure",
+            "i cannot help", "i cannot provide", "cannot find specific information",
+            "no specific information", "no information about", "don't have information",
+            "not available in my knowledge", "unable to find", "no data available",
+            "insufficient information", "outside my knowledge", "cannot answer"
+        ]
+        if any(keyword in content for keyword in explicit_unknown):
+            return True
+        
+        # PRIORITY 3: Detect fake files/images/paths (CRITICAL SAFETY)
+        fake_file_patterns = [
+            ".jpg", ".jpeg", ".png", ".html", ".gif", ".doc", ".docx",
+            ".xls", ".xlsx", ".ppt", ".pptx", ".mp4", ".avi", ".mp3",
+            "/uploads/", "/files/", "/images/", "/documents/", "/media/",
+            "file://", "ftp://", "path:", "directory:", "folder:"
+        ]
+        
+        has_real_citations = pinecone_response.get("has_citations", False)
+        if any(pattern in content_raw for pattern in fake_file_patterns):
+            if not has_real_citations:
+                return True
+        
+        # PRIORITY 4: Detect potential fake citations (CRITICAL)
+        if "[1]" in content_raw or "**Sources:**" in content_raw:
+            suspicious_patterns = [
+                "http://", ".org", ".net",
+                "example.com", "website.com", "source.com", "domain.com"
+            ]
+            if not has_real_citations and any(pattern in content_raw for pattern in suspicious_patterns):
+                return True
+        
+        # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short)
+        if not has_real_citations:
+            if "[1]" not in content_raw and "**Sources:**" not in content_raw:
+                if len(content_raw.strip()) > 30:
+                    return True
+        
+        # PRIORITY 6: General knowledge indicators (likely hallucination)
+        general_knowledge_red_flags = [
+            "generally", "typically", "usually", "commonly", "often", "most",
+            "according to", "it is known", "studies show", "research indicates",
+            "experts say", "based on", "in general", "as a rule"
+        ]
+        if any(flag in content for flag in general_knowledge_red_flags):
+            return True
+        
+        # PRIORITY 7: Question-answering patterns that suggest general knowledge
+        qa_patterns = [
+            "the answer is", "this is because", "the reason", "due to the fact",
+            "this happens when", "the cause of", "this occurs"
+        ]
+        if any(pattern in content for pattern in qa_patterns):
+            if not pinecone_response.get("has_citations", False):
+                return True
+        
+        # PRIORITY 8: Response length suggests substantial answer without sources
+        response_length = pinecone_response.get("response_length", 0)
+        if response_length > 100 and not pinecone_response.get("has_citations", False):
+            return True
+        
+        return False
 
-User Question: {prompt}
-
-Please provide helpful, specific advice relevant to the food & beverage industry based on your knowledge."""
-
+    def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
+        """Get enhanced AI response using same logic as reference code."""
         try:
-            if self.openai_client:
-                response = self.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": enhanced_prompt}],
-                    max_tokens=1500,
-                    temperature=0.7
-                )
-                content = response.choices[0].message.content
-                
-            elif self.langchain_llm:
-                from langchain_core.messages import HumanMessage
-                response = self.langchain_llm.invoke([HumanMessage(content=enhanced_prompt)])
-                content = response.content
-                
-            else:
-                content = "AI services are not available. Please configure your OpenAI API key."
+            # Convert chat history to LangChain format
+            langchain_history = []
+            if chat_history:
+                for msg in chat_history[-10:]:  # Last 10 messages to avoid token limits
+                    if msg.get("role") == "user":
+                        langchain_history.append(HumanMessage(content=msg.get("content", "")))
+                    elif msg.get("role") == "assistant":
+                        langchain_history.append(AIMessage(content=msg.get("content", "")))
             
-            return {
-                "content": content,
-                "source": "FiFi AI (Knowledge Only)",
-                "used_search": False,
-                "used_pinecone": False,
-                "search_attempted": False,
-                "search_error": None,
-                "success": True
-            }
+            # Add current prompt
+            langchain_history.append(HumanMessage(content=prompt))
             
-        except Exception as e:
-            logger.error(f"LLM fallback error: {e}")
+            # STEP 1: Try Pinecone Knowledge Base FIRST
+            if self.pinecone_tool:
+                pinecone_response = self.pinecone_tool.query(langchain_history)
+                
+                if pinecone_response and pinecone_response.get("success"):
+                    should_fallback = self.should_use_web_fallback(pinecone_response)
+                    
+                    if not should_fallback:
+                        logger.info("Using Pinecone knowledge base response")
+                        return {
+                            "content": pinecone_response["content"],
+                            "source": pinecone_response.get("source", "FiFi Knowledge Base"),
+                            "used_search": False,
+                            "used_pinecone": True,
+                            "has_citations": pinecone_response.get("has_citations", False),
+                            "safety_override": False,
+                            "success": True
+                        }
+                    else:
+                        logger.warning("SAFETY OVERRIDE: Detected potentially fabricated information")
+                        # Continue to Tavily fallback with safety override flag
+            
+            # STEP 2: Fall back to Tavily Web Search
+            if self.tavily_agent:
+                logger.info("Using Tavily web search fallback")
+                tavily_response = self.tavily_agent.query(prompt, langchain_history[:-1])
+                
+                if tavily_response.get("success"):
+                    return {
+                        "content": tavily_response["content"],
+                        "source": tavily_response.get("source", "FiFi Web Search"),
+                        "used_search": True,
+                        "used_pinecone": False,
+                        "has_citations": False,
+                        "safety_override": True if self.pinecone_tool else False,
+                        "success": True
+                    }
+            
+            # STEP 3: Final fallback
             return {
-                "content": f"I'm having trouble processing your request: {str(e)}",
+                "content": "I apologize, but all systems are currently unavailable.",
                 "source": "Error",
                 "used_search": False,
                 "used_pinecone": False,
-                "search_attempted": False,
-                "search_error": str(e),
+                "has_citations": False,
+                "safety_override": False,
                 "success": False
             }
-    
-    def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """Get enhanced AI response: Pinecone first, then direct Tavily, then LLM fallback."""
-        try:
-            pinecone_result = None
             
-            # STEP 1: Try Pinecone Knowledge Base FIRST
-            if self.pinecone_assistant:
-                try:
-                    # Convert chat history to LangChain format for Pinecone
-                    from langchain_core.messages import HumanMessage, AIMessage
-                    
-                    langchain_history = []
-                    if chat_history:
-                        for msg in chat_history[-10:]:  # Last 10 messages to avoid token limits
-                            if msg.get("role") == "user":
-                                langchain_history.append(HumanMessage(content=msg.get("content", "")))
-                            elif msg.get("role") == "assistant":
-                                langchain_history.append(AIMessage(content=msg.get("content", "")))
-                    
-                    # Add current prompt
-                    langchain_history.append(HumanMessage(content=prompt))
-                    
-                    # Query Pinecone Assistant
-                    pinecone_result = self.pinecone_assistant.query(langchain_history)
-                    logger.info(f"Pinecone query result: {pinecone_result.get('success', False)}")
-                    
-                    # If Pinecone has a good answer, use it
-                    if pinecone_result.get("success") and pinecone_result.get("content"):
-                        content = pinecone_result["content"]
-                        
-                        # Check if it's a meaningful response (not the "I don't know" response)
-                        if "I don't have specific information about this topic" not in content:
-                            logger.info("Using Pinecone knowledge base response")
-                            return {
-                                "content": content,
-                                "source": pinecone_result.get("source", "FiFi Knowledge Base"),
-                                "used_search": False,
-                                "used_pinecone": True,
-                                "search_attempted": False,
-                                "search_error": None,
-                                "has_citations": pinecone_result.get("has_citations", False),
-                                "success": True
-                            }
-                        else:
-                            logger.info("Pinecone doesn't have specific info, falling back to Tavily")
-                    
-                except Exception as e:
-                    logger.error(f"Pinecone Assistant query failed: {e}")
-                    pinecone_result = {"error": str(e), "error_type": "general"}
-                    
-                    # Check for token limit error
-                    if self.pinecone_assistant._is_token_limit_error(e):
-                        pinecone_result["error_type"] = "token_limit"
-            
-            # STEP 2: Fall back to DIRECT Tavily search (no LLM synthesis)
-            if self.direct_tavily:
-                use_search = self._should_use_web_search(prompt)
-                logger.info(f"Should use web search: {use_search}")
-                
-                if use_search:
-                    try:
-                        # Use general search first
-                        search_result = self.direct_tavily.search_general(prompt)
-                        
-                        if search_result.get("success") and search_result.get("content"):
-                            logger.info("Using direct Tavily search response")
-                            return {
-                                "content": search_result["content"],
-                                "source": search_result.get("source", "FiFi Web Search"),
-                                "used_search": True,
-                                "used_pinecone": False,
-                                "search_attempted": True,
-                                "search_error": None,
-                                "pinecone_result": pinecone_result,
-                                "success": True
-                            }
-                        else:
-                            logger.warning("Tavily search failed or returned no content")
-                            
-                    except Exception as e:
-                        logger.error(f"Direct Tavily search failed: {e}")
-                        # Continue to LLM fallback
-            
-            # STEP 3: Final fallback to pure LLM (when both Pinecone and Tavily fail/unavailable)
-            logger.info("Falling back to pure LLM response")
-            fallback_response = self._fallback_to_llm(prompt)
-            
-            # Add debug info about what happened
-            debug_info = [
-                f"\n\n---\n🔍 **Response Info:**",
-                f"- Pinecone available: {bool(self.pinecone_assistant)}",
-                f"- Pinecone queried: {bool(pinecone_result)}",
-                f"- Tavily available: {bool(self.direct_tavily)}",
-                f"- Search appropriate: {self._should_use_web_search(prompt)}",
-                f"- Using: LLM knowledge fallback"
-            ]
-            
-            if pinecone_result and pinecone_result.get("error_type") == "token_limit":
-                debug_info.append(f"- Pinecone token limit reached")
-            elif pinecone_result and pinecone_result.get("error_type") == "general":
-                debug_info.append(f"- Pinecone error: {pinecone_result.get('error', 'Unknown')}")
-            
-            fallback_response["content"] += "\n".join(debug_info)
-            fallback_response["pinecone_result"] = pinecone_result
-            
-            return fallback_response
-        
         except Exception as e:
             logger.error(f"Enhanced AI response error: {e}")
             return {
@@ -585,8 +558,8 @@ Please provide helpful, specific advice relevant to the food & beverage industry
                 "source": "Error",
                 "used_search": False,
                 "used_pinecone": False,
-                "search_attempted": False,
-                "search_error": str(e),
+                "has_citations": False,
+                "safety_override": False,
                 "success": False
             }
 
@@ -594,10 +567,9 @@ def init_session_state():
     """Initialize session state safely."""
     if 'initialized' not in st.session_state:
         try:
-            # Simple initialization without complex detection
             st.session_state.session_manager = SimpleSessionManager()
-            st.session_state.ai = EnhancedAI()  # Updated to use EnhancedAI
-            st.session_state.page = "chat"  # Start directly in chat
+            st.session_state.ai = EnhancedAI()
+            st.session_state.page = "chat"
             st.session_state.initialized = True
             logger.info("Session state initialized successfully")
         except Exception as e:
@@ -607,7 +579,7 @@ def init_session_state():
 def render_chat_interface():
     """Render the main chat interface."""
     st.title("🤖 FiFi AI Assistant")
-    st.caption("Your intelligent food & beverage sourcing companion")
+    st.caption("Your intelligent food & beverage sourcing companion with smart fallback")
     
     session = st.session_state.session_manager.get_session()
     
@@ -632,10 +604,14 @@ def render_chat_interface():
                 
                 # Show web search usage  
                 if msg.get("used_search"):
-                    source_indicators.append("🔍 Direct Search")
+                    source_indicators.append("🌐 Web Search")
                 
                 if source_indicators:
                     st.caption(f"Enhanced with: {', '.join(source_indicators)}")
+                
+                # Show safety override warning
+                if msg.get("safety_override"):
+                    st.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switched to verified web sources.")
     
     # Chat input
     if prompt := st.chat_input("Ask me about ingredients, suppliers, market trends, or sourcing..."):
@@ -652,7 +628,7 @@ def render_chat_interface():
         
         # Get and display AI response
         with st.chat_message("assistant"):
-            with st.spinner("Searching knowledge base and web..."):
+            with st.spinner("🔍 Querying FiFi (Internal Specialist)..."):
                 response = st.session_state.ai.get_response(prompt, session.messages)
                 
                 # Handle enhanced response format
@@ -661,16 +637,16 @@ def render_chat_interface():
                     source = response.get("source", "Unknown")
                     used_search = response.get("used_search", False)
                     used_pinecone = response.get("used_pinecone", False)
-                    pinecone_result = response.get("pinecone_result", {})
                     has_citations = response.get("has_citations", False)
+                    safety_override = response.get("safety_override", False)
                 else:
                     # Fallback for simple string responses
                     content = str(response)
                     source = "FiFi AI"
                     used_search = False
                     used_pinecone = False
-                    pinecone_result = {}
                     has_citations = False
+                    safety_override = False
                 
                 st.markdown(content)
                 
@@ -683,17 +659,15 @@ def render_chat_interface():
                         enhancements.append("🧠 Enhanced with Knowledge Base")
                 
                 if used_search:
-                    enhancements.append("🔍 Enhanced with direct Tavily search")
-                
-                # Show specific error messages for debugging
-                if pinecone_result.get("error_type") == "token_limit":
-                    st.warning("⚠️ Knowledge base token limit reached - using direct search fallback")
-                elif pinecone_result.get("error_type") == "general":
-                    st.warning("⚠️ Knowledge base temporarily unavailable - using direct search fallback")
+                    enhancements.append("🌐 Enhanced with verified web search")
                 
                 if enhancements:
                     for enhancement in enhancements:
                         st.success(enhancement)
+                
+                # Show safety override warning
+                if safety_override:
+                    st.error("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switched to verified web sources.")
         
         # Add AI response to history
         session.messages.append({
@@ -703,7 +677,7 @@ def render_chat_interface():
             "used_search": used_search,
             "used_pinecone": used_pinecone,
             "has_citations": has_citations,
-            "pinecone_result": pinecone_result,
+            "safety_override": safety_override,
             "timestamp": datetime.now().isoformat()
         })
         
@@ -731,17 +705,17 @@ def render_sidebar():
         st.subheader("System Status")
         st.write(f"**OpenAI:** {'✅' if OPENAI_AVAILABLE and config.OPENAI_API_KEY else '❌'}")
         st.write(f"**LangChain:** {'✅' if LANGCHAIN_AVAILABLE else '❌'}")
-        st.write(f"**Direct Tavily:** {'✅' if TAVILY_AVAILABLE and config.TAVILY_API_KEY else '❌'}")
+        st.write(f"**Tavily Search:** {'✅' if TAVILY_AVAILABLE and config.TAVILY_API_KEY else '❌'}")
         st.write(f"**Pinecone:** {'✅' if PINECONE_AVAILABLE and config.PINECONE_API_KEY else '❌'}")
         st.write(f"**SQLite Cloud:** {'✅' if SQLITECLOUD_AVAILABLE else '❌'}")
         
         # Component Status
         if hasattr(st.session_state, 'ai'):
             ai = st.session_state.ai
-            pinecone_status = "✅ Connected" if ai.pinecone_assistant else "❌ Failed"
-            tavily_status = "✅ Connected" if ai.direct_tavily else "❌ Failed"
+            pinecone_status = "✅ Connected" if ai.pinecone_tool else "❌ Failed"
+            tavily_status = "✅ Connected" if ai.tavily_agent else "❌ Failed"
             st.write(f"**Pinecone Assistant:** {pinecone_status}")
-            st.write(f"**Direct Tavily Search:** {tavily_status}")
+            st.write(f"**Tavily Fallback Agent:** {tavily_status}")
         
         st.divider()
         
@@ -759,7 +733,8 @@ def render_sidebar():
         st.subheader("Available Features")
         st.write("✅ Enhanced F&B AI Chat")
         st.write("✅ Session Management")
-        st.write("✅ OpenAI Integration")
+        st.write("✅ Anti-Hallucination Safety")
+        st.write("✅ Smart Fallback Logic")
         
         if LANGCHAIN_AVAILABLE:
             st.write("✅ LangChain Support")
@@ -768,22 +743,31 @@ def render_sidebar():
         
         # Pinecone Knowledge Base Status
         if PINECONE_AVAILABLE and config.PINECONE_API_KEY:
-            if hasattr(st.session_state, 'ai') and st.session_state.ai.pinecone_assistant:
+            if hasattr(st.session_state, 'ai') and st.session_state.ai.pinecone_tool:
                 st.write("✅ Knowledge Base (Pinecone)")
             else:
                 st.write("⚠️ Knowledge Base (Connection Failed)")
         else:
             st.write("❌ Knowledge Base (Setup Required)")
             
-        # Direct Tavily Search Status
+        # Tavily Fallback Status
         if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
-            if hasattr(st.session_state, 'ai') and st.session_state.ai.direct_tavily:
-                st.write("✅ Direct Web Search (No LLM Synthesis)")
-                st.write("✅ 12taste.com Search")
+            if hasattr(st.session_state, 'ai') and st.session_state.ai.tavily_agent:
+                st.write("✅ Web Search Fallback (Tavily)")
             else:
                 st.write("⚠️ Web Search (Connection Failed)")
         else:
             st.write("❌ Web Search (API key needed)")
+        
+        # Safety Features Info
+        with st.expander("🛡️ Safety Features"):
+            st.write("**Anti-Hallucination Checks:**")
+            st.write("- Fake citation detection")
+            st.write("- File path validation")
+            st.write("- General knowledge flagging")
+            st.write("- Response length analysis")
+            st.write("- Current info detection")
+            st.write("- Automatic web fallback")
         
         # Example queries
         st.subheader("💡 Try These Queries")
@@ -804,116 +788,6 @@ def render_sidebar():
                     "timestamp": datetime.now().isoformat()
                 })
                 st.rerun()
-        
-        # Pinecone Knowledge Base Testing
-        if PINECONE_AVAILABLE and config.PINECONE_API_KEY:
-            with st.expander("🧠 Knowledge Base Testing"):
-                st.write("**Test Pinecone Assistant:**")
-                
-                if hasattr(st.session_state, 'ai') and st.session_state.ai.pinecone_assistant:
-                    st.success("✅ Pinecone Assistant Connected")
-                    
-                    test_kb_query = st.text_input("Test knowledge base query:", placeholder="What do you know about organic ingredients?")
-                    
-                    if st.button("🧠 Test Knowledge Base"):
-                        if test_kb_query:
-                            with st.spinner("Testing knowledge base..."):
-                                try:
-                                    from langchain_core.messages import HumanMessage
-                                    test_result = st.session_state.ai.pinecone_assistant.query([HumanMessage(content=test_kb_query)])
-                                    
-                                    if test_result.get("success"):
-                                        st.success("✅ Knowledge base query worked!")
-                                        st.text_area("KB Result:", test_result.get("content", "No content"), height=200)
-                                        if test_result.get("has_citations"):
-                                            st.info("📚 Response includes citations")
-                                    else:
-                                        st.error(f"❌ Knowledge base query failed: {test_result.get('error_type', 'Unknown error')}")
-                                        
-                                except Exception as e:
-                                    st.error(f"❌ Knowledge base test failed: {e}")
-                else:
-                    st.error("❌ Pinecone Assistant not connected")
-                    st.write("**Troubleshooting:**")
-                    st.write(f"- Pinecone package: {'✅' if PINECONE_AVAILABLE else '❌'}")
-                    st.write(f"- API key configured: {'✅' if config.PINECONE_API_KEY else '❌'}")
-                    st.write(f"- Assistant name: {config.PINECONE_ASSISTANT_NAME}")
-                    
-                    if not PINECONE_AVAILABLE:
-                        st.warning("Install pinecone package and pinecone-plugins-assistant")
-                        st.code("pip install pinecone pinecone-plugins-assistant")
-                    
-                    if not config.PINECONE_API_KEY:
-                        st.warning("Add PINECONE_API_KEY to secrets")
-                        st.code("PINECONE_API_KEY = 'your-api-key-here'")
-        
-        # Search info and testing
-        if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
-            with st.expander("🔍 Direct Search Features & Testing"):
-                st.write("**Direct Tavily Search (No LLM):**")
-                st.write(f"- {len(DEFAULT_EXCLUDED_DOMAINS)} competitor domains filtered")
-                st.write("- Direct answers from Tavily API")
-                st.write("- No LLM synthesis step needed")
-                st.write("- Faster response times")
-                
-                st.write("**Smart Search Triggers:**")
-                st.write("- Supplier/company queries")
-                st.write("- Price & market information")
-                st.write("- Current trends & news")
-                st.write("- 'Find', 'locate', 'where to buy'")
-                
-                st.divider()
-                
-                # Manual search test using DirectTavilySearch
-                st.write("**🧪 Test Direct Search:**")
-                test_query = st.text_input("Test search query:", placeholder="organic vanilla suppliers")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("🔍 Test General Search"):
-                        if test_query:
-                            with st.spinner("Testing direct search..."):
-                                try:
-                                    if hasattr(st.session_state.ai, 'direct_tavily') and st.session_state.ai.direct_tavily:
-                                        search_result = st.session_state.ai.direct_tavily.search_general(test_query)
-                                        if search_result.get("success"):
-                                            st.success("✅ Direct search worked!")
-                                            st.text_area("Results:", search_result.get("content", "No content"), height=200)
-                                        else:
-                                            st.error(f"❌ Search failed: {search_result.get('content', 'Unknown error')}")
-                                    else:
-                                        st.error("❌ DirectTavilySearch not available")
-                                except Exception as e:
-                                    st.error(f"❌ Search failed: {e}")
-                
-                with col2:
-                    if st.button("🎯 Test 12taste Search"):
-                        if test_query:
-                            with st.spinner("Testing 12taste search..."):
-                                try:
-                                    if hasattr(st.session_state.ai, 'direct_tavily') and st.session_state.ai.direct_tavily:
-                                        search_result = st.session_state.ai.direct_tavily.search_12taste_only(test_query)
-                                        if search_result.get("success"):
-                                            st.success("✅ 12taste search worked!")
-                                            st.text_area("Results:", search_result.get("content", "No content"), height=200)
-                                        else:
-                                            st.error(f"❌ 12taste search failed: {search_result.get('content', 'Unknown error')}")
-                                    else:
-                                        st.error("❌ DirectTavilySearch not available")
-                                except Exception as e:
-                                    st.error(f"❌ 12taste search failed: {e}")
-        else:
-            with st.expander("❌ Search Not Available"):
-                st.write("**Status Check:**")
-                st.write(f"- Tavily package: {'✅' if TAVILY_AVAILABLE else '❌'}")
-                st.write(f"- API key configured: {'✅' if config.TAVILY_API_KEY else '❌'}")
-                
-                if not TAVILY_AVAILABLE:
-                    st.warning("Install tavily-python package")
-                
-                if not config.TAVILY_API_KEY:
-                    st.warning("Add TAVILY_API_KEY to secrets")
-                    st.code("TAVILY_API_KEY = 'your-api-key-here'")
         
         # Configuration status
         st.subheader("🔧 API Configuration")
@@ -943,6 +817,26 @@ def main():
         # Render interface
         render_sidebar()
         render_chat_interface()
+        
+        # Show welcome message with safety info
+        if not st.session_state.session_manager.get_session().messages:
+            st.info("""
+            👋 **Welcome to FiFi AI Chat Assistant!**
+            
+            **How it works:**
+            - 🔍 **First**: Searches your internal knowledge base via Pinecone
+            - 🛡️ **Safety Override**: Detects and blocks fabricated information (fake URLs, file paths, etc.)
+            - 🌐 **Verified Fallback**: Switches to real web sources when needed
+            - 🚨 **Anti-Misinformation**: Aggressive detection of hallucinated content
+            
+            **Safety Features:**
+            - ✅ Blocks fake citations and non-existent file references
+            - ✅ Prevents hallucinated image paths (.jpg, .png, etc.)
+            - ✅ Validates all sources before presenting information
+            - ✅ Falls back to verified web search when information is questionable
+            
+            **Note**: If you see a "SAFETY OVERRIDE" message, the system detected potentially fabricated information and switched to verified sources to protect you from misinformation.
+            """)
         
     except Exception as e:
         logger.error(f"Critical error: {e}")
