@@ -3,6 +3,7 @@ import os
 import uuid
 import json
 import logging
+import re
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ OPENAI_AVAILABLE = False
 LANGCHAIN_AVAILABLE = False
 SQLITECLOUD_AVAILABLE = False
 TAVILY_AVAILABLE = False
+PINECONE_AVAILABLE = False
 
 try:
     import openai
@@ -43,37 +45,23 @@ try:
 except ImportError:
     pass
 
+try:
+    from pinecone import Pinecone
+    from pinecone_plugins.assistant.models.chat import Message as PineconeMessage
+    PINECONE_AVAILABLE = True
+except ImportError:
+    PINECONE_AVAILABLE = False
+
 # Competition exclusion list for web searches
 DEFAULT_EXCLUDED_DOMAINS = [
-    "ingredientsnetwork.com",
-    "csmingredients.com", 
-    "batafood.com",
-    "nccingredients.com",
-    "prinovaglobal.com",
-    "ingrizo.com",
-    "solina.com",
-    "opply.com",
-    "brusco.co.uk",
-    "lehmanningredients.co.uk",
-    "i-ingredients.com",
-    "fciltd.com",
-    "lupafoods.com",
-    "tradeingredients.com",
-    "peterwhiting.co.uk",
-    "globalgrains.co.uk",
-    "tradeindia.com",
-    "udaan.com",
-    "ofbusiness.com",
-    "indiamart.com",
-    "symega.com",
-    "meviveinternational.com",
-    "amazon.com",
-    "podfoods.co",
-    "gocheetah.com",
-    "foodmaven.com",
-    "connect.kehe.com",
-    "knowde.com",
-    "ingredientsonline.com",
+    "ingredientsnetwork.com", "csmingredients.com", "batafood.com",
+    "nccingredients.com", "prinovaglobal.com", "ingrizo.com",
+    "solina.com", "opply.com", "brusco.co.uk", "lehmanningredients.co.uk",
+    "i-ingredients.com", "fciltd.com", "lupafoods.com", "tradeingredients.com",
+    "peterwhiting.co.uk", "globalgrains.co.uk", "tradeindia.com",
+    "udaan.com", "ofbusiness.com", "indiamart.com", "symega.com",
+    "meviveinternational.com", "amazon.com", "podfoods.co", "gocheetah.com",
+    "foodmaven.com", "connect.kehe.com", "knowde.com", "ingredientsonline.com",
     "sourcegoodfood.com"
 ]
 
@@ -85,6 +73,8 @@ class Config:
         self.OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
         self.SQLITE_CLOUD_CONNECTION = st.secrets.get("SQLITE_CLOUD_CONNECTION")
         self.TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY")
+        self.PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY")
+        self.PINECONE_ASSISTANT_NAME = st.secrets.get("PINECONE_ASSISTANT_NAME", "my-chat-assistant")
 
 config = Config()
 
@@ -123,6 +113,259 @@ class SimpleSessionManager:
     def clear_chat_history(self, session: UserSession):
         session.messages = []
         session.last_activity = datetime.now()
+
+class PineconeAssistantTool:
+    """Advanced Pinecone Assistant with token limit detection and anti-hallucination."""
+    
+    def __init__(self, api_key: str, assistant_name: str):
+        if not PINECONE_AVAILABLE: 
+            raise ImportError("Pinecone client not available.")
+        self.pc = Pinecone(api_key=api_key)
+        self.assistant_name = assistant_name
+        self.assistant = self._initialize_assistant()
+
+    def _initialize_assistant(self):
+        try:
+            instructions = (
+                "You are a document-based AI assistant with STRICT limitations.\n\n"
+                "ABSOLUTE RULES - NO EXCEPTIONS:\n"
+                "1. You can ONLY answer using information that exists in your uploaded documents\n"
+                "2. If you cannot find the answer in your documents, you MUST respond with EXACTLY: 'I don't have specific information about this topic in my knowledge base.'\n"
+                "3. NEVER create fake citations, URLs, or source references\n"
+                "4. NEVER create fake file paths, image references (.jpg, .png, etc.), or document names\n"
+                "5. NEVER use general knowledge or information not in your documents\n"
+                "6. NEVER guess or speculate about anything\n"
+                "7. NEVER make up website links, file paths, or citations\n"
+                "8. If asked about current events, news, recent information, or anything not in your documents, respond with: 'I don't have specific information about this topic in my knowledge base.'\n"
+                "9. Only include citations [1], [2], etc. if they come from your actual uploaded documents\n"
+                "10. NEVER reference images, files, or documents that were not actually uploaded to your knowledge base\n\n"
+                "REMEMBER: It is better to say 'I don't know' than to provide incorrect information, fake sources, or non-existent file references."
+            )
+            
+            assistants_list = self.pc.assistant.list_assistants()
+            if self.assistant_name not in [a.name for a in assistants_list]:
+                st.warning(f"Assistant '{self.assistant_name}' not found. Creating...")
+                return self.pc.assistant.create_assistant(
+                    assistant_name=self.assistant_name, 
+                    instructions=instructions
+                )
+            else:
+                st.info(f"Connected to assistant: '{self.assistant_name}'")
+                return self.pc.assistant.Assistant(assistant_name=self.assistant_name)
+        except Exception as e:
+            st.error(f"Failed to initialize Pinecone Assistant: {e}")
+            return None
+
+    def _is_token_limit_error(self, error: Exception) -> bool:
+        """Check if the error is related to token limits (150K tokens)."""
+        error_str = str(error).lower()
+        token_error_indicators = [
+            "token limit", "token_limit", "tokens exceeded", "context length",
+            "context_length", "maximum context", "150k", "150000", "token count"
+        ]
+        return any(indicator in error_str for indicator in token_error_indicators)
+
+    def query(self, chat_history: List[HumanMessage]) -> Dict[str, Any]:
+        if not self.assistant: 
+            return {"content": "Pinecone assistant not available.", "success": False, "source": "error", "error_type": "unavailable"}
+        
+        try:
+            pinecone_messages = [
+                PineconeMessage(
+                    role="user" if isinstance(msg, HumanMessage) else "assistant", 
+                    content=msg.content
+                ) for msg in chat_history
+            ]
+            
+            response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o")
+            content = response.message.content
+            has_citations = False
+            
+            # Process citations
+            if hasattr(response, 'citations') and response.citations:
+                has_citations = True
+                citations_header = "\n\n---\n**Sources:**\n"
+                citations_list = []
+                seen_items = set()
+                
+                for citation in response.citations:
+                    for reference in citation.references:
+                        if hasattr(reference, 'file') and reference.file:
+                            link_url = None
+                            if hasattr(reference.file, 'metadata') and reference.file.metadata:
+                                link_url = reference.file.metadata.get('source_url')
+                            if not link_url and hasattr(reference.file, 'signed_url') and reference.file.signed_url:
+                                link_url = reference.file.signed_url
+                            
+                            if link_url:
+                                if '?' in link_url:
+                                    link_url += '&utm_source=fifi-in'
+                                else:
+                                    link_url += '?utm_source=fifi-in'
+                                
+                                display_text = link_url
+                                if display_text not in seen_items:
+                                    link = f"[{len(seen_items) + 1}] [{display_text}]({link_url})"
+                                    citations_list.append(link)
+                                    seen_items.add(display_text)
+                            else:
+                                display_text = getattr(reference.file, 'name', 'Unknown Source')
+                                if display_text not in seen_items:
+                                    link = f"[{len(seen_items) + 1}] {display_text}"
+                                    citations_list.append(link)
+                                    seen_items.add(display_text)
+                
+                if citations_list:
+                    content += citations_header + "\n".join(citations_list)
+            
+            return {
+                "content": content, 
+                "success": True, 
+                "source": "FiFi Knowledge Base",
+                "has_citations": has_citations,
+                "response_length": len(content),
+                "error_type": None
+            }
+            
+        except Exception as e:
+            logger.error(f"Pinecone Assistant error: {str(e)}")
+            
+            # Check if it's a token limit error
+            if self._is_token_limit_error(e):
+                return {"content": "Token limit reached in knowledge base.", "success": False, "source": "error", "error_type": "token_limit"}
+            else:
+                return {"content": "Error querying knowledge base.", "success": False, "source": "error", "error_type": "general"}
+
+class DirectTavilySearch:
+    """Direct Tavily search without OpenAI orchestration - handles both general and 12taste-only searches."""
+    
+    def __init__(self, tavily_api_key: str):
+        if not TAVILY_AVAILABLE:
+            raise ImportError("Tavily client not available.")
+        self.client = TavilyClient(api_key=tavily_api_key)
+
+    def _add_utm_to_links(self, content: str) -> str:
+        """Add UTM parameters to links."""
+        def replacer(match):
+            url = match.group(1)
+            utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
+            if '?' in url:
+                new_url = f"{url}&{utm_params}"
+            else:
+                new_url = f"{url}?{utm_params}"
+            return f"({new_url})"
+        return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
+
+    def _synthesize_search_results(self, results, query: str, search_type: str = "general") -> str:
+        """Synthesize search results into a coherent response similar to LLM output."""
+        
+        # Handle string response from Tavily
+        if isinstance(results, str):
+            return f"Based on my search: {results}"
+        
+        # Handle dictionary response from Tavily (most common format)
+        if isinstance(results, dict):
+            # Check if there's a pre-made answer
+            if results.get('answer'):
+                prefix = "Based on 12taste.com" if search_type == "12taste_only" else "Based on my web search"
+                return f"{prefix}: {results['answer']}"
+            
+            # Extract the results array
+            search_results = results.get('results', [])
+            if not search_results:
+                return "I couldn't find any relevant information for your query."
+            
+            # Process the results
+            relevant_info = []
+            sources = []
+            
+            for i, result in enumerate(search_results[:3], 1):  # Use top 3 results
+                if isinstance(result, dict):
+                    title = result.get('title', f'Result {i}')
+                    content = (result.get('content') or 
+                             result.get('snippet') or 
+                             result.get('description') or 
+                             result.get('summary', ''))
+                    url = result.get('url', '')
+                    
+                    if content:
+                        # Clean up content
+                        if len(content) > 400:
+                            content = content[:400] + "..."
+                        relevant_info.append(content)
+                        
+                        if url and title:
+                            # Add UTM tracking
+                            if '?' in url:
+                                url += '&utm_source=12taste.com&utm_medium=fifi-chat'
+                            else:
+                                url += '?utm_source=12taste.com&utm_medium=fifi-chat'
+                            sources.append(f"[{title}]({url})")
+            
+            if not relevant_info:
+                return "I found search results but couldn't extract readable content. Please try rephrasing your query."
+            
+            # Build synthesized response
+            response_parts = []
+            prefix = "Based on 12taste.com" if search_type == "12taste_only" else "Based on my web search"
+            
+            if len(relevant_info) == 1:
+                response_parts.append(f"{prefix}: {relevant_info[0]}")
+            else:
+                response_parts.append(f"{prefix}, here's what I found:")
+                for i, info in enumerate(relevant_info, 1):
+                    response_parts.append(f"\n\n**{i}.** {info}")
+            
+            # Add sources
+            if sources:
+                response_parts.append(f"\n\n**Sources:**")
+                for i, source in enumerate(sources, 1):
+                    response_parts.append(f"\n{i}. {source}")
+            
+            return "".join(response_parts)
+        
+        # Fallback for unknown formats
+        return "I couldn't find any relevant information for your query."
+
+    def search_general(self, query: str) -> Dict[str, Any]:
+        """Search web with competitor exclusions."""
+        try:
+            response = self.client.search(
+                query=query,
+                search_depth="advanced",
+                max_results=5,
+                include_answer=True,
+                include_raw_content=False,
+                exclude_domains=DEFAULT_EXCLUDED_DOMAINS
+            )
+            
+            content = self._synthesize_search_results(response, query, "general")
+            final_content = self._add_utm_to_links(content)
+            
+            return {"content": final_content, "success": True, "source": "FiFi Web Search"}
+            
+        except Exception as e:
+            return {"content": f"Search error: {str(e)}", "success": False, "source": "error"}
+
+    def search_12taste_only(self, query: str) -> Dict[str, Any]:
+        """Search only 12taste.com domain."""
+        try:
+            domain_query = f"site:12taste.com {query}"
+            response = self.client.search(
+                query=domain_query,
+                search_depth="advanced",
+                max_results=3,
+                include_answer=True,
+                include_raw_content=False
+            )
+            
+            content = self._synthesize_search_results(response, query, "12taste_only")
+            final_content = self._add_utm_to_links(content)
+            
+            return {"content": final_content, "success": True, "source": "12taste.com Search"}
+            
+        except Exception as e:
+            return {"content": f"12taste.com search error: {str(e)}", "success": False, "source": "error"}
 
 class EnhancedAI:
     """Enhanced AI interface with web search and F&B domain expertise."""
