@@ -6,110 +6,128 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any
 import uuid
 
-# All the imports that passed
+# Import our working classes
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
-from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_core.messages import HumanMessage, AIMessage
 from pinecone import Pinecone
 from tavily import TavilyClient
 
-st.title("🧪 Class Instantiation Test")
+st.title("🧪 Method Call Test")
 
-# Test 1: Basic dataclass (this should work)
-st.write("🔄 Testing basic dataclass...")
+# Set fake environment variables for testing
+os.environ['OPENAI_API_KEY'] = 'fake-key'
+os.environ['TAVILY_API_KEY'] = 'fake-key'
+os.environ['PINECONE_API_KEY'] = 'fake-key'
+
+# Test 1: ChatOpenAI method calls
+st.write("🔄 Testing ChatOpenAI method calls...")
 try:
-    @dataclass
-    class UserSession:
-        session_id: str
-        user_type: str = "guest"
-        messages: List[Dict[str, Any]] = field(default_factory=list)
-        created_at: datetime = field(default_factory=datetime.now)
+    llm = ChatOpenAI(model="gpt-4o-mini", api_key="fake-key", temperature=0.7)
     
-    session = UserSession(session_id=str(uuid.uuid4()))
-    st.write("✅ UserSession creation successful")
+    # Test invoke method (this might call st.get_option internally)
+    st.write("  - Testing invoke method...")
+    try:
+        # This will fail due to fake API key, but we're testing for st.get_option() error
+        response = llm.invoke([HumanMessage(content="test")])
+    except Exception as e:
+        if "get_option() takes 1 positional argument but 2 were given" in str(e):
+            st.error(f"❌ Found st.get_option() error in ChatOpenAI.invoke: {e}")
+        else:
+            st.write(f"  - Expected API error (not st.get_option): {type(e).__name__}")
+    
+    st.write("✅ ChatOpenAI method testing completed")
 except Exception as e:
-    st.error(f"❌ UserSession creation failed: {e}")
+    st.error(f"❌ ChatOpenAI method test failed: {e}")
     st.exception(e)
 
-# Test 2: ChatOpenAI initialization (SUSPECT #1)
-st.write("🔄 Testing ChatOpenAI initialization...")
+# Test 2: TavilyClient method calls
+st.write("🔄 Testing TavilyClient method calls...")
 try:
-    # Try with minimal parameters first
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        api_key="fake-key-for-testing",  # Just testing initialization
-        temperature=0.7
+    tavily_client = TavilyClient(api_key="fake-key")
+    
+    # Test search method
+    st.write("  - Testing search method...")
+    try:
+        response = tavily_client.search(query="test", max_results=1)
+    except Exception as e:
+        if "get_option() takes 1 positional argument but 2 were given" in str(e):
+            st.error(f"❌ Found st.get_option() error in TavilyClient.search: {e}")
+        else:
+            st.write(f"  - Expected API error (not st.get_option): {type(e).__name__}")
+    
+    st.write("✅ TavilyClient method testing completed")
+except Exception as e:
+    st.error(f"❌ TavilyClient method test failed: {e}")
+    st.exception(e)
+
+# Test 3: Our session state operations
+st.write("🔄 Testing session state operations...")
+try:
+    # Test session state assignments that might trigger the error
+    st.write("  - Testing deployment origin detection...")
+    
+    # This is from our original code - might be the culprit
+    is_streamlit_cloud = (
+        'streamlit.app' in os.environ.get('STREAMLIT_SERVER_ADDRESS', '') or
+        'streamlit.app' in os.environ.get('HOSTNAME', '') or
+        os.environ.get('STREAMLIT_SHARING_MODE') == 'true'
     )
-    st.write("✅ ChatOpenAI initialization successful")
-except Exception as e:
-    st.error(f"❌ ChatOpenAI initialization failed: {e}")
-    st.exception(e)
-
-# Test 3: TavilySearchResults initialization (SUSPECT #2)
-st.write("🔄 Testing TavilySearchResults initialization...")
-try:
-    search_tool = TavilySearchResults(
-        api_key="fake-key-for-testing",  # Just testing initialization
-        max_results=5
-    )
-    st.write("✅ TavilySearchResults initialization successful")
-except Exception as e:
-    st.error(f"❌ TavilySearchResults initialization failed: {e}")
-    st.exception(e)
-
-# Test 4: Pinecone initialization (SUSPECT #3)
-st.write("🔄 Testing Pinecone initialization...")
-try:
-    pc = Pinecone(api_key="fake-key-for-testing")
-    st.write("✅ Pinecone initialization successful")
-except Exception as e:
-    st.error(f"❌ Pinecone initialization failed: {e}")
-    st.exception(e)
-
-# Test 5: TavilyClient initialization (SUSPECT #4)
-st.write("🔄 Testing TavilyClient initialization...")
-try:
-    tavily_client = TavilyClient(api_key="fake-key-for-testing")
-    st.write("✅ TavilyClient initialization successful")
-except Exception as e:
-    st.error(f"❌ TavilyClient initialization failed: {e}")
-    st.exception(e)
-
-# Test 6: Our custom classes from the original code
-st.write("🔄 Testing custom Config class...")
-try:
-    class MinimalConfig:
-        def __init__(self):
-            self.JWT_SECRET = "test-secret"
-            self.WORDPRESS_URL = "https://example.com"
-            self.OPENAI_API_KEY = "fake-key"
-            self.SQLITE_CLOUD_CONNECTION = None
     
-    config = MinimalConfig()
-    st.write("✅ MinimalConfig creation successful")
-except Exception as e:
-    st.error(f"❌ MinimalConfig creation failed: {e}")
-    st.exception(e)
-
-# Test 7: DatabaseManager simulation
-st.write("🔄 Testing DatabaseManager simulation...")
-try:
-    class MockDatabaseManager:
-        def __init__(self):
-            self.local_sessions = {}
-            self.use_cloud = False
-        
-        def save_session(self, session):
-            self.local_sessions[session.session_id] = session
-        
-        def load_session(self, session_id):
-            return self.local_sessions.get(session_id)
+    st.session_state.test_deployment_origin = 'https://fifi-co-pilot.streamlit.app'
+    st.session_state.test_deployment_env = 'streamlit_cloud'
     
-    db_manager = MockDatabaseManager()
-    st.write("✅ MockDatabaseManager creation successful")
+    st.write("✅ Session state operations completed")
 except Exception as e:
-    st.error(f"❌ MockDatabaseManager creation failed: {e}")
+    if "get_option() takes 1 positional argument but 2 were given" in str(e):
+        st.error(f"❌ Found st.get_option() error in session state operations: {e}")
     st.exception(e)
 
-st.success("🎉 Class instantiation test completed!")
-st.info("The first ❌ error above shows which class is calling st.get_option() internally.")
+# Test 4: Our original _get_current_origin method
+st.write("🔄 Testing origin detection method...")
+try:
+    def test_get_current_origin():
+        try:
+            # Use session state if available
+            if hasattr(st.session_state, 'deployment_origin'):
+                return st.session_state.deployment_origin
+            
+            # Simple environment detection
+            is_streamlit_cloud = (
+                'streamlit.app' in os.environ.get('STREAMLIT_SERVER_ADDRESS', '') or
+                'streamlit.app' in os.environ.get('HOSTNAME', '') or
+                os.environ.get('STREAMLIT_SHARING_MODE') == 'true'
+            )
+            
+            if is_streamlit_cloud:
+                return 'https://fifi-co-pilot.streamlit.app'
+            else:
+                return 'https://fifi-co-pilot-v1-121263692901.europe-west4.run.app'
+                
+        except Exception as e:
+            return 'https://fifi-co-pilot.streamlit.app'
+    
+    origin = test_get_current_origin()
+    st.write(f"✅ Origin detection successful: {origin}")
+except Exception as e:
+    if "get_option() takes 1 positional argument but 2 were given" in str(e):
+        st.error(f"❌ Found st.get_option() error in origin detection: {e}")
+    st.exception(e)
+
+# Test 5: Session initialization simulation
+st.write("🔄 Testing session initialization simulation...")
+try:
+    # Simulate our init_session_state function
+    if 'test_initialized' not in st.session_state:
+        st.session_state.test_deployment_origin = 'https://fifi-co-pilot.streamlit.app'
+        st.session_state.test_deployment_env = 'streamlit_cloud'
+        st.session_state.test_db_manager = None
+        st.session_state.test_initialized = True
+    
+    st.write("✅ Session initialization simulation completed")
+except Exception as e:
+    if "get_option() takes 1 positional argument but 2 were given" in str(e):
+        st.error(f"❌ Found st.get_option() error in session initialization: {e}")
+    st.exception(e)
+
+st.success("🎉 Method call test completed!")
+st.info("Check above for any st.get_option() errors to identify the exact source.")
