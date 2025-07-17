@@ -3,7 +3,7 @@ openai>=1.0.0
 langchain-openai>=0.1.0
 tavily-python>=0.3.0
 pinecone>=4.0.0
-pinecone-plugins-assistant>=0.0.4
+pinecone-plugin-assistant>=0.0.4
 requests>=2.31.0
 python-dateutil>=2.8.2
 uuid
