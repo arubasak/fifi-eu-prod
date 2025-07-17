@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 OPENAI_AVAILABLE = False
 LANGCHAIN_AVAILABLE = False
 SQLITECLOUD_AVAILABLE = False
+TAVILY_AVAILABLE = False
 
 try:
     import openai
@@ -35,6 +36,46 @@ try:
     SQLITECLOUD_AVAILABLE = True
 except ImportError:
     pass
+
+try:
+    from tavily import TavilyClient
+    TAVILY_AVAILABLE = True
+except ImportError:
+    pass
+
+# Competition exclusion list for web searches
+DEFAULT_EXCLUDED_DOMAINS = [
+    "ingredientsnetwork.com",
+    "csmingredients.com", 
+    "batafood.com",
+    "nccingredients.com",
+    "prinovaglobal.com",
+    "ingrizo.com",
+    "solina.com",
+    "opply.com",
+    "brusco.co.uk",
+    "lehmanningredients.co.uk",
+    "i-ingredients.com",
+    "fciltd.com",
+    "lupafoods.com",
+    "tradeingredients.com",
+    "peterwhiting.co.uk",
+    "globalgrains.co.uk",
+    "tradeindia.com",
+    "udaan.com",
+    "ofbusiness.com",
+    "indiamart.com",
+    "symega.com",
+    "meviveinternational.com",
+    "amazon.com",
+    "podfoods.co",
+    "gocheetah.com",
+    "foodmaven.com",
+    "connect.kehe.com",
+    "knowde.com",
+    "ingredientsonline.com",
+    "sourcegoodfood.com"
+]
 
 # Simple configuration
 class Config:
@@ -83,12 +124,13 @@ class SimpleSessionManager:
         session.messages = []
         session.last_activity = datetime.now()
 
-class SimpleAI:
-    """Simple AI interface with multiple backends."""
+class EnhancedAI:
+    """Enhanced AI interface with web search and F&B domain expertise."""
     
     def __init__(self):
         self.openai_client = None
         self.langchain_llm = None
+        self.tavily_client = None
         
         if OPENAI_AVAILABLE and config.OPENAI_API_KEY:
             try:
@@ -105,32 +147,125 @@ class SimpleAI:
                 )
             except Exception as e:
                 logger.error(f"LangChain LLM initialization failed: {e}")
+        
+        if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
+            try:
+                self.tavily_client = TavilyClient(api_key=config.TAVILY_API_KEY)
+            except Exception as e:
+                logger.error(f"Tavily client initialization failed: {e}")
     
-    def get_response(self, prompt: str, chat_history: List[Dict] = None) -> str:
-        """Get AI response using available backend."""
+    def _search_web(self, query: str, search_type: str = "general") -> str:
+        """Perform web search with domain filtering."""
         try:
-            # Try OpenAI client first
+            if not self.tavily_client:
+                return "Web search not available."
+            
+            if search_type == "12taste_only":
+                # Search only 12taste.com domain
+                domain_query = f"site:12taste.com {query}"
+                response = self.tavily_client.search(
+                    query=domain_query,
+                    search_depth="advanced",
+                    max_results=3,
+                    include_answer=True,
+                    include_raw_content=False
+                )
+                source_label = "12taste.com"
+            else:
+                # General search with competitor exclusions
+                response = self.tavily_client.search(
+                    query=query,
+                    search_depth="advanced", 
+                    max_results=5,
+                    include_answer=True,
+                    include_raw_content=False,
+                    exclude_domains=DEFAULT_EXCLUDED_DOMAINS
+                )
+                source_label = "Web Search"
+            
+            # Format results
+            results = []
+            if response.get('answer'):
+                results.append(f"**Summary:** {response['answer']}")
+            
+            if response.get('results'):
+                results.append("\n**Sources:**")
+                for i, result in enumerate(response['results'][:3], 1):
+                    title = result.get('title', 'No title')
+                    content = result.get('content', 'No content')
+                    url = result.get('url', 'No URL')
+                    results.append(f"{i}. **{title}**: {content[:200]}... ([Source]({url}))")
+            
+            return f"\n🔍 **{source_label} Results:**\n" + "\n".join(results)
+            
+        except Exception as e:
+            logger.error(f"Web search error: {e}")
+            return f"Web search encountered an error: {str(e)}"
+    
+    def _should_use_web_search(self, prompt: str) -> bool:
+        """Determine if the query would benefit from web search."""
+        search_indicators = [
+            "find", "search", "suppliers", "companies", "latest", "current", 
+            "price", "cost", "market", "trends", "news", "available",
+            "where to buy", "who sells", "contact", "locate"
+        ]
+        return any(indicator in prompt.lower() for indicator in search_indicators)
+    
+    def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
+        """Get enhanced AI response with web search capability."""
+        try:
+            # Enhanced F&B domain prompt
+            enhanced_prompt = f"""You are FiFi, an AI assistant specializing in food & beverage sourcing and ingredients. 
+You help F&B professionals find suppliers, understand market trends, source ingredients, and navigate the food industry.
+
+User Question: {prompt}
+
+Please provide helpful, specific advice relevant to the food & beverage industry. If you need current market information or supplier details, I can search the web for you."""
+
+            # Check if we should use web search
+            use_search = self._should_use_web_search(prompt)
+            search_results = ""
+            
+            if use_search and self.tavily_client:
+                search_results = self._search_web(prompt)
+                enhanced_prompt += f"\n\nWeb Search Results:\n{search_results}\n\nPlease incorporate this search information into your response when relevant."
+            
+            # Get AI response
             if self.openai_client:
                 response = self.openai_client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1000,
+                    messages=[{"role": "user", "content": enhanced_prompt}],
+                    max_tokens=1500,
                     temperature=0.7
                 )
-                return response.choices[0].message.content
-            
-            # Try LangChain as fallback
+                content = response.choices[0].message.content
+                source = "FiFi AI + Web Search" if search_results else "FiFi AI"
+                
             elif self.langchain_llm:
                 from langchain_core.messages import HumanMessage
-                response = self.langchain_llm.invoke([HumanMessage(content=prompt)])
-                return response.content
-            
+                response = self.langchain_llm.invoke([HumanMessage(content=enhanced_prompt)])
+                content = response.content
+                source = "FiFi AI + Web Search" if search_results else "FiFi AI"
+                
             else:
-                return "AI services are not available. Please configure your OpenAI API key."
+                content = "AI services are not available. Please configure your OpenAI API key."
+                source = "Error"
+            
+            return {
+                "content": content,
+                "source": source,
+                "used_search": bool(search_results),
+                "success": True
+            }
         
         except Exception as e:
-            logger.error(f"AI response error: {e}")
-            return "I'm having trouble processing your request right now. Please try again."
+            logger.error(f"Enhanced AI response error: {e}")
+            return {
+                "content": "I'm having trouble processing your request right now. Please try again.",
+                "source": "Error",
+                "used_search": False,
+                "success": False
+            }
 
 def init_session_state():
     """Initialize session state safely."""
@@ -138,7 +273,7 @@ def init_session_state():
         try:
             # Simple initialization without complex detection
             st.session_state.session_manager = SimpleSessionManager()
-            st.session_state.ai = SimpleAI()
+            st.session_state.ai = EnhancedAI()  # Updated to use EnhancedAI
             st.session_state.page = "chat"  # Start directly in chat
             st.session_state.initialized = True
             logger.info("Session state initialized successfully")
@@ -149,6 +284,7 @@ def init_session_state():
 def render_chat_interface():
     """Render the main chat interface."""
     st.title("🤖 FiFi AI Assistant")
+    st.caption("Your intelligent food & beverage sourcing companion")
     
     session = st.session_state.session_manager.get_session()
     
@@ -158,9 +294,11 @@ def render_chat_interface():
             st.markdown(msg.get("content", ""))
             if "source" in msg:
                 st.caption(f"Source: {msg['source']}")
+            if msg.get("used_search"):
+                st.caption("🔍 Enhanced with web search")
     
     # Chat input
-    if prompt := st.chat_input("Ask me anything about food & beverage sourcing..."):
+    if prompt := st.chat_input("Ask me about ingredients, suppliers, market trends, or sourcing..."):
         # Display user message
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -174,15 +312,32 @@ def render_chat_interface():
         
         # Get and display AI response
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
+            with st.spinner("Searching and analyzing..."):
                 response = st.session_state.ai.get_response(prompt, session.messages)
-                st.markdown(response)
+                
+                # Handle enhanced response format
+                if isinstance(response, dict):
+                    content = response.get("content", "No response generated.")
+                    source = response.get("source", "Unknown")
+                    used_search = response.get("used_search", False)
+                else:
+                    # Fallback for simple string responses
+                    content = str(response)
+                    source = "FiFi AI"
+                    used_search = False
+                
+                st.markdown(content)
+                
+                # Show search indicator
+                if used_search:
+                    st.success("🔍 Enhanced with real-time web search")
         
         # Add AI response to history
         session.messages.append({
             "role": "assistant",
-            "content": response,
-            "source": "FiFi AI",
+            "content": content,
+            "source": source,
+            "used_search": used_search,
             "timestamp": datetime.now().isoformat()
         })
         
@@ -206,10 +361,11 @@ def render_sidebar():
             st.write(f"**Email:** {session.email}")
         st.write(f"**Messages:** {len(session.messages)}")
         
-        # Status indicators
+        # System status
         st.subheader("System Status")
         st.write(f"**OpenAI:** {'✅' if OPENAI_AVAILABLE and config.OPENAI_API_KEY else '❌'}")
         st.write(f"**LangChain:** {'✅' if LANGCHAIN_AVAILABLE else '❌'}")
+        st.write(f"**Web Search:** {'✅' if TAVILY_AVAILABLE and config.TAVILY_API_KEY else '❌'}")
         st.write(f"**SQLite Cloud:** {'✅' if SQLITECLOUD_AVAILABLE else '❌'}")
         
         st.divider()
@@ -226,13 +382,54 @@ def render_sidebar():
         
         # Feature status
         st.subheader("Available Features")
-        st.write("✅ Basic Chat")
+        st.write("✅ Enhanced F&B AI Chat")
         st.write("✅ Session Management")
         st.write("✅ OpenAI Integration")
+        
         if LANGCHAIN_AVAILABLE:
             st.write("✅ LangChain Support")
         else:
             st.write("❌ LangChain (install required)")
+            
+        if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
+            st.write("✅ Web Search (Competitor-Filtered)")
+            st.write("✅ 12taste.com Search")
+        else:
+            st.write("❌ Web Search (API key needed)")
+        
+        # Example queries
+        st.subheader("💡 Try These Queries")
+        example_queries = [
+            "Find organic vanilla extract suppliers",
+            "Latest trends in plant-based proteins", 
+            "Current cocoa prices and suppliers",
+            "Sustainable packaging suppliers in Europe",
+            "Clean label ingredient alternatives"
+        ]
+        
+        for query in example_queries:
+            if st.button(f"💬 {query}", key=f"example_{hash(query)}", use_container_width=True):
+                # Add the example query to chat
+                session.messages.append({
+                    "role": "user", 
+                    "content": query,
+                    "timestamp": datetime.now().isoformat()
+                })
+                st.rerun()
+        
+        # Search info
+        if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
+            with st.expander("🔍 Search Features"):
+                st.write("**Competitor Exclusions:**")
+                st.write(f"- {len(DEFAULT_EXCLUDED_DOMAINS)} domains filtered")
+                st.write("- Focus on relevant suppliers")
+                st.write("- Excludes marketplaces & competitors")
+                
+                st.write("**Smart Search Triggers:**")
+                st.write("- Supplier/company queries")
+                st.write("- Price & market information")
+                st.write("- Current trends & news")
+                st.write("- 'Find', 'locate', 'where to buy'")
 
 def main():
     """Main application function."""
