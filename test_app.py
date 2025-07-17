@@ -1,124 +1,115 @@
 import streamlit as st
 import os
 import logging
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Any
+import uuid
 
-# Step 1: Test basic imports
-st.write("🔄 Testing basic imports...")
-try:
-    import uuid
-    import time
-    import json
-    import threading
-    from typing import List, Dict, Optional, Any, Union
-    from datetime import datetime, timedelta
-    from dataclasses import dataclass, field
-    from collections import defaultdict
-    import requests
-    import jwt
-    from enum import Enum
-    import io
-    import re
-    import sys
-    from urllib.parse import urlparse
-    import html
-    st.write("✅ Basic imports successful")
-except Exception as e:
-    st.error(f"❌ Basic imports failed: {e}")
-    st.stop()
+# All the imports that passed
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+from langchain_community.tools.tavily_search import TavilySearchResults
+from pinecone import Pinecone
+from tavily import TavilyClient
 
-# Step 2: Test PDF imports
-st.write("🔄 Testing PDF imports...")
-try:
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.colors import black, grey, lightgrey
-    from reportlab.lib.enums import TA_LEFT, TA_CENTER
-    st.write("✅ PDF imports successful")
-except Exception as e:
-    st.error(f"❌ PDF imports failed: {e}")
+st.title("🧪 Class Instantiation Test")
 
-# Step 3: Test AI imports
-st.write("🔄 Testing AI imports...")
-try:
-    import openai
-    st.write("✅ OpenAI import successful")
-except Exception as e:
-    st.error(f"❌ OpenAI import failed: {e}")
-
-# Step 4: Test SQLite Cloud
-st.write("🔄 Testing SQLite Cloud...")
-try:
-    import sqlitecloud
-    st.write("✅ SQLite Cloud import successful")
-except Exception as e:
-    st.error(f"❌ SQLite Cloud import failed: {e}")
-
-# Step 5: Test LangChain imports (THIS IS LIKELY THE CULPRIT)
-st.write("🔄 Testing LangChain imports...")
-try:
-    from langchain_openai import ChatOpenAI
-    st.write("✅ langchain_openai successful")
-    
-    from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
-    st.write("✅ langchain_core.messages successful")
-    
-    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-    st.write("✅ langchain_core.prompts successful")
-    
-    from langchain.agents import create_openai_tools_agent, AgentExecutor
-    st.write("✅ langchain.agents successful")
-    
-    from langchain_community.tools.tavily_search import TavilySearchResults
-    st.write("✅ langchain_community.tools successful")
-    
-    from langchain_core.tools import tool
-    st.write("✅ langchain_core.tools successful")
-    
-except Exception as e:
-    st.error(f"❌ LangChain imports failed: {e}")
-    st.exception(e)
-
-# Step 6: Test Pinecone
-st.write("🔄 Testing Pinecone...")
-try:
-    from pinecone import Pinecone
-    st.write("✅ Pinecone import successful")
-except Exception as e:
-    st.error(f"❌ Pinecone import failed: {e}")
-
-# Step 7: Test Tavily
-st.write("🔄 Testing Tavily...")
-try:
-    from tavily import TavilyClient
-    st.write("✅ Tavily import successful")
-except Exception as e:
-    st.error(f"❌ Tavily import failed: {e}")
-
-# Step 8: Test configuration loading
-st.write("🔄 Testing configuration...")
-try:
-    # Simple config test
-    jwt_secret = st.secrets.get("JWT_SECRET", "test-secret")
-    st.write(f"✅ Config loaded, JWT secret length: {len(jwt_secret)}")
-except Exception as e:
-    st.error(f"❌ Config loading failed: {e}")
-
-st.success("🎉 All import tests completed!")
-st.info("Check above for any ❌ errors that might be causing the st.get_option() issue.")
-
-# Test if we can create basic classes
-st.write("🔄 Testing class creation...")
+# Test 1: Basic dataclass (this should work)
+st.write("🔄 Testing basic dataclass...")
 try:
     @dataclass
-    class TestSession:
-        session_id: str = "test"
+    class UserSession:
+        session_id: str
+        user_type: str = "guest"
         messages: List[Dict[str, Any]] = field(default_factory=list)
+        created_at: datetime = field(default_factory=datetime.now)
     
-    test_session = TestSession()
-    st.write("✅ Dataclass creation successful")
+    session = UserSession(session_id=str(uuid.uuid4()))
+    st.write("✅ UserSession creation successful")
 except Exception as e:
-    st.error(f"❌ Class creation failed: {e}")
+    st.error(f"❌ UserSession creation failed: {e}")
+    st.exception(e)
 
-st.write("📋 Debug complete. Any errors above indicate the problematic component.")
+# Test 2: ChatOpenAI initialization (SUSPECT #1)
+st.write("🔄 Testing ChatOpenAI initialization...")
+try:
+    # Try with minimal parameters first
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        api_key="fake-key-for-testing",  # Just testing initialization
+        temperature=0.7
+    )
+    st.write("✅ ChatOpenAI initialization successful")
+except Exception as e:
+    st.error(f"❌ ChatOpenAI initialization failed: {e}")
+    st.exception(e)
+
+# Test 3: TavilySearchResults initialization (SUSPECT #2)
+st.write("🔄 Testing TavilySearchResults initialization...")
+try:
+    search_tool = TavilySearchResults(
+        api_key="fake-key-for-testing",  # Just testing initialization
+        max_results=5
+    )
+    st.write("✅ TavilySearchResults initialization successful")
+except Exception as e:
+    st.error(f"❌ TavilySearchResults initialization failed: {e}")
+    st.exception(e)
+
+# Test 4: Pinecone initialization (SUSPECT #3)
+st.write("🔄 Testing Pinecone initialization...")
+try:
+    pc = Pinecone(api_key="fake-key-for-testing")
+    st.write("✅ Pinecone initialization successful")
+except Exception as e:
+    st.error(f"❌ Pinecone initialization failed: {e}")
+    st.exception(e)
+
+# Test 5: TavilyClient initialization (SUSPECT #4)
+st.write("🔄 Testing TavilyClient initialization...")
+try:
+    tavily_client = TavilyClient(api_key="fake-key-for-testing")
+    st.write("✅ TavilyClient initialization successful")
+except Exception as e:
+    st.error(f"❌ TavilyClient initialization failed: {e}")
+    st.exception(e)
+
+# Test 6: Our custom classes from the original code
+st.write("🔄 Testing custom Config class...")
+try:
+    class MinimalConfig:
+        def __init__(self):
+            self.JWT_SECRET = "test-secret"
+            self.WORDPRESS_URL = "https://example.com"
+            self.OPENAI_API_KEY = "fake-key"
+            self.SQLITE_CLOUD_CONNECTION = None
+    
+    config = MinimalConfig()
+    st.write("✅ MinimalConfig creation successful")
+except Exception as e:
+    st.error(f"❌ MinimalConfig creation failed: {e}")
+    st.exception(e)
+
+# Test 7: DatabaseManager simulation
+st.write("🔄 Testing DatabaseManager simulation...")
+try:
+    class MockDatabaseManager:
+        def __init__(self):
+            self.local_sessions = {}
+            self.use_cloud = False
+        
+        def save_session(self, session):
+            self.local_sessions[session.session_id] = session
+        
+        def load_session(self, session_id):
+            return self.local_sessions.get(session_id)
+    
+    db_manager = MockDatabaseManager()
+    st.write("✅ MockDatabaseManager creation successful")
+except Exception as e:
+    st.error(f"❌ MockDatabaseManager creation failed: {e}")
+    st.exception(e)
+
+st.success("🎉 Class instantiation test completed!")
+st.info("The first ❌ error above shows which class is calling st.get_option() internally.")
