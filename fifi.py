@@ -366,19 +366,32 @@ class UserSession:
     active: bool = True
 
 class DatabaseManager:
-    def __init__(self, connection_string: str):
-        if not SQLITECLOUD_AVAILABLE:
-            raise ImportError("SQLite Cloud not available. Install with: pip install sqlitecloud")
-        
-        self.connection_string = connection_string
+    def __init__(self, connection_string: str = None):
         self.lock = threading.Lock()
-        try:
-            self._create_database_if_not_exists()
-            self._init_database()
-            self.cleanup_expired_sessions()
-        except Exception as e:
-            logger.error(f"Database initialization failed: {e}")
-            raise
+        
+        if connection_string and SQLITECLOUD_AVAILABLE:
+            # Use SQLite Cloud
+            self.connection_string = connection_string
+            self.use_cloud = True
+            try:
+                self._create_database_if_not_exists()
+                self._init_database()
+                self.cleanup_expired_sessions()
+            except Exception as e:
+                logger.error(f"SQLite Cloud initialization failed: {e}")
+                st.warning("SQLite Cloud unavailable, using local storage (sessions won't persist)")
+                self._init_local_storage()
+        else:
+            # Fallback to local storage
+            logger.info("Using local storage for sessions (not persistent)")
+            self.use_cloud = False
+            self._init_local_storage()
+    
+    def _init_local_storage(self):
+        """Initialize local in-memory storage as fallback."""
+        import sqlite3
+        self.local_sessions = {}
+        self.use_cloud = False
     
     def _create_database_if_not_exists(self):
         """Create the database if it doesn't exist."""
@@ -1175,17 +1188,23 @@ class SessionManager:
     def _get_current_origin(self) -> str:
         """Detect the current deployment environment and return appropriate origin."""
         try:
-            # Check if we're in Streamlit Community Cloud
-            if 'streamlit.app' in st.get_option('browser.serverAddress', ''):
+            # Check if we're in Streamlit Community Cloud by examining the hostname
+            # Since st.get_option API changed, use alternative detection methods
+            import socket
+            hostname = socket.gethostname()
+            
+            # Check for Streamlit Community Cloud indicators
+            if 'streamlit.app' in hostname or 'streamlit' in os.environ.get('STREAMLIT_SERVER_ADDRESS', ''):
                 return 'https://fifi-co-pilot.streamlit.app'
             
             # Check session state for custom origin (set by deployment)
-            if 'deployment_origin' in st.session_state:
+            if hasattr(st.session_state, 'deployment_origin'):
                 return st.session_state.deployment_origin
             
             # Default to GCP Cloud Run
             return 'https://fifi-co-pilot-v1-121263692901.europe-west4.run.app'
-        except:
+        except Exception as e:
+            logger.warning(f"Could not detect deployment environment: {e}")
             # Fallback to GCP Cloud Run
             return 'https://fifi-co-pilot-v1-121263692901.europe-west4.run.app'
 
@@ -1460,66 +1479,71 @@ def render_sidebar(session: UserSession):
         
         # Session info
         st.subheader("Session Info")
-        st.write(f"**Type:** {session.user_type.value}")
-        if session.email:
+        st.write(f"**Type:** {getattr(session, 'user_type', 'unknown')}")
+        if hasattr(session, 'email') and session.email:
             st.write(f"**Email:** {session.email}")
-        st.write(f"**Messages:** {len(session.messages)}")
+        if hasattr(session, 'messages'):
+            st.write(f"**Messages:** {len(session.messages)}")
         
-        # Database health check
-        try:
-            db_status = st.session_state.db_manager.verify_database_setup()
-            if db_status["database_connected"]:
-                st.write("**Database:** ✅ Connected")
-                if st.checkbox("Show DB Details"):
-                    st.write(f"**Total Sessions:** {db_status.get('total_sessions', 'N/A')}")
-                    st.write(f"**Active Sessions:** {db_status.get('active_sessions', 'N/A')}")
-                    st.write(f"**Indexes:** {db_status.get('indexes_created', 'N/A')}")
-            else:
-                st.write("**Database:** ❌ Error")
-                if st.checkbox("Show Error"):
-                    st.error(db_status.get('status', 'Unknown error'))
-        except Exception as e:
-            st.write("**Database:** ⚠️ Unknown")
-            logger.error(f"Failed to get DB status: {e}")
-        
-        # Database stats (if available)
-        try:
-            stats = st.session_state.db_manager.get_session_stats()
-            if stats and st.checkbox("Show System Stats"):
-                st.subheader("System Stats (24h)")
-                st.write(f"**Active Sessions:** {stats.get('active_sessions', 'N/A')}")
-                st.write(f"**Total Sessions:** {stats.get('total_sessions', 'N/A')}")
-                st.write(f"**Guest Sessions:** {stats.get('guest_sessions', 'N/A')}")
-                st.write(f"**Registered Users:** {stats.get('registered_sessions', 'N/A')}")
-        except Exception as e:
-            logger.error(f"Failed to get stats: {e}")
+        # Database health check (only if db_manager exists)
+        if hasattr(st.session_state, 'db_manager') and st.session_state.db_manager:
+            try:
+                db_status = st.session_state.db_manager.verify_database_setup()
+                if db_status["database_connected"]:
+                    st.write("**Database:** ✅ Connected")
+                    if st.checkbox("Show DB Details"):
+                        st.write(f"**Total Sessions:** {db_status.get('total_sessions', 'N/A')}")
+                        st.write(f"**Active Sessions:** {db_status.get('active_sessions', 'N/A')}")
+                        st.write(f"**Indexes:** {db_status.get('indexes_created', 'N/A')}")
+                else:
+                    st.write("**Database:** ❌ Error")
+                    if st.checkbox("Show Error"):
+                        st.error(db_status.get('status', 'Unknown error'))
+            except Exception as e:
+                st.write("**Database:** ⚠️ Local Storage")
+                logger.error(f"Failed to get DB status: {e}")
+        else:
+            st.write("**Database:** 📱 Local Storage")
         
         st.divider()
         
         # Controls
         if st.button("🗑️ Clear History"):
-            st.session_state.session_manager.clear_chat_history(session)
+            if hasattr(st.session_state, 'session_manager') and st.session_state.session_manager:
+                st.session_state.session_manager.clear_chat_history(session)
+            else:
+                # Clear local messages
+                if hasattr(session, 'messages'):
+                    session.messages = []
             try:
                 st.rerun()
             except AttributeError:
                 st.experimental_rerun()
         
         if st.button("🚪 End Session"):
-            st.session_state.session_manager.end_session(st.session_state.get('current_session_id'))
+            if hasattr(st.session_state, 'session_manager') and st.session_state.session_manager:
+                st.session_state.session_manager.end_session(st.session_state.get('current_session_id'))
+            else:
+                # Clear session state manually
+                for key in list(st.session_state.keys()):
+                    if key.startswith('current_session'):
+                        del st.session_state[key]
+                st.session_state.page = "welcome"
             try:
                 st.rerun()
             except AttributeError:
                 st.experimental_rerun()
         
-        # PDF download
-        if session.messages:
+        # PDF download (only if pdf_exporter exists)
+        if (hasattr(session, 'messages') and session.messages and 
+            hasattr(st.session_state, 'pdf_exporter') and st.session_state.pdf_exporter):
             try:
                 pdf_buffer = st.session_state.pdf_exporter.generate_chat_pdf(session)
                 if pdf_buffer.getvalue():  # Check if PDF has content
                     st.download_button(
                         label="📄 Download Chat PDF",
                         data=pdf_buffer,
-                        file_name=f"chat_{session.session_id[:8]}.pdf",
+                        file_name=f"chat_{getattr(session, 'session_id', 'temp')[:8]}.pdf",
                         mime="application/pdf"
                     )
             except Exception as e:
@@ -1538,21 +1562,81 @@ def main():
         # Initialize session state
         init_session_state()
         
+        # Check if initialization was successful
+        if not st.session_state.get('initialized', False):
+            st.error("Application failed to initialize properly.")
+            st.info("Please refresh the page or contact support if the problem persists.")
+            if st.button("Retry Initialization"):
+                # Clear session state and try again
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                st.rerun()
+            return
+        
+        # Check if session manager is available
+        if not hasattr(st.session_state, 'session_manager') or st.session_state.session_manager is None:
+            st.error("Session manager not available.")
+            st.info("Running in limited mode without session persistence.")
+            
+            # Create a minimal session for basic functionality
+            from dataclasses import dataclass
+            from datetime import datetime
+            
+            @dataclass
+            class MinimalSession:
+                session_id: str = "temp-session"
+                user_type: str = "guest"
+                email: str = None
+                messages: list = None
+                
+                def __post_init__(self):
+                    if self.messages is None:
+                        self.messages = []
+            
+            session = MinimalSession()
+            
+            # Render basic welcome page
+            st.title("🤖 AI Chat Assistant")
+            st.warning("Running in limited mode. Some features may not be available.")
+            st.info("Please check your configuration and refresh the page.")
+            return
+        
         # Get current session
         session = st.session_state.session_manager.get_session()
         
         # Render appropriate page
         if st.session_state.get('page') == "chat":
-            render_sidebar(session)
+            if hasattr(st.session_state, 'db_manager') and st.session_state.db_manager:
+                render_sidebar(session)
             render_chat_interface(session)
         else:
             render_welcome_page()
             
     except Exception as e:
         logger.critical(f"Critical application error: {e}", exc_info=True)
-        st.error("A critical error occurred. Please refresh the page and try again.")
-        if st.checkbox("Show error details"):
+        st.error("A critical error occurred.")
+        
+        # Show error details in an expander
+        with st.expander("Error Details"):
             st.exception(e)
+        
+        # Provide recovery options
+        st.subheader("Recovery Options")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🔄 Refresh Page"):
+                st.rerun()
+        
+        with col2:
+            if st.button("🗑️ Clear Session"):
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                st.rerun()
+        
+        with col3:
+            if st.button("📋 Copy Error"):
+                st.code(str(e))
 
 if __name__ == "__main__":
     main()
