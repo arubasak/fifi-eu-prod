@@ -407,7 +407,7 @@ class EnhancedAI:
         # INITIALIZE DIRECT TAVILY SEARCH (no LLM synthesis)
         if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
             try:
-                self.direct_tavily = DirectTavilySearch(api_key=config.TAVILY_API_KEY)
+                self.direct_tavily = DirectTavilySearch(tavily_api_key=config.TAVILY_API_KEY)
                 logger.info("Direct Tavily Search initialized successfully")
             except Exception as e:
                 logger.error(f"Direct Tavily Search initialization failed: {e}")
