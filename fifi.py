@@ -1163,7 +1163,7 @@ class SessionManager:
         """Get current session or create new guest session."""
         session_id = st.session_state.get('current_session_id')
         
-        if session_id:
+        if session_id and self.db:
             session = self.db.load_session(session_id)
             if session and session.active:
                 # Check if session is expired
@@ -1181,32 +1181,34 @@ class SessionManager:
             session_id=str(uuid.uuid4()),
             user_type=UserType.GUEST
         )
-        self.db.save_session(session)
+        if self.db:
+            self.db.save_session(session)
         st.session_state.current_session_id = session.session_id
         return session
     
     def _get_current_origin(self) -> str:
         """Detect the current deployment environment and return appropriate origin."""
         try:
-            # Check if we're in Streamlit Community Cloud by examining the hostname
-            # Since st.get_option API changed, use alternative detection methods
-            import socket
-            hostname = socket.gethostname()
-            
-            # Check for Streamlit Community Cloud indicators
-            if 'streamlit.app' in hostname or 'streamlit' in os.environ.get('STREAMLIT_SERVER_ADDRESS', ''):
-                return 'https://fifi-co-pilot.streamlit.app'
-            
-            # Check session state for custom origin (set by deployment)
+            # Use session state if available
             if hasattr(st.session_state, 'deployment_origin'):
                 return st.session_state.deployment_origin
             
-            # Default to GCP Cloud Run
-            return 'https://fifi-co-pilot-v1-121263692901.europe-west4.run.app'
+            # Simple environment detection without deprecated APIs
+            is_streamlit_cloud = (
+                'streamlit.app' in os.environ.get('STREAMLIT_SERVER_ADDRESS', '') or
+                'streamlit.app' in os.environ.get('HOSTNAME', '') or
+                os.environ.get('STREAMLIT_SHARING_MODE') == 'true'
+            )
+            
+            if is_streamlit_cloud:
+                return 'https://fifi-co-pilot.streamlit.app'
+            else:
+                return 'https://fifi-co-pilot-v1-121263692901.europe-west4.run.app'
+                
         except Exception as e:
             logger.warning(f"Could not detect deployment environment: {e}")
-            # Fallback to GCP Cloud Run
-            return 'https://fifi-co-pilot-v1-121263692901.europe-west4.run.app'
+            # Safe fallback
+            return 'https://fifi-co-pilot.streamlit.app'
 
     def authenticate_with_wp(self, username: str, password: str) -> Optional[UserSession]:
         """Authenticate user with WordPress using JWT."""
@@ -1585,7 +1587,8 @@ def main():
                 st.rerun()
             return
         
-        # Rest of your main() function...        
+        # Rest of your main() function...
+        
         # Check if session manager is available
         if not hasattr(st.session_state, 'session_manager') or st.session_state.session_manager is None:
             st.error("Session manager not available.")
