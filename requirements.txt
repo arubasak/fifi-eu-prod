@@ -1,31 +1,10 @@
-# Core Streamlit and Web Framework
 streamlit>=1.28.0
-
-# Essential packages for basic functionality
+openai>=1.0.0
+langchain-openai>=0.1.0
+tavily-python>=0.3.0
+pinecone>=4.0.0
+pinecone-plugins-assistant>=0.0.4
 requests>=2.31.0
-PyJWT>=2.8.0
-python-dateutil>=2.8.0
-
-# Database - Using exact version that exists
-sqlitecloud==0.0.84
-
-# PDF Generation
-reportlab>=4.0.0
-
-# AI and Machine Learning - Conservative versions for stability
-openai>=1.0.0,<2.0.0
-
-# LangChain packages - Pinned to stable versions
-langchain
-langchain-openai
-langchain-community
-langchain-core
-langchain-tavily
-
-# Search and Vector Database - Stable versions
-tavily-python
-pinecone-client
-pinecone-plugin-assistant
-
-# Data Processing (optional but useful)
-pandas
+python-dateutil>=2.8.2
+uuid
+dataclasses-json
