@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 import requests
 import jwt
-import openai
 from enum import Enum
 import io
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -24,6 +23,14 @@ import re
 import sys
 from urllib.parse import urlparse
 import html  # Fixed: Added missing html import
+
+# --- OpenAI Import with error handling ---
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    logging.warning("OpenAI not available. Install with: pip install openai")
 
 # --- SQLite Cloud Import ---
 try:
@@ -48,11 +55,10 @@ except ImportError as e:
 
 try:
     from pinecone import Pinecone
-    from pinecone_plugins.assistant.models.chat import Message as PineconeMessage
     PINECONE_AVAILABLE = True
 except ImportError:
     PINECONE_AVAILABLE = False
-    logging.warning("Pinecone packages not found. To enable Pinecone features, run: pip install pinecone pinecone-plugin-assistant")
+    logging.warning("Pinecone packages not found. To enable Pinecone features, run: pip install pinecone-client")
 
 try:
     from tavily import TavilyClient
@@ -98,18 +104,22 @@ class Config:
                     raise ValueError(f"Missing required configuration: {key}")
                 return None
         
-        # Required configuration
-        required_vars = ['JWT_SECRET', 'OPENAI_API_KEY', 'WORDPRESS_URL', 'SQLITE_CLOUD_CONNECTION']
+        # Base required configuration (only JWT and WordPress)
+        required_vars = ['JWT_SECRET', 'WORDPRESS_URL']
         
         try:
             self.JWT_SECRET = get_config_value('JWT_SECRET')
-            self.OPENAI_API_KEY = self._validate_api_key(get_config_value('OPENAI_API_KEY'))
             self.WORDPRESS_URL = self._validate_url(get_config_value('WORDPRESS_URL'))
-            self.SQLITE_CLOUD_CONNECTION = get_config_value('SQLITE_CLOUD_CONNECTION')
             
-            # Fixed: Better SQLite Cloud connection string validation
-            if not self.SQLITE_CLOUD_CONNECTION or not self.SQLITE_CLOUD_CONNECTION.startswith('sqlitecloud://'):
+            # Database configuration (required if SQLite Cloud is available)
+            self.SQLITE_CLOUD_CONNECTION = get_config_value('SQLITE_CLOUD_CONNECTION', required=SQLITECLOUD_AVAILABLE)
+            if self.SQLITE_CLOUD_CONNECTION and not self.SQLITE_CLOUD_CONNECTION.startswith('sqlitecloud://'):
                 raise ValueError("Invalid SQLite Cloud connection string format")
+            
+            # OpenAI configuration (required if OpenAI is available)
+            self.OPENAI_API_KEY = get_config_value('OPENAI_API_KEY', required=OPENAI_AVAILABLE)
+            if self.OPENAI_API_KEY:
+                self.OPENAI_API_KEY = self._validate_api_key(self.OPENAI_API_KEY)
             
             # Optional configuration
             self.PINECONE_API_KEY = get_config_value('PINECONE_API_KEY', required=False)
@@ -157,7 +167,20 @@ try:
     config = Config()
 except ValueError as e:
     st.error(f"Application Configuration Error: {e}")
-    st.stop()
+    st.info("Some features may be unavailable due to missing configuration or packages.")
+    # Create a minimal config for basic operation
+    class MinimalConfig:
+        def __init__(self):
+            self.JWT_SECRET = os.getenv('JWT_SECRET', 'development-secret')
+            self.WORDPRESS_URL = os.getenv('WORDPRESS_URL', 'https://example.com')
+            self.OPENAI_API_KEY = None
+            self.SQLITE_CLOUD_CONNECTION = None
+            self.PINECONE_API_KEY = None
+            self.TAVILY_API_KEY = None
+            self.ZOHO_ENABLED = False
+    
+    config = MinimalConfig()
+    st.warning("Running in limited mode. Please check your configuration.")
 
 # --- 2. Utility Functions & Classes ---
 
