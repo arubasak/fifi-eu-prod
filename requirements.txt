@@ -8,3 +8,5 @@ requests>=2.31.0
 python-dateutil>=2.8.2
 uuid
 dataclasses-json
+langchain-tavily>=0.1.0  # Added
+python-dotenv           # Added
