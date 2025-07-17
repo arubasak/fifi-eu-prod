@@ -1,0 +1,33 @@
+# Core Streamlit and Web Framework
+streamlit>=1.28.0
+
+# Database
+sqlitecloud>=0.1.0
+
+# AI and Machine Learning
+openai>=1.0.0
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-community>=0.0.20
+langchain-core>=0.1.0
+
+# Vector Database and Search
+pinecone-client>=3.0.0
+pinecone-plugin-assistant>=0.1.0
+tavily-python>=0.3.0
+
+# HTTP Requests and Authentication
+requests>=2.31.0
+PyJWT>=2.8.0
+
+# PDF Generation
+reportlab>=4.0.0
+
+# Data Processing
+pandas>=2.0.0
+
+# Utility Libraries
+python-dateutil>=2.8.0
+
+# Environment Variables (for local development)
+python-dotenv>=1.0.0
