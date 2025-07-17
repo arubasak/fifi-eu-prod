@@ -214,21 +214,39 @@ class EnhancedAI:
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """Get enhanced AI response with web search capability."""
         try:
+            # Check if we should use web search
+            use_search = self._should_use_web_search(prompt)
+            search_results = ""
+            search_attempted = False
+            search_error = None
+            
+            # Debug info
+            logger.info(f"Query: {prompt[:50]}...")
+            logger.info(f"Should use search: {use_search}")
+            logger.info(f"Tavily available: {TAVILY_AVAILABLE}")
+            logger.info(f"Tavily API key configured: {bool(config.TAVILY_API_KEY)}")
+            logger.info(f"Tavily client initialized: {bool(self.tavily_client)}")
+            
+            if use_search and self.tavily_client:
+                search_attempted = True
+                try:
+                    search_results = self._search_web(prompt)
+                    logger.info(f"Search results length: {len(search_results)}")
+                except Exception as e:
+                    search_error = str(e)
+                    logger.error(f"Search failed: {e}")
+                    search_results = f"Search error: {e}"
+            
             # Enhanced F&B domain prompt
             enhanced_prompt = f"""You are FiFi, an AI assistant specializing in food & beverage sourcing and ingredients. 
 You help F&B professionals find suppliers, understand market trends, source ingredients, and navigate the food industry.
 
-User Question: {prompt}
+User Question: {prompt}"""
 
-Please provide helpful, specific advice relevant to the food & beverage industry. If you need current market information or supplier details, I can search the web for you."""
-
-            # Check if we should use web search
-            use_search = self._should_use_web_search(prompt)
-            search_results = ""
-            
-            if use_search and self.tavily_client:
-                search_results = self._search_web(prompt)
+            if search_results:
                 enhanced_prompt += f"\n\nWeb Search Results:\n{search_results}\n\nPlease incorporate this search information into your response when relevant."
+            else:
+                enhanced_prompt += "\n\nPlease provide helpful, specific advice relevant to the food & beverage industry based on your knowledge."
             
             # Get AI response
             if self.openai_client:
@@ -239,31 +257,47 @@ Please provide helpful, specific advice relevant to the food & beverage industry
                     temperature=0.7
                 )
                 content = response.choices[0].message.content
-                source = "FiFi AI + Web Search" if search_results else "FiFi AI"
                 
             elif self.langchain_llm:
                 from langchain_core.messages import HumanMessage
                 response = self.langchain_llm.invoke([HumanMessage(content=enhanced_prompt)])
                 content = response.content
-                source = "FiFi AI + Web Search" if search_results else "FiFi AI"
                 
             else:
                 content = "AI services are not available. Please configure your OpenAI API key."
-                source = "Error"
             
+            # Determine source and add debug info
+            if search_results and not search_error:
+                source = "FiFi AI + Web Search"
+                # Add debug info to response
+                content += f"\n\n---\n🔍 **Search Debug Info:**\n- Search triggered: {use_search}\n- Search attempted: {search_attempted}\n- Results length: {len(search_results)}"
+            elif search_attempted and search_error:
+                source = "FiFi AI (Search Failed)"
+                content += f"\n\n---\n❌ **Search Failed:**\n- Error: {search_error}\n- Falling back to AI knowledge"
+            elif use_search and not self.tavily_client:
+                source = "FiFi AI (Search Unavailable)"
+                content += f"\n\n---\n⚠️ **Search Status:**\n- Search triggered but Tavily client not available\n- Tavily available: {TAVILY_AVAILABLE}\n- API key configured: {bool(config.TAVILY_API_KEY)}"
+            else:
+                source = "FiFi AI"
+                content += f"\n\n---\n📝 **Response Info:**\n- Search triggered: {use_search}\n- Using knowledge-based response"
+                
             return {
                 "content": content,
                 "source": source,
-                "used_search": bool(search_results),
+                "used_search": bool(search_results and not search_error),
+                "search_attempted": search_attempted,
+                "search_error": search_error,
                 "success": True
             }
         
         except Exception as e:
             logger.error(f"Enhanced AI response error: {e}")
             return {
-                "content": "I'm having trouble processing your request right now. Please try again.",
+                "content": f"I'm having trouble processing your request: {str(e)}",
                 "source": "Error",
                 "used_search": False,
+                "search_attempted": False,
+                "search_error": str(e),
                 "success": False
             }
 
@@ -417,9 +451,9 @@ def render_sidebar():
                 })
                 st.rerun()
         
-        # Search info
+        # Search info and testing
         if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
-            with st.expander("🔍 Search Features"):
+            with st.expander("🔍 Search Features & Testing"):
                 st.write("**Competitor Exclusions:**")
                 st.write(f"- {len(DEFAULT_EXCLUDED_DOMAINS)} domains filtered")
                 st.write("- Focus on relevant suppliers")
@@ -430,6 +464,56 @@ def render_sidebar():
                 st.write("- Price & market information")
                 st.write("- Current trends & news")
                 st.write("- 'Find', 'locate', 'where to buy'")
+                
+                st.divider()
+                
+                # Manual search test
+                st.write("**🧪 Test Search:**")
+                test_query = st.text_input("Test search query:", placeholder="organic vanilla suppliers")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("🔍 Test General Search"):
+                        if test_query:
+                            with st.spinner("Testing search..."):
+                                try:
+                                    ai = st.session_state.ai
+                                    search_result = ai._search_web(test_query, "general")
+                                    st.success("✅ Search worked!")
+                                    st.text_area("Results:", search_result, height=200)
+                                except Exception as e:
+                                    st.error(f"❌ Search failed: {e}")
+                
+                with col2:
+                    if st.button("🎯 Test 12taste Search"):
+                        if test_query:
+                            with st.spinner("Testing 12taste search..."):
+                                try:
+                                    ai = st.session_state.ai
+                                    search_result = ai._search_web(test_query, "12taste_only")
+                                    st.success("✅ 12taste search worked!")
+                                    st.text_area("Results:", search_result, height=200)
+                                except Exception as e:
+                                    st.error(f"❌ 12taste search failed: {e}")
+        else:
+            with st.expander("❌ Search Not Available"):
+                st.write("**Status Check:**")
+                st.write(f"- Tavily package: {'✅' if TAVILY_AVAILABLE else '❌'}")
+                st.write(f"- API key configured: {'✅' if config.TAVILY_API_KEY else '❌'}")
+                
+                if not TAVILY_AVAILABLE:
+                    st.warning("Install tavily-python package")
+                
+                if not config.TAVILY_API_KEY:
+                    st.warning("Add TAVILY_API_KEY to secrets")
+                    st.code("TAVILY_API_KEY = 'your-api-key-here'")
+        
+        # Configuration status
+        st.subheader("🔧 API Configuration")
+        st.write(f"**OpenAI:** {'✅ Configured' if config.OPENAI_API_KEY else '❌ Missing'}")
+        st.write(f"**Tavily:** {'✅ Configured' if config.TAVILY_API_KEY else '❌ Missing'}")
+        st.write(f"**WordPress:** {'✅ Configured' if config.WORDPRESS_URL else '❌ Missing'}")
+        st.write(f"**SQLite Cloud:** {'✅ Configured' if config.SQLITE_CLOUD_CONNECTION else '❌ Missing'}")
 
 def main():
     """Main application function."""
