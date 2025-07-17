@@ -13,3 +13,4 @@ pinecone-client>=2.2.0,<4.0.0
 tavily-python>=0.3.0
 reportlab>=4.0.0
 sqlitecloud==0.0.84
+
