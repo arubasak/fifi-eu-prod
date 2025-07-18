@@ -658,7 +658,7 @@ class TavilyFallbackAgent:
             relevant_info = []
             sources = []
 
-            for i, result in enumerate(search_results[:3], 1):  # Use top 3 results
+            for i, result in enumerate(search_results[:5], 1):  # Use top 3 results
                 if isinstance(result, dict):
                     title = result.get('title', f'Result {i}')
                     content = (result.get('content') or
