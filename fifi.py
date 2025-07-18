@@ -162,7 +162,7 @@ except ValueError as e:
     class MinimalConfig:
         def __init__(self):
             self.JWT_SECRET = os.getenv('JWT_SECRET', 'development-secret-key')
-            self.WORDPRESS_URL = os.getenv('WORDPRESS_URL', 'https://example.com')
+            self.WORDPRESS_URL = os.getenv('WORDPRESS_URL', 'https://www.12taste.com/staging-eu-24-06-2025/')
             self.OPENAI_API_KEY = None
             self.SQLITE_CLOUD_CONNECTION = None
             self.PINECONE_API_KEY = None
