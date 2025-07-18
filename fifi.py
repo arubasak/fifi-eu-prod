@@ -16,16 +16,19 @@ from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langchain_tavily import TavilySearch
 
 # =============================================================================
-# VERSION 2.0 CHANGELOG:
+# VERSION 2.1 CHANGELOG:
+# - Implemented clickable inline citations. Markers [1], [2] are now hyperlinks.
+# - Markers jump to the corresponding full source at the bottom of the response.
+# - Enabled unsafe_allow_html in st.markdown to render the necessary anchor links.
 # - Added EnhancedErrorHandler for sophisticated error management
 # - Added ErrorSeverity classification system
-# - Added ErrorContext for detailed error information  
+# - Added ErrorContext for detailed error information
 # - Added error handling decorators (@handle_api_errors, @safe_import)
 # - Added error recovery suggestions and user-friendly messages
 # - Added error dashboard in sidebar
 # - Enhanced component status tracking
 # - Added graceful degradation for missing features
-# - NEW: Added Pinecone inline citation functionality
+# - Added Pinecone inline citation functionality
 # =============================================================================
 
 # Setup enhanced logging
@@ -76,7 +79,7 @@ except ImportError:
 
 class ErrorSeverity(Enum):
     LOW = "low"           # Feature unavailable but app continues
-    MEDIUM = "medium"     # Degraded functionality 
+    MEDIUM = "medium"     # Degraded functionality
     HIGH = "high"         # Major feature broken
     CRITICAL = "critical" # App might not work
 
@@ -93,16 +96,16 @@ class ErrorContext:
 
 class EnhancedErrorHandler:
     """Enhanced error handling with user-friendly messages and recovery suggestions."""
-    
+
     def __init__(self):
         self.error_history = []
         self.component_status = {}
-        
+
     def handle_api_error(self, component: str, operation: str, error: Exception) -> ErrorContext:
         """Handle API-related errors with smart classification."""
         error_str = str(error).lower()
         error_type = type(error).__name__
-        
+
         # Classify the error
         if "timeout" in error_str or "timed out" in error_str:
             return ErrorContext(
@@ -119,7 +122,7 @@ class EnhancedErrorHandler:
                 ],
                 fallback_available=True
             )
-        
+
         elif "unauthorized" in error_str or "forbidden" in error_str or "401" in error_str or "403" in error_str:
             return ErrorContext(
                 component=component,
@@ -135,7 +138,7 @@ class EnhancedErrorHandler:
                 ],
                 fallback_available=False
             )
-        
+
         elif "rate limit" in error_str or "429" in error_str:
             return ErrorContext(
                 component=component,
@@ -151,7 +154,7 @@ class EnhancedErrorHandler:
                 ],
                 fallback_available=True
             )
-        
+
         elif "not found" in error_str or "404" in error_str:
             return ErrorContext(
                 component=component,
@@ -166,7 +169,7 @@ class EnhancedErrorHandler:
                 ],
                 fallback_available=True
             )
-        
+
         elif "connection" in error_str or "network" in error_str:
             return ErrorContext(
                 component=component,
@@ -182,7 +185,7 @@ class EnhancedErrorHandler:
                 ],
                 fallback_available=True
             )
-        
+
         else:
             # Generic error
             return ErrorContext(
@@ -199,7 +202,7 @@ class EnhancedErrorHandler:
                 ],
                 fallback_available=True
             )
-    
+
     def handle_import_error(self, package_name: str, feature_name: str) -> ErrorContext:
         """Handle missing package errors."""
         return ErrorContext(
@@ -216,16 +219,16 @@ class EnhancedErrorHandler:
             ],
             fallback_available=True
         )
-    
+
     def display_error_to_user(self, error_context: ErrorContext):
         """Display user-friendly error message in Streamlit."""
         severity_icons = {
             ErrorSeverity.LOW: "ℹ️",
             ErrorSeverity.MEDIUM: "⚠️",
-            ErrorSeverity.HIGH: "🚨", 
+            ErrorSeverity.HIGH: "🚨",
             ErrorSeverity.CRITICAL: "💥"
         }
-        
+
         # Main error message
         icon = severity_icons.get(error_context.severity, "❓")
         if error_context.severity == ErrorSeverity.CRITICAL:
@@ -236,17 +239,17 @@ class EnhancedErrorHandler:
             st.warning(f"{icon} {error_context.user_message}")
         else:
             st.info(f"{icon} {error_context.user_message}")
-        
+
         # Recovery suggestions
         if error_context.recovery_suggestions:
             with st.expander("💡 What you can do:"):
                 for suggestion in error_context.recovery_suggestions:
                     st.write(f"• {suggestion}")
-        
+
         # Fallback availability
         if error_context.fallback_available:
             st.success("✅ Backup systems are available and will be used automatically.")
-    
+
     def log_error(self, error_context: ErrorContext):
         """Log error for monitoring."""
         self.error_history.append({
@@ -257,7 +260,7 @@ class EnhancedErrorHandler:
             "severity": error_context.severity.value,
             "technical_details": error_context.technical_details
         })
-        
+
         # Update component status
         self.component_status[error_context.component] = {
             "status": "error",
@@ -265,33 +268,33 @@ class EnhancedErrorHandler:
             "error_type": error_context.error_type,
             "severity": error_context.severity.value
         }
-        
+
         # Keep only last 50 errors
         if len(self.error_history) > 50:
             self.error_history.pop(0)
-    
+
     def mark_component_healthy(self, component: str):
         """Mark a component as healthy."""
         self.component_status[component] = {
             "status": "healthy",
             "last_check": datetime.now()
         }
-    
+
     def get_system_health_summary(self) -> Dict[str, Any]:
         """Get overall system health summary."""
         if not self.component_status:
             return {"overall_health": "Unknown", "healthy_components": 0, "total_components": 0}
-        
+
         healthy_count = sum(1 for status in self.component_status.values() if status.get("status") == "healthy")
         total_count = len(self.component_status)
-        
+
         if healthy_count == total_count:
             overall_health = "Healthy"
         elif healthy_count > total_count // 2:
             overall_health = "Degraded"
         else:
             overall_health = "Critical"
-        
+
         return {
             "overall_health": overall_health,
             "healthy_components": healthy_count,
@@ -316,10 +319,10 @@ def handle_api_errors(component: str, operation: str, show_to_user: bool = True)
             except Exception as e:
                 error_context = error_handler.handle_api_error(component, operation, e)
                 error_handler.log_error(error_context)
-                
+
                 if show_to_user:
                     error_handler.display_error_to_user(error_context)
-                
+
                 logger.error(f"{component} {operation} failed: {e}")
                 return None
         return wrapper
@@ -335,10 +338,10 @@ def safe_import(package_name: str, feature_name: str, show_error: bool = True):
             except ImportError as e:
                 error_context = error_handler.handle_import_error(package_name, feature_name)
                 error_handler.log_error(error_context)
-                
+
                 if show_error:
                     error_handler.display_error_to_user(error_context)
-                
+
                 return None
         return wrapper
     return decorator
@@ -383,79 +386,80 @@ class UserSession:
 
 class SimpleSessionManager:
     """Simple session manager with in-memory storage."""
-    
+
     def __init__(self):
         self.sessions = {}
-    
+
     def get_session(self) -> UserSession:
         session_id = st.session_state.get('current_session_id')
-        
+
         if session_id and session_id in self.sessions:
             session = self.sessions[session_id]
             session.last_activity = datetime.now()
             return session
-        
+
         return self.create_guest_session()
-    
+
     def create_guest_session(self) -> UserSession:
         session = UserSession(session_id=str(uuid.uuid4()))
         self.sessions[session.session_id] = session
         st.session_state.current_session_id = session.session_id
         return session
-    
+
     def clear_chat_history(self, session: UserSession):
         session.messages = []
         session.last_activity = datetime.now()
 
 # =============================================================================
-# NEW: Pinecone Inline Citation Helper Function
+# MODIFIED in v2.1: Pinecone Inline Citation Helper Function
 # =============================================================================
 
 def insert_citations(response) -> str:
     """
-    Insert citation markers [i] at specified positions in the text.
+    Insert clickable citation markers [<a href='#cite-i'>[i]</a>] at specified positions in the text.
     Processes positions in order, adjusting for previous insertions.
-    
+
     Args:
         response: Pinecone Assistant Chat Response
-        
+
     Returns:
         Modified text with citation markers inserted
     """
     if not hasattr(response, 'citations') or not response.citations:
         return response.message.content
-    
+
     result = response.message.content
     citations = response.citations
     offset = 0  # Keep track of how much we've shifted the text
-    
+
     # Sort citations by position to ensure proper insertion order
     sorted_citations = sorted(enumerate(citations, start=1), key=lambda x: x[1].position)
-    
+
     for i, cite in sorted_citations:
-        citation_marker = f"[{i}]"
+        # MODIFIED: Make the marker a clickable HTML anchor link
+        citation_marker = f" <a href='#cite-{i}'>[{i}]</a>"
         position = cite.position
         adjusted_position = position + offset
-        
+
         # Ensure we don't go beyond the text length
         if adjusted_position <= len(result):
             result = result[:adjusted_position] + citation_marker + result[adjusted_position:]
             offset += len(citation_marker)
-    
+
     return result
 
 # =============================================================================
-# ENHANCED v2.0: PineconeAssistantTool with Inline Citations and Error Handling
+# MODIFIED in v2.1: PineconeAssistantTool with Clickable Inline Citations
 # =============================================================================
 class PineconeAssistantTool:
-    """Advanced Pinecone Assistant with inline citations, token limit detection and enhanced error handling."""
-    
+    """Advanced Pinecone Assistant with clickable inline citations, token limit detection and enhanced error handling."""
+
     def __init__(self, api_key: str, assistant_name: str):
-        if not PINECONE_AVAILABLE: 
+        if not PINECONE_AVAILABLE:
             error_context = error_handler.handle_import_error("pinecone", "Pinecone Knowledge Base")
             error_handler.display_error_to_user(error_context)
             raise ImportError("Pinecone client not available.")
-        
+
         self.pc = Pinecone(api_key=api_key)
         self.assistant_name = assistant_name
         self.assistant = self._initialize_assistant()
@@ -478,12 +482,12 @@ class PineconeAssistantTool:
                 "10. NEVER reference images, files, or documents that were not actually uploaded to your knowledge base\n\n"
                 "REMEMBER: It is better to say 'I don't know' than to provide incorrect information, fake sources, or non-existent file references."
             )
-            
+
             assistants_list = self.pc.assistant.list_assistants()
             if self.assistant_name not in [a.name for a in assistants_list]:
                 st.info(f"🔧 Creating new Pinecone assistant: '{self.assistant_name}'")
                 return self.pc.assistant.create_assistant(
-                    assistant_name=self.assistant_name, 
+                    assistant_name=self.assistant_name,
                     instructions=instructions
                 )
             else:
@@ -495,45 +499,45 @@ class PineconeAssistantTool:
 
     @handle_api_errors("Pinecone", "Query Knowledge Base", show_to_user=False)
     def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]:
-        if not self.assistant: 
+        if not self.assistant:
             return {
                 "content": "Pinecone assistant not available.",
                 "success": False,
                 "source": "error",
                 "error_type": "unavailable"
             }
-        
+
         try:
             pinecone_messages = [
                 PineconeMessage(
-                    role="user" if isinstance(msg, HumanMessage) else "assistant", 
+                    role="user" if isinstance(msg, HumanMessage) else "assistant",
                     content=msg.content
                 ) for msg in chat_history
             ]
-            
-            # NEW: Enable highlights for inline citations
+
+            # Enable highlights for inline citations
             response = self.assistant.chat(
-                messages=pinecone_messages, 
+                messages=pinecone_messages,
                 model="gpt-4o",
                 include_highlights=True  # Enable inline citation positions
             )
-            
-            # NEW: Process inline citations
+
+            # Process inline citations
             content_with_inline_citations = insert_citations(response)
-            
+
             has_citations = False
             has_inline_citations = False
-            
+
             # Check if we have inline citations
             if hasattr(response, 'citations') and response.citations:
                 has_citations = True
                 has_inline_citations = True
-                
+
                 # Also build traditional citations list for additional context
                 citations_header = "\n\n---\n**Sources:**\n"
                 citations_list = []
                 seen_items = set()
-                
+
                 for i, citation in enumerate(response.citations, 1):
                     for reference in citation.references:
                         if hasattr(reference, 'file') and reference.file:
@@ -542,48 +546,52 @@ class PineconeAssistantTool:
                                 link_url = reference.file.metadata.get('source_url')
                             if not link_url and hasattr(reference.file, 'signed_url') and reference.file.signed_url:
                                 link_url = reference.file.signed_url
-                            
+
                             if link_url:
                                 if '?' in link_url:
                                     link_url += '&utm_source=fifi-in'
                                 else:
                                     link_url += '?utm_source=fifi-in'
-                                
+
                                 display_text = link_url
                                 if display_text not in seen_items:
-                                    link = f"[{i}] [{display_text}]({link_url})"
-                                    citations_list.append(link)
+                                    # MODIFIED: Create a Markdown link and wrap it with an HTML anchor for the jump target
+                                    markdown_link = f"[{display_text}]({link_url})"
+                                    final_item = f"<a id='cite-{i}'></a>{i}. {markdown_link}"
+                                    citations_list.append(final_item)
                                     seen_items.add(display_text)
                             else:
                                 display_text = getattr(reference.file, 'name', 'Unknown Source')
                                 if display_text not in seen_items:
-                                    link = f"[{i}] {display_text}"
-                                    citations_list.append(link)
+                                    # MODIFIED: Create a non-linked item but still wrap it with the anchor for the jump target
+                                    final_item = f"<a id='cite-{i}'></a>{i}. {display_text}"
+                                    citations_list.append(final_item)
                                     seen_items.add(display_text)
-                
+
                 # Add traditional citations list at the end
                 if citations_list:
                     content_with_inline_citations += citations_header + "\n".join(citations_list)
-            
+
             return {
-                "content": content_with_inline_citations, 
-                "success": True, 
+                "content": content_with_inline_citations,
+                "success": True,
                 "source": "FiFi Knowledge Base",
                 "has_citations": has_citations,
                 "has_inline_citations": has_inline_citations,
                 "response_length": len(content_with_inline_citations)
             }
-            
+
         except Exception as e:
             # This will be caught by the decorator
             raise e
+
 
 # =============================================================================
 # ENHANCED v2.0: TavilyFallbackAgent with Error Handling
 # =============================================================================
 class TavilyFallbackAgent:
     """Tavily fallback agent with smart result synthesis, UTM tracking, and enhanced error handling."""
-    
+
     def __init__(self, tavily_api_key: str):
         if not TAVILY_AVAILABLE:
             error_context = error_handler.handle_import_error("langchain-tavily", "Web Search")
@@ -605,88 +613,88 @@ class TavilyFallbackAgent:
 
     def synthesize_search_results(self, results, query: str) -> str:
         """Synthesize search results into a coherent response similar to LLM output."""
-        
+
         # Handle string response from Tavily
         if isinstance(results, str):
             return f"Based on my search: {results}"
-        
+
         # Handle dictionary response from Tavily (most common format)
         if isinstance(results, dict):
             # Check if there's a pre-made answer
             if results.get('answer'):
                 return f"Based on my search: {results['answer']}"
-            
+
             # Extract the results array
             search_results = results.get('results', [])
             if not search_results:
                 return "I couldn't find any relevant information for your query."
-            
+
             # Process the results
             relevant_info = []
             sources = []
-            
+
             for i, result in enumerate(search_results[:3], 1):  # Use top 3 results
                 if isinstance(result, dict):
                     title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
-                             result.get('description') or 
+                    content = (result.get('content') or
+                             result.get('snippet') or
+                             result.get('description') or
                              result.get('summary', ''))
                     url = result.get('url', '')
-                    
+
                     if content:
                         # Clean up content
                         if len(content) > 400:
                             content = content[:400] + "..."
                         relevant_info.append(content)
-                        
+
                         if url and title:
                             sources.append(f"[{title}]({url})")
-            
+
             if not relevant_info:
                 return "I found search results but couldn't extract readable content. Please try rephrasing your query."
-            
+
             # Build synthesized response
             response_parts = []
-            
+
             if len(relevant_info) == 1:
                 response_parts.append(f"Based on my search: {relevant_info[0]}")
             else:
                 response_parts.append("Based on my search, here's what I found:")
                 for i, info in enumerate(relevant_info, 1):
                     response_parts.append(f"\n\n**{i}.** {info}")
-            
+
             # Add sources
             if sources:
                 response_parts.append(f"\n\n**Sources:**")
                 for i, source in enumerate(sources, 1):
                     response_parts.append(f"\n{i}. {source}")
-            
+
             return "".join(response_parts)
-        
+
         # Handle direct list (fallback)
         if isinstance(results, list):
             relevant_info = []
             sources = []
-            
+
             for i, result in enumerate(results[:3], 1):
                 if isinstance(result, dict):
                     title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
+                    content = (result.get('content') or
+                             result.get('snippet') or
                              result.get('description', ''))
                     url = result.get('url', '')
-                    
+
                     if content:
                         if len(content) > 400:
                             content = content[:400] + "..."
                         relevant_info.append(content)
                         if url:
                             sources.append(f"[{title}]({url})")
-            
+
             if not relevant_info:
                 return "I couldn't find relevant information for your query."
-            
+
             response_parts = []
             if len(relevant_info) == 1:
                 response_parts.append(f"Based on my search: {relevant_info[0]}")
@@ -694,14 +702,14 @@ class TavilyFallbackAgent:
                 response_parts.append("Based on my search:")
                 for info in relevant_info:
                     response_parts.append(f"\n{info}")
-            
+
             if sources:
                 response_parts.append(f"\n\n**Sources:**")
                 for i, source in enumerate(sources, 1):
                     response_parts.append(f"{i}. {source}")
-            
+
             return "".join(response_parts)
-        
+
         # Fallback for unknown formats
         return "I couldn't find any relevant information for your query."
 
@@ -711,7 +719,7 @@ class TavilyFallbackAgent:
             search_results = self.tavily_tool.invoke({"query": message})
             synthesized_content = self.synthesize_search_results(search_results, message)
             final_content = self.add_utm_to_links(synthesized_content)
-            
+
             return {
                 "content": final_content,
                 "success": True,
@@ -726,13 +734,13 @@ class TavilyFallbackAgent:
 # =============================================================================
 class EnhancedAI:
     """Enhanced AI with Pinecone knowledge base, inline citations, smart Tavily fallback, and sophisticated error handling."""
-    
+
     def __init__(self):
         self.pinecone_tool = None
         self.tavily_agent = None
         self.openai_client = None
         self.langchain_llm = None
-        
+
         # Initialize OpenAI clients for potential LLM fallback
         if OPENAI_AVAILABLE and config.OPENAI_API_KEY:
             try:
@@ -742,7 +750,7 @@ class EnhancedAI:
                 logger.error(f"OpenAI client initialization failed: {e}")
                 error_context = error_handler.handle_api_error("OpenAI", "Initialize Client", e)
                 error_handler.log_error(error_context)
-        
+
         if LANGCHAIN_AVAILABLE and config.OPENAI_API_KEY:
             try:
                 self.langchain_llm = ChatOpenAI(
@@ -755,7 +763,7 @@ class EnhancedAI:
                 logger.error(f"LangChain LLM initialization failed: {e}")
                 error_context = error_handler.handle_api_error("LangChain", "Initialize LLM", e)
                 error_handler.log_error(error_context)
-        
+
         # Initialize Pinecone Assistant
         if PINECONE_AVAILABLE and config.PINECONE_API_KEY and config.PINECONE_ASSISTANT_NAME:
             try:
@@ -767,7 +775,7 @@ class EnhancedAI:
             except Exception as e:
                 logger.error(f"Pinecone Assistant initialization failed: {e}")
                 self.pinecone_tool = None
-        
+
         # Initialize Tavily Fallback Agent
         if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
             try:
@@ -781,7 +789,7 @@ class EnhancedAI:
         """EXTREMELY aggressive fallback detection to prevent any hallucination."""
         content = pinecone_response.get("content", "").lower()
         content_raw = pinecone_response.get("content", "")
-        
+
         # PRIORITY 1: Always fallback for current/recent information requests
         current_info_indicators = [
             "today", "yesterday", "this week", "this month", "this year", "2025", "2024",
@@ -790,7 +798,7 @@ class EnhancedAI:
         ]
         if any(indicator in content for indicator in current_info_indicators):
             return True
-        
+
         # PRIORITY 2: Explicit "don't know" statements (allow these to pass)
         explicit_unknown = [
             "i don't have specific information", "i don't know", "i'm not sure",
@@ -801,7 +809,7 @@ class EnhancedAI:
         ]
         if any(keyword in content for keyword in explicit_unknown):
             return True
-        
+
         # PRIORITY 3: Detect fake files/images/paths (CRITICAL SAFETY)
         fake_file_patterns = [
             ".jpg", ".jpeg", ".png", ".html", ".gif", ".doc", ".docx",
@@ -809,14 +817,14 @@ class EnhancedAI:
             "/uploads/", "/files/", "/images/", "/documents/", "/media/",
             "file://", "ftp://", "path:", "directory:", "folder:"
         ]
-        
+
         has_real_citations = pinecone_response.get("has_citations", False)
         has_inline_citations = pinecone_response.get("has_inline_citations", False)
-        
+
         if any(pattern in content_raw for pattern in fake_file_patterns):
             if not has_real_citations:
                 return True
-        
+
         # PRIORITY 4: Detect potential fake citations (CRITICAL)
         if "[1]" in content_raw or "**Sources:**" in content_raw:
             suspicious_patterns = [
@@ -825,13 +833,13 @@ class EnhancedAI:
             ]
             if not has_real_citations and any(pattern in content_raw for pattern in suspicious_patterns):
                 return True
-        
+
         # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short or inline citations present)
         if not has_real_citations and not has_inline_citations:
             if "[1]" not in content_raw and "**Sources:**" not in content_raw:
                 if len(content_raw.strip()) > 30:
                     return True
-        
+
         # PRIORITY 6: General knowledge indicators (likely hallucination)
         general_knowledge_red_flags = [
             "generally", "typically", "usually", "commonly", "often", "most",
@@ -840,7 +848,7 @@ class EnhancedAI:
         ]
         if any(flag in content for flag in general_knowledge_red_flags):
             return True
-        
+
         # PRIORITY 7: Question-answering patterns that suggest general knowledge
         qa_patterns = [
             "the answer is", "this is because", "the reason", "due to the fact",
@@ -849,12 +857,12 @@ class EnhancedAI:
         if any(pattern in content for pattern in qa_patterns):
             if not pinecone_response.get("has_citations", False) and not pinecone_response.get("has_inline_citations", False):
                 return True
-        
+
         # PRIORITY 8: Response length suggests substantial answer without sources
         response_length = pinecone_response.get("response_length", 0)
         if response_length > 100 and not pinecone_response.get("has_citations", False) and not pinecone_response.get("has_inline_citations", False):
             return True
-        
+
         return False
 
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
@@ -868,17 +876,17 @@ class EnhancedAI:
                         langchain_history.append(HumanMessage(content=msg.get("content", "")))
                     elif msg.get("role") == "assistant":
                         langchain_history.append(AIMessage(content=msg.get("content", "")))
-            
+
             # Add current prompt
             langchain_history.append(HumanMessage(content=prompt))
-            
+
             # STEP 1: Try Pinecone Knowledge Base FIRST
             if self.pinecone_tool:
                 pinecone_response = self.pinecone_tool.query(langchain_history)
-                
+
                 if pinecone_response and pinecone_response.get("success"):
                     should_fallback = self.should_use_web_fallback(pinecone_response)
-                    
+
                     if not should_fallback:
                         logger.info("Using Pinecone knowledge base response")
                         return {
@@ -894,12 +902,12 @@ class EnhancedAI:
                     else:
                         logger.warning("SAFETY OVERRIDE: Detected potentially fabricated information")
                         # Continue to Tavily fallback with safety override flag
-            
+
             # STEP 2: Fall back to Tavily Web Search
             if self.tavily_agent:
                 logger.info("Using Tavily web search fallback")
                 tavily_response = self.tavily_agent.query(prompt, langchain_history[:-1])
-                
+
                 if tavily_response and tavily_response.get("success"):
                     return {
                         "content": tavily_response["content"],
@@ -914,7 +922,7 @@ class EnhancedAI:
                 else:
                     # Tavily failed, log the issue
                     logger.warning("Tavily search failed, proceeding to final fallback")
-            
+
             # STEP 3: Final fallback with helpful error message
             return {
                 "content": "I apologize, but all AI systems are currently experiencing issues. Please try again in a few minutes, or try rephrasing your question.",
@@ -926,12 +934,12 @@ class EnhancedAI:
                 "safety_override": False,
                 "success": False
             }
-            
+
         except Exception as e:
             logger.error(f"Enhanced AI response error: {e}")
             error_context = error_handler.handle_api_error("AI System", "Generate Response", e)
             error_handler.log_error(error_context)
-            
+
             return {
                 "content": f"I'm experiencing technical difficulties. {error_context.user_message}",
                 "source": "Error Recovery",
@@ -949,7 +957,7 @@ def init_session_state():
         try:
             st.session_state.session_manager = SimpleSessionManager()
             st.session_state.ai = EnhancedAI()
-            st.session_state.error_handler = error_handler  # NEW in v2.0
+            st.session_state.error_handler = error_handler
             st.session_state.page = "chat"
             st.session_state.initialized = True
             logger.info("Session state initialized successfully")
@@ -959,25 +967,29 @@ def init_session_state():
             error_handler.display_error_to_user(error_context)
             st.session_state.initialized = False
 
+# =============================================================================
+# MODIFIED in v2.1: render_chat_interface with unsafe_allow_html=True
+# =============================================================================
 def render_chat_interface():
     """Render the main chat interface."""
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion with inline citations and smart fallback")
-    
+
     session = st.session_state.session_manager.get_session()
-    
+
     # Display chat history
     for msg in session.messages:
         with st.chat_message(msg.get("role", "user")):
-            st.markdown(msg.get("content", ""))
-            
+            # MODIFIED: Allow HTML for clickable citations in historical messages
+            st.markdown(msg.get("content", ""), unsafe_allow_html=True)
+
             # Show source information for assistant messages
             if msg.get("role") == "assistant":
                 source_indicators = []
-                
+
                 if "source" in msg:
                     st.caption(f"Source: {msg['source']}")
-                
+
                 # Show knowledge base usage with inline citations
                 if msg.get("used_pinecone"):
                     if msg.get("has_inline_citations"):
@@ -986,36 +998,36 @@ def render_chat_interface():
                         source_indicators.append("🧠 Knowledge Base (with citations)")
                     else:
                         source_indicators.append("🧠 Knowledge Base")
-                
-                # Show web search usage  
+
+                # Show web search usage
                 if msg.get("used_search"):
                     source_indicators.append("🌐 Web Search")
-                
+
                 if source_indicators:
                     st.caption(f"Enhanced with: {', '.join(source_indicators)}")
-                
+
                 # Show safety override warning
                 if msg.get("safety_override"):
                     st.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switched to verified web sources.")
-    
+
     # Chat input
     if prompt := st.chat_input("Ask me about ingredients, suppliers, market trends, or sourcing..."):
         # Display user message
         with st.chat_message("user"):
             st.markdown(prompt)
-        
+
         # Add user message to history
         session.messages.append({
             "role": "user",
             "content": prompt,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         # Get and display AI response
         with st.chat_message("assistant"):
             with st.spinner("🔍 Querying FiFi (Internal Specialist)..."):
                 response = st.session_state.ai.get_response(prompt, session.messages)
-                
+
                 # Handle enhanced response format
                 if isinstance(response, dict):
                     content = response.get("content", "No response generated.")
@@ -1034,9 +1046,10 @@ def render_chat_interface():
                     has_citations = False
                     has_inline_citations = False
                     safety_override = False
-                
-                st.markdown(content)
-                
+
+                # MODIFIED: Allow HTML to render clickable citations
+                st.markdown(content, unsafe_allow_html=True)
+
                 # Show enhancement indicators
                 enhancements = []
                 if used_pinecone:
@@ -1046,18 +1059,18 @@ def render_chat_interface():
                         enhancements.append("🧠 Enhanced with Knowledge Base (with citations)")
                     else:
                         enhancements.append("🧠 Enhanced with Knowledge Base")
-                
+
                 if used_search:
                     enhancements.append("🌐 Enhanced with verified web search")
-                
+
                 if enhancements:
                     for enhancement in enhancements:
                         st.success(enhancement)
-                
+
                 # Show safety override warning
                 if safety_override:
                     st.error("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switched to verified web sources.")
-        
+
         # Add AI response to history
         session.messages.append({
             "role": "assistant",
@@ -1070,10 +1083,10 @@ def render_chat_interface():
             "safety_override": safety_override,
             "timestamp": datetime.now().isoformat()
         })
-        
+
         # Update session
         session.last_activity = datetime.now()
-        
+
         st.rerun()
 
 # =============================================================================
@@ -1083,9 +1096,9 @@ def render_sidebar():
     """Render the sidebar with controls and enhanced error monitoring."""
     with st.sidebar:
         st.title("Chat Controls")
-        
+
         session = st.session_state.session_manager.get_session()
-        
+
         # Session info
         st.subheader("Session Info")
         st.write(f"**ID:** {session.session_id[:8]}...")
@@ -1093,7 +1106,7 @@ def render_sidebar():
         if session.email:
             st.write(f"**Email:** {session.email}")
         st.write(f"**Messages:** {len(session.messages)}")
-        
+
         # System status
         st.subheader("System Status")
         st.write(f"**OpenAI:** {'✅' if OPENAI_AVAILABLE and config.OPENAI_API_KEY else '❌'}")
@@ -1101,7 +1114,7 @@ def render_sidebar():
         st.write(f"**Tavily Search:** {'✅' if TAVILY_AVAILABLE and config.TAVILY_API_KEY else '❌'}")
         st.write(f"**Pinecone:** {'✅' if PINECONE_AVAILABLE and config.PINECONE_API_KEY else '❌'}")
         st.write(f"**SQLite Cloud:** {'✅' if SQLITECLOUD_AVAILABLE else '❌'}")
-        
+
         # Component Status
         if hasattr(st.session_state, 'ai'):
             ai = st.session_state.ai
@@ -1109,16 +1122,16 @@ def render_sidebar():
             tavily_status = "✅ Connected" if ai.tavily_agent else "❌ Failed"
             st.write(f"**Pinecone Assistant:** {pinecone_status}")
             st.write(f"**Tavily Fallback Agent:** {tavily_status}")
-        
+
         # NEW in v2.0: Enhanced Error Dashboard
         with st.expander("🚨 System Health & Error Monitoring"):
             if hasattr(st.session_state, 'error_handler'):
                 health_summary = error_handler.get_system_health_summary()
-                
+
                 # Overall health indicator
                 health_color = {"Healthy": "🟢", "Degraded": "🟡", "Critical": "🔴"}.get(health_summary["overall_health"], "❓")
                 st.write(f"**System Health:** {health_color} {health_summary['overall_health']}")
-                
+
                 # Component health details
                 if error_handler.component_status:
                     st.write("**Component Status:**")
@@ -1131,7 +1144,7 @@ def render_sidebar():
                                 st.caption(f"Last error: {status_info['last_error'].strftime('%H:%M:%S')}")
                         else:
                             st.write(f"✅ **{component}**: Healthy")
-                
+
                 # Recent errors
                 if error_handler.error_history:
                     st.write("**Recent Errors:**")
@@ -1140,25 +1153,25 @@ def render_sidebar():
                         icon = severity_icon.get(error["severity"], "❓")
                         time_str = error["timestamp"].strftime("%H:%M:%S")
                         st.text(f"{icon} {time_str} [{error['component']}] {error['error_type']}")
-                
+
                 # System metrics
                 if health_summary["total_components"] > 0:
                     health_percentage = (health_summary["healthy_components"] / health_summary["total_components"]) * 100
                     st.metric("System Health", f"{health_percentage:.0f}%")
                     st.metric("Error Count", health_summary["error_count"])
-        
+
         st.divider()
-        
+
         # Controls
         if st.button("🗑️ Clear History"):
             st.session_state.session_manager.clear_chat_history(session)
             st.rerun()
-        
+
         if st.button("🔄 New Session"):
             if 'current_session_id' in st.session_state:
                 del st.session_state.current_session_id
             st.rerun()
-        
+
         # Feature status
         st.subheader("Available Features")
         st.write("✅ Enhanced F&B AI Chat")
@@ -1166,13 +1179,13 @@ def render_sidebar():
         st.write("✅ Anti-Hallucination Safety")
         st.write("✅ Smart Fallback Logic")
         st.write("✅ Enhanced Error Handling")
-        st.write("✅ Inline Citations (NEW)")  # NEW in v2.0
-        
+        st.write("✅ Clickable Inline Citations (NEW)")  # NEW in v2.1
+
         if LANGCHAIN_AVAILABLE:
             st.write("✅ LangChain Support")
         else:
             st.write("❌ LangChain (install required)")
-        
+
         # Pinecone Knowledge Base Status
         if PINECONE_AVAILABLE and config.PINECONE_API_KEY:
             if hasattr(st.session_state, 'ai') and st.session_state.ai.pinecone_tool:
@@ -1181,7 +1194,7 @@ def render_sidebar():
                 st.write("⚠️ Knowledge Base (Connection Failed)")
         else:
             st.write("❌ Knowledge Base (Setup Required)")
-            
+
         # Tavily Fallback Status
         if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
             if hasattr(st.session_state, 'ai') and st.session_state.ai.tavily_agent:
@@ -1190,7 +1203,7 @@ def render_sidebar():
                 st.write("⚠️ Web Search (Connection Failed)")
         else:
             st.write("❌ Web Search (API key needed)")
-        
+
         # Safety Features Info
         with st.expander("🛡️ Safety Features"):
             st.write("**Anti-Hallucination Checks:**")
@@ -1200,17 +1213,17 @@ def render_sidebar():
             st.write("- Response length analysis")
             st.write("- Current info detection")
             st.write("- Automatic web fallback")
-            st.write("**NEW in v2.0:**")
+            st.write("**NEW in v2.1:**")
             st.write("- Enhanced error recovery")
             st.write("- User-friendly error messages")
             st.write("- System health monitoring")
-            st.write("- Inline citation support")
-        
+            st.write("- Clickable inline citation support")
+
         # Citation Features Info
         with st.expander("📚 Citation Features"):
-            st.write("**Inline Citations:**")
+            st.write("**Clickable Inline Citations:**")
             st.write("- Precise text position citations [1]")
-            st.write("- Automatic citation marker insertion")
+            st.write("- Clickable markers jump to source")
             st.write("- Traditional source list at bottom")
             st.write("- UTM tracking for external links")
             st.write("- Real-time citation validation")
@@ -1219,27 +1232,27 @@ def render_sidebar():
             st.write("- Prevents fake file references")
             st.write("- Detects fabricated citations")
             st.write("- Fallback for uncited content")
-        
+
         # Example queries
         st.subheader("💡 Try These Queries")
         example_queries = [
             "Find organic vanilla extract suppliers",
-            "Latest trends in plant-based proteins", 
+            "Latest trends in plant-based proteins",
             "Current cocoa prices and suppliers",
             "Sustainable packaging suppliers in Europe",
             "Clean label ingredient alternatives"
         ]
-        
+
         for query in example_queries:
             if st.button(f"💬 {query}", key=f"example_{hash(query)}", use_container_width=True):
                 # Add the example query to chat
                 session.messages.append({
-                    "role": "user", 
+                    "role": "user",
                     "content": query,
                     "timestamp": datetime.now().isoformat()
                 })
                 st.rerun()
-        
+
         # Configuration status
         st.subheader("🔧 API Configuration")
         st.write(f"**OpenAI:** {'✅ Configured' if config.OPENAI_API_KEY else '❌ Missing'}")
@@ -1251,62 +1264,62 @@ def render_sidebar():
 def main():
     """Main application function with enhanced error handling."""
     st.set_page_config(
-        page_title="FiFi AI Assistant v2.0",
+        page_title="FiFi AI Assistant v2.1",
         page_icon="🤖",
         layout="wide"
     )
-    
+
     try:
         # Initialize session state
         init_session_state()
-        
+
         if not st.session_state.get('initialized', False):
             st.error("⚠️ Application initialization failed")
             st.info("Please refresh the page or check your configuration.")
             return
-        
+
         # Render interface
         render_sidebar()
         render_chat_interface()
-        
+
         # Show welcome message with safety info
         if not st.session_state.session_manager.get_session().messages:
             st.info("""
-            👋 **Welcome to FiFi AI Chat Assistant v2.0!**
-            
+            👋 **Welcome to FiFi AI Chat Assistant v2.1!**
+
             **How it works:**
             - 🔍 **First**: Searches your internal knowledge base via Pinecone
-            - 📚 **NEW**: Inline citations [1] show exactly where information comes from
+            - 📚 **NEW**: Clickable inline citations [1] show exactly where information comes from
             - 🛡️ **Safety Override**: Detects and blocks fabricated information (fake URLs, file paths, etc.)
             - 🌐 **Verified Fallback**: Switches to real web sources when needed
             - 🚨 **Anti-Misinformation**: Aggressive detection of hallucinated content
-            
-            **NEW in v2.0 - Enhanced Features:**
-            - ✅ **Inline Citations**: Precise [1] markers show source positions in text
+
+            **NEW in v2.1 - Clickable Citations:**
+            - ✅ **Clickable Inline Citations**: Precise [1] markers in the text now jump to the full source at the bottom.
             - ✅ User-friendly error messages with recovery suggestions
             - ✅ Automatic fallback when services fail
             - ✅ Real-time system health monitoring
             - ✅ Graceful degradation for missing features
-            
+
             **Safety Features:**
             - ✅ Blocks fake citations and non-existent file references
             - ✅ Prevents hallucinated image paths (.jpg, .png, etc.)
             - ✅ Validates all sources before presenting information
             - ✅ Falls back to verified web search when information is questionable
-            - ✅ Inline citations with position validation
-            
+            - ✅ Clickable inline citations with position validation
+
             **Note**: If you see a "SAFETY OVERRIDE" message, the system detected potentially fabricated information and switched to verified sources to protect you from misinformation.
             """)
-        
+
     except Exception as e:
         logger.error(f"Critical error: {e}")
         error_context = error_handler.handle_api_error("Application", "Main Function", e)
         error_handler.display_error_to_user(error_context)
-        
+
         if st.button("🔄 Restart App"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
 
 if __name__ == "__main__":
-    main()
+    main()```
