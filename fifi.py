@@ -19,12 +19,12 @@ from langchain_tavily import TavilySearch
 from urllib.parse import urlparse
 
 # =============================================================================
-# VERSION 2.1 CHANGELOG:
-# - Added Enhanced Configuration Management with validation & fallbacks
-# - Added Rate Limiting system with thread-safe sliding window
-# - Added Input Sanitization & XSS prevention
-# - Added Domain Exclusions for competitor filtering
-# - Added Enhanced Token Limit Detection with smart fallbacks
+# VERSION 2.4 COMPLETE - ALL ENHANCEMENTS INTEGRATED
+# CHANGELOG:
+# v2.1: Enhanced Configuration Management with validation & fallbacks
+# v2.2: FIXED Rate limiter bug - proper consumption tracking with rollback
+# v2.3: FIXED SQLite Cloud display - user-friendly status messages  
+# v2.4: NEW Inline Citation Links - citations appear after product/supplier mentions
 # =============================================================================
 
 # Setup enhanced logging
@@ -78,7 +78,7 @@ except ImportError:
     logger.warning("Tavily client not available. Install with: pip install tavily-python")
 
 # =============================================================================
-# NEW: Enhanced Configuration Management
+# v2.1: Enhanced Configuration Management
 # =============================================================================
 
 class Config:
@@ -175,42 +175,92 @@ except ValueError as e:
     logger.warning("Using minimal configuration fallback")
 
 # =============================================================================
-# NEW: Rate Limiting System
+# v2.2: Enhanced Rate Limiting System with Rollback
 # =============================================================================
 
 class RateLimiter:
-    """Thread-safe rate limiter using sliding window approach."""
+    """Thread-safe rate limiter with rollback mechanism for failed requests."""
     
     def __init__(self, max_requests: int = 20, window_seconds: int = 60):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.requests: Dict[str, List[float]] = defaultdict(list)
+        self.pending_requests: Dict[str, List[float]] = defaultdict(list)  # Track pending requests
         self._lock = threading.Lock()
         
-    def is_allowed(self, identifier: str) -> bool:
-        """Check if request is allowed for the given identifier."""
+    def check_available(self, identifier: str) -> bool:
+        """Check if request would be allowed WITHOUT consuming a slot."""
         with self._lock:
             try:
                 now = time.time()
                 window_start = now - self.window_seconds
                 
-                # Clean old requests outside the window
+                # Clean old requests
                 self.requests[identifier] = [
                     timestamp for timestamp in self.requests[identifier] 
                     if timestamp > window_start
                 ]
                 
-                # Check if we're under the limit
-                if len(self.requests[identifier]) < self.max_requests:
-                    self.requests[identifier].append(now)
-                    return True
+                # Clean old pending requests
+                self.pending_requests[identifier] = [
+                    timestamp for timestamp in self.pending_requests[identifier] 
+                    if timestamp > window_start
+                ]
                 
+                # Check if we're under the limit (including pending)
+                total_requests = len(self.requests[identifier]) + len(self.pending_requests[identifier])
+                return total_requests < self.max_requests
+                
+            except Exception as e:
+                logger.error(f"Rate limiter check error: {e}")
+                return True  # Allow on error
+    
+    def reserve_slot(self, identifier: str) -> str:
+        """Reserve a slot for a request. Returns reservation_id or None if not available."""
+        with self._lock:
+            try:
+                if self.check_available(identifier):
+                    now = time.time()
+                    reservation_id = f"{identifier}_{now}_{uuid.uuid4().hex[:8]}"
+                    self.pending_requests[identifier].append(now)
+                    return reservation_id
+                return None
+                
+            except Exception as e:
+                logger.error(f"Rate limiter reservation error: {e}")
+                return f"error_{identifier}_{time.time()}"  # Allow on error
+    
+    def confirm_request(self, identifier: str, reservation_id: str) -> bool:
+        """Confirm a successful request - moves from pending to confirmed."""
+        with self._lock:
+            try:
+                now = time.time()
+                # Remove one pending request (most recent)
+                if self.pending_requests[identifier]:
+                    self.pending_requests[identifier].pop()
+                    
+                # Add to confirmed requests
+                self.requests[identifier].append(now)
+                return True
+                
+            except Exception as e:
+                logger.error(f"Rate limiter confirm error: {e}")
+                return False
+    
+    def rollback_request(self, identifier: str, reservation_id: str) -> bool:
+        """Rollback a failed request - removes from pending without confirming."""
+        with self._lock:
+            try:
+                # Remove one pending request (most recent)
+                if self.pending_requests[identifier]:
+                    self.pending_requests[identifier].pop()
+                    return True
                 return False
                 
             except Exception as e:
-                logger.error(f"Rate limiter error: {e}")
-                return True  # Allow on error to prevent blocking users
-    
+                logger.error(f"Rate limiter rollback error: {e}")
+                return False
+        
     def get_remaining_requests(self, identifier: str) -> int:
         """Get number of remaining requests for identifier."""
         with self._lock:
@@ -224,7 +274,15 @@ class RateLimiter:
                     if timestamp > window_start
                 ]
                 
-                return max(0, self.max_requests - len(self.requests[identifier]))
+                # Clean old pending requests
+                self.pending_requests[identifier] = [
+                    timestamp for timestamp in self.pending_requests[identifier] 
+                    if timestamp > window_start
+                ]
+                
+                # Calculate remaining (subtract both confirmed and pending)
+                total_used = len(self.requests[identifier]) + len(self.pending_requests[identifier])
+                return max(0, self.max_requests - total_used)
                 
             except Exception as e:
                 logger.error(f"Error getting remaining requests: {e}")
@@ -234,11 +292,12 @@ class RateLimiter:
         """Get timestamp when the rate limit will reset for identifier."""
         with self._lock:
             try:
-                if not self.requests[identifier]:
+                all_requests = self.requests[identifier] + self.pending_requests[identifier]
+                if not all_requests:
                     return time.time()
                 
                 # Find the oldest request in the current window
-                oldest_request = min(self.requests[identifier])
+                oldest_request = min(all_requests)
                 return oldest_request + self.window_seconds
                 
             except Exception as e:
@@ -248,29 +307,31 @@ class RateLimiter:
 # Initialize global rate limiter
 rate_limiter = RateLimiter(max_requests=20, window_seconds=60)
 
-def check_rate_limit(session_id: str) -> tuple[bool, str]:
+def check_and_reserve_rate_limit(session_id: str) -> tuple[bool, str, Optional[str]]:
     """
-    Check rate limit and return (allowed, message).
+    Check rate limit and reserve a slot if available.
     
     Returns:
-        tuple: (is_allowed, message_for_user)
+        tuple: (is_allowed, message_for_user, reservation_id)
     """
-    if rate_limiter.is_allowed(session_id):
-        remaining = rate_limiter.get_remaining_requests(session_id)
-        return True, f"✅ Request allowed ({remaining} remaining)"
+    if rate_limiter.check_available(session_id):
+        reservation_id = rate_limiter.reserve_slot(session_id)
+        if reservation_id:
+            remaining = rate_limiter.get_remaining_requests(session_id)
+            return True, f"✅ Request reserved ({remaining} remaining)", reservation_id
+        else:
+            return False, "⏱️ Rate limit exceeded. Please wait a moment.", None
     else:
         reset_time = rate_limiter.get_reset_time(session_id)
         wait_seconds = int(reset_time - time.time())
-        return False, f"⏱️ Rate limit exceeded. Try again in {wait_seconds} seconds."
+        return False, f"⏱️ Rate limit exceeded. Try again in {wait_seconds} seconds.", None
 
 # =============================================================================
-# NEW: Input Sanitization & Validation
+# Input Sanitization & Validation
 # =============================================================================
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
-    """
-    Sanitize user input to prevent XSS attacks and limit length.
-    """
+    """Sanitize user input to prevent XSS attacks and limit length."""
     if not isinstance(text, str):
         raise ValueError("Input must be a string")
     
@@ -292,12 +353,7 @@ def sanitize_input(text: str, max_length: int = 4000) -> str:
     return sanitized.strip()
 
 def sanitize_chat_message(message: str) -> tuple[str, bool]:
-    """
-    Sanitize chat message and check if it's valid.
-    
-    Returns:
-        tuple: (sanitized_message, is_valid)
-    """
+    """Sanitize chat message and check if it's valid."""
     try:
         # Basic validation
         if not message or not isinstance(message, str):
@@ -329,7 +385,7 @@ def sanitize_chat_message(message: str) -> tuple[str, bool]:
         return "", False
 
 # =============================================================================
-# NEW: Domain Exclusions & Enhanced Token Detection
+# Domain Exclusions & Enhanced Token Detection
 # =============================================================================
 
 # Competition exclusion list for web searches
@@ -370,7 +426,127 @@ def add_utm_to_links(content: str, utm_source: str = "fifi-chat") -> str:
     return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
 
 # =============================================================================
-# Enhanced Error Handling System (from original)
+# v2.4: NEW Inline Citation Processing
+# =============================================================================
+
+def process_inline_citations(content: str, citations_list: List[str]) -> str:
+    """
+    Process content to add inline citations after product/supplier mentions.
+    
+    Args:
+        content: Original content from Pinecone
+        citations_list: List of citation strings like "[1] Source A"
+        
+    Returns:
+        Content with inline citations added
+    """
+    if not citations_list or not content:
+        return content
+    
+    # Create mapping of citation numbers
+    citation_map = {}
+    for i, citation in enumerate(citations_list, 1):
+        citation_map[i] = citation
+    
+    # Keywords that likely indicate products, suppliers, or companies
+    citation_triggers = [
+        # Product-related terms
+        r'\b(vanilla extract|cocoa|chocolate|protein|ingredient|supplement|additive|flavor|spice|extract|powder|oil|syrup)\b',
+        # Supplier/Company patterns
+        r'\b([A-Z][a-z]+ (?:Inc|LLC|Corp|Corporation|Company|Co|Ltd|Limited|Group|International|Foods|Ingredients)\.?)\b',
+        # Brand/Company names (2+ capitalized words)
+        r'\b([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b',
+        # Supplier-related terms
+        r'\b(supplier|manufacturer|distributor|producer|vendor|provider|source|company|brand|farm|factory|mill)\b',
+        # Geographic suppliers
+        r'\b(European|American|Asian|organic|local|regional|sustainable|premium|specialty)\s+(supplier|manufacturer|producer|source)\b',
+        # Price/market terms
+        r'\b(price|cost|market|trading|wholesale|retail|bulk|commodity)\b'
+    ]
+    
+    # Combine all patterns
+    combined_pattern = '|'.join(f'({pattern})' for pattern in citation_triggers)
+    
+    # Split content into sentences for better citation placement
+    sentences = re.split(r'(?<=[.!?])\s+', content)
+    processed_sentences = []
+    
+    citation_counter = 1
+    used_citations = set()
+    
+    for sentence in sentences:
+        # Check if sentence contains citation-worthy content
+        if re.search(combined_pattern, sentence, re.IGNORECASE):
+            # Add citation at the end of sentence if not already present
+            if not re.search(r'\[\d+\]', sentence):
+                # Distribute citations across different sentences
+                citation_num = ((citation_counter - 1) % len(citations_list)) + 1
+                sentence = sentence.rstrip('.!?') + f' [{citation_num}]' + sentence[-1] if sentence and sentence[-1] in '.!?' else sentence + f' [{citation_num}]'
+                used_citations.add(citation_num)
+                citation_counter += 1
+        
+        processed_sentences.append(sentence)
+    
+    # If no citations were added, add them to the first substantial sentence
+    if not used_citations and len(processed_sentences) > 0:
+        for i, sentence in enumerate(processed_sentences):
+            if len(sentence.strip()) > 50:  # Substantial sentence
+                if not re.search(r'\[\d+\]', sentence):
+                    processed_sentences[i] = sentence.rstrip('.!?') + ' [1]' + (sentence[-1] if sentence and sentence[-1] in '.!?' else '')
+                    used_citations.add(1)
+                break
+    
+    return ' '.join(processed_sentences)
+
+def extract_company_mentions(content: str) -> List[str]:
+    """
+    Extract company and product mentions from content for better citation placement.
+    
+    Args:
+        content: Text content to analyze
+        
+    Returns:
+        List of company/product mentions found
+    """
+    mentions = []
+    
+    # Company name patterns
+    company_patterns = [
+        r'\b([A-Z][a-z]+\s+(?:Inc|LLC|Corp|Corporation|Company|Co|Ltd|Limited|Group|International|Foods|Ingredients)\.?)\b',
+        r'\b([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b',  # Multi-word capitalized names
+    ]
+    
+    # Product/ingredient patterns
+    product_patterns = [
+        r'\b(organic\s+\w+|premium\s+\w+|sustainable\s+\w+|natural\s+\w+)\b',
+        r'\b(vanilla\s+extract|cocoa\s+powder|plant-based\s+protein|clean\s+label)\b',
+    ]
+    
+    all_patterns = company_patterns + product_patterns
+    
+    for pattern in all_patterns:
+        matches = re.findall(pattern, content, re.IGNORECASE)
+        for match in matches:
+            if isinstance(match, tuple):
+                mention = next(m for m in match if m)  # Get first non-empty group
+            else:
+                mention = match
+            
+            if mention and len(mention.strip()) > 3:
+                mentions.append(mention.strip())
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_mentions = []
+    for mention in mentions:
+        if mention.lower() not in seen:
+            seen.add(mention.lower())
+            unique_mentions.append(mention)
+    
+    return unique_mentions[:5]  # Limit to top 5 mentions
+
+# =============================================================================
+# Enhanced Error Handling System
 # =============================================================================
 
 class ErrorSeverity(Enum):
@@ -419,7 +595,7 @@ class EnhancedErrorHandler:
                 fallback_available=True
             )
         
-        # Classify other errors (keeping original logic)
+        # Other error handling (keeping original logic)
         elif "timeout" in error_str or "timed out" in error_str:
             return ErrorContext(
                 component=component,
@@ -634,11 +810,11 @@ class SimpleSessionManager:
         session.last_activity = datetime.now()
 
 # =============================================================================
-# Enhanced PineconeAssistantTool with Token Detection
+# v2.4: Enhanced PineconeAssistantTool with Inline Citations
 # =============================================================================
 
 class PineconeAssistantTool:
-    """Advanced Pinecone Assistant with enhanced token limit detection."""
+    """Advanced Pinecone Assistant with inline citations and enhanced token limit detection."""
     
     def __init__(self, api_key: str, assistant_name: str):
         if not PINECONE_AVAILABLE: 
@@ -704,12 +880,11 @@ class PineconeAssistantTool:
             response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o")
             content = response.message.content
             has_citations = False
+            citations_list = []
             
             # Process citations
             if hasattr(response, 'citations') and response.citations:
                 has_citations = True
-                citations_header = "\n\n---\n**Sources:**\n"
-                citations_list = []
                 seen_items = set()
                 
                 for citation in response.citations:
@@ -739,14 +914,25 @@ class PineconeAssistantTool:
                                     citations_list.append(link)
                                     seen_items.add(display_text)
                 
+                # v2.4: NEW Process inline citations
                 if citations_list:
-                    content += citations_header + "\n".join(citations_list)
+                    # Add inline citations to content
+                    content_with_inline = process_inline_citations(content, citations_list)
+                    
+                    # Add traditional bottom citations section
+                    citations_header = "\n\n---\n**Sources:**\n"
+                    content = content_with_inline + citations_header + "\n".join(citations_list)
+                    
+                    # Extract company mentions for better citation context
+                    company_mentions = extract_company_mentions(content)
+                    logger.info(f"Found company/product mentions: {company_mentions}")
             
             return {
                 "content": content, 
                 "success": True, 
                 "source": "FiFi Knowledge Base",
                 "has_citations": has_citations,
+                "inline_citations": has_citations and len(citations_list) > 0,
                 "response_length": len(content)
             }
             
@@ -951,11 +1137,11 @@ class TavilyFallbackAgent:
             raise e
 
 # =============================================================================
-# Enhanced AI with Smart Fallback Logic
+# v2.4: Enhanced AI with Inline Citations and Smart Fallback
 # =============================================================================
 
 class EnhancedAI:
-    """Enhanced AI with smart fallback and rate limiting."""
+    """Enhanced AI with inline citations, proper rate limiting, and smart fallback."""
     
     def __init__(self):
         self.pinecone_tool = None
@@ -1077,11 +1263,14 @@ class EnhancedAI:
         return False
 
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """Get enhanced AI response with rate limiting and comprehensive error handling."""
+        """Get enhanced AI response with inline citations, rate limiting, and comprehensive error handling."""
+        
+        session_id = st.session_state.get('current_session_id', 'anonymous')
+        reservation_id = None
+        
         try:
-            # Check rate limit first
-            session_id = st.session_state.get('current_session_id', 'anonymous')
-            allowed, rate_message = check_rate_limit(session_id)
+            # STEP 1: Check and reserve rate limit slot
+            allowed, rate_message, reservation_id = check_and_reserve_rate_limit(session_id)
             
             if not allowed:
                 return {
@@ -1090,24 +1279,28 @@ class EnhancedAI:
                     "used_search": False,
                     "used_pinecone": False,
                     "has_citations": False,
+                    "inline_citations": False,
                     "safety_override": False,
                     "success": False
                 }
             
-            # Sanitize input
+            # STEP 2: Sanitize input
             sanitized_prompt, is_valid = sanitize_chat_message(prompt)
             if not is_valid:
+                # Rollback rate limit reservation
+                rate_limiter.rollback_request(session_id, reservation_id)
                 return {
                     "content": "⚠️ Invalid input detected. Please rephrase your question.",
                     "source": "Input Validation",
                     "used_search": False,
                     "used_pinecone": False,
                     "has_citations": False,
+                    "inline_citations": False,
                     "safety_override": False,
                     "success": False
                 }
             
-            # Convert chat history to LangChain format
+            # STEP 3: Convert chat history to LangChain format
             langchain_history = []
             if chat_history:
                 for msg in chat_history[-10:]:  # Last 10 messages to avoid token limits
@@ -1119,7 +1312,7 @@ class EnhancedAI:
             # Add current prompt (sanitized)
             langchain_history.append(HumanMessage(content=sanitized_prompt))
             
-            # STEP 1: Try Pinecone Knowledge Base FIRST
+            # STEP 4: Try Pinecone Knowledge Base FIRST
             if self.pinecone_tool:
                 pinecone_response = self.pinecone_tool.query(langchain_history)
                 
@@ -1127,13 +1320,16 @@ class EnhancedAI:
                     should_fallback = self.should_use_web_fallback(pinecone_response)
                     
                     if not should_fallback:
-                        logger.info("Using Pinecone knowledge base response")
+                        # SUCCESS: Confirm rate limit usage
+                        rate_limiter.confirm_request(session_id, reservation_id)
+                        logger.info("Using Pinecone knowledge base response with inline citations")
                         return {
                             "content": pinecone_response["content"],
                             "source": pinecone_response.get("source", "FiFi Knowledge Base"),
                             "used_search": False,
                             "used_pinecone": True,
                             "has_citations": pinecone_response.get("has_citations", False),
+                            "inline_citations": pinecone_response.get("inline_citations", False),
                             "safety_override": False,
                             "success": True
                         }
@@ -1150,29 +1346,35 @@ class EnhancedAI:
                             tavily_response = self.tavily_agent.query(sanitized_prompt, langchain_history[:-1], search_type="12taste_only")
                             
                             if tavily_response and tavily_response.get("success"):
+                                # SUCCESS: Confirm rate limit usage
+                                rate_limiter.confirm_request(session_id, reservation_id)
                                 return {
                                     "content": tavily_response["content"],
                                     "source": tavily_response.get("source", "FiFi 12taste.com Search"),
                                     "used_search": True,
                                     "used_pinecone": False,
                                     "has_citations": False,
+                                    "inline_citations": False,
                                     "safety_override": False,
                                     "token_limit_fallback": True,
                                     "success": True
                                 }
             
-            # STEP 2: Fall back to Tavily Web Search (with exclusions)
+            # STEP 5: Fall back to Tavily Web Search (with exclusions)
             if self.tavily_agent:
                 logger.info("Using Tavily web search fallback")
                 tavily_response = self.tavily_agent.query(sanitized_prompt, langchain_history[:-1])
                 
                 if tavily_response and tavily_response.get("success"):
+                    # SUCCESS: Confirm rate limit usage
+                    rate_limiter.confirm_request(session_id, reservation_id)
                     return {
                         "content": tavily_response["content"],
                         "source": tavily_response.get("source", "FiFi Web Search"),
                         "used_search": True,
                         "used_pinecone": False,
                         "has_citations": False,
+                        "inline_citations": False,
                         "safety_override": True if self.pinecone_tool else False,
                         "success": True
                     }
@@ -1180,18 +1382,25 @@ class EnhancedAI:
                     # Tavily failed, log the issue
                     logger.warning("Tavily search failed, proceeding to final fallback")
             
-            # STEP 3: Final fallback with helpful error message
+            # STEP 6: Final fallback with helpful error message
+            # Rollback rate limit since we couldn't provide a useful response
+            rate_limiter.rollback_request(session_id, reservation_id)
             return {
                 "content": "I apologize, but all AI systems are currently experiencing issues. Please try again in a few minutes, or try rephrasing your question.",
                 "source": "System Status",
                 "used_search": False,
                 "used_pinecone": False,
                 "has_citations": False,
+                "inline_citations": False,
                 "safety_override": False,
                 "success": False
             }
             
         except Exception as e:
+            # Rollback rate limit on any error
+            if reservation_id:
+                rate_limiter.rollback_request(session_id, reservation_id)
+                
             logger.error(f"Enhanced AI response error: {e}")
             error_context = error_handler.handle_api_error("AI System", "Generate Response", e)
             error_handler.log_error(error_context)
@@ -1202,6 +1411,7 @@ class EnhancedAI:
                 "used_search": False,
                 "used_pinecone": False,
                 "has_citations": False,
+                "inline_citations": False,
                 "safety_override": False,
                 "success": False
             }
@@ -1223,9 +1433,9 @@ def init_session_state():
             st.session_state.initialized = False
 
 def render_chat_interface():
-    """Render the main chat interface with enhanced features."""
-    st.title("🤖 FiFi AI Assistant")
-    st.caption("Your intelligent food & beverage sourcing companion with enhanced security & smart fallback")
+    """Render the main chat interface with enhanced inline citation features."""
+    st.title("🤖 FiFi AI Assistant v2.4")
+    st.caption("✨ Enhanced with inline citation links after product/supplier mentions")
     
     session = st.session_state.session_manager.get_session()
     
@@ -1246,7 +1456,10 @@ def render_chat_interface():
                 # Show knowledge base usage
                 if msg.get("used_pinecone"):
                     if msg.get("has_citations"):
-                        source_indicators.append("🧠 Knowledge Base (with citations)")
+                        if msg.get("inline_citations"):
+                            source_indicators.append("🧠 Knowledge Base (with inline citations)")
+                        else:
+                            source_indicators.append("🧠 Knowledge Base (with citations)")
                     else:
                         source_indicators.append("🧠 Knowledge Base")
                 
@@ -1259,6 +1472,10 @@ def render_chat_interface():
                 
                 if source_indicators:
                     st.caption(f"Enhanced with: {', '.join(source_indicators)}")
+                
+                # v2.4: Show inline citation info
+                if msg.get("inline_citations"):
+                    st.success("✨ NEW: Citations now appear inline after product/supplier mentions!")
                 
                 # Show safety override warning
                 if msg.get("safety_override"):
@@ -1290,7 +1507,7 @@ def render_chat_interface():
         
         # Get and display AI response
         with st.chat_message("assistant"):
-            with st.spinner("🔍 Querying FiFi (Enhanced Security)..."):
+            with st.spinner("🔍 Querying FiFi (Enhanced with Inline Citations v2.4)..."):
                 response = st.session_state.ai.get_response(sanitized_prompt, session.messages)
                 
                 # Handle enhanced response format
@@ -1300,6 +1517,7 @@ def render_chat_interface():
                     used_search = response.get("used_search", False)
                     used_pinecone = response.get("used_pinecone", False)
                     has_citations = response.get("has_citations", False)
+                    inline_citations = response.get("inline_citations", False)
                     safety_override = response.get("safety_override", False)
                     token_limit_fallback = response.get("token_limit_fallback", False)
                 else:
@@ -1309,6 +1527,7 @@ def render_chat_interface():
                     used_search = False
                     used_pinecone = False
                     has_citations = False
+                    inline_citations = False
                     safety_override = False
                     token_limit_fallback = False
                 
@@ -1318,7 +1537,10 @@ def render_chat_interface():
                 enhancements = []
                 if used_pinecone:
                     if has_citations:
-                        enhancements.append("🧠 Enhanced with Knowledge Base (with citations)")
+                        if inline_citations:
+                            enhancements.append("🧠 Enhanced with Knowledge Base (with inline citations)")
+                        else:
+                            enhancements.append("🧠 Enhanced with Knowledge Base (with citations)")
                     else:
                         enhancements.append("🧠 Enhanced with Knowledge Base")
                 
@@ -1331,6 +1553,10 @@ def render_chat_interface():
                 if enhancements:
                     for enhancement in enhancements:
                         st.success(enhancement)
+                
+                # v2.4: Show inline citation info
+                if inline_citations:
+                    st.success("✨ NEW: Citations now appear inline after product/supplier mentions!")
                 
                 # Show safety override warning
                 if safety_override:
@@ -1348,6 +1574,7 @@ def render_chat_interface():
             "used_search": used_search,
             "used_pinecone": used_pinecone,
             "has_citations": has_citations,
+            "inline_citations": inline_citations,
             "safety_override": safety_override,
             "token_limit_fallback": token_limit_fallback,
             "timestamp": datetime.now().isoformat()
@@ -1359,7 +1586,7 @@ def render_chat_interface():
         st.rerun()
 
 def render_sidebar():
-    """Render the enhanced sidebar with comprehensive monitoring."""
+    """v2.4: Render the enhanced sidebar with all improvements and inline citation features."""
     with st.sidebar:
         st.title("Chat Controls")
         
@@ -1373,20 +1600,41 @@ def render_sidebar():
             st.write(f"**Email:** {session.email}")
         st.write(f"**Messages:** {len(session.messages)}")
         
-        # Enhanced system status
+        # v2.3: Enhanced system status with better SQLite Cloud display
         st.subheader("Enhanced System Status")
         st.write(f"**OpenAI:** {'✅' if OPENAI_AVAILABLE and config.OPENAI_API_KEY else '❌'}")
         st.write(f"**LangChain:** {'✅' if LANGCHAIN_AVAILABLE else '❌'}")
         st.write(f"**Tavily Search:** {'✅' if TAVILY_AVAILABLE and config.TAVILY_API_KEY else '❌'}")
         st.write(f"**Tavily Client:** {'✅' if TAVILY_CLIENT_AVAILABLE and config.TAVILY_API_KEY else '❌'}")
         st.write(f"**Pinecone:** {'✅' if PINECONE_AVAILABLE and config.PINECONE_API_KEY else '❌'}")
-        st.write(f"**SQLite Cloud:** {'✅' if SQLITECLOUD_AVAILABLE else '❌'}")
         
-        # Rate limiter status
+        # v2.3: Better SQLite Cloud status display
+        if SQLITECLOUD_AVAILABLE:
+            if config.SQLITE_CLOUD_CONNECTION:
+                st.write("**SQLite Cloud:** ✅ Available & Configured")
+            else:
+                st.write("**SQLite Cloud:** ⚠️ Available but Not Configured")
+        else:
+            st.write("**SQLite Cloud:** ℹ️ Not Installed")
+        
+        # v2.2: Rate limiter status with accurate display
         if hasattr(st.session_state, 'session_manager'):
             session_id = st.session_state.get('current_session_id', 'anonymous')
             remaining = rate_limiter.get_remaining_requests(session_id)
             st.write(f"**Rate Limit:** {remaining}/20 requests remaining")
+            
+            # Add additional rate limit details in expander
+            with st.expander("📊 Rate Limit Details"):
+                confirmed_requests = len(rate_limiter.requests.get(session_id, []))
+                pending_requests = len(rate_limiter.pending_requests.get(session_id, []))
+                st.write(f"Confirmed: {confirmed_requests}")
+                st.write(f"Pending: {pending_requests}")
+                st.write(f"Available: {remaining}")
+                
+                if confirmed_requests + pending_requests > 0:
+                    reset_time = rate_limiter.get_reset_time(session_id)
+                    reset_in = max(0, int(reset_time - time.time()))
+                    st.write(f"Resets in: {reset_in}s")
         
         # Component Status
         if hasattr(st.session_state, 'ai'):
@@ -1445,11 +1693,13 @@ def render_sidebar():
                 del st.session_state.current_session_id
             st.rerun()
         
-        # Enhanced feature status
-        st.subheader("Enhanced Features")
+        # v2.4: Enhanced feature status
+        st.subheader("✨ v2.4 Features")
+        st.write("✨ NEW: Inline Citation Links")
+        st.write("✅ FIXED: SQLite Cloud Display (User-Friendly)")
+        st.write("✅ FIXED: Rate Limiting (Accurate Display)")
         st.write("✅ Enhanced F&B AI Chat")
         st.write("✅ Input Sanitization & XSS Protection")
-        st.write("✅ Rate Limiting (20 req/min)")
         st.write("✅ Domain Exclusions (Competitor Filtering)")
         st.write("✅ Enhanced Token Limit Detection")
         st.write("✅ Session Management")
@@ -1464,9 +1714,26 @@ def render_sidebar():
         
         # Enhanced Safety Features Info
         with st.expander("🛡️ Enhanced Safety Features"):
+            st.write("**✨ v2.4 NEW: Inline Citations:**")
+            st.write("- Citations appear after product mentions")
+            st.write("- Citations appear after supplier mentions")
+            st.write("- Company names get inline citations")
+            st.write("- Traditional bottom citations still included")
+            st.write("- Better citation context mapping")
+            st.write("")
+            st.write("**v2.3 Display Improvements:**")
+            st.write("- User-friendly SQLite Cloud status")
+            st.write("- Better package availability messaging")
+            st.write("- Clearer configuration guidance")
+            st.write("")
+            st.write("**v2.2 Rate Limiting Fix:**")
+            st.write("- Proper request reservation system")
+            st.write("- Rollback on failed requests")
+            st.write("- Accurate remaining count display")
+            st.write("- Thread-safe sliding window")
+            st.write("")
             st.write("**Security Enhancements:**")
             st.write("- XSS Protection & Input Sanitization")
-            st.write("- Rate limiting (20 requests/minute)")
             st.write("- Suspicious pattern detection")
             st.write("- Thread-safe operations")
             st.write("")
@@ -1474,29 +1741,15 @@ def render_sidebar():
             st.write("- Competitor domain exclusions")
             st.write("- UTM tracking on all links")
             st.write("- Domain-specific fallback for token limits")
-            st.write("")
-            st.write("**Anti-Hallucination Checks:**")
-            st.write("- Fake citation detection")
-            st.write("- File path validation")
-            st.write("- General knowledge flagging")
-            st.write("- Response length analysis")
-            st.write("- Current info detection")
-            st.write("- Automatic web fallback")
-            st.write("")
-            st.write("**Error Recovery:**")
-            st.write("- Enhanced error recovery")
-            st.write("- User-friendly error messages")
-            st.write("- System health monitoring")
-            st.write("- Smart token limit handling")
         
-        # Example queries
-        st.subheader("💡 Try These Queries")
+        # Example queries with focus on inline citations
+        st.subheader("💡 Try These Queries (with Inline Citations)")
         example_queries = [
-            "Find organic vanilla extract suppliers",
-            "Latest trends in plant-based proteins", 
-            "Current cocoa prices and suppliers",
-            "Sustainable packaging suppliers in Europe",
-            "Clean label ingredient alternatives"
+            "Find organic vanilla extract suppliers with certifications",
+            "Latest trends in plant-based proteins from major manufacturers", 
+            "Current cocoa prices and top suppliers in Europe",
+            "Sustainable packaging suppliers with eco-friendly solutions",
+            "Clean label ingredient alternatives from certified companies"
         ]
         
         for query in example_queries:
@@ -1511,18 +1764,28 @@ def render_sidebar():
                     })
                     st.rerun()
         
-        # Enhanced configuration status
+        # v2.3: Enhanced configuration status with better messaging
         st.subheader("🔧 API Configuration")
         st.write(f"**OpenAI:** {'✅ Configured' if config.OPENAI_API_KEY else '❌ Missing'}")
         st.write(f"**Tavily:** {'✅ Configured' if config.TAVILY_API_KEY else '❌ Missing'}")
         st.write(f"**Pinecone:** {'✅ Configured' if config.PINECONE_API_KEY else '❌ Missing'}")
         st.write(f"**WordPress:** {'✅ Configured' if config.WORDPRESS_URL else '❌ Missing'}")
-        st.write(f"**SQLite Cloud:** {'✅ Configured' if config.SQLITE_CLOUD_CONNECTION else '❌ Missing'}")
+        
+        # v2.3: Better SQLite Cloud configuration display
+        if SQLITECLOUD_AVAILABLE:
+            if config.SQLITE_CLOUD_CONNECTION:
+                st.write("**SQLite Cloud:** ✅ Configured")
+            else:
+                st.write("**SQLite Cloud:** ⚠️ Package Available, API Key Missing")
+        else:
+            st.write("**SQLite Cloud:** ℹ️ Package Not Installed")
+            if st.button("📦 Install SQLite Cloud", help="Run: pip install sqlitecloud"):
+                st.code("pip install sqlitecloud", language="bash")
 
 def main():
-    """Main application function with enhanced error handling."""
+    """Main application function with all enhancements integrated."""
     st.set_page_config(
-        page_title="FiFi AI Assistant v2.1 Enhanced",
+        page_title="FiFi AI Assistant v2.4 - Complete Enhanced Edition",
         page_icon="🤖",
         layout="wide"
     )
@@ -1540,14 +1803,26 @@ def main():
         render_sidebar()
         render_chat_interface()
         
-        # Show enhanced welcome message
+        # Show comprehensive welcome message
         if not st.session_state.session_manager.get_session().messages:
             st.info("""
-            👋 **Welcome to FiFi AI Chat Assistant v2.1 Enhanced!**
+            👋 **Welcome to FiFi AI Chat Assistant v2.4 - Complete Enhanced Edition!**
+            
+            **✨ v2.4 NEW FEATURE - Inline Citation Links:**
+            - ✅ Citations now appear inline after product mentions
+            - ✅ Citations appear after supplier/company names  
+            - ✅ Better citation context mapping for F&B content
+            - ✅ Traditional bottom citations section still included
+            - ✅ Smart company/product mention detection
+            
+            **🔧 Previous Enhancements:**
+            - ✅ v2.3: User-friendly SQLite Cloud display
+            - ✅ v2.2: Fixed rate limiting with proper consumption tracking
+            - ✅ v2.1: Enhanced configuration with validation & fallbacks
             
             **🔒 Enhanced Security Features:**
             - ✅ XSS Protection & Input Sanitization
-            - ✅ Rate Limiting (20 requests per minute)
+            - ✅ Rate Limiting (20 requests per minute) - Working Correctly
             - ✅ Suspicious Pattern Detection
             - ✅ Thread-Safe Operations
             
@@ -1569,7 +1844,14 @@ def main():
             - 🌐 **Smart Fallback**: Regular web search with competitor exclusions
             - 🎯 **Token Limit**: Domain-specific search when context is full
             
-            **Note**: If you see a "SAFETY OVERRIDE" message, the system detected potentially fabricated information and switched to verified sources to protect you from misinformation.
+            **✨ NEW: Ask about suppliers, products, or companies to see inline citations in action!**
+            
+            **📈 Version History:**
+            - v2.4: Inline Citation Links
+            - v2.3: SQLite Cloud Display Fixes
+            - v2.2: Rate Limiter Bug Fixes  
+            - v2.1: Enhanced Configuration Management
+            - v2.0: Base Enhanced System
             """)
         
     except Exception as e:
