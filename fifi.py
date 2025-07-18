@@ -977,27 +977,31 @@ class EnhancedAI:
             }
 
 # =============================================================================
-# NEW: Content Moderation Function
+# NEW (v2): Stricter Content Moderation Function
 # =============================================================================
 @handle_api_errors("OpenAI", "Content Moderation", show_to_user=False)
 def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Dict[str, Any]:
     """
-    Checks if the user's input violates OpenAI's content policy using the moderation endpoint.
+    Checks if the user's input violates OpenAI's content policy using a "fail-closed" approach.
 
     Args:
         prompt: The user's input text.
-        client: The OpenAI client instance. Can be None if not initialized.
+        client: The OpenAI client instance.
 
     Returns:
         A dictionary containing:
         - "flagged": A boolean indicating if the content was flagged.
-        - "message": A user-friendly message if flagged, otherwise None.
+        - "message": A user-friendly message explaining the result.
+        - "check_failed": A boolean indicating if the moderation check could not be completed.
     """
-    # If the OpenAI client isn't configured, we skip the check.
-    # This ensures the app still works if the API key is missing.
+    # If the OpenAI client isn't configured, the check fails. Block the prompt.
     if not client:
-        logger.warning("OpenAI client not available for moderation check. Skipping.")
-        return {"flagged": False, "message": None}
+        logger.error("Moderation check failed: OpenAI client is not configured.")
+        return {
+            "flagged": True, # Treat as flagged to be safe
+            "message": "I cannot process this request because the content safety system is not configured. Please contact the administrator.",
+            "check_failed": True
+        }
 
     try:
         # Call the moderation endpoint
@@ -1012,18 +1016,21 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Di
             # Return a user-friendly message
             return {
                 "flagged": True,
-                "message": "I'm sorry, but your message violates our content policy. Please rephrase your query and try again."
+                "message": "I'm sorry, but your message violates our content policy and cannot be processed.",
+                "check_failed": False
             }
         
         # If not flagged, return success
-        return {"flagged": False, "message": None}
+        return {"flagged": False, "message": None, "check_failed": False}
 
     except Exception as e:
-        # The decorator handles the error, but we should "fail open" here.
-        # If the moderation check itself fails, it's safer to let the content through
-        # than to block legitimate requests. The error will still be logged.
+        # If the API call itself fails, block the prompt for safety.
         logger.error(f"Moderation check API call failed: {e}")
-        return {"flagged": False, "message": None}
+        return {
+            "flagged": True, # Treat as flagged to be safe
+            "message": "I could not verify the safety of your message due to a technical issue. Please try again shortly.",
+            "check_failed": True
+        }
 
 def init_session_state():
     """Initialize session state safely with enhanced error handling."""
@@ -1084,7 +1091,6 @@ def render_chat_interface():
                 if msg.get("safety_override"):
                     st.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switched to verified web sources.")
 
-    # Chat input
         # Chat input
     if prompt := st.chat_input("Ask me about ingredients, suppliers, market trends, or sourcing..."):
         # Display user message
@@ -1098,25 +1104,92 @@ def render_chat_interface():
             "timestamp": datetime.now().isoformat()
         })
         
-        # --- START OF NEW MODERATION LOGIC ---
+        # --- START OF NEW (v2) STRICT MODERATION LOGIC ---
 
         # Check the user's input for policy violations
         moderation_result = check_content_moderation(prompt, st.session_state.ai.openai_client)
 
-        if moderation_result["flagged"]:
-            # If content is flagged, display the moderation message and stop
+        # First, handle cases where the prompt should be blocked
+        if moderation_result["flagged"] or moderation_result["check_failed"]:
+            # If content is flagged or the check failed, display the blocking message and stop
             with st.chat_message("assistant"):
-                st.warning(f"🚨 {moderation_result['message']}")
+                st.error(f"🚨 {moderation_result['message']}") # Use st.error for high visibility
             
             # Add the moderation response to chat history
             session.messages.append({
                 "role": "assistant",
                 "content": moderation_result['message'],
-                "source": "Content Policy",
+                "source": "Content Safety Policy",
                 "timestamp": datetime.now().isoformat()
             })
             st.rerun()
 
+        else:
+            # If content is safe, proceed to get the AI response
+            with st.chat_message("assistant"):
+                with st.spinner("🔍 Querying FiFi (Internal Specialist)..."):
+                    response = st.session_state.ai.get_response(prompt, session.messages)
+
+                    # Handle enhanced response format
+                    if isinstance(response, dict):
+                        content = response.get("content", "No response generated.")
+                        source = response.get("source", "Unknown")
+                        used_search = response.get("used_search", False)
+                        used_pinecone = response.get("used_pinecone", False)
+                        has_citations = response.get("has_citations", False)
+                        has_inline_citations = response.get("has_inline_citations", False)
+                        safety_override = response.get("safety_override", False)
+                    else:
+                        # Fallback for simple string responses
+                        content = str(response)
+                        source = "FiFi AI"
+                        used_search = False
+                        used_pinecone = False
+                        has_citations = False
+                        has_inline_citations = False
+                        safety_override = False
+
+                    # Allow HTML to render clickable citations
+                    st.markdown(content, unsafe_allow_html=True)
+
+                    # Show enhancement indicators
+                    enhancements = []
+                    if used_pinecone:
+                        if has_inline_citations:
+                            enhancements.append("🧠 Enhanced with Knowledge Base (with inline citations)")
+                        elif has_citations:
+                            enhancements.append("🧠 Enhanced with Knowledge Base (with citations)")
+                        else:
+                            enhancements.append("🧠 Enhanced with Knowledge Base")
+
+                    if used_search:
+                        enhancements.append("🌐 Enhanced with verified web search")
+
+                    if enhancements:
+                        for enhancement in enhancements:
+                            st.success(enhancement)
+
+                    # Show safety override warning
+                    if safety_override:
+                        st.error("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switched to verified web sources.")
+
+            # Add AI response to history
+            session.messages.append({
+                "role": "assistant",
+                "content": content,
+                "source": source,
+                "used_search": used_search,
+                "used_pinecone": used_pinecone,
+                "has_citations": has_citations,
+                "has_inline_citations": has_inline_citations,
+                "safety_override": safety_override,
+                "timestamp": datetime.now().isoformat()
+            })
+
+            # Update session
+            session.last_activity = datetime.now()
+
+            st.rerun()
         else:
             # If content is safe, proceed to get the AI response
             with st.chat_message("assistant"):
