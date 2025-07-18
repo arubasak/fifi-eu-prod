@@ -25,6 +25,7 @@ from langchain_tavily import TavilySearch
 # - Added error dashboard in sidebar
 # - Enhanced component status tracking
 # - Added graceful degradation for missing features
+# - NEW: Added Pinecone inline citation functionality
 # =============================================================================
 
 # Setup enhanced logging
@@ -407,10 +408,47 @@ class SimpleSessionManager:
         session.last_activity = datetime.now()
 
 # =============================================================================
-# ENHANCED v2.0: PineconeAssistantTool with Error Handling
+# NEW: Pinecone Inline Citation Helper Function
+# =============================================================================
+
+def insert_citations(response) -> str:
+    """
+    Insert citation markers [i] at specified positions in the text.
+    Processes positions in order, adjusting for previous insertions.
+    
+    Args:
+        response: Pinecone Assistant Chat Response
+        
+    Returns:
+        Modified text with citation markers inserted
+    """
+    if not hasattr(response, 'citations') or not response.citations:
+        return response.message.content
+    
+    result = response.message.content
+    citations = response.citations
+    offset = 0  # Keep track of how much we've shifted the text
+    
+    # Sort citations by position to ensure proper insertion order
+    sorted_citations = sorted(enumerate(citations, start=1), key=lambda x: x[1].position)
+    
+    for i, cite in sorted_citations:
+        citation_marker = f"[{i}]"
+        position = cite.position
+        adjusted_position = position + offset
+        
+        # Ensure we don't go beyond the text length
+        if adjusted_position <= len(result):
+            result = result[:adjusted_position] + citation_marker + result[adjusted_position:]
+            offset += len(citation_marker)
+    
+    return result
+
+# =============================================================================
+# ENHANCED v2.0: PineconeAssistantTool with Inline Citations and Error Handling
 # =============================================================================
 class PineconeAssistantTool:
-    """Advanced Pinecone Assistant with token limit detection and enhanced error handling."""
+    """Advanced Pinecone Assistant with inline citations, token limit detection and enhanced error handling."""
     
     def __init__(self, api_key: str, assistant_name: str):
         if not PINECONE_AVAILABLE: 
@@ -473,18 +511,30 @@ class PineconeAssistantTool:
                 ) for msg in chat_history
             ]
             
-            response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o")
-            content = response.message.content
-            has_citations = False
+            # NEW: Enable highlights for inline citations
+            response = self.assistant.chat(
+                messages=pinecone_messages, 
+                model="gpt-4o",
+                include_highlights=True  # Enable inline citation positions
+            )
             
-            # Process citations
+            # NEW: Process inline citations
+            content_with_inline_citations = insert_citations(response)
+            
+            has_citations = False
+            has_inline_citations = False
+            
+            # Check if we have inline citations
             if hasattr(response, 'citations') and response.citations:
                 has_citations = True
+                has_inline_citations = True
+                
+                # Also build traditional citations list for additional context
                 citations_header = "\n\n---\n**Sources:**\n"
                 citations_list = []
                 seen_items = set()
                 
-                for citation in response.citations:
+                for i, citation in enumerate(response.citations, 1):
                     for reference in citation.references:
                         if hasattr(reference, 'file') and reference.file:
                             link_url = None
@@ -501,25 +551,27 @@ class PineconeAssistantTool:
                                 
                                 display_text = link_url
                                 if display_text not in seen_items:
-                                    link = f"[{len(seen_items) + 1}] [{display_text}]({link_url})"
+                                    link = f"[{i}] [{display_text}]({link_url})"
                                     citations_list.append(link)
                                     seen_items.add(display_text)
                             else:
                                 display_text = getattr(reference.file, 'name', 'Unknown Source')
                                 if display_text not in seen_items:
-                                    link = f"[{len(seen_items) + 1}] {display_text}"
+                                    link = f"[{i}] {display_text}"
                                     citations_list.append(link)
                                     seen_items.add(display_text)
                 
+                # Add traditional citations list at the end
                 if citations_list:
-                    content += citations_header + "\n".join(citations_list)
+                    content_with_inline_citations += citations_header + "\n".join(citations_list)
             
             return {
-                "content": content, 
+                "content": content_with_inline_citations, 
                 "success": True, 
                 "source": "FiFi Knowledge Base",
                 "has_citations": has_citations,
-                "response_length": len(content)
+                "has_inline_citations": has_inline_citations,
+                "response_length": len(content_with_inline_citations)
             }
             
         except Exception as e:
@@ -670,10 +722,10 @@ class TavilyFallbackAgent:
             raise e
 
 # =============================================================================
-# ENHANCED v2.0: EnhancedAI with Better Error Recovery
+# ENHANCED v2.0: EnhancedAI with Better Error Recovery and Inline Citations
 # =============================================================================
 class EnhancedAI:
-    """Enhanced AI with Pinecone knowledge base, smart Tavily fallback, and sophisticated error handling."""
+    """Enhanced AI with Pinecone knowledge base, inline citations, smart Tavily fallback, and sophisticated error handling."""
     
     def __init__(self):
         self.pinecone_tool = None
@@ -759,6 +811,8 @@ class EnhancedAI:
         ]
         
         has_real_citations = pinecone_response.get("has_citations", False)
+        has_inline_citations = pinecone_response.get("has_inline_citations", False)
+        
         if any(pattern in content_raw for pattern in fake_file_patterns):
             if not has_real_citations:
                 return True
@@ -772,8 +826,8 @@ class EnhancedAI:
             if not has_real_citations and any(pattern in content_raw for pattern in suspicious_patterns):
                 return True
         
-        # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short)
-        if not has_real_citations:
+        # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short or inline citations present)
+        if not has_real_citations and not has_inline_citations:
             if "[1]" not in content_raw and "**Sources:**" not in content_raw:
                 if len(content_raw.strip()) > 30:
                     return True
@@ -793,12 +847,12 @@ class EnhancedAI:
             "this happens when", "the cause of", "this occurs"
         ]
         if any(pattern in content for pattern in qa_patterns):
-            if not pinecone_response.get("has_citations", False):
+            if not pinecone_response.get("has_citations", False) and not pinecone_response.get("has_inline_citations", False):
                 return True
         
         # PRIORITY 8: Response length suggests substantial answer without sources
         response_length = pinecone_response.get("response_length", 0)
-        if response_length > 100 and not pinecone_response.get("has_citations", False):
+        if response_length > 100 and not pinecone_response.get("has_citations", False) and not pinecone_response.get("has_inline_citations", False):
             return True
         
         return False
@@ -833,6 +887,7 @@ class EnhancedAI:
                             "used_search": False,
                             "used_pinecone": True,
                             "has_citations": pinecone_response.get("has_citations", False),
+                            "has_inline_citations": pinecone_response.get("has_inline_citations", False),
                             "safety_override": False,
                             "success": True
                         }
@@ -852,6 +907,7 @@ class EnhancedAI:
                         "used_search": True,
                         "used_pinecone": False,
                         "has_citations": False,
+                        "has_inline_citations": False,
                         "safety_override": True if self.pinecone_tool else False,
                         "success": True
                     }
@@ -866,6 +922,7 @@ class EnhancedAI:
                 "used_search": False,
                 "used_pinecone": False,
                 "has_citations": False,
+                "has_inline_citations": False,
                 "safety_override": False,
                 "success": False
             }
@@ -881,6 +938,7 @@ class EnhancedAI:
                 "used_search": False,
                 "used_pinecone": False,
                 "has_citations": False,
+                "has_inline_citations": False,
                 "safety_override": False,
                 "success": False
             }
@@ -904,7 +962,7 @@ def init_session_state():
 def render_chat_interface():
     """Render the main chat interface."""
     st.title("🤖 FiFi AI Assistant")
-    st.caption("Your intelligent food & beverage sourcing companion with smart fallback")
+    st.caption("Your intelligent food & beverage sourcing companion with inline citations and smart fallback")
     
     session = st.session_state.session_manager.get_session()
     
@@ -920,9 +978,11 @@ def render_chat_interface():
                 if "source" in msg:
                     st.caption(f"Source: {msg['source']}")
                 
-                # Show knowledge base usage
+                # Show knowledge base usage with inline citations
                 if msg.get("used_pinecone"):
-                    if msg.get("has_citations"):
+                    if msg.get("has_inline_citations"):
+                        source_indicators.append("🧠 Knowledge Base (with inline citations)")
+                    elif msg.get("has_citations"):
                         source_indicators.append("🧠 Knowledge Base (with citations)")
                     else:
                         source_indicators.append("🧠 Knowledge Base")
@@ -963,6 +1023,7 @@ def render_chat_interface():
                     used_search = response.get("used_search", False)
                     used_pinecone = response.get("used_pinecone", False)
                     has_citations = response.get("has_citations", False)
+                    has_inline_citations = response.get("has_inline_citations", False)
                     safety_override = response.get("safety_override", False)
                 else:
                     # Fallback for simple string responses
@@ -971,6 +1032,7 @@ def render_chat_interface():
                     used_search = False
                     used_pinecone = False
                     has_citations = False
+                    has_inline_citations = False
                     safety_override = False
                 
                 st.markdown(content)
@@ -978,7 +1040,9 @@ def render_chat_interface():
                 # Show enhancement indicators
                 enhancements = []
                 if used_pinecone:
-                    if has_citations:
+                    if has_inline_citations:
+                        enhancements.append("🧠 Enhanced with Knowledge Base (with inline citations)")
+                    elif has_citations:
                         enhancements.append("🧠 Enhanced with Knowledge Base (with citations)")
                     else:
                         enhancements.append("🧠 Enhanced with Knowledge Base")
@@ -1002,6 +1066,7 @@ def render_chat_interface():
             "used_search": used_search,
             "used_pinecone": used_pinecone,
             "has_citations": has_citations,
+            "has_inline_citations": has_inline_citations,
             "safety_override": safety_override,
             "timestamp": datetime.now().isoformat()
         })
@@ -1100,7 +1165,8 @@ def render_sidebar():
         st.write("✅ Session Management")
         st.write("✅ Anti-Hallucination Safety")
         st.write("✅ Smart Fallback Logic")
-        st.write("✅ Enhanced Error Handling")  # NEW in v2.0
+        st.write("✅ Enhanced Error Handling")
+        st.write("✅ Inline Citations (NEW)")  # NEW in v2.0
         
         if LANGCHAIN_AVAILABLE:
             st.write("✅ LangChain Support")
@@ -1138,6 +1204,21 @@ def render_sidebar():
             st.write("- Enhanced error recovery")
             st.write("- User-friendly error messages")
             st.write("- System health monitoring")
+            st.write("- Inline citation support")
+        
+        # Citation Features Info
+        with st.expander("📚 Citation Features"):
+            st.write("**Inline Citations:**")
+            st.write("- Precise text position citations [1]")
+            st.write("- Automatic citation marker insertion")
+            st.write("- Traditional source list at bottom")
+            st.write("- UTM tracking for external links")
+            st.write("- Real-time citation validation")
+            st.write("**Citation Safety:**")
+            st.write("- Validates all citation sources")
+            st.write("- Prevents fake file references")
+            st.write("- Detects fabricated citations")
+            st.write("- Fallback for uncited content")
         
         # Example queries
         st.subheader("💡 Try These Queries")
@@ -1195,11 +1276,13 @@ def main():
             
             **How it works:**
             - 🔍 **First**: Searches your internal knowledge base via Pinecone
+            - 📚 **NEW**: Inline citations [1] show exactly where information comes from
             - 🛡️ **Safety Override**: Detects and blocks fabricated information (fake URLs, file paths, etc.)
             - 🌐 **Verified Fallback**: Switches to real web sources when needed
             - 🚨 **Anti-Misinformation**: Aggressive detection of hallucinated content
             
-            **NEW in v2.0 - Enhanced Error Handling:**
+            **NEW in v2.0 - Enhanced Features:**
+            - ✅ **Inline Citations**: Precise [1] markers show source positions in text
             - ✅ User-friendly error messages with recovery suggestions
             - ✅ Automatic fallback when services fail
             - ✅ Real-time system health monitoring
@@ -1210,6 +1293,7 @@ def main():
             - ✅ Prevents hallucinated image paths (.jpg, .png, etc.)
             - ✅ Validates all sources before presenting information
             - ✅ Falls back to verified web search when information is questionable
+            - ✅ Inline citations with position validation
             
             **Note**: If you see a "SAFETY OVERRIDE" message, the system detected potentially fabricated information and switched to verified sources to protect you from misinformation.
             """)
