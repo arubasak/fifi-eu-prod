@@ -615,7 +615,7 @@ class PineconeAssistantTool:
 # ENHANCED v2.0: TavilyFallbackAgent with Error Handling
 # =============================================================================
 class TavilyFallbackAgent:
-    """Tavily fallback agent with smart result synthesis, UTM tracking, and enhanced error handling."""
+    """Tavily fallback agent with smart result synthesis, inline citations, UTM tracking, and enhanced error handling."""
 
     def __init__(self, tavily_api_key: str):
         if not TAVILY_AVAILABLE:
@@ -623,6 +623,18 @@ class TavilyFallbackAgent:
             error_handler.display_error_to_user(error_context)
             raise ImportError("Tavily client not available.")
         self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
+
+    def add_utm_to_url(self, url: str) -> str:
+        """Add UTM parameters to a single URL."""
+        if not url:
+            return url
+            
+        utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
+        if '?' in url:
+            new_url = f"{url}&{utm_params}"
+        else:
+            new_url = f"{url}?{utm_params}"
+        return new_url
 
     def add_utm_to_links(self, content: str) -> str:
         """Finds all Markdown links in a string and appends the UTM parameters."""
@@ -637,7 +649,7 @@ class TavilyFallbackAgent:
         return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
 
     def synthesize_search_results(self, results, query: str) -> str:
-        """Synthesize search results into a coherent response similar to LLM output."""
+        """Synthesize search results into a coherent response with inline citations."""
 
         # Handle string response from Tavily
         if isinstance(results, str):
@@ -654,11 +666,12 @@ class TavilyFallbackAgent:
             if not search_results:
                 return "I couldn't find any relevant information for your query."
 
-            # Process the results
+            # Process the results with inline citations
             relevant_info = []
             sources = []
+            source_urls = []
 
-            for i, result in enumerate(search_results[:5], 1):  # Use top 3 results
+            for i, result in enumerate(search_results[:5], 1):  # Use top 5 results
                 if isinstance(result, dict):
                     title = result.get('title', f'Result {i}')
                     content = (result.get('content') or
@@ -671,15 +684,27 @@ class TavilyFallbackAgent:
                         # Clean up content
                         if len(content) > 400:
                             content = content[:400] + "..."
-                        relevant_info.append(content)
-
-                        if url and title:
-                            sources.append(f"[{title}]({url})")
+                        
+                        # Add inline citation with direct link
+                        if url:
+                            url_with_utm = self.add_utm_to_url(url)
+                            # Create inline citation that links directly to source
+                            content_with_citation = f"{content} <a href='{url_with_utm}' target='_blank' title='Source: {title}'>[{i}]</a>"
+                            relevant_info.append(content_with_citation)
+                            
+                            # Also collect for sources section
+                            sources.append(f"[{title}]({url_with_utm})")
+                            source_urls.append(url_with_utm)
+                        else:
+                            # No URL available, just add non-linked citation marker
+                            content_with_citation = f"{content} <a href='#cite-{i}'>[{i}]</a>"
+                            relevant_info.append(content_with_citation)
+                            sources.append(f"{title}")
 
             if not relevant_info:
                 return "I found search results but couldn't extract readable content. Please try rephrasing your query."
 
-            # Build synthesized response
+            # Build synthesized response with inline citations
             response_parts = []
 
             if len(relevant_info) == 1:
@@ -689,11 +714,16 @@ class TavilyFallbackAgent:
                 for i, info in enumerate(relevant_info, 1):
                     response_parts.append(f"\n\n**{i}.** {info}")
 
-            # Add sources
+            # Add sources section with anchor links for non-URL citations
             if sources:
-                response_parts.append(f"\n\n**Sources:**")
+                response_parts.append(f"\n\n---\n**Sources:**")
                 for i, source in enumerate(sources, 1):
-                    response_parts.append(f"\n{i}. {source}")
+                    if source_urls and i <= len(source_urls):
+                        # For sources with URLs, create anchor target and link
+                        response_parts.append(f"\n<a id='cite-{i}'></a>{i}. {source}")
+                    else:
+                        # For sources without URLs, just show the anchor
+                        response_parts.append(f"\n<a id='cite-{i}'></a>{i}. {source}")
 
             return "".join(response_parts)
 
@@ -701,8 +731,9 @@ class TavilyFallbackAgent:
         if isinstance(results, list):
             relevant_info = []
             sources = []
+            source_urls = []
 
-            for i, result in enumerate(results[:3], 1):
+            for i, result in enumerate(results[:5], 1):
                 if isinstance(result, dict):
                     title = result.get('title', f'Result {i}')
                     content = (result.get('content') or
@@ -713,9 +744,18 @@ class TavilyFallbackAgent:
                     if content:
                         if len(content) > 400:
                             content = content[:400] + "..."
-                        relevant_info.append(content)
+                        
                         if url:
-                            sources.append(f"[{title}]({url})")
+                            url_with_utm = self.add_utm_to_url(url)
+                            # Add inline citation with direct link
+                            content_with_citation = f"{content} <a href='{url_with_utm}' target='_blank' title='Source: {title}'>[{i}]</a>"
+                            relevant_info.append(content_with_citation)
+                            sources.append(f"[{title}]({url_with_utm})")
+                            source_urls.append(url_with_utm)
+                        else:
+                            content_with_citation = f"{content} <a href='#cite-{i}'>[{i}]</a>"
+                            relevant_info.append(content_with_citation)
+                            sources.append(title)
 
             if not relevant_info:
                 return "I couldn't find relevant information for your query."
@@ -725,13 +765,16 @@ class TavilyFallbackAgent:
                 response_parts.append(f"Based on my search: {relevant_info[0]}")
             else:
                 response_parts.append("Based on my search:")
-                for info in relevant_info:
-                    response_parts.append(f"\n{info}")
+                for i, info in enumerate(relevant_info, 1):
+                    response_parts.append(f"\n**{i}.** {info}")
 
             if sources:
-                response_parts.append(f"\n\n**Sources:**")
+                response_parts.append(f"\n\n---\n**Sources:**")
                 for i, source in enumerate(sources, 1):
-                    response_parts.append(f"{i}. {source}")
+                    if source_urls and i <= len(source_urls):
+                        response_parts.append(f"\n<a id='cite-{i}'></a>{i}. {source}")
+                    else:
+                        response_parts.append(f"\n<a id='cite-{i}'></a>{i}. {source}")
 
             return "".join(response_parts)
 
@@ -743,17 +786,17 @@ class TavilyFallbackAgent:
         try:
             search_results = self.tavily_tool.invoke({"query": message})
             synthesized_content = self.synthesize_search_results(search_results, message)
-            final_content = self.add_utm_to_links(synthesized_content)
-
+            # Note: We don't use add_utm_to_links here anymore since UTM is added in synthesize_search_results
+            
             return {
-                "content": final_content,
+                "content": synthesized_content,
                 "success": True,
-                "source": "FiFi Web Search"
+                "source": "FiFi Web Search",
+                "has_inline_citations": True  # Add this flag to indicate inline citations are present
             }
         except Exception as e:
             # This will be caught by the decorator
             raise e
-
 # =============================================================================
 # ENHANCED v2.0: EnhancedAI with Better Error Recovery and Inline Citations
 # =============================================================================
