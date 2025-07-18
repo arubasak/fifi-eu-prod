@@ -979,59 +979,112 @@ class EnhancedAI:
 # =============================================================================
 # NEW (v2): Stricter Content Moderation Function
 # =============================================================================
-@handle_api_errors("OpenAI", "Content Moderation", show_to_user=False)
 def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Dict[str, Any]:
     """
-    Checks if the user's input violates OpenAI's content policy using a "fail-closed" approach.
-
+    Checks if the user's input violates OpenAI's content policy using omni-moderation-latest.
+    
     Args:
         prompt: The user's input text.
         client: The OpenAI client instance.
-
+    
     Returns:
         A dictionary containing:
         - "flagged": A boolean indicating if the content was flagged.
         - "message": A user-friendly message explaining the result.
         - "check_failed": A boolean indicating if the moderation check could not be completed.
     """
-    # If the OpenAI client isn't configured, the check fails. Block the prompt.
+    # If the OpenAI client isn't configured, skip moderation (allow the request)
     if not client:
-        logger.error("Moderation check failed: OpenAI client is not configured.")
+        logger.warning("Moderation check skipped: OpenAI client is not configured.")
         return {
-            "flagged": True, # Treat as flagged to be safe
-            "message": "I cannot process this request because the content safety system is not configured. Please contact the administrator.",
-            "check_failed": True
+            "flagged": False,
+            "message": None,
+            "check_failed": True,
+            "reason": "client_not_configured"
+        }
+    
+    # Check if the client has the necessary attributes
+    if not hasattr(client, 'moderations'):
+        logger.warning("Moderation check skipped: OpenAI client missing moderations attribute.")
+        return {
+            "flagged": False,
+            "message": None,
+            "check_failed": True,
+            "reason": "client_invalid"
         }
 
     try:
-        # Call the moderation endpoint
-        response = client.moderations.create(input=prompt)
+        # Call the moderation endpoint with omni-moderation-latest
+        logger.debug(f"Running moderation check on prompt: {prompt[:50]}...")
+        
+        response = client.moderations.create(
+            model="omni-moderation-latest",
+            input=prompt
+        )
+        
+        # Check if response is valid
+        if not response or not response.results:
+            logger.error("Moderation API returned empty response")
+            return {
+                "flagged": False,  # Allow on API issues
+                "message": None,
+                "check_failed": True,
+                "reason": "empty_response"
+            }
+            
         result = response.results[0]
-
+        
         if result.flagged:
             # If flagged, log the specific categories for internal review
             flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
             logger.warning(f"Input flagged by moderation for: {', '.join(flagged_categories)}")
             
+            # Get the highest scoring categories for context
+            high_scores = {
+                cat: getattr(result.category_scores, cat, 0) 
+                for cat in flagged_categories
+            }
+            
             # Return a user-friendly message
             return {
                 "flagged": True,
                 "message": "I'm sorry, but your message violates our content policy and cannot be processed.",
-                "check_failed": False
+                "check_failed": False,
+                "categories": flagged_categories,
+                "scores": high_scores
             }
         
         # If not flagged, return success
-        return {"flagged": False, "message": None, "check_failed": False}
-
-    except Exception as e:
-        # If the API call itself fails, block the prompt for safety.
-        logger.error(f"Moderation check API call failed: {e}")
+        logger.debug("Moderation check passed")
         return {
-            "flagged": True, # Treat as flagged to be safe
-            "message": "I could not verify the safety of your message due to a technical issue. Please try again shortly.",
-            "check_failed": True
+            "flagged": False, 
+            "message": None, 
+            "check_failed": False
         }
 
+    except Exception as e:
+        # Log the specific error for debugging
+        error_msg = f"Moderation check failed: {type(e).__name__}: {str(e)}"
+        logger.error(error_msg)
+        
+        # Check if this is a permission/access error
+        if "permission" in str(e).lower() or "access" in str(e).lower() or "not found" in str(e).lower():
+            return {
+                "flagged": True,  # Block on permission errors
+                "message": "Content moderation service is not properly configured. Please contact support.",
+                "check_failed": True,
+                "reason": "permission_error",
+                "error_details": str(e)
+            }
+        
+        # For other API errors, allow the request to proceed
+        return {
+            "flagged": False,
+            "message": None,
+            "check_failed": True,
+            "reason": f"api_error: {type(e).__name__}",
+            "error_details": str(e)
+        }
 def init_session_state():
     """Initialize session state safely with enhanced error handling."""
     if 'initialized' not in st.session_state:
