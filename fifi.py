@@ -4,14 +4,30 @@ import uuid
 import json
 import logging
 import re
-from typing import List, Dict, Optional, Any
+import time
+import functools
+from typing import List, Dict, Optional, Any, Callable
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
+from enum import Enum
+from collections import defaultdict
 import requests
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langchain_tavily import TavilySearch
 
-# Setup logging
+# =============================================================================
+# VERSION 2.0 CHANGELOG:
+# - Added EnhancedErrorHandler for sophisticated error management
+# - Added ErrorSeverity classification system
+# - Added ErrorContext for detailed error information  
+# - Added error handling decorators (@handle_api_errors, @safe_import)
+# - Added error recovery suggestions and user-friendly messages
+# - Added error dashboard in sidebar
+# - Enhanced component status tracking
+# - Added graceful degradation for missing features
+# =============================================================================
+
+# Setup enhanced logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -53,7 +69,282 @@ try:
 except ImportError:
     PINECONE_AVAILABLE = False
 
+# =============================================================================
+# NEW in v2.0: Enhanced Error Handling System
+# =============================================================================
+
+class ErrorSeverity(Enum):
+    LOW = "low"           # Feature unavailable but app continues
+    MEDIUM = "medium"     # Degraded functionality 
+    HIGH = "high"         # Major feature broken
+    CRITICAL = "critical" # App might not work
+
+@dataclass
+class ErrorContext:
+    component: str
+    operation: str
+    error_type: str
+    severity: ErrorSeverity
+    user_message: str
+    technical_details: str
+    recovery_suggestions: List[str]
+    fallback_available: bool = False
+
+class EnhancedErrorHandler:
+    """Enhanced error handling with user-friendly messages and recovery suggestions."""
+    
+    def __init__(self):
+        self.error_history = []
+        self.component_status = {}
+        
+    def handle_api_error(self, component: str, operation: str, error: Exception) -> ErrorContext:
+        """Handle API-related errors with smart classification."""
+        error_str = str(error).lower()
+        error_type = type(error).__name__
+        
+        # Classify the error
+        if "timeout" in error_str or "timed out" in error_str:
+            return ErrorContext(
+                component=component,
+                operation=operation,
+                error_type="TimeoutError",
+                severity=ErrorSeverity.MEDIUM,
+                user_message=f"{component} is responding slowly. Please try again in a moment.",
+                technical_details=str(error),
+                recovery_suggestions=[
+                    "Try your request again",
+                    "Check your internet connection",
+                    "Try a simpler query"
+                ],
+                fallback_available=True
+            )
+        
+        elif "unauthorized" in error_str or "forbidden" in error_str or "401" in error_str or "403" in error_str:
+            return ErrorContext(
+                component=component,
+                operation=operation,
+                error_type="AuthenticationError",
+                severity=ErrorSeverity.HIGH,
+                user_message=f"{component} authentication failed. Please check your API configuration.",
+                technical_details=str(error),
+                recovery_suggestions=[
+                    "Verify your API key is correct",
+                    "Check if your API key has expired",
+                    "Ensure you have proper API permissions"
+                ],
+                fallback_available=False
+            )
+        
+        elif "rate limit" in error_str or "429" in error_str:
+            return ErrorContext(
+                component=component,
+                operation=operation,
+                error_type="RateLimitError",
+                severity=ErrorSeverity.MEDIUM,
+                user_message=f"{component} rate limit reached. Please wait a moment before trying again.",
+                technical_details=str(error),
+                recovery_suggestions=[
+                    "Wait 1-2 minutes before trying again",
+                    "Try a shorter query",
+                    "Consider upgrading your API plan"
+                ],
+                fallback_available=True
+            )
+        
+        elif "not found" in error_str or "404" in error_str:
+            return ErrorContext(
+                component=component,
+                operation=operation,
+                error_type="NotFoundError",
+                severity=ErrorSeverity.MEDIUM,
+                user_message=f"{component} resource not found. The service might be temporarily unavailable.",
+                technical_details=str(error),
+                recovery_suggestions=[
+                    "Try again in a few minutes",
+                    "Check if the service is experiencing issues"
+                ],
+                fallback_available=True
+            )
+        
+        elif "connection" in error_str or "network" in error_str:
+            return ErrorContext(
+                component=component,
+                operation=operation,
+                error_type="ConnectionError",
+                severity=ErrorSeverity.HIGH,
+                user_message=f"Cannot connect to {component}. Please check your internet connection.",
+                technical_details=str(error),
+                recovery_suggestions=[
+                    "Check your internet connection",
+                    "Try refreshing the page",
+                    "Try again in a few minutes"
+                ],
+                fallback_available=True
+            )
+        
+        else:
+            # Generic error
+            return ErrorContext(
+                component=component,
+                operation=operation,
+                error_type=error_type,
+                severity=ErrorSeverity.MEDIUM,
+                user_message=f"{component} encountered an unexpected error. We're switching to backup systems.",
+                technical_details=str(error),
+                recovery_suggestions=[
+                    "Try your request again",
+                    "Try a different approach to your question",
+                    "Contact support if the issue persists"
+                ],
+                fallback_available=True
+            )
+    
+    def handle_import_error(self, package_name: str, feature_name: str) -> ErrorContext:
+        """Handle missing package errors."""
+        return ErrorContext(
+            component="Package Import",
+            operation=f"Import {package_name}",
+            error_type="ImportError",
+            severity=ErrorSeverity.LOW,
+            user_message=f"{feature_name} is not available. The app will continue with limited functionality.",
+            technical_details=f"Package '{package_name}' is not installed",
+            recovery_suggestions=[
+                f"Install {package_name}: pip install {package_name}",
+                "Some features may be unavailable",
+                "Core functionality will still work"
+            ],
+            fallback_available=True
+        )
+    
+    def display_error_to_user(self, error_context: ErrorContext):
+        """Display user-friendly error message in Streamlit."""
+        severity_icons = {
+            ErrorSeverity.LOW: "ℹ️",
+            ErrorSeverity.MEDIUM: "⚠️",
+            ErrorSeverity.HIGH: "🚨", 
+            ErrorSeverity.CRITICAL: "💥"
+        }
+        
+        # Main error message
+        icon = severity_icons.get(error_context.severity, "❓")
+        if error_context.severity == ErrorSeverity.CRITICAL:
+            st.error(f"{icon} **{error_context.user_message}**")
+        elif error_context.severity == ErrorSeverity.HIGH:
+            st.error(f"{icon} {error_context.user_message}")
+        elif error_context.severity == ErrorSeverity.MEDIUM:
+            st.warning(f"{icon} {error_context.user_message}")
+        else:
+            st.info(f"{icon} {error_context.user_message}")
+        
+        # Recovery suggestions
+        if error_context.recovery_suggestions:
+            with st.expander("💡 What you can do:"):
+                for suggestion in error_context.recovery_suggestions:
+                    st.write(f"• {suggestion}")
+        
+        # Fallback availability
+        if error_context.fallback_available:
+            st.success("✅ Backup systems are available and will be used automatically.")
+    
+    def log_error(self, error_context: ErrorContext):
+        """Log error for monitoring."""
+        self.error_history.append({
+            "timestamp": datetime.now(),
+            "component": error_context.component,
+            "operation": error_context.operation,
+            "error_type": error_context.error_type,
+            "severity": error_context.severity.value,
+            "technical_details": error_context.technical_details
+        })
+        
+        # Update component status
+        self.component_status[error_context.component] = {
+            "status": "error",
+            "last_error": datetime.now(),
+            "error_type": error_context.error_type,
+            "severity": error_context.severity.value
+        }
+        
+        # Keep only last 50 errors
+        if len(self.error_history) > 50:
+            self.error_history.pop(0)
+    
+    def mark_component_healthy(self, component: str):
+        """Mark a component as healthy."""
+        self.component_status[component] = {
+            "status": "healthy",
+            "last_check": datetime.now()
+        }
+    
+    def get_system_health_summary(self) -> Dict[str, Any]:
+        """Get overall system health summary."""
+        if not self.component_status:
+            return {"overall_health": "Unknown", "healthy_components": 0, "total_components": 0}
+        
+        healthy_count = sum(1 for status in self.component_status.values() if status.get("status") == "healthy")
+        total_count = len(self.component_status)
+        
+        if healthy_count == total_count:
+            overall_health = "Healthy"
+        elif healthy_count > total_count // 2:
+            overall_health = "Degraded"
+        else:
+            overall_health = "Critical"
+        
+        return {
+            "overall_health": overall_health,
+            "healthy_components": healthy_count,
+            "total_components": total_count,
+            "error_count": len(self.error_history)
+        }
+
+# Initialize error handler
+error_handler = EnhancedErrorHandler()
+
+# Enhanced error handling decorators
+def handle_api_errors(component: str, operation: str, show_to_user: bool = True):
+    """Decorator for API error handling."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                result = func(*args, **kwargs)
+                # Mark component as healthy on success
+                error_handler.mark_component_healthy(component)
+                return result
+            except Exception as e:
+                error_context = error_handler.handle_api_error(component, operation, e)
+                error_handler.log_error(error_context)
+                
+                if show_to_user:
+                    error_handler.display_error_to_user(error_context)
+                
+                logger.error(f"{component} {operation} failed: {e}")
+                return None
+        return wrapper
+    return decorator
+
+def safe_import(package_name: str, feature_name: str, show_error: bool = True):
+    """Safe import with user-friendly error handling."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except ImportError as e:
+                error_context = error_handler.handle_import_error(package_name, feature_name)
+                error_handler.log_error(error_context)
+                
+                if show_error:
+                    error_handler.display_error_to_user(error_context)
+                
+                return None
+        return wrapper
+    return decorator
+
+# =============================================================================
 # Competition exclusion list for web searches
+# =============================================================================
 DEFAULT_EXCLUDED_DOMAINS = [
     "ingredientsnetwork.com", "csmingredients.com", "batafood.com",
     "nccingredients.com", "prinovaglobal.com", "ingrizo.com",
@@ -115,16 +406,23 @@ class SimpleSessionManager:
         session.messages = []
         session.last_activity = datetime.now()
 
+# =============================================================================
+# ENHANCED v2.0: PineconeAssistantTool with Error Handling
+# =============================================================================
 class PineconeAssistantTool:
-    """Advanced Pinecone Assistant with token limit detection and anti-hallucination."""
+    """Advanced Pinecone Assistant with token limit detection and enhanced error handling."""
     
     def __init__(self, api_key: str, assistant_name: str):
         if not PINECONE_AVAILABLE: 
+            error_context = error_handler.handle_import_error("pinecone", "Pinecone Knowledge Base")
+            error_handler.display_error_to_user(error_context)
             raise ImportError("Pinecone client not available.")
+        
         self.pc = Pinecone(api_key=api_key)
         self.assistant_name = assistant_name
         self.assistant = self._initialize_assistant()
 
+    @handle_api_errors("Pinecone", "Initialize Assistant")
     def _initialize_assistant(self):
         try:
             instructions = (
@@ -145,21 +443,27 @@ class PineconeAssistantTool:
             
             assistants_list = self.pc.assistant.list_assistants()
             if self.assistant_name not in [a.name for a in assistants_list]:
-                st.warning(f"Assistant '{self.assistant_name}' not found. Creating...")
+                st.info(f"🔧 Creating new Pinecone assistant: '{self.assistant_name}'")
                 return self.pc.assistant.create_assistant(
                     assistant_name=self.assistant_name, 
                     instructions=instructions
                 )
             else:
-                st.info(f"Connected to assistant: '{self.assistant_name}'")
+                st.success(f"✅ Connected to Pinecone assistant: '{self.assistant_name}'")
                 return self.pc.assistant.Assistant(assistant_name=self.assistant_name)
         except Exception as e:
-            st.error(f"Failed to initialize Pinecone Assistant: {e}")
-            return None
+            # This will be caught by the decorator
+            raise e
 
+    @handle_api_errors("Pinecone", "Query Knowledge Base", show_to_user=False)
     def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]:
         if not self.assistant: 
-            return None
+            return {
+                "content": "Pinecone assistant not available.",
+                "success": False,
+                "source": "error",
+                "error_type": "unavailable"
+            }
         
         try:
             pinecone_messages = [
@@ -219,14 +523,19 @@ class PineconeAssistantTool:
             }
             
         except Exception as e:
-            logger.error(f"Pinecone Assistant error: {str(e)}")
-            return None
+            # This will be caught by the decorator
+            raise e
 
+# =============================================================================
+# ENHANCED v2.0: TavilyFallbackAgent with Error Handling
+# =============================================================================
 class TavilyFallbackAgent:
-    """Tavily fallback agent with smart result synthesis and UTM tracking."""
+    """Tavily fallback agent with smart result synthesis, UTM tracking, and enhanced error handling."""
     
     def __init__(self, tavily_api_key: str):
         if not TAVILY_AVAILABLE:
+            error_context = error_handler.handle_import_error("langchain-tavily", "Web Search")
+            error_handler.display_error_to_user(error_context)
             raise ImportError("Tavily client not available.")
         self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
 
@@ -344,6 +653,7 @@ class TavilyFallbackAgent:
         # Fallback for unknown formats
         return "I couldn't find any relevant information for your query."
 
+    @handle_api_errors("Tavily", "Web Search", show_to_user=False)
     def query(self, message: str, chat_history: List[BaseMessage]) -> Dict[str, Any]:
         try:
             search_results = self.tavily_tool.invoke({"query": message})
@@ -356,14 +666,14 @@ class TavilyFallbackAgent:
                 "source": "FiFi Web Search"
             }
         except Exception as e:
-            return {
-                "content": f"I apologize, but an error occurred while searching: {str(e)}",
-                "success": False,
-                "source": "error"
-            }
+            # This will be caught by the decorator
+            raise e
 
+# =============================================================================
+# ENHANCED v2.0: EnhancedAI with Better Error Recovery
+# =============================================================================
 class EnhancedAI:
-    """Enhanced AI with Pinecone knowledge base and smart Tavily fallback with aggressive anti-hallucination."""
+    """Enhanced AI with Pinecone knowledge base, smart Tavily fallback, and sophisticated error handling."""
     
     def __init__(self):
         self.pinecone_tool = None
@@ -375,8 +685,11 @@ class EnhancedAI:
         if OPENAI_AVAILABLE and config.OPENAI_API_KEY:
             try:
                 self.openai_client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
+                error_handler.mark_component_healthy("OpenAI")
             except Exception as e:
                 logger.error(f"OpenAI client initialization failed: {e}")
+                error_context = error_handler.handle_api_error("OpenAI", "Initialize Client", e)
+                error_handler.log_error(error_context)
         
         if LANGCHAIN_AVAILABLE and config.OPENAI_API_KEY:
             try:
@@ -385,8 +698,11 @@ class EnhancedAI:
                     api_key=config.OPENAI_API_KEY,
                     temperature=0.7
                 )
+                error_handler.mark_component_healthy("LangChain")
             except Exception as e:
                 logger.error(f"LangChain LLM initialization failed: {e}")
+                error_context = error_handler.handle_api_error("LangChain", "Initialize LLM", e)
+                error_handler.log_error(error_context)
         
         # Initialize Pinecone Assistant
         if PINECONE_AVAILABLE and config.PINECONE_API_KEY and config.PINECONE_ASSISTANT_NAME:
@@ -488,7 +804,7 @@ class EnhancedAI:
         return False
 
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """Get enhanced AI response using same logic as reference code."""
+        """Get enhanced AI response with comprehensive error handling and recovery."""
         try:
             # Convert chat history to LangChain format
             langchain_history = []
@@ -529,7 +845,7 @@ class EnhancedAI:
                 logger.info("Using Tavily web search fallback")
                 tavily_response = self.tavily_agent.query(prompt, langchain_history[:-1])
                 
-                if tavily_response.get("success"):
+                if tavily_response and tavily_response.get("success"):
                     return {
                         "content": tavily_response["content"],
                         "source": tavily_response.get("source", "FiFi Web Search"),
@@ -539,11 +855,14 @@ class EnhancedAI:
                         "safety_override": True if self.pinecone_tool else False,
                         "success": True
                     }
+                else:
+                    # Tavily failed, log the issue
+                    logger.warning("Tavily search failed, proceeding to final fallback")
             
-            # STEP 3: Final fallback
+            # STEP 3: Final fallback with helpful error message
             return {
-                "content": "I apologize, but all systems are currently unavailable.",
-                "source": "Error",
+                "content": "I apologize, but all AI systems are currently experiencing issues. Please try again in a few minutes, or try rephrasing your question.",
+                "source": "System Status",
                 "used_search": False,
                 "used_pinecone": False,
                 "has_citations": False,
@@ -553,9 +872,12 @@ class EnhancedAI:
             
         except Exception as e:
             logger.error(f"Enhanced AI response error: {e}")
+            error_context = error_handler.handle_api_error("AI System", "Generate Response", e)
+            error_handler.log_error(error_context)
+            
             return {
-                "content": f"I'm having trouble processing your request: {str(e)}",
-                "source": "Error",
+                "content": f"I'm experiencing technical difficulties. {error_context.user_message}",
+                "source": "Error Recovery",
                 "used_search": False,
                 "used_pinecone": False,
                 "has_citations": False,
@@ -564,16 +886,19 @@ class EnhancedAI:
             }
 
 def init_session_state():
-    """Initialize session state safely."""
+    """Initialize session state safely with enhanced error handling."""
     if 'initialized' not in st.session_state:
         try:
             st.session_state.session_manager = SimpleSessionManager()
             st.session_state.ai = EnhancedAI()
+            st.session_state.error_handler = error_handler  # NEW in v2.0
             st.session_state.page = "chat"
             st.session_state.initialized = True
             logger.info("Session state initialized successfully")
         except Exception as e:
             logger.error(f"Session state initialization failed: {e}")
+            error_context = error_handler.handle_api_error("Session", "Initialize", e)
+            error_handler.display_error_to_user(error_context)
             st.session_state.initialized = False
 
 def render_chat_interface():
@@ -686,8 +1011,11 @@ def render_chat_interface():
         
         st.rerun()
 
+# =============================================================================
+# ENHANCED v2.0: Sidebar with Error Dashboard
+# =============================================================================
 def render_sidebar():
-    """Render the sidebar with controls."""
+    """Render the sidebar with controls and enhanced error monitoring."""
     with st.sidebar:
         st.title("Chat Controls")
         
@@ -717,6 +1045,43 @@ def render_sidebar():
             st.write(f"**Pinecone Assistant:** {pinecone_status}")
             st.write(f"**Tavily Fallback Agent:** {tavily_status}")
         
+        # NEW in v2.0: Enhanced Error Dashboard
+        with st.expander("🚨 System Health & Error Monitoring"):
+            if hasattr(st.session_state, 'error_handler'):
+                health_summary = error_handler.get_system_health_summary()
+                
+                # Overall health indicator
+                health_color = {"Healthy": "🟢", "Degraded": "🟡", "Critical": "🔴"}.get(health_summary["overall_health"], "❓")
+                st.write(f"**System Health:** {health_color} {health_summary['overall_health']}")
+                
+                # Component health details
+                if error_handler.component_status:
+                    st.write("**Component Status:**")
+                    for component, status_info in error_handler.component_status.items():
+                        if status_info.get("status") == "error":
+                            severity = status_info.get("severity", "medium")
+                            icon = "🚨" if severity in ["high", "critical"] else "⚠️"
+                            st.write(f"{icon} **{component}**: {status_info.get('error_type', 'Error')}")
+                            if "last_error" in status_info:
+                                st.caption(f"Last error: {status_info['last_error'].strftime('%H:%M:%S')}")
+                        else:
+                            st.write(f"✅ **{component}**: Healthy")
+                
+                # Recent errors
+                if error_handler.error_history:
+                    st.write("**Recent Errors:**")
+                    for error in error_handler.error_history[-3:]:  # Last 3 errors
+                        severity_icon = {"low": "ℹ️", "medium": "⚠️", "high": "🚨", "critical": "💥"}
+                        icon = severity_icon.get(error["severity"], "❓")
+                        time_str = error["timestamp"].strftime("%H:%M:%S")
+                        st.text(f"{icon} {time_str} [{error['component']}] {error['error_type']}")
+                
+                # System metrics
+                if health_summary["total_components"] > 0:
+                    health_percentage = (health_summary["healthy_components"] / health_summary["total_components"]) * 100
+                    st.metric("System Health", f"{health_percentage:.0f}%")
+                    st.metric("Error Count", health_summary["error_count"])
+        
         st.divider()
         
         # Controls
@@ -735,6 +1100,7 @@ def render_sidebar():
         st.write("✅ Session Management")
         st.write("✅ Anti-Hallucination Safety")
         st.write("✅ Smart Fallback Logic")
+        st.write("✅ Enhanced Error Handling")  # NEW in v2.0
         
         if LANGCHAIN_AVAILABLE:
             st.write("✅ LangChain Support")
@@ -768,6 +1134,10 @@ def render_sidebar():
             st.write("- Response length analysis")
             st.write("- Current info detection")
             st.write("- Automatic web fallback")
+            st.write("**NEW in v2.0:**")
+            st.write("- Enhanced error recovery")
+            st.write("- User-friendly error messages")
+            st.write("- System health monitoring")
         
         # Example queries
         st.subheader("💡 Try These Queries")
@@ -798,9 +1168,9 @@ def render_sidebar():
         st.write(f"**SQLite Cloud:** {'✅ Configured' if config.SQLITE_CLOUD_CONNECTION else '❌ Missing'}")
 
 def main():
-    """Main application function."""
+    """Main application function with enhanced error handling."""
     st.set_page_config(
-        page_title="FiFi AI Assistant",
+        page_title="FiFi AI Assistant v2.0",
         page_icon="🤖",
         layout="wide"
     )
@@ -811,7 +1181,7 @@ def main():
         
         if not st.session_state.get('initialized', False):
             st.error("⚠️ Application initialization failed")
-            st.info("Please refresh the page.")
+            st.info("Please refresh the page or check your configuration.")
             return
         
         # Render interface
@@ -821,13 +1191,19 @@ def main():
         # Show welcome message with safety info
         if not st.session_state.session_manager.get_session().messages:
             st.info("""
-            👋 **Welcome to FiFi AI Chat Assistant!**
+            👋 **Welcome to FiFi AI Chat Assistant v2.0!**
             
             **How it works:**
             - 🔍 **First**: Searches your internal knowledge base via Pinecone
             - 🛡️ **Safety Override**: Detects and blocks fabricated information (fake URLs, file paths, etc.)
             - 🌐 **Verified Fallback**: Switches to real web sources when needed
             - 🚨 **Anti-Misinformation**: Aggressive detection of hallucinated content
+            
+            **NEW in v2.0 - Enhanced Error Handling:**
+            - ✅ User-friendly error messages with recovery suggestions
+            - ✅ Automatic fallback when services fail
+            - ✅ Real-time system health monitoring
+            - ✅ Graceful degradation for missing features
             
             **Safety Features:**
             - ✅ Blocks fake citations and non-existent file references
@@ -840,8 +1216,8 @@ def main():
         
     except Exception as e:
         logger.error(f"Critical error: {e}")
-        st.error("🚨 Application Error")
-        st.text(f"Error: {str(e)}")
+        error_context = error_handler.handle_api_error("Application", "Main Function", e)
+        error_handler.display_error_to_user(error_context)
         
         if st.button("🔄 Restart App"):
             for key in list(st.session_state.keys()):
