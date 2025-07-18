@@ -416,8 +416,8 @@ class SimpleSessionManager:
 
 def insert_citations(response) -> str:
     """
-    Insert clickable citation markers [<a href='#cite-i'>[i]</a>] at specified positions in the text.
-    Processes positions in order, adjusting for previous insertions.
+    Insert clickable citation markers. If a source URL is available, the marker
+    links directly to it in a new tab. Otherwise, it links to the citation list at the bottom.
 
     Args:
         response: Pinecone Assistant Chat Response
@@ -432,16 +432,41 @@ def insert_citations(response) -> str:
     citations = response.citations
     offset = 0  # Keep track of how much we've shifted the text
 
-    # Sort citations by position to ensure proper insertion order
+    # Sort citations by their position in the text to ensure proper insertion order
     sorted_citations = sorted(enumerate(citations, start=1), key=lambda x: x[1].position)
 
     for i, cite in sorted_citations:
-        # MODIFIED: Make the marker a clickable HTML anchor link
-        citation_marker = f" <a href='#cite-{i}'>[{i}]</a>"
+        link_url = None
+        # Attempt to find a URL in the citation's references
+        if hasattr(cite, 'references') and cite.references:
+            # Use the URL from the first reference for the inline link
+            reference = cite.references[0]
+            if hasattr(reference, 'file') and reference.file:
+                # Prioritize 'source_url' from metadata, then fall back to 'signed_url'
+                if hasattr(reference.file, 'metadata') and reference.file.metadata:
+                    link_url = reference.file.metadata.get('source_url')
+                if not link_url and hasattr(reference.file, 'signed_url') and reference.file.signed_url:
+                    link_url = reference.file.signed_url
+
+                # If a URL was found, append the UTM parameters
+                if link_url:
+                    if '?' in link_url:
+                        link_url += '&utm_source=fifi-in'
+                    else:
+                        link_url += '?utm_source=fifi-in'
+
+        # Create the final HTML for the citation marker
+        if link_url:
+            # If a URL exists, link directly to the external source and open in a new tab
+            citation_marker = f" <a href='{link_url}' target='_blank' title='Source: {link_url}'>[{i}]</a>"
+        else:
+            # Otherwise, fall back to the original behavior of linking to the bottom of the page
+            citation_marker = f" <a href='#cite-{i}'>[{i}]</a>"
+
         position = cite.position
         adjusted_position = position + offset
 
-        # Ensure we don't go beyond the text length
+        # Insert the citation marker into the response text
         if adjusted_position <= len(result):
             result = result[:adjusted_position] + citation_marker + result[adjusted_position:]
             offset += len(citation_marker)
