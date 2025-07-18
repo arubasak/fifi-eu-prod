@@ -6,6 +6,8 @@ import logging
 import re
 import time
 import functools
+import threading
+import html
 from typing import List, Dict, Optional, Any, Callable
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -14,17 +16,15 @@ from collections import defaultdict
 import requests
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langchain_tavily import TavilySearch
+from urllib.parse import urlparse
 
 # =============================================================================
-# VERSION 2.0 CHANGELOG:
-# - Added EnhancedErrorHandler for sophisticated error management
-# - Added ErrorSeverity classification system
-# - Added ErrorContext for detailed error information  
-# - Added error handling decorators (@handle_api_errors, @safe_import)
-# - Added error recovery suggestions and user-friendly messages
-# - Added error dashboard in sidebar
-# - Enhanced component status tracking
-# - Added graceful degradation for missing features
+# VERSION 2.1 CHANGELOG:
+# - Added Enhanced Configuration Management with validation & fallbacks
+# - Added Rate Limiting system with thread-safe sliding window
+# - Added Input Sanitization & XSS prevention
+# - Added Domain Exclusions for competitor filtering
+# - Added Enhanced Token Limit Detection with smart fallbacks
 # =============================================================================
 
 # Setup enhanced logging
@@ -42,25 +42,25 @@ try:
     import openai
     OPENAI_AVAILABLE = True
 except ImportError:
-    pass
+    logger.warning("OpenAI not available. Install with: pip install openai")
 
 try:
     from langchain_openai import ChatOpenAI
     LANGCHAIN_AVAILABLE = True
 except ImportError:
-    pass
+    logger.warning("LangChain not available. Install with: pip install langchain-openai")
 
 try:
     import sqlitecloud
     SQLITECLOUD_AVAILABLE = True
 except ImportError:
-    pass
+    logger.warning("SQLite Cloud not available. Install with: pip install sqlitecloud")
 
 try:
     from langchain_tavily import TavilySearch
     TAVILY_AVAILABLE = True
 except ImportError:
-    pass
+    logger.warning("Tavily not available. Install with: pip install langchain-tavily")
 
 try:
     from pinecone import Pinecone
@@ -68,16 +68,316 @@ try:
     PINECONE_AVAILABLE = True
 except ImportError:
     PINECONE_AVAILABLE = False
+    logger.warning("Pinecone not available. Install with: pip install pinecone-client")
+
+try:
+    from tavily import TavilyClient
+    TAVILY_CLIENT_AVAILABLE = True
+except ImportError:
+    TAVILY_CLIENT_AVAILABLE = False
+    logger.warning("Tavily client not available. Install with: pip install tavily-python")
 
 # =============================================================================
-# NEW in v2.0: Enhanced Error Handling System
+# NEW: Enhanced Configuration Management
+# =============================================================================
+
+class Config:
+    def __init__(self):
+        # Helper function to get config values from Streamlit secrets or environment
+        def get_config_value(key: str, required: bool = True) -> str:
+            try:
+                # Try Streamlit secrets first
+                if hasattr(st, 'secrets') and key in st.secrets:
+                    return st.secrets[key]
+                # Fallback to environment variables
+                value = os.getenv(key)
+                if required and not value:
+                    raise ValueError(f"Missing required configuration: {key}")
+                return value
+            except Exception as e:
+                if required:
+                    raise ValueError(f"Missing required configuration: {key}")
+                return None
+        
+        try:
+            # Base required configuration
+            self.JWT_SECRET = get_config_value('JWT_SECRET')
+            self.WORDPRESS_URL = self._validate_url(get_config_value('WORDPRESS_URL'))
+            
+            # Database configuration (required if SQLite Cloud is available)
+            self.SQLITE_CLOUD_CONNECTION = get_config_value('SQLITE_CLOUD_CONNECTION', required=SQLITECLOUD_AVAILABLE)
+            if self.SQLITE_CLOUD_CONNECTION and not self.SQLITE_CLOUD_CONNECTION.startswith('sqlitecloud://'):
+                raise ValueError("Invalid SQLite Cloud connection string format")
+            
+            # OpenAI configuration (required if OpenAI is available)
+            self.OPENAI_API_KEY = get_config_value('OPENAI_API_KEY', required=OPENAI_AVAILABLE)
+            if self.OPENAI_API_KEY:
+                self.OPENAI_API_KEY = self._validate_api_key(self.OPENAI_API_KEY)
+            
+            # Optional API configurations
+            self.PINECONE_API_KEY = get_config_value('PINECONE_API_KEY', required=False)
+            if self.PINECONE_API_KEY:
+                self.PINECONE_API_KEY = self._validate_api_key(self.PINECONE_API_KEY)
+            
+            self.PINECONE_ASSISTANT_NAME = get_config_value('PINECONE_ASSISTANT_NAME', required=False) or 'my-chat-assistant'
+            self.TAVILY_API_KEY = get_config_value('TAVILY_API_KEY', required=False)
+            if self.TAVILY_API_KEY:
+                self.TAVILY_API_KEY = self._validate_api_key(self.TAVILY_API_KEY)
+            
+        except Exception as e:
+            logger.error(f"Configuration error: {e}")
+            raise
+
+    def _validate_url(self, url: str) -> str:
+        """Validate and clean URL format"""
+        if not url:
+            raise ValueError("URL cannot be empty")
+        if not url.startswith(('http://', 'https://')):
+            raise ValueError(f"Invalid URL format: {url}")
+        try:
+            parsed = urlparse(url)
+            if not parsed.netloc:
+                raise ValueError(f"Invalid URL format: {url}")
+        except Exception:
+            raise ValueError(f"Invalid URL format: {url}")
+        return url.rstrip('/')  # Remove trailing slashes
+
+    def _validate_api_key(self, api_key: str) -> str:
+        """Validate API key format and length"""
+        if not api_key:
+            raise ValueError("API key cannot be empty")
+        api_key = api_key.strip()
+        if len(api_key) < 5:
+            raise ValueError("API key too short")
+        return api_key
+
+# Enhanced config initialization with fallback
+try:
+    config = Config()
+    logger.info("Configuration loaded successfully")
+except ValueError as e:
+    st.error(f"⚠️ Configuration Error: {e}")
+    st.info("Some features may be unavailable. Running in limited mode.")
+    
+    # Create minimal fallback config
+    class MinimalConfig:
+        def __init__(self):
+            self.JWT_SECRET = os.getenv('JWT_SECRET', 'development-secret-key')
+            self.WORDPRESS_URL = os.getenv('WORDPRESS_URL', 'https://example.com')
+            self.OPENAI_API_KEY = None
+            self.SQLITE_CLOUD_CONNECTION = None
+            self.PINECONE_API_KEY = None
+            self.PINECONE_ASSISTANT_NAME = 'my-chat-assistant'
+            self.TAVILY_API_KEY = None
+    
+    config = MinimalConfig()
+    st.warning("⚠️ Running in limited mode. Check your environment variables or Streamlit secrets.")
+    logger.warning("Using minimal configuration fallback")
+
+# =============================================================================
+# NEW: Rate Limiting System
+# =============================================================================
+
+class RateLimiter:
+    """Thread-safe rate limiter using sliding window approach."""
+    
+    def __init__(self, max_requests: int = 20, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests: Dict[str, List[float]] = defaultdict(list)
+        self._lock = threading.Lock()
+        
+    def is_allowed(self, identifier: str) -> bool:
+        """Check if request is allowed for the given identifier."""
+        with self._lock:
+            try:
+                now = time.time()
+                window_start = now - self.window_seconds
+                
+                # Clean old requests outside the window
+                self.requests[identifier] = [
+                    timestamp for timestamp in self.requests[identifier] 
+                    if timestamp > window_start
+                ]
+                
+                # Check if we're under the limit
+                if len(self.requests[identifier]) < self.max_requests:
+                    self.requests[identifier].append(now)
+                    return True
+                
+                return False
+                
+            except Exception as e:
+                logger.error(f"Rate limiter error: {e}")
+                return True  # Allow on error to prevent blocking users
+    
+    def get_remaining_requests(self, identifier: str) -> int:
+        """Get number of remaining requests for identifier."""
+        with self._lock:
+            try:
+                now = time.time()
+                window_start = now - self.window_seconds
+                
+                # Clean old requests
+                self.requests[identifier] = [
+                    timestamp for timestamp in self.requests[identifier] 
+                    if timestamp > window_start
+                ]
+                
+                return max(0, self.max_requests - len(self.requests[identifier]))
+                
+            except Exception as e:
+                logger.error(f"Error getting remaining requests: {e}")
+                return self.max_requests
+    
+    def get_reset_time(self, identifier: str) -> float:
+        """Get timestamp when the rate limit will reset for identifier."""
+        with self._lock:
+            try:
+                if not self.requests[identifier]:
+                    return time.time()
+                
+                # Find the oldest request in the current window
+                oldest_request = min(self.requests[identifier])
+                return oldest_request + self.window_seconds
+                
+            except Exception as e:
+                logger.error(f"Error getting reset time: {e}")
+                return time.time()
+
+# Initialize global rate limiter
+rate_limiter = RateLimiter(max_requests=20, window_seconds=60)
+
+def check_rate_limit(session_id: str) -> tuple[bool, str]:
+    """
+    Check rate limit and return (allowed, message).
+    
+    Returns:
+        tuple: (is_allowed, message_for_user)
+    """
+    if rate_limiter.is_allowed(session_id):
+        remaining = rate_limiter.get_remaining_requests(session_id)
+        return True, f"✅ Request allowed ({remaining} remaining)"
+    else:
+        reset_time = rate_limiter.get_reset_time(session_id)
+        wait_seconds = int(reset_time - time.time())
+        return False, f"⏱️ Rate limit exceeded. Try again in {wait_seconds} seconds."
+
+# =============================================================================
+# NEW: Input Sanitization & Validation
+# =============================================================================
+
+def sanitize_input(text: str, max_length: int = 4000) -> str:
+    """
+    Sanitize user input to prevent XSS attacks and limit length.
+    """
+    if not isinstance(text, str):
+        raise ValueError("Input must be a string")
+    
+    # HTML escape the input to prevent XSS
+    sanitized = html.escape(text)
+    
+    # Remove potentially dangerous characters (additional safety)
+    sanitized = re.sub(r'[<>"\'\n\r\t]', '', sanitized)
+    
+    # Remove any script-like patterns
+    sanitized = re.sub(r'(?i)(javascript|vbscript|onload|onerror|onclick)', '', sanitized)
+    
+    # Limit length to prevent DoS
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length]
+        logger.warning(f"Input truncated from {len(text)} to {max_length} characters")
+    
+    # Strip whitespace
+    return sanitized.strip()
+
+def sanitize_chat_message(message: str) -> tuple[str, bool]:
+    """
+    Sanitize chat message and check if it's valid.
+    
+    Returns:
+        tuple: (sanitized_message, is_valid)
+    """
+    try:
+        # Basic validation
+        if not message or not isinstance(message, str):
+            return "", False
+        
+        # Sanitize
+        sanitized = sanitize_input(message, max_length=2000)  # Shorter limit for chat
+        
+        # Check if message is not empty after sanitization
+        if not sanitized or len(sanitized.strip()) < 2:
+            return "", False
+        
+        # Check for suspicious patterns
+        suspicious_patterns = [
+            r'(?i)(exec|eval|system|import\s+os)',  # Code injection attempts
+            r'(?i)(drop\s+table|delete\s+from)',    # SQL injection attempts
+            r'<script|javascript:',                  # XSS attempts
+        ]
+        
+        for pattern in suspicious_patterns:
+            if re.search(pattern, sanitized):
+                logger.warning(f"Suspicious pattern detected in message: {pattern}")
+                return "", False
+        
+        return sanitized, True
+        
+    except Exception as e:
+        logger.error(f"Error sanitizing chat message: {e}")
+        return "", False
+
+# =============================================================================
+# NEW: Domain Exclusions & Enhanced Token Detection
+# =============================================================================
+
+# Competition exclusion list for web searches
+DEFAULT_EXCLUDED_DOMAINS = [
+    "ingredientsnetwork.com", "csmingredients.com", "batafood.com",
+    "nccingredients.com", "prinovaglobal.com", "ingrizo.com",
+    "solina.com", "opply.com", "brusco.co.uk", "lehmanningredients.co.uk",
+    "i-ingredients.com", "fciltd.com", "lupafoods.com", "tradeingredients.com",
+    "peterwhiting.co.uk", "globalgrains.co.uk", "tradeindia.com",
+    "udaan.com", "ofbusiness.com", "indiamart.com", "symega.com",
+    "meviveinternational.com", "amazon.com", "podfoods.co", "gocheetah.com",
+    "foodmaven.com", "connect.kehe.com", "knowde.com", "ingredientsonline.com",
+    "sourcegoodfood.com"
+]
+
+def is_token_limit_error(error: Exception) -> bool:
+    """Enhanced detection for token limit errors."""
+    error_str = str(error).lower()
+    token_error_indicators = [
+        "token limit", "token_limit", "tokens exceeded", "context length",
+        "context_length", "maximum context", "context too long", "150k",
+        "150000", "token count", "max_tokens", "input too long",
+        "sequence length", "context window"
+    ]
+    return any(indicator in error_str for indicator in token_error_indicators)
+
+def add_utm_to_links(content: str, utm_source: str = "fifi-chat") -> str:
+    """Add UTM tracking parameters to all links in content."""
+    def replacer(match):
+        url = match.group(1)
+        utm_params = f"utm_source={utm_source}&utm_medium=ai-chat"
+        if '?' in url:
+            new_url = f"{url}&{utm_params}"
+        else:
+            new_url = f"{url}?{utm_params}"
+        return f"({new_url})"
+    
+    return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
+
+# =============================================================================
+# Enhanced Error Handling System (from original)
 # =============================================================================
 
 class ErrorSeverity(Enum):
-    LOW = "low"           # Feature unavailable but app continues
-    MEDIUM = "medium"     # Degraded functionality 
-    HIGH = "high"         # Major feature broken
-    CRITICAL = "critical" # App might not work
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
 
 @dataclass
 class ErrorContext:
@@ -102,8 +402,25 @@ class EnhancedErrorHandler:
         error_str = str(error).lower()
         error_type = type(error).__name__
         
-        # Classify the error
-        if "timeout" in error_str or "timed out" in error_str:
+        # Enhanced token limit detection
+        if is_token_limit_error(error):
+            return ErrorContext(
+                component=component,
+                operation=operation,
+                error_type="TokenLimitError",
+                severity=ErrorSeverity.MEDIUM,
+                user_message=f"{component} token limit reached. Switching to alternative search.",
+                technical_details=str(error),
+                recovery_suggestions=[
+                    "The system will automatically use domain-specific search",
+                    "Try a shorter or more specific query",
+                    "This is normal for very long conversations"
+                ],
+                fallback_available=True
+            )
+        
+        # Classify other errors (keeping original logic)
+        elif "timeout" in error_str or "timed out" in error_str:
             return ErrorContext(
                 component=component,
                 operation=operation,
@@ -151,37 +468,6 @@ class EnhancedErrorHandler:
                 fallback_available=True
             )
         
-        elif "not found" in error_str or "404" in error_str:
-            return ErrorContext(
-                component=component,
-                operation=operation,
-                error_type="NotFoundError",
-                severity=ErrorSeverity.MEDIUM,
-                user_message=f"{component} resource not found. The service might be temporarily unavailable.",
-                technical_details=str(error),
-                recovery_suggestions=[
-                    "Try again in a few minutes",
-                    "Check if the service is experiencing issues"
-                ],
-                fallback_available=True
-            )
-        
-        elif "connection" in error_str or "network" in error_str:
-            return ErrorContext(
-                component=component,
-                operation=operation,
-                error_type="ConnectionError",
-                severity=ErrorSeverity.HIGH,
-                user_message=f"Cannot connect to {component}. Please check your internet connection.",
-                technical_details=str(error),
-                recovery_suggestions=[
-                    "Check your internet connection",
-                    "Try refreshing the page",
-                    "Try again in a few minutes"
-                ],
-                fallback_available=True
-            )
-        
         else:
             # Generic error
             return ErrorContext(
@@ -198,23 +484,6 @@ class EnhancedErrorHandler:
                 ],
                 fallback_available=True
             )
-    
-    def handle_import_error(self, package_name: str, feature_name: str) -> ErrorContext:
-        """Handle missing package errors."""
-        return ErrorContext(
-            component="Package Import",
-            operation=f"Import {package_name}",
-            error_type="ImportError",
-            severity=ErrorSeverity.LOW,
-            user_message=f"{feature_name} is not available. The app will continue with limited functionality.",
-            technical_details=f"Package '{package_name}' is not installed",
-            recovery_suggestions=[
-                f"Install {package_name}: pip install {package_name}",
-                "Some features may be unavailable",
-                "Core functionality will still work"
-            ],
-            fallback_available=True
-        )
     
     def display_error_to_user(self, error_context: ErrorContext):
         """Display user-friendly error message in Streamlit."""
@@ -324,51 +593,9 @@ def handle_api_errors(component: str, operation: str, show_to_user: bool = True)
         return wrapper
     return decorator
 
-def safe_import(package_name: str, feature_name: str, show_error: bool = True):
-    """Safe import with user-friendly error handling."""
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            try:
-                return func(*args, **kwargs)
-            except ImportError as e:
-                error_context = error_handler.handle_import_error(package_name, feature_name)
-                error_handler.log_error(error_context)
-                
-                if show_error:
-                    error_handler.display_error_to_user(error_context)
-                
-                return None
-        return wrapper
-    return decorator
-
 # =============================================================================
-# Competition exclusion list for web searches
+# Enhanced Session Management
 # =============================================================================
-DEFAULT_EXCLUDED_DOMAINS = [
-    "ingredientsnetwork.com", "csmingredients.com", "batafood.com",
-    "nccingredients.com", "prinovaglobal.com", "ingrizo.com",
-    "solina.com", "opply.com", "brusco.co.uk", "lehmanningredients.co.uk",
-    "i-ingredients.com", "fciltd.com", "lupafoods.com", "tradeingredients.com",
-    "peterwhiting.co.uk", "globalgrains.co.uk", "tradeindia.com",
-    "udaan.com", "ofbusiness.com", "indiamart.com", "symega.com",
-    "meviveinternational.com", "amazon.com", "podfoods.co", "gocheetah.com",
-    "foodmaven.com", "connect.kehe.com", "knowde.com", "ingredientsonline.com",
-    "sourcegoodfood.com"
-]
-
-# Simple configuration
-class Config:
-    def __init__(self):
-        self.JWT_SECRET = st.secrets.get("JWT_SECRET", "default-secret")
-        self.WORDPRESS_URL = st.secrets.get("WORDPRESS_URL", "https://example.com")
-        self.OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
-        self.SQLITE_CLOUD_CONNECTION = st.secrets.get("SQLITE_CLOUD_CONNECTION")
-        self.TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY")
-        self.PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY")
-        self.PINECONE_ASSISTANT_NAME = st.secrets.get("PINECONE_ASSISTANT_NAME", "my-chat-assistant")
-
-config = Config()
 
 @dataclass
 class UserSession:
@@ -407,10 +634,11 @@ class SimpleSessionManager:
         session.last_activity = datetime.now()
 
 # =============================================================================
-# ENHANCED v2.0: PineconeAssistantTool with Error Handling
+# Enhanced PineconeAssistantTool with Token Detection
 # =============================================================================
+
 class PineconeAssistantTool:
-    """Advanced Pinecone Assistant with token limit detection and enhanced error handling."""
+    """Advanced Pinecone Assistant with enhanced token limit detection."""
     
     def __init__(self, api_key: str, assistant_name: str):
         if not PINECONE_AVAILABLE: 
@@ -523,157 +751,211 @@ class PineconeAssistantTool:
             }
             
         except Exception as e:
-            # This will be caught by the decorator
-            raise e
+            # Enhanced token limit detection
+            if is_token_limit_error(e):
+                return {
+                    "content": "Token limit reached in knowledge base.",
+                    "success": False,
+                    "source": "error",
+                    "error_type": "token_limit"
+                }
+            else:
+                return {
+                    "content": "Error querying knowledge base.",
+                    "success": False,
+                    "source": "error",
+                    "error_type": "general"
+                }
 
 # =============================================================================
-# ENHANCED v2.0: TavilyFallbackAgent with Error Handling
+# Enhanced TavilyFallbackAgent with Domain Exclusions
 # =============================================================================
+
 class TavilyFallbackAgent:
-    """Tavily fallback agent with smart result synthesis, UTM tracking, and enhanced error handling."""
+    """Enhanced Tavily fallback agent with domain exclusions and smart result synthesis."""
     
     def __init__(self, tavily_api_key: str):
-        if not TAVILY_AVAILABLE:
+        if not TAVILY_AVAILABLE and not TAVILY_CLIENT_AVAILABLE:
             error_context = error_handler.handle_import_error("langchain-tavily", "Web Search")
             error_handler.display_error_to_user(error_context)
             raise ImportError("Tavily client not available.")
-        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
-
-    def add_utm_to_links(self, content: str) -> str:
-        """Finds all Markdown links in a string and appends the UTM parameters."""
-        def replacer(match):
-            url = match.group(1)
-            utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
-            if '?' in url:
-                new_url = f"{url}&{utm_params}"
-            else:
-                new_url = f"{url}?{utm_params}"
-            return f"({new_url})"
-        return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
-
-    def synthesize_search_results(self, results, query: str) -> str:
-        """Synthesize search results into a coherent response similar to LLM output."""
         
-        # Handle string response from Tavily
-        if isinstance(results, str):
-            return f"Based on my search: {results}"
+        self.tavily_api_key = tavily_api_key
+        self.excluded_domains = DEFAULT_EXCLUDED_DOMAINS.copy()
         
-        # Handle dictionary response from Tavily (most common format)
-        if isinstance(results, dict):
-            # Check if there's a pre-made answer
-            if results.get('answer'):
-                return f"Based on my search: {results['answer']}"
+        # Initialize appropriate Tavily client
+        if TAVILY_CLIENT_AVAILABLE:
+            self.tavily_client = TavilyClient(api_key=tavily_api_key)
+        elif TAVILY_AVAILABLE:
+            self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
+        else:
+            raise ImportError("No Tavily client available")
+
+    def search_with_exclusions(self, query: str, max_results: int = 5) -> Dict[str, Any]:
+        """Perform search with competitor domain exclusions."""
+        try:
+            if TAVILY_CLIENT_AVAILABLE and hasattr(self, 'tavily_client'):
+                response = self.tavily_client.search(
+                    query=query,
+                    search_depth="advanced",
+                    max_results=max_results,
+                    include_answer=True,
+                    include_raw_content=False,
+                    exclude_domains=self.excluded_domains
+                )
+                
+                # Format response
+                formatted_results = []
+                if response.get('results'):
+                    for result in response['results']:
+                        # Double-check domain exclusion (extra safety)
+                        url = result.get('url', '')
+                        if not any(domain in url for domain in self.excluded_domains):
+                            formatted_results.append({
+                                'title': result.get('title', 'No title'),
+                                'content': result.get('content', 'No content'),
+                                'url': url
+                            })
+                
+                return {
+                    "results": formatted_results,
+                    "answer": response.get('answer'),
+                    "success": True,
+                    "excluded_count": len(response.get('results', [])) - len(formatted_results)
+                }
             
-            # Extract the results array
-            search_results = results.get('results', [])
-            if not search_results:
-                return "I couldn't find any relevant information for your query."
+            elif hasattr(self, 'tavily_tool'):
+                # Fallback to basic TavilySearch
+                search_results = self.tavily_tool.invoke({"query": query})
+                return {
+                    "results": [{"content": str(search_results)}],
+                    "answer": str(search_results),
+                    "success": True,
+                    "excluded_count": 0
+                }
             
-            # Process the results
-            relevant_info = []
-            sources = []
+            return {"results": [], "success": False, "error": "No search client available"}
             
-            for i, result in enumerate(search_results[:3], 1):  # Use top 3 results
+        except Exception as e:
+            logger.error(f"Search with exclusions error: {e}")
+            return {"results": [], "success": False, "error": str(e)}
+
+    def search_domain_specific(self, query: str, domain: str, max_results: int = 5) -> Dict[str, Any]:
+        """Search within a specific domain only."""
+        try:
+            if TAVILY_CLIENT_AVAILABLE and hasattr(self, 'tavily_client'):
+                # Add site restriction to query
+                domain_query = f"site:{domain} {query}"
+                
+                response = self.tavily_client.search(
+                    query=domain_query,
+                    search_depth="advanced", 
+                    max_results=max_results,
+                    include_answer=True,
+                    include_raw_content=False
+                )
+                
+                # Format response
+                formatted_results = []
+                if response.get('results'):
+                    for result in response['results']:
+                        formatted_results.append({
+                            'title': result.get('title', 'No title'),
+                            'content': result.get('content', 'No content'),
+                            'url': result.get('url', 'No URL')
+                        })
+                
+                return {
+                    "results": formatted_results,
+                    "answer": response.get('answer'),
+                    "success": True,
+                    "domain": domain
+                }
+            
+            return {"results": [], "success": False, "error": "Domain-specific search not available"}
+            
+        except Exception as e:
+            logger.error(f"Domain-specific search error: {e}")
+            return {"results": [], "success": False, "error": str(e)}
+
+    def synthesize_search_results(self, search_result: Dict[str, Any], source_label: str) -> str:
+        """Format search results into readable response."""
+        if not search_result.get("success"):
+            return f"I apologize, but I encountered an error: {search_result.get('error', 'Unknown error')}"
+        
+        response_parts = []
+        
+        # Add summary if available
+        if search_result.get("answer"):
+            response_parts.append(f"**Summary:** {search_result['answer']}")
+        
+        # Add results
+        results = search_result.get("results", [])
+        if results:
+            response_parts.append(f"\n**Detailed Information:**")
+            for i, result in enumerate(results[:3], 1):  # Limit to top 3 results
                 if isinstance(result, dict):
-                    title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
-                             result.get('description') or 
-                             result.get('summary', ''))
+                    title = result.get('title', 'No title')
+                    content = result.get('content', 'No content')
                     url = result.get('url', '')
                     
-                    if content:
-                        # Clean up content
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                        relevant_info.append(content)
-                        
-                        if url and title:
-                            sources.append(f"[{title}]({url})")
-            
-            if not relevant_info:
-                return "I found search results but couldn't extract readable content. Please try rephrasing your query."
-            
-            # Build synthesized response
-            response_parts = []
-            
-            if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info[0]}")
-            else:
-                response_parts.append("Based on my search, here's what I found:")
-                for i, info in enumerate(relevant_info, 1):
-                    response_parts.append(f"\n\n**{i}.** {info}")
-            
-            # Add sources
-            if sources:
-                response_parts.append(f"\n\n**Sources:**")
-                for i, source in enumerate(sources, 1):
-                    response_parts.append(f"\n{i}. {source}")
-            
-            return "".join(response_parts)
-        
-        # Handle direct list (fallback)
-        if isinstance(results, list):
-            relevant_info = []
-            sources = []
-            
-            for i, result in enumerate(results[:3], 1):
-                if isinstance(result, dict):
-                    title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
-                             result.get('description', ''))
-                    url = result.get('url', '')
+                    # Truncate content if too long
+                    if len(content) > 200:
+                        content = content[:200] + "..."
                     
-                    if content:
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                        relevant_info.append(content)
-                        if url:
-                            sources.append(f"[{title}]({url})")
-            
-            if not relevant_info:
-                return "I couldn't find relevant information for your query."
-            
-            response_parts = []
-            if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info[0]}")
-            else:
-                response_parts.append("Based on my search:")
-                for info in relevant_info:
-                    response_parts.append(f"\n{info}")
-            
-            if sources:
-                response_parts.append(f"\n\n**Sources:**")
-                for i, source in enumerate(sources, 1):
-                    response_parts.append(f"{i}. {source}")
-            
-            return "".join(response_parts)
+                    response_parts.append(f"\n{i}. **{title}**")
+                    response_parts.append(f"   {content}")
+                    if url:
+                        response_parts.append(f"   [Read more]({url})")
+                else:
+                    # Handle string results
+                    content = str(result)
+                    if len(content) > 200:
+                        content = content[:200] + "..."
+                    response_parts.append(f"\n{i}. {content}")
         
-        # Fallback for unknown formats
-        return "I couldn't find any relevant information for your query."
+        # Add source attribution
+        if search_result.get("domain"):
+            response_parts.append(f"\n*Source: {source_label} ({search_result['domain']})*")
+        else:
+            response_parts.append(f"\n*Source: {source_label}*")
+            
+        # Add exclusion info if applicable
+        if search_result.get("excluded_count", 0) > 0:
+            response_parts.append(f"\n*Note: {search_result['excluded_count']} competitor results excluded*")
+        
+        formatted_response = "".join(response_parts)
+        return add_utm_to_links(formatted_response)
 
     @handle_api_errors("Tavily", "Web Search", show_to_user=False)
-    def query(self, message: str, chat_history: List[BaseMessage]) -> Dict[str, Any]:
+    def query(self, message: str, chat_history: List[BaseMessage], search_type: str = "general") -> Dict[str, Any]:
         try:
-            search_results = self.tavily_tool.invoke({"query": message})
-            synthesized_content = self.synthesize_search_results(search_results, message)
-            final_content = self.add_utm_to_links(synthesized_content)
+            # Perform search based on type
+            if search_type == "12taste_only":
+                search_result = self.search_domain_specific(message, "12taste.com")
+                source_label = "FiFi 12taste.com Search"
+            else:  # general search with exclusions
+                search_result = self.search_with_exclusions(message)
+                source_label = "FiFi Web Search"
+            
+            # Synthesize results
+            final_content = self.synthesize_search_results(search_result, source_label)
             
             return {
                 "content": final_content,
                 "success": True,
-                "source": "FiFi Web Search"
+                "source": source_label
             }
         except Exception as e:
             # This will be caught by the decorator
             raise e
 
 # =============================================================================
-# ENHANCED v2.0: EnhancedAI with Better Error Recovery
+# Enhanced AI with Smart Fallback Logic
 # =============================================================================
+
 class EnhancedAI:
-    """Enhanced AI with Pinecone knowledge base, smart Tavily fallback, and sophisticated error handling."""
+    """Enhanced AI with smart fallback and rate limiting."""
     
     def __init__(self):
         self.pinecone_tool = None
@@ -717,7 +999,7 @@ class EnhancedAI:
                 self.pinecone_tool = None
         
         # Initialize Tavily Fallback Agent
-        if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
+        if (TAVILY_AVAILABLE or TAVILY_CLIENT_AVAILABLE) and config.TAVILY_API_KEY:
             try:
                 self.tavily_agent = TavilyFallbackAgent(tavily_api_key=config.TAVILY_API_KEY)
                 logger.info("Tavily Fallback Agent initialized successfully")
@@ -787,16 +1069,7 @@ class EnhancedAI:
         if any(flag in content for flag in general_knowledge_red_flags):
             return True
         
-        # PRIORITY 7: Question-answering patterns that suggest general knowledge
-        qa_patterns = [
-            "the answer is", "this is because", "the reason", "due to the fact",
-            "this happens when", "the cause of", "this occurs"
-        ]
-        if any(pattern in content for pattern in qa_patterns):
-            if not pinecone_response.get("has_citations", False):
-                return True
-        
-        # PRIORITY 8: Response length suggests substantial answer without sources
+        # PRIORITY 7: Response length suggests substantial answer without sources
         response_length = pinecone_response.get("response_length", 0)
         if response_length > 100 and not pinecone_response.get("has_citations", False):
             return True
@@ -804,8 +1077,36 @@ class EnhancedAI:
         return False
 
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """Get enhanced AI response with comprehensive error handling and recovery."""
+        """Get enhanced AI response with rate limiting and comprehensive error handling."""
         try:
+            # Check rate limit first
+            session_id = st.session_state.get('current_session_id', 'anonymous')
+            allowed, rate_message = check_rate_limit(session_id)
+            
+            if not allowed:
+                return {
+                    "content": rate_message,
+                    "source": "Rate Limiter",
+                    "used_search": False,
+                    "used_pinecone": False,
+                    "has_citations": False,
+                    "safety_override": False,
+                    "success": False
+                }
+            
+            # Sanitize input
+            sanitized_prompt, is_valid = sanitize_chat_message(prompt)
+            if not is_valid:
+                return {
+                    "content": "⚠️ Invalid input detected. Please rephrase your question.",
+                    "source": "Input Validation",
+                    "used_search": False,
+                    "used_pinecone": False,
+                    "has_citations": False,
+                    "safety_override": False,
+                    "success": False
+                }
+            
             # Convert chat history to LangChain format
             langchain_history = []
             if chat_history:
@@ -815,8 +1116,8 @@ class EnhancedAI:
                     elif msg.get("role") == "assistant":
                         langchain_history.append(AIMessage(content=msg.get("content", "")))
             
-            # Add current prompt
-            langchain_history.append(HumanMessage(content=prompt))
+            # Add current prompt (sanitized)
+            langchain_history.append(HumanMessage(content=sanitized_prompt))
             
             # STEP 1: Try Pinecone Knowledge Base FIRST
             if self.pinecone_tool:
@@ -839,11 +1140,31 @@ class EnhancedAI:
                     else:
                         logger.warning("SAFETY OVERRIDE: Detected potentially fabricated information")
                         # Continue to Tavily fallback with safety override flag
+                else:
+                    # Check for token limit error
+                    error_type = pinecone_response.get("error_type")
+                    if error_type == "token_limit":
+                        logger.info("Token limit detected, falling back to domain-specific search")
+                        # Use domain-specific search for token limits
+                        if self.tavily_agent:
+                            tavily_response = self.tavily_agent.query(sanitized_prompt, langchain_history[:-1], search_type="12taste_only")
+                            
+                            if tavily_response and tavily_response.get("success"):
+                                return {
+                                    "content": tavily_response["content"],
+                                    "source": tavily_response.get("source", "FiFi 12taste.com Search"),
+                                    "used_search": True,
+                                    "used_pinecone": False,
+                                    "has_citations": False,
+                                    "safety_override": False,
+                                    "token_limit_fallback": True,
+                                    "success": True
+                                }
             
-            # STEP 2: Fall back to Tavily Web Search
+            # STEP 2: Fall back to Tavily Web Search (with exclusions)
             if self.tavily_agent:
                 logger.info("Using Tavily web search fallback")
-                tavily_response = self.tavily_agent.query(prompt, langchain_history[:-1])
+                tavily_response = self.tavily_agent.query(sanitized_prompt, langchain_history[:-1])
                 
                 if tavily_response and tavily_response.get("success"):
                     return {
@@ -891,7 +1212,7 @@ def init_session_state():
         try:
             st.session_state.session_manager = SimpleSessionManager()
             st.session_state.ai = EnhancedAI()
-            st.session_state.error_handler = error_handler  # NEW in v2.0
+            st.session_state.error_handler = error_handler
             st.session_state.page = "chat"
             st.session_state.initialized = True
             logger.info("Session state initialized successfully")
@@ -902,16 +1223,18 @@ def init_session_state():
             st.session_state.initialized = False
 
 def render_chat_interface():
-    """Render the main chat interface."""
+    """Render the main chat interface with enhanced features."""
     st.title("🤖 FiFi AI Assistant")
-    st.caption("Your intelligent food & beverage sourcing companion with smart fallback")
+    st.caption("Your intelligent food & beverage sourcing companion with enhanced security & smart fallback")
     
     session = st.session_state.session_manager.get_session()
     
     # Display chat history
     for msg in session.messages:
         with st.chat_message(msg.get("role", "user")):
-            st.markdown(msg.get("content", ""))
+            # Use safe content display
+            content = msg.get("content", "")
+            st.markdown(content, unsafe_allow_html=False)  # Streamlit's built-in safety
             
             # Show source information for assistant messages
             if msg.get("role") == "assistant":
@@ -929,7 +1252,10 @@ def render_chat_interface():
                 
                 # Show web search usage  
                 if msg.get("used_search"):
-                    source_indicators.append("🌐 Web Search")
+                    if msg.get("token_limit_fallback"):
+                        source_indicators.append("🌐 Domain-Specific Search (Token Limit)")
+                    else:
+                        source_indicators.append("🌐 Web Search (Filtered)")
                 
                 if source_indicators:
                     st.caption(f"Enhanced with: {', '.join(source_indicators)}")
@@ -937,24 +1263,35 @@ def render_chat_interface():
                 # Show safety override warning
                 if msg.get("safety_override"):
                     st.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switched to verified web sources.")
+                
+                # Show token limit fallback info
+                if msg.get("token_limit_fallback"):
+                    st.info("🔄 TOKEN LIMIT: Switched to domain-specific search for better results.")
     
-    # Chat input
+    # Chat input with enhanced validation
     if prompt := st.chat_input("Ask me about ingredients, suppliers, market trends, or sourcing..."):
-        # Display user message
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        # Sanitize input before processing
+        sanitized_prompt, is_valid = sanitize_chat_message(prompt)
         
-        # Add user message to history
+        if not is_valid:
+            st.error("⚠️ Invalid message detected. Please rephrase your question.")
+            return
+        
+        # Display user message (using sanitized version)
+        with st.chat_message("user"):
+            st.markdown(sanitized_prompt)
+        
+        # Add user message to history (sanitized)
         session.messages.append({
             "role": "user",
-            "content": prompt,
+            "content": sanitized_prompt,
             "timestamp": datetime.now().isoformat()
         })
         
         # Get and display AI response
         with st.chat_message("assistant"):
-            with st.spinner("🔍 Querying FiFi (Internal Specialist)..."):
-                response = st.session_state.ai.get_response(prompt, session.messages)
+            with st.spinner("🔍 Querying FiFi (Enhanced Security)..."):
+                response = st.session_state.ai.get_response(sanitized_prompt, session.messages)
                 
                 # Handle enhanced response format
                 if isinstance(response, dict):
@@ -964,6 +1301,7 @@ def render_chat_interface():
                     used_pinecone = response.get("used_pinecone", False)
                     has_citations = response.get("has_citations", False)
                     safety_override = response.get("safety_override", False)
+                    token_limit_fallback = response.get("token_limit_fallback", False)
                 else:
                     # Fallback for simple string responses
                     content = str(response)
@@ -972,8 +1310,9 @@ def render_chat_interface():
                     used_pinecone = False
                     has_citations = False
                     safety_override = False
+                    token_limit_fallback = False
                 
-                st.markdown(content)
+                st.markdown(content, unsafe_allow_html=False)  # Safe display
                 
                 # Show enhancement indicators
                 enhancements = []
@@ -984,7 +1323,10 @@ def render_chat_interface():
                         enhancements.append("🧠 Enhanced with Knowledge Base")
                 
                 if used_search:
-                    enhancements.append("🌐 Enhanced with verified web search")
+                    if token_limit_fallback:
+                        enhancements.append("🌐 Enhanced with domain-specific search")
+                    else:
+                        enhancements.append("🌐 Enhanced with filtered web search")
                 
                 if enhancements:
                     for enhancement in enhancements:
@@ -993,6 +1335,10 @@ def render_chat_interface():
                 # Show safety override warning
                 if safety_override:
                     st.error("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switched to verified web sources.")
+                
+                # Show token limit fallback info
+                if token_limit_fallback:
+                    st.info("🔄 TOKEN LIMIT: Switched to domain-specific search for better results.")
         
         # Add AI response to history
         session.messages.append({
@@ -1003,6 +1349,7 @@ def render_chat_interface():
             "used_pinecone": used_pinecone,
             "has_citations": has_citations,
             "safety_override": safety_override,
+            "token_limit_fallback": token_limit_fallback,
             "timestamp": datetime.now().isoformat()
         })
         
@@ -1011,11 +1358,8 @@ def render_chat_interface():
         
         st.rerun()
 
-# =============================================================================
-# ENHANCED v2.0: Sidebar with Error Dashboard
-# =============================================================================
 def render_sidebar():
-    """Render the sidebar with controls and enhanced error monitoring."""
+    """Render the enhanced sidebar with comprehensive monitoring."""
     with st.sidebar:
         st.title("Chat Controls")
         
@@ -1029,13 +1373,20 @@ def render_sidebar():
             st.write(f"**Email:** {session.email}")
         st.write(f"**Messages:** {len(session.messages)}")
         
-        # System status
-        st.subheader("System Status")
+        # Enhanced system status
+        st.subheader("Enhanced System Status")
         st.write(f"**OpenAI:** {'✅' if OPENAI_AVAILABLE and config.OPENAI_API_KEY else '❌'}")
         st.write(f"**LangChain:** {'✅' if LANGCHAIN_AVAILABLE else '❌'}")
         st.write(f"**Tavily Search:** {'✅' if TAVILY_AVAILABLE and config.TAVILY_API_KEY else '❌'}")
+        st.write(f"**Tavily Client:** {'✅' if TAVILY_CLIENT_AVAILABLE and config.TAVILY_API_KEY else '❌'}")
         st.write(f"**Pinecone:** {'✅' if PINECONE_AVAILABLE and config.PINECONE_API_KEY else '❌'}")
         st.write(f"**SQLite Cloud:** {'✅' if SQLITECLOUD_AVAILABLE else '❌'}")
+        
+        # Rate limiter status
+        if hasattr(st.session_state, 'session_manager'):
+            session_id = st.session_state.get('current_session_id', 'anonymous')
+            remaining = rate_limiter.get_remaining_requests(session_id)
+            st.write(f"**Rate Limit:** {remaining}/20 requests remaining")
         
         # Component Status
         if hasattr(st.session_state, 'ai'):
@@ -1045,7 +1396,7 @@ def render_sidebar():
             st.write(f"**Pinecone Assistant:** {pinecone_status}")
             st.write(f"**Tavily Fallback Agent:** {tavily_status}")
         
-        # NEW in v2.0: Enhanced Error Dashboard
+        # Enhanced Error Dashboard
         with st.expander("🚨 System Health & Error Monitoring"):
             if hasattr(st.session_state, 'error_handler'):
                 health_summary = error_handler.get_system_health_summary()
@@ -1094,39 +1445,36 @@ def render_sidebar():
                 del st.session_state.current_session_id
             st.rerun()
         
-        # Feature status
-        st.subheader("Available Features")
+        # Enhanced feature status
+        st.subheader("Enhanced Features")
         st.write("✅ Enhanced F&B AI Chat")
+        st.write("✅ Input Sanitization & XSS Protection")
+        st.write("✅ Rate Limiting (20 req/min)")
+        st.write("✅ Domain Exclusions (Competitor Filtering)")
+        st.write("✅ Enhanced Token Limit Detection")
         st.write("✅ Session Management")
         st.write("✅ Anti-Hallucination Safety")
         st.write("✅ Smart Fallback Logic")
-        st.write("✅ Enhanced Error Handling")  # NEW in v2.0
+        st.write("✅ Enhanced Error Handling")
         
         if LANGCHAIN_AVAILABLE:
             st.write("✅ LangChain Support")
         else:
             st.write("❌ LangChain (install required)")
         
-        # Pinecone Knowledge Base Status
-        if PINECONE_AVAILABLE and config.PINECONE_API_KEY:
-            if hasattr(st.session_state, 'ai') and st.session_state.ai.pinecone_tool:
-                st.write("✅ Knowledge Base (Pinecone)")
-            else:
-                st.write("⚠️ Knowledge Base (Connection Failed)")
-        else:
-            st.write("❌ Knowledge Base (Setup Required)")
-            
-        # Tavily Fallback Status
-        if TAVILY_AVAILABLE and config.TAVILY_API_KEY:
-            if hasattr(st.session_state, 'ai') and st.session_state.ai.tavily_agent:
-                st.write("✅ Web Search Fallback (Tavily)")
-            else:
-                st.write("⚠️ Web Search (Connection Failed)")
-        else:
-            st.write("❌ Web Search (API key needed)")
-        
-        # Safety Features Info
-        with st.expander("🛡️ Safety Features"):
+        # Enhanced Safety Features Info
+        with st.expander("🛡️ Enhanced Safety Features"):
+            st.write("**Security Enhancements:**")
+            st.write("- XSS Protection & Input Sanitization")
+            st.write("- Rate limiting (20 requests/minute)")
+            st.write("- Suspicious pattern detection")
+            st.write("- Thread-safe operations")
+            st.write("")
+            st.write("**Business Logic:**")
+            st.write("- Competitor domain exclusions")
+            st.write("- UTM tracking on all links")
+            st.write("- Domain-specific fallback for token limits")
+            st.write("")
             st.write("**Anti-Hallucination Checks:**")
             st.write("- Fake citation detection")
             st.write("- File path validation")
@@ -1134,10 +1482,12 @@ def render_sidebar():
             st.write("- Response length analysis")
             st.write("- Current info detection")
             st.write("- Automatic web fallback")
-            st.write("**NEW in v2.0:**")
+            st.write("")
+            st.write("**Error Recovery:**")
             st.write("- Enhanced error recovery")
             st.write("- User-friendly error messages")
             st.write("- System health monitoring")
+            st.write("- Smart token limit handling")
         
         # Example queries
         st.subheader("💡 Try These Queries")
@@ -1151,15 +1501,17 @@ def render_sidebar():
         
         for query in example_queries:
             if st.button(f"💬 {query}", key=f"example_{hash(query)}", use_container_width=True):
-                # Add the example query to chat
-                session.messages.append({
-                    "role": "user", 
-                    "content": query,
-                    "timestamp": datetime.now().isoformat()
-                })
-                st.rerun()
+                # Sanitize example query before adding
+                sanitized_query, is_valid = sanitize_chat_message(query)
+                if is_valid:
+                    session.messages.append({
+                        "role": "user", 
+                        "content": sanitized_query,
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    st.rerun()
         
-        # Configuration status
+        # Enhanced configuration status
         st.subheader("🔧 API Configuration")
         st.write(f"**OpenAI:** {'✅ Configured' if config.OPENAI_API_KEY else '❌ Missing'}")
         st.write(f"**Tavily:** {'✅ Configured' if config.TAVILY_API_KEY else '❌ Missing'}")
@@ -1170,7 +1522,7 @@ def render_sidebar():
 def main():
     """Main application function with enhanced error handling."""
     st.set_page_config(
-        page_title="FiFi AI Assistant v2.0",
+        page_title="FiFi AI Assistant v2.1 Enhanced",
         page_icon="🤖",
         layout="wide"
     )
@@ -1188,28 +1540,34 @@ def main():
         render_sidebar()
         render_chat_interface()
         
-        # Show welcome message with safety info
+        # Show enhanced welcome message
         if not st.session_state.session_manager.get_session().messages:
             st.info("""
-            👋 **Welcome to FiFi AI Chat Assistant v2.0!**
+            👋 **Welcome to FiFi AI Chat Assistant v2.1 Enhanced!**
             
-            **How it works:**
-            - 🔍 **First**: Searches your internal knowledge base via Pinecone
-            - 🛡️ **Safety Override**: Detects and blocks fabricated information (fake URLs, file paths, etc.)
-            - 🌐 **Verified Fallback**: Switches to real web sources when needed
-            - 🚨 **Anti-Misinformation**: Aggressive detection of hallucinated content
+            **🔒 Enhanced Security Features:**
+            - ✅ XSS Protection & Input Sanitization
+            - ✅ Rate Limiting (20 requests per minute)
+            - ✅ Suspicious Pattern Detection
+            - ✅ Thread-Safe Operations
             
-            **NEW in v2.0 - Enhanced Error Handling:**
-            - ✅ User-friendly error messages with recovery suggestions
-            - ✅ Automatic fallback when services fail
-            - ✅ Real-time system health monitoring
-            - ✅ Graceful degradation for missing features
+            **🎯 Smart Business Logic:**
+            - ✅ Competitor Domain Exclusions (30+ domains filtered)
+            - ✅ UTM Tracking on All External Links
+            - ✅ Domain-Specific Fallback for Token Limits
+            - ✅ Enhanced Token Limit Detection
             
-            **Safety Features:**
+            **🛡️ Anti-Hallucination System:**
             - ✅ Blocks fake citations and non-existent file references
             - ✅ Prevents hallucinated image paths (.jpg, .png, etc.)
             - ✅ Validates all sources before presenting information
             - ✅ Falls back to verified web search when information is questionable
+            
+            **🔄 Enhanced Fallback Logic:**
+            - 🔍 **First**: Searches your internal knowledge base via Pinecone
+            - 🛡️ **Safety Override**: Detects and blocks fabricated information
+            - 🌐 **Smart Fallback**: Regular web search with competitor exclusions
+            - 🎯 **Token Limit**: Domain-specific search when context is full
             
             **Note**: If you see a "SAFETY OVERRIDE" message, the system detected potentially fabricated information and switched to verified sources to protect you from misinformation.
             """)
