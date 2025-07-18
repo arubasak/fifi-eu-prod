@@ -19,12 +19,11 @@ from langchain_tavily import TavilySearch
 from urllib.parse import urlparse
 
 # =============================================================================
-# VERSION 2.4 COMPLETE - ALL ENHANCEMENTS INTEGRATED
-# CHANGELOG:
-# v2.1: Enhanced Configuration Management with validation & fallbacks
-# v2.2: FIXED Rate limiter bug - proper consumption tracking with rollback
-# v2.3: FIXED SQLite Cloud display - user-friendly status messages  
-# v2.4: NEW Inline Citation Links - citations appear after product/supplier mentions
+# VERSION 2.5 CHANGELOG:
+# - FIXED: Using official Pinecone inline citation method with include_highlights=True
+# - FIXED: Pinecone query issues causing infinite spinner
+# - IMPROVED: Error handling for Pinecone connection issues
+# - REMOVED: Custom pattern-matching citation logic (replaced with official method)
 # =============================================================================
 
 # Setup enhanced logging
@@ -78,7 +77,7 @@ except ImportError:
     logger.warning("Tavily client not available. Install with: pip install tavily-python")
 
 # =============================================================================
-# v2.1: Enhanced Configuration Management
+# Enhanced Configuration Management (unchanged from v2.4)
 # =============================================================================
 
 class Config:
@@ -175,7 +174,7 @@ except ValueError as e:
     logger.warning("Using minimal configuration fallback")
 
 # =============================================================================
-# v2.2: Enhanced Rate Limiting System with Rollback
+# Rate Limiting System (unchanged from v2.4)
 # =============================================================================
 
 class RateLimiter:
@@ -185,7 +184,7 @@ class RateLimiter:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.requests: Dict[str, List[float]] = defaultdict(list)
-        self.pending_requests: Dict[str, List[float]] = defaultdict(list)  # Track pending requests
+        self.pending_requests: Dict[str, List[float]] = defaultdict(list)
         self._lock = threading.Lock()
         
     def check_available(self, identifier: str) -> bool:
@@ -327,7 +326,7 @@ def check_and_reserve_rate_limit(session_id: str) -> tuple[bool, str, Optional[s
         return False, f"⏱️ Rate limit exceeded. Try again in {wait_seconds} seconds.", None
 
 # =============================================================================
-# Input Sanitization & Validation
+# Input Sanitization & Validation (unchanged from v2.4)
 # =============================================================================
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
@@ -385,7 +384,7 @@ def sanitize_chat_message(message: str) -> tuple[str, bool]:
         return "", False
 
 # =============================================================================
-# Domain Exclusions & Enhanced Token Detection
+# Domain Exclusions & Enhanced Token Detection (unchanged from v2.4)
 # =============================================================================
 
 # Competition exclusion list for web searches
@@ -426,127 +425,50 @@ def add_utm_to_links(content: str, utm_source: str = "fifi-chat") -> str:
     return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
 
 # =============================================================================
-# v2.4: NEW Inline Citation Processing
+# v2.5: FIXED Official Pinecone Inline Citation Implementation
 # =============================================================================
 
-def process_inline_citations(content: str, citations_list: List[str]) -> str:
+def insert_citations(response) -> str:
     """
-    Process content to add inline citations after product/supplier mentions.
+    OFFICIAL PINECONE METHOD: Insert citation markers [i] at specified positions in the text.
+    Processes positions in order, adjusting for previous insertions.
     
     Args:
-        content: Original content from Pinecone
-        citations_list: List of citation strings like "[1] Source A"
+        response: Pinecone Assistant Chat Response
         
     Returns:
-        Content with inline citations added
+        Modified text with citation markers inserted
     """
-    if not citations_list or not content:
-        return content
-    
-    # Create mapping of citation numbers
-    citation_map = {}
-    for i, citation in enumerate(citations_list, 1):
-        citation_map[i] = citation
-    
-    # Keywords that likely indicate products, suppliers, or companies
-    citation_triggers = [
-        # Product-related terms
-        r'\b(vanilla extract|cocoa|chocolate|protein|ingredient|supplement|additive|flavor|spice|extract|powder|oil|syrup)\b',
-        # Supplier/Company patterns
-        r'\b([A-Z][a-z]+ (?:Inc|LLC|Corp|Corporation|Company|Co|Ltd|Limited|Group|International|Foods|Ingredients)\.?)\b',
-        # Brand/Company names (2+ capitalized words)
-        r'\b([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b',
-        # Supplier-related terms
-        r'\b(supplier|manufacturer|distributor|producer|vendor|provider|source|company|brand|farm|factory|mill)\b',
-        # Geographic suppliers
-        r'\b(European|American|Asian|organic|local|regional|sustainable|premium|specialty)\s+(supplier|manufacturer|producer|source)\b',
-        # Price/market terms
-        r'\b(price|cost|market|trading|wholesale|retail|bulk|commodity)\b'
-    ]
-    
-    # Combine all patterns
-    combined_pattern = '|'.join(f'({pattern})' for pattern in citation_triggers)
-    
-    # Split content into sentences for better citation placement
-    sentences = re.split(r'(?<=[.!?])\s+', content)
-    processed_sentences = []
-    
-    citation_counter = 1
-    used_citations = set()
-    
-    for sentence in sentences:
-        # Check if sentence contains citation-worthy content
-        if re.search(combined_pattern, sentence, re.IGNORECASE):
-            # Add citation at the end of sentence if not already present
-            if not re.search(r'\[\d+\]', sentence):
-                # Distribute citations across different sentences
-                citation_num = ((citation_counter - 1) % len(citations_list)) + 1
-                sentence = sentence.rstrip('.!?') + f' [{citation_num}]' + sentence[-1] if sentence and sentence[-1] in '.!?' else sentence + f' [{citation_num}]'
-                used_citations.add(citation_num)
-                citation_counter += 1
+    try:
+        result = response.message.content
+        citations = response.citations
         
-        processed_sentences.append(sentence)
-    
-    # If no citations were added, add them to the first substantial sentence
-    if not used_citations and len(processed_sentences) > 0:
-        for i, sentence in enumerate(processed_sentences):
-            if len(sentence.strip()) > 50:  # Substantial sentence
-                if not re.search(r'\[\d+\]', sentence):
-                    processed_sentences[i] = sentence.rstrip('.!?') + ' [1]' + (sentence[-1] if sentence and sentence[-1] in '.!?' else '')
-                    used_citations.add(1)
-                break
-    
-    return ' '.join(processed_sentences)
-
-def extract_company_mentions(content: str) -> List[str]:
-    """
-    Extract company and product mentions from content for better citation placement.
-    
-    Args:
-        content: Text content to analyze
-        
-    Returns:
-        List of company/product mentions found
-    """
-    mentions = []
-    
-    # Company name patterns
-    company_patterns = [
-        r'\b([A-Z][a-z]+\s+(?:Inc|LLC|Corp|Corporation|Company|Co|Ltd|Limited|Group|International|Foods|Ingredients)\.?)\b',
-        r'\b([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b',  # Multi-word capitalized names
-    ]
-    
-    # Product/ingredient patterns
-    product_patterns = [
-        r'\b(organic\s+\w+|premium\s+\w+|sustainable\s+\w+|natural\s+\w+)\b',
-        r'\b(vanilla\s+extract|cocoa\s+powder|plant-based\s+protein|clean\s+label)\b',
-    ]
-    
-    all_patterns = company_patterns + product_patterns
-    
-    for pattern in all_patterns:
-        matches = re.findall(pattern, content, re.IGNORECASE)
-        for match in matches:
-            if isinstance(match, tuple):
-                mention = next(m for m in match if m)  # Get first non-empty group
-            else:
-                mention = match
+        if not citations:
+            return result
             
-            if mention and len(mention.strip()) > 3:
-                mentions.append(mention.strip())
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_mentions = []
-    for mention in mentions:
-        if mention.lower() not in seen:
-            seen.add(mention.lower())
-            unique_mentions.append(mention)
-    
-    return unique_mentions[:5]  # Limit to top 5 mentions
+        offset = 0  # Keep track of how much we've shifted the text
+        for i, cite in enumerate(citations, start=1):
+            citation = f"[{i}]"
+            position = cite.position
+            adjusted_position = position + offset
+            
+            # Ensure we don't go beyond string bounds
+            if adjusted_position <= len(result):
+                result = result[:adjusted_position] + citation + result[adjusted_position:]
+                offset += len(citation)
+            else:
+                # If position is beyond bounds, append at end
+                result += citation
+                
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error inserting citations: {e}")
+        # Return original content if citation insertion fails
+        return response.message.content if hasattr(response, 'message') else str(response)
 
 # =============================================================================
-# Enhanced Error Handling System
+# Enhanced Error Handling System (unchanged from v2.4)
 # =============================================================================
 
 class ErrorSeverity(Enum):
@@ -595,7 +517,7 @@ class EnhancedErrorHandler:
                 fallback_available=True
             )
         
-        # Other error handling (keeping original logic)
+        # Other error handling
         elif "timeout" in error_str or "timed out" in error_str:
             return ErrorContext(
                 component=component,
@@ -770,7 +692,7 @@ def handle_api_errors(component: str, operation: str, show_to_user: bool = True)
     return decorator
 
 # =============================================================================
-# Enhanced Session Management
+# Enhanced Session Management (unchanged from v2.4)
 # =============================================================================
 
 @dataclass
@@ -810,25 +732,25 @@ class SimpleSessionManager:
         session.last_activity = datetime.now()
 
 # =============================================================================
-# v2.4: Enhanced PineconeAssistantTool with Inline Citations
+# v2.5: FIXED PineconeAssistantTool with Official Inline Citations
 # =============================================================================
 
 class PineconeAssistantTool:
-    """Advanced Pinecone Assistant with inline citations and enhanced token limit detection."""
+    """FIXED v2.5: Pinecone Assistant with official inline citations and enhanced error handling."""
     
     def __init__(self, api_key: str, assistant_name: str):
         if not PINECONE_AVAILABLE: 
-            error_context = error_handler.handle_import_error("pinecone", "Pinecone Knowledge Base")
-            error_handler.display_error_to_user(error_context)
             raise ImportError("Pinecone client not available.")
         
         self.pc = Pinecone(api_key=api_key)
         self.assistant_name = assistant_name
         self.assistant = self._initialize_assistant()
 
-    @handle_api_errors("Pinecone", "Initialize Assistant")
     def _initialize_assistant(self):
+        """Initialize Pinecone assistant with enhanced error handling."""
         try:
+            logger.info(f"Initializing Pinecone assistant: {self.assistant_name}")
+            
             instructions = (
                 "You are a document-based AI assistant with STRICT limitations.\n\n"
                 "ABSOLUTE RULES - NO EXCEPTIONS:\n"
@@ -845,22 +767,31 @@ class PineconeAssistantTool:
                 "REMEMBER: It is better to say 'I don't know' than to provide incorrect information, fake sources, or non-existent file references."
             )
             
+            # Check if assistant exists
             assistants_list = self.pc.assistant.list_assistants()
-            if self.assistant_name not in [a.name for a in assistants_list]:
+            assistant_names = [a.name for a in assistants_list]
+            
+            if self.assistant_name not in assistant_names:
+                logger.info(f"Creating new Pinecone assistant: '{self.assistant_name}'")
                 st.info(f"🔧 Creating new Pinecone assistant: '{self.assistant_name}'")
-                return self.pc.assistant.create_assistant(
+                assistant = self.pc.assistant.create_assistant(
                     assistant_name=self.assistant_name, 
                     instructions=instructions
                 )
+                logger.info(f"Successfully created assistant: {self.assistant_name}")
+                return assistant
             else:
+                logger.info(f"Connecting to existing assistant: '{self.assistant_name}'")
                 st.success(f"✅ Connected to Pinecone assistant: '{self.assistant_name}'")
                 return self.pc.assistant.Assistant(assistant_name=self.assistant_name)
+                
         except Exception as e:
-            # This will be caught by the decorator
-            raise e
+            logger.error(f"Failed to initialize Pinecone assistant: {e}")
+            st.error(f"❌ Failed to initialize Pinecone assistant: {e}")
+            return None
 
-    @handle_api_errors("Pinecone", "Query Knowledge Base", show_to_user=False)
     def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]:
+        """FIXED v2.5: Query with official Pinecone inline citations and better error handling."""
         if not self.assistant: 
             return {
                 "content": "Pinecone assistant not available.",
@@ -870,19 +801,35 @@ class PineconeAssistantTool:
             }
         
         try:
-            pinecone_messages = [
-                PineconeMessage(
-                    role="user" if isinstance(msg, HumanMessage) else "assistant", 
-                    content=msg.content
-                ) for msg in chat_history
-            ]
+            logger.info("Starting Pinecone query...")
             
-            response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o")
-            content = response.message.content
+            # Convert LangChain messages to Pinecone format
+            pinecone_messages = []
+            for msg in chat_history:
+                if isinstance(msg, HumanMessage):
+                    pinecone_messages.append(PineconeMessage(role="user", content=msg.content))
+                elif isinstance(msg, AIMessage):
+                    pinecone_messages.append(PineconeMessage(role="assistant", content=msg.content))
+            
+            logger.info(f"Converted {len(pinecone_messages)} messages for Pinecone")
+            
+            # FIXED v2.5: Use official Pinecone method with include_highlights=True
+            logger.info("Querying Pinecone with highlights enabled...")
+            response = self.assistant.chat(
+                messages=pinecone_messages, 
+                model="gpt-4o",
+                include_highlights=True  # CRITICAL: This enables inline citations
+            )
+            
+            logger.info("Received response from Pinecone")
+            
+            # Use official Pinecone inline citation method
+            content_with_inline_citations = insert_citations(response)
+            
+            # Process traditional bottom citations
             has_citations = False
             citations_list = []
             
-            # Process citations
             if hasattr(response, 'citations') and response.citations:
                 has_citations = True
                 seen_items = set()
@@ -897,6 +844,7 @@ class PineconeAssistantTool:
                                 link_url = reference.file.signed_url
                             
                             if link_url:
+                                # Add UTM tracking
                                 if '?' in link_url:
                                     link_url += '&utm_source=fifi-in'
                                 else:
@@ -914,29 +862,29 @@ class PineconeAssistantTool:
                                     citations_list.append(link)
                                     seen_items.add(display_text)
                 
-                # v2.4: NEW Process inline citations
+                # Add traditional bottom citations section
                 if citations_list:
-                    # Add inline citations to content
-                    content_with_inline = process_inline_citations(content, citations_list)
-                    
-                    # Add traditional bottom citations section
                     citations_header = "\n\n---\n**Sources:**\n"
-                    content = content_with_inline + citations_header + "\n".join(citations_list)
-                    
-                    # Extract company mentions for better citation context
-                    company_mentions = extract_company_mentions(content)
-                    logger.info(f"Found company/product mentions: {company_mentions}")
+                    final_content = content_with_inline_citations + citations_header + "\n".join(citations_list)
+                else:
+                    final_content = content_with_inline_citations
+            else:
+                final_content = content_with_inline_citations
+            
+            logger.info(f"Successfully processed Pinecone response with {len(citations_list)} citations")
             
             return {
-                "content": content, 
+                "content": final_content, 
                 "success": True, 
                 "source": "FiFi Knowledge Base",
                 "has_citations": has_citations,
                 "inline_citations": has_citations and len(citations_list) > 0,
-                "response_length": len(content)
+                "response_length": len(final_content)
             }
             
         except Exception as e:
+            logger.error(f"Pinecone query error: {e}")
+            
             # Enhanced token limit detection
             if is_token_limit_error(e):
                 return {
@@ -947,14 +895,14 @@ class PineconeAssistantTool:
                 }
             else:
                 return {
-                    "content": "Error querying knowledge base.",
+                    "content": f"Error querying knowledge base: {str(e)}",
                     "success": False,
                     "source": "error",
                     "error_type": "general"
                 }
 
 # =============================================================================
-# Enhanced TavilyFallbackAgent with Domain Exclusions
+# Enhanced TavilyFallbackAgent (unchanged from v2.4)
 # =============================================================================
 
 class TavilyFallbackAgent:
@@ -962,8 +910,6 @@ class TavilyFallbackAgent:
     
     def __init__(self, tavily_api_key: str):
         if not TAVILY_AVAILABLE and not TAVILY_CLIENT_AVAILABLE:
-            error_context = error_handler.handle_import_error("langchain-tavily", "Web Search")
-            error_handler.display_error_to_user(error_context)
             raise ImportError("Tavily client not available.")
         
         self.tavily_api_key = tavily_api_key
@@ -1113,8 +1059,8 @@ class TavilyFallbackAgent:
         formatted_response = "".join(response_parts)
         return add_utm_to_links(formatted_response)
 
-    @handle_api_errors("Tavily", "Web Search", show_to_user=False)
     def query(self, message: str, chat_history: List[BaseMessage], search_type: str = "general") -> Dict[str, Any]:
+        """Query using Tavily search with domain exclusions."""
         try:
             # Perform search based on type
             if search_type == "12taste_only":
@@ -1133,15 +1079,19 @@ class TavilyFallbackAgent:
                 "source": source_label
             }
         except Exception as e:
-            # This will be caught by the decorator
-            raise e
+            logger.error(f"Tavily query error: {e}")
+            return {
+                "content": f"Error performing web search: {str(e)}",
+                "success": False,
+                "source": "error"
+            }
 
 # =============================================================================
-# v2.4: Enhanced AI with Inline Citations and Smart Fallback
+# Enhanced AI with Official Pinecone Citations
 # =============================================================================
 
 class EnhancedAI:
-    """Enhanced AI with inline citations, proper rate limiting, and smart fallback."""
+    """Enhanced AI with official Pinecone inline citations, proper rate limiting, and smart fallback."""
     
     def __init__(self):
         self.pinecone_tool = None
@@ -1263,7 +1213,7 @@ class EnhancedAI:
         return False
 
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """Get enhanced AI response with inline citations, rate limiting, and comprehensive error handling."""
+        """Get enhanced AI response with official Pinecone inline citations."""
         
         session_id = st.session_state.get('current_session_id', 'anonymous')
         reservation_id = None
@@ -1314,6 +1264,7 @@ class EnhancedAI:
             
             # STEP 4: Try Pinecone Knowledge Base FIRST
             if self.pinecone_tool:
+                logger.info("Attempting Pinecone query...")
                 pinecone_response = self.pinecone_tool.query(langchain_history)
                 
                 if pinecone_response and pinecone_response.get("success"):
@@ -1322,7 +1273,7 @@ class EnhancedAI:
                     if not should_fallback:
                         # SUCCESS: Confirm rate limit usage
                         rate_limiter.confirm_request(session_id, reservation_id)
-                        logger.info("Using Pinecone knowledge base response with inline citations")
+                        logger.info("Using Pinecone knowledge base response with official inline citations")
                         return {
                             "content": pinecone_response["content"],
                             "source": pinecone_response.get("source", "FiFi Knowledge Base"),
@@ -1428,14 +1379,12 @@ def init_session_state():
             logger.info("Session state initialized successfully")
         except Exception as e:
             logger.error(f"Session state initialization failed: {e}")
-            error_context = error_handler.handle_api_error("Session", "Initialize", e)
-            error_handler.display_error_to_user(error_context)
             st.session_state.initialized = False
 
 def render_chat_interface():
-    """Render the main chat interface with enhanced inline citation features."""
-    st.title("🤖 FiFi AI Assistant v2.4")
-    st.caption("✨ Enhanced with inline citation links after product/supplier mentions")
+    """Render the main chat interface with official Pinecone inline citation features."""
+    st.title("🤖 FiFi AI Assistant v2.5")
+    st.caption("🔧 FIXED: Official Pinecone inline citations with include_highlights=True")
     
     session = st.session_state.session_manager.get_session()
     
@@ -1457,7 +1406,7 @@ def render_chat_interface():
                 if msg.get("used_pinecone"):
                     if msg.get("has_citations"):
                         if msg.get("inline_citations"):
-                            source_indicators.append("🧠 Knowledge Base (with inline citations)")
+                            source_indicators.append("🧠 Knowledge Base (with official inline citations)")
                         else:
                             source_indicators.append("🧠 Knowledge Base (with citations)")
                     else:
@@ -1473,9 +1422,9 @@ def render_chat_interface():
                 if source_indicators:
                     st.caption(f"Enhanced with: {', '.join(source_indicators)}")
                 
-                # v2.4: Show inline citation info
+                # Show inline citation info
                 if msg.get("inline_citations"):
-                    st.success("✨ NEW: Citations now appear inline after product/supplier mentions!")
+                    st.success("✨ OFFICIAL: Citations placed at exact Pinecone positions!")
                 
                 # Show safety override warning
                 if msg.get("safety_override"):
@@ -1507,7 +1456,7 @@ def render_chat_interface():
         
         # Get and display AI response
         with st.chat_message("assistant"):
-            with st.spinner("🔍 Querying FiFi (Enhanced with Inline Citations v2.4)..."):
+            with st.spinner("🔍 Querying FiFi (Official Pinecone Citations v2.5)..."):
                 response = st.session_state.ai.get_response(sanitized_prompt, session.messages)
                 
                 # Handle enhanced response format
@@ -1538,7 +1487,7 @@ def render_chat_interface():
                 if used_pinecone:
                     if has_citations:
                         if inline_citations:
-                            enhancements.append("🧠 Enhanced with Knowledge Base (with inline citations)")
+                            enhancements.append("🧠 Enhanced with Knowledge Base (official inline citations)")
                         else:
                             enhancements.append("🧠 Enhanced with Knowledge Base (with citations)")
                     else:
@@ -1554,9 +1503,9 @@ def render_chat_interface():
                     for enhancement in enhancements:
                         st.success(enhancement)
                 
-                # v2.4: Show inline citation info
+                # Show inline citation info
                 if inline_citations:
-                    st.success("✨ NEW: Citations now appear inline after product/supplier mentions!")
+                    st.success("✨ OFFICIAL: Citations placed at exact Pinecone-determined positions!")
                 
                 # Show safety override warning
                 if safety_override:
@@ -1586,7 +1535,7 @@ def render_chat_interface():
         st.rerun()
 
 def render_sidebar():
-    """v2.4: Render the enhanced sidebar with all improvements and inline citation features."""
+    """Render the enhanced sidebar with official Pinecone citation features."""
     with st.sidebar:
         st.title("Chat Controls")
         
@@ -1600,7 +1549,7 @@ def render_sidebar():
             st.write(f"**Email:** {session.email}")
         st.write(f"**Messages:** {len(session.messages)}")
         
-        # v2.3: Enhanced system status with better SQLite Cloud display
+        # Enhanced system status
         st.subheader("Enhanced System Status")
         st.write(f"**OpenAI:** {'✅' if OPENAI_AVAILABLE and config.OPENAI_API_KEY else '❌'}")
         st.write(f"**LangChain:** {'✅' if LANGCHAIN_AVAILABLE else '❌'}")
@@ -1608,7 +1557,7 @@ def render_sidebar():
         st.write(f"**Tavily Client:** {'✅' if TAVILY_CLIENT_AVAILABLE and config.TAVILY_API_KEY else '❌'}")
         st.write(f"**Pinecone:** {'✅' if PINECONE_AVAILABLE and config.PINECONE_API_KEY else '❌'}")
         
-        # v2.3: Better SQLite Cloud status display
+        # Better SQLite Cloud status display
         if SQLITECLOUD_AVAILABLE:
             if config.SQLITE_CLOUD_CONNECTION:
                 st.write("**SQLite Cloud:** ✅ Available & Configured")
@@ -1617,7 +1566,7 @@ def render_sidebar():
         else:
             st.write("**SQLite Cloud:** ℹ️ Not Installed")
         
-        # v2.2: Rate limiter status with accurate display
+        # Rate limiter status
         if hasattr(st.session_state, 'session_manager'):
             session_id = st.session_state.get('current_session_id', 'anonymous')
             remaining = rate_limiter.get_remaining_requests(session_id)
@@ -1693,11 +1642,12 @@ def render_sidebar():
                 del st.session_state.current_session_id
             st.rerun()
         
-        # v2.4: Enhanced feature status
-        st.subheader("✨ v2.4 Features")
-        st.write("✨ NEW: Inline Citation Links")
-        st.write("✅ FIXED: SQLite Cloud Display (User-Friendly)")
+        # Enhanced feature status
+        st.subheader("🔧 v2.5 Features")
+        st.write("🔧 FIXED: Official Pinecone Inline Citations")
+        st.write("🔧 FIXED: Pinecone Query Issues (No More Spinning)")
         st.write("✅ FIXED: Rate Limiting (Accurate Display)")
+        st.write("✅ FIXED: SQLite Cloud Display (User-Friendly)")
         st.write("✅ Enhanced F&B AI Chat")
         st.write("✅ Input Sanitization & XSS Protection")
         st.write("✅ Domain Exclusions (Competitor Filtering)")
@@ -1714,42 +1664,37 @@ def render_sidebar():
         
         # Enhanced Safety Features Info
         with st.expander("🛡️ Enhanced Safety Features"):
-            st.write("**✨ v2.4 NEW: Inline Citations:**")
-            st.write("- Citations appear after product mentions")
-            st.write("- Citations appear after supplier mentions")
-            st.write("- Company names get inline citations")
-            st.write("- Traditional bottom citations still included")
-            st.write("- Better citation context mapping")
+            st.write("**🔧 v2.5 FIXES:**")
+            st.write("- Official Pinecone inline citation method")
+            st.write("- Fixed infinite spinner issues")
+            st.write("- Better error handling for Pinecone")
+            st.write("- Enhanced logging for debugging")
             st.write("")
-            st.write("**v2.3 Display Improvements:**")
-            st.write("- User-friendly SQLite Cloud status")
-            st.write("- Better package availability messaging")
-            st.write("- Clearer configuration guidance")
+            st.write("**✨ Official Pinecone Citations:**")
+            st.write("- Uses include_highlights=True parameter")
+            st.write("- Citations at exact Pinecone positions")
+            st.write("- cite.position for accurate placement")
+            st.write("- Traditional bottom citations included")
             st.write("")
-            st.write("**v2.2 Rate Limiting Fix:**")
-            st.write("- Proper request reservation system")
-            st.write("- Rollback on failed requests")
-            st.write("- Accurate remaining count display")
-            st.write("- Thread-safe sliding window")
+            st.write("**Previous Enhancements:**")
+            st.write("- v2.3: User-friendly SQLite Cloud status")
+            st.write("- v2.2: Proper request reservation system")
+            st.write("- v2.1: Enhanced configuration management")
             st.write("")
-            st.write("**Security Enhancements:**")
+            st.write("**Security & Business Logic:**")
             st.write("- XSS Protection & Input Sanitization")
-            st.write("- Suspicious pattern detection")
-            st.write("- Thread-safe operations")
-            st.write("")
-            st.write("**Business Logic:**")
             st.write("- Competitor domain exclusions")
             st.write("- UTM tracking on all links")
             st.write("- Domain-specific fallback for token limits")
         
-        # Example queries with focus on inline citations
-        st.subheader("💡 Try These Queries (with Inline Citations)")
+        # Example queries optimized for Pinecone
+        st.subheader("💡 Try These Queries (Official Citations)")
         example_queries = [
-            "Find organic vanilla extract suppliers with certifications",
-            "Latest trends in plant-based proteins from major manufacturers", 
-            "Current cocoa prices and top suppliers in Europe",
-            "Sustainable packaging suppliers with eco-friendly solutions",
-            "Clean label ingredient alternatives from certified companies"
+            "Find certified organic vanilla extract suppliers",
+            "Who are the major plant-based protein manufacturers?", 
+            "Current cocoa market leaders and their pricing",
+            "Sustainable packaging companies with certifications",
+            "Clean label ingredient suppliers and their products"
         ]
         
         for query in example_queries:
@@ -1764,14 +1709,14 @@ def render_sidebar():
                     })
                     st.rerun()
         
-        # v2.3: Enhanced configuration status with better messaging
+        # Enhanced configuration status
         st.subheader("🔧 API Configuration")
         st.write(f"**OpenAI:** {'✅ Configured' if config.OPENAI_API_KEY else '❌ Missing'}")
         st.write(f"**Tavily:** {'✅ Configured' if config.TAVILY_API_KEY else '❌ Missing'}")
         st.write(f"**Pinecone:** {'✅ Configured' if config.PINECONE_API_KEY else '❌ Missing'}")
         st.write(f"**WordPress:** {'✅ Configured' if config.WORDPRESS_URL else '❌ Missing'}")
         
-        # v2.3: Better SQLite Cloud configuration display
+        # Better SQLite Cloud configuration display
         if SQLITECLOUD_AVAILABLE:
             if config.SQLITE_CLOUD_CONNECTION:
                 st.write("**SQLite Cloud:** ✅ Configured")
@@ -1779,13 +1724,11 @@ def render_sidebar():
                 st.write("**SQLite Cloud:** ⚠️ Package Available, API Key Missing")
         else:
             st.write("**SQLite Cloud:** ℹ️ Package Not Installed")
-            if st.button("📦 Install SQLite Cloud", help="Run: pip install sqlitecloud"):
-                st.code("pip install sqlitecloud", language="bash")
 
 def main():
-    """Main application function with all enhancements integrated."""
+    """Main application function with official Pinecone citation enhancements."""
     st.set_page_config(
-        page_title="FiFi AI Assistant v2.4 - Complete Enhanced Edition",
+        page_title="FiFi AI Assistant v2.5 - Official Pinecone Citations",
         page_icon="🤖",
         layout="wide"
     )
@@ -1806,14 +1749,19 @@ def main():
         # Show comprehensive welcome message
         if not st.session_state.session_manager.get_session().messages:
             st.info("""
-            👋 **Welcome to FiFi AI Chat Assistant v2.4 - Complete Enhanced Edition!**
+            👋 **Welcome to FiFi AI Chat Assistant v2.5!**
             
-            **✨ v2.4 NEW FEATURE - Inline Citation Links:**
-            - ✅ Citations now appear inline after product mentions
-            - ✅ Citations appear after supplier/company names  
-            - ✅ Better citation context mapping for F&B content
-            - ✅ Traditional bottom citations section still included
-            - ✅ Smart company/product mention detection
+            **🔧 v2.5 CRITICAL FIXES:**
+            - ✅ FIXED: Official Pinecone inline citation method using `include_highlights=True`
+            - ✅ FIXED: Pinecone query issues causing infinite spinner
+            - ✅ IMPROVED: Better error handling and logging for debugging
+            - ✅ ENHANCED: Citations now placed at exact Pinecone-determined positions
+            
+            **✨ Official Pinecone Citation Method:**
+            - Uses the exact Pinecone Assistant API with `include_highlights=True`
+            - Citations inserted at precise positions determined by Pinecone
+            - No more pattern matching - uses official `cite.position` values
+            - Combines inline citations with traditional bottom references
             
             **🔧 Previous Enhancements:**
             - ✅ v2.3: User-friendly SQLite Cloud display
@@ -1844,20 +1792,12 @@ def main():
             - 🌐 **Smart Fallback**: Regular web search with competitor exclusions
             - 🎯 **Token Limit**: Domain-specific search when context is full
             
-            **✨ NEW: Ask about suppliers, products, or companies to see inline citations in action!**
-            
-            **📈 Version History:**
-            - v2.4: Inline Citation Links
-            - v2.3: SQLite Cloud Display Fixes
-            - v2.2: Rate Limiter Bug Fixes  
-            - v2.1: Enhanced Configuration Management
-            - v2.0: Base Enhanced System
+            **🎯 Try asking about suppliers, products, or companies to see the official Pinecone inline citations in action!**
             """)
         
     except Exception as e:
         logger.error(f"Critical error: {e}")
-        error_context = error_handler.handle_api_error("Application", "Main Function", e)
-        error_handler.display_error_to_user(error_context)
+        st.error(f"🚨 Critical application error: {e}")
         
         if st.button("🔄 Restart App"):
             for key in list(st.session_state.keys()):
