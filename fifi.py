@@ -466,4 +466,4 @@ def main():
         st.error("A critical application error occurred.")
 
 if __name__ == "__main__":
-    main()```
+    main()
