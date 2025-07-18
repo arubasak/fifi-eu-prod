@@ -976,6 +976,55 @@ class EnhancedAI:
                 "success": False
             }
 
+# =============================================================================
+# NEW: Content Moderation Function
+# =============================================================================
+@handle_api_errors("OpenAI", "Content Moderation", show_to_user=False)
+def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Dict[str, Any]:
+    """
+    Checks if the user's input violates OpenAI's content policy using the moderation endpoint.
+
+    Args:
+        prompt: The user's input text.
+        client: The OpenAI client instance. Can be None if not initialized.
+
+    Returns:
+        A dictionary containing:
+        - "flagged": A boolean indicating if the content was flagged.
+        - "message": A user-friendly message if flagged, otherwise None.
+    """
+    # If the OpenAI client isn't configured, we skip the check.
+    # This ensures the app still works if the API key is missing.
+    if not client:
+        logger.warning("OpenAI client not available for moderation check. Skipping.")
+        return {"flagged": False, "message": None}
+
+    try:
+        # Call the moderation endpoint
+        response = client.moderations.create(input=prompt)
+        result = response.results[0]
+
+        if result.flagged:
+            # If flagged, log the specific categories for internal review
+            flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
+            logger.warning(f"Input flagged by moderation for: {', '.join(flagged_categories)}")
+            
+            # Return a user-friendly message
+            return {
+                "flagged": True,
+                "message": "I'm sorry, but your message violates our content policy. Please rephrase your query and try again."
+            }
+        
+        # If not flagged, return success
+        return {"flagged": False, "message": None}
+
+    except Exception as e:
+        # The decorator handles the error, but we should "fail open" here.
+        # If the moderation check itself fails, it's safer to let the content through
+        # than to block legitimate requests. The error will still be logged.
+        logger.error(f"Moderation check API call failed: {e}")
+        return {"flagged": False, "message": None}
+
 def init_session_state():
     """Initialize session state safely with enhanced error handling."""
     if 'initialized' not in st.session_state:
