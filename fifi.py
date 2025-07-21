@@ -708,9 +708,7 @@ def render_welcome_page(session_manager: SessionManager):
         if not session_manager.config.WORDPRESS_URL:
             st.warning("Sign-in is disabled because the authentication service is not configured.")
         else:
-            # Add the debug function here temporarily
-            if st.expander("🔧 Debug WordPress User Data (Remove in Production)", expanded=False):
-                debug_wordpress_user_data()
+            # REMOVED: debug_wordpress_user_data() call that was causing the error
             
             with st.form("login_form", clear_on_submit=False):
                 username = st.text_input("Username or Email")
