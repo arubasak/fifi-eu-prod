@@ -234,10 +234,14 @@ class UserSession:
 # (Database, PDF Exporter, Zoho Manager, Rate Limiter)
 # =============================================================================
 
+# =============================================================================
+# 4. CORE APPLICATION COMPONENTS - WITH DEFINITIVE STATE-SAVING FIX
+# =============================================================================
+
 class DatabaseManager:
     """Manages database interactions for persistent sessions."""
     def __init__(self, connection_string: Optional[str]):
-        self.lock = threading.Lock()
+        self.lock = threading.Lock() # The lock is initialized here
         self.use_cloud = False
         if connection_string and SQLITECLOUD_AVAILABLE:
             try:
@@ -252,9 +256,25 @@ class DatabaseManager:
         else:
             self._init_local_storage()
 
+    # --- START OF THE FIX ---
+    # These two methods tell Streamlit how to save and load this object.
+    def __getstate__(self) -> dict:
+        """Exclude the un-pickleable 'lock' attribute when saving state."""
+        state = self.__dict__.copy()
+        del state['lock']
+        return state
+
+    def __setstate__(self, state: dict):
+        """Restore state and re-create a new lock when loading state."""
+        self.__dict__.update(state)
+        self.lock = threading.Lock()
+    # --- END OF THE FIX ---
+
     def _init_local_storage(self):
         logger.info("Using local in-memory storage for sessions (not persistent across restarts).")
-        self.local_sessions = {}
+        # This check is important for when the state is restored
+        if not hasattr(self, 'local_sessions'):
+            self.local_sessions = {}
         self.use_cloud = False
 
     def _get_connection(self):
@@ -315,8 +335,10 @@ class DatabaseManager:
                         wp_token=row_dict.get('wp_token')
                     )
             else:
+                # Add a check for local_sessions in case of state restoration
+                if not hasattr(self, 'local_sessions'):
+                    self.local_sessions = {}
                 return self.local_sessions.get(session_id)
-
 class PDFExporter:
     """Generates PDF reports from chat sessions."""
     def __init__(self):
