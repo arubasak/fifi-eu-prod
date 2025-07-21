@@ -543,35 +543,25 @@ class SessionManager:
         logger.info(f"🔒 Session ID {session_id[:8]}... locked in Streamlit state")
 
     def get_session(self) -> UserSession:
-        """Get the current session with robust state management."""
-        # Try multiple sources for session ID
-        session_id = (
-            st.session_state.get('current_session_id') or 
-            st.session_state.get('persistent_session_id') or 
-            st.session_state.get('authenticated_session_id')
-        )
+        """Get the current session with simplified, reliable logic."""
+        # Get session ID from primary location
+        session_id = st.session_state.get('current_session_id')
         
         logger.info(f"🔍 Session lookup: {session_id[:8] if session_id else 'None'}...")
         
         if session_id:
             session = self.db.load_session(session_id)
             if session and session.active:
+                # Update last activity but don't save immediately to avoid race conditions
                 session.last_activity = datetime.now()
-                # Ensure session ID is locked in state
-                self._ensure_session_id_persistence(session_id)
-                logger.info(f"✅ Retrieved active session: {session_id[:8]}... | Type: {session.user_type.value}")
+                logger.info(f"✅ Retrieved session: {session_id[:8]}... | Type: {session.user_type.value} | Name: {session.first_name or 'None'}")
                 return session
             else:
-                logger.warning(f"⚠️ Session {session_id[:8]}... not found or inactive")
+                logger.warning(f"⚠️ Session {session_id[:8]}... not found or inactive in database")
         
-        # Only create guest session if no authenticated session exists
-        if not self._has_authenticated_session():
-            logger.info("🆕 Creating new guest session")
-            return self._create_guest_session()
-        else:
-            logger.error("🚨 Authenticated session exists but couldn't be loaded - this should not happen!")
-            # Try to recover the authenticated session
-            return self._recover_authenticated_session()
+        # Create new guest session - this is the fallback
+        logger.info("🆕 Creating new guest session (no valid session found)")
+        return self._create_guest_session()
 
     def _has_authenticated_session(self) -> bool:
         """Check if we have any indicators of an authenticated session."""
@@ -609,7 +599,7 @@ class SessionManager:
 
     @handle_api_errors("Authentication", "WordPress Login")
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        """Enhanced WordPress authentication with robust session management."""
+        """Simplified WordPress authentication with immediate session persistence."""
         if not self.config.WORDPRESS_URL:
             st.error("Authentication service is not configured.")
             return None
@@ -660,18 +650,19 @@ class SessionManager:
                 current_session.wp_token = data.get('token')
                 current_session.last_activity = datetime.now()
                 
-                # CRITICAL: Save the authenticated session
+                # CRITICAL: Save the authenticated session immediately and ensure it's persisted
                 self.db.save_session(current_session)
                 
-                # Set multiple authentication indicators in session state
-                st.session_state.authenticated_session_id = current_session.session_id
-                st.session_state.user_authenticated = True
-                st.session_state.wp_authenticated = True
-                st.session_state.last_auth_session_id = current_session.session_id
-                st.session_state.auth_timestamp = datetime.now().isoformat()
+                # Force immediate verification that the session was saved
+                verification_session = self.db.load_session(current_session.session_id)
+                if verification_session and verification_session.user_type == UserType.REGISTERED_USER:
+                    logger.info(f"✅ Session verification successful: {verification_session.first_name}")
+                else:
+                    logger.error(f"❌ Session verification FAILED - session not saved properly!")
+                    return None
                 
-                # Ensure session ID persistence
-                self._ensure_session_id_persistence(current_session.session_id)
+                # Set session ID in Streamlit state - SIMPLIFIED
+                st.session_state.current_session_id = current_session.session_id
                 
                 logger.info(f"✅ Authentication successful! Session {current_session.session_id[:8]}... upgraded to {current_session.user_type.value}")
                 logger.info(f"👤 User: {current_session.first_name} ({current_session.email})")
@@ -904,12 +895,17 @@ def debug_session_state(session_manager: SessionManager):
             st.rerun()
 
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
-    """Enhanced sidebar with better session state management."""
+    """Simplified sidebar with direct session checking."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
-        # Always get the freshest session data
+        # Get session directly - no caching
         fresh_session = session_manager.get_session()
+        
+        # IMMEDIATE DEBUG INFO AT TOP
+        st.write(f"**Debug:** Session Type = `{fresh_session.user_type.value}`")
+        st.write(f"**Debug:** Display Name = `{fresh_session.first_name or 'None'}`")
+        st.write(f"**Debug:** Session ID = `{fresh_session.session_id[:8]}...`")
 
         # User status display
         if fresh_session.user_type == UserType.REGISTERED_USER:
@@ -924,24 +920,22 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         
         st.divider()
         st.markdown(f"**Messages:** {len(fresh_session.messages)}")
-        st.markdown(f"**Session:** `{fresh_session.session_id[:8]}...`")
         
         # Enhanced debug info
-        with st.expander("🔧 Session Debug Info"):
+        with st.expander("🔧 Session Debug Info", expanded=True):
             st.write(f"**User Type:** `{fresh_session.user_type.value}`")
             st.write(f"**Display Name:** `{fresh_session.first_name or 'None'}`")
             st.write(f"**Email:** `{fresh_session.email or 'None'}`")
             st.write(f"**Has Token:** `{bool(fresh_session.wp_token)}`")
             st.write(f"**Active:** `{fresh_session.active}`")
-            st.write(f"**Auth Indicators:** `{session_manager._has_authenticated_session()}`")
+            
+            # Check what's in session state
+            session_id_in_state = st.session_state.get('current_session_id', 'None')
+            st.write(f"**Session ID in State:** `{session_id_in_state[:8] if session_id_in_state != 'None' else 'None'}...`")
+            st.write(f"**IDs Match:** `{session_id_in_state == fresh_session.session_id}`")
             
             db_type = "Cloud Database" if session_manager.db.use_cloud else "Local Memory"
             st.write(f"**Database:** `{db_type}`")
-            
-            # Show auth timestamp if available
-            auth_time = st.session_state.get('auth_timestamp')
-            if auth_time:
-                st.write(f"**Auth Time:** `{auth_time}`")
             
             if st.button("🔄 Refresh", key="force_refresh_sidebar"):
                 st.rerun()
