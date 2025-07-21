@@ -709,9 +709,7 @@ def render_welcome_page(session_manager: SessionManager):
         if not session_manager.config.WORDPRESS_URL:
             st.warning("Sign-in is disabled because the authentication service is not configured.")
         else:
-            # REMOVED: debug_wordpress_user_data() call that was causing the error
-            
-            with st.form("login_form", clear_on_submit=False):
+            with st.form("login_form", clear_on_submit=True):
                 username = st.text_input("Username or Email")
                 password = st.text_input("Password", type="password")
                 submit_button = st.form_submit_button("Sign In", use_container_width=True)
@@ -720,32 +718,40 @@ def render_welcome_page(session_manager: SessionManager):
                     if not username or not password:
                         st.error("Please enter both username and password")
                     else:
-                        with st.spinner("Authenticating..."):
+                        # Clear any existing error states
+                        if 'auth_error' in st.session_state:
+                            del st.session_state.auth_error
+                        
+                        with st.spinner("🔐 Authenticating..."):
                             authenticated_session = session_manager.authenticate_with_wordpress(username, password)
                             
                         if authenticated_session:
-                            # Clear any temporary session state
-                            if 'temp_authenticated_session' in st.session_state:
-                                st.session_state.temp_authenticated_session = None
+                            # Authentication successful
+                            st.success(f"✅ Welcome back, {authenticated_session.first_name}!")
                             
-                            # Set page to chat and force rerun
+                            # Small delay to show success message
+                            import time
+                            time.sleep(0.5)
+                            
+                            # Set page to chat
                             st.session_state.page = "chat"
-                            st.success("Redirecting to chat...")
-                            time.sleep(1)  # Brief pause to show success message
+                            
+                            # Force a complete rerun to refresh the entire app
                             st.rerun()
-                        # Error messages are handled in authenticate_with_wordpress
+                        else:
+                            st.session_state.auth_error = True
     
     with tab2:
         st.markdown("""
         **Continue as a guest** to try FiFi AI Assistant without signing in.
         
-        ℹ️ Guest users have limited features:
-        - No chat history persistence
-        - No PDF export
-        - Session ends when browser is closed
+        ℹ️ **Guest limitations:**
+        - No chat history saved across sessions
+        - No PDF export capability
+        - Limited features
         """)
         
-        if st.button("Start as Guest", use_container_width=True):
+        if st.button("👤 Start as Guest", use_container_width=True):
             st.session_state.page = "chat"
             st.rerun()
 # =============================================================================
