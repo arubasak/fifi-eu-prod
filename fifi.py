@@ -705,22 +705,52 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
 def render_welcome_page(session_manager: SessionManager):
     st.title("🤖 Welcome to FiFi AI Assistant")
     tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
+    
     with tab1:
         if not session_manager.config.WORDPRESS_URL:
             st.warning("Sign-in is disabled because the authentication service is not configured.")
         else:
-            with st.form("login_form"):
+            # Add the debug function here temporarily
+            if st.expander("🔧 Debug WordPress User Data (Remove in Production)", expanded=False):
+                debug_wordpress_user_data()
+            
+            with st.form("login_form", clear_on_submit=False):
                 username = st.text_input("Username or Email")
                 password = st.text_input("Password", type="password")
-                if st.form_submit_button("Sign In", use_container_width=True):
-                    if session_manager.authenticate_with_wordpress(username, password):
-                        st.session_state.page = "chat"
-                        st.rerun()
+                submit_button = st.form_submit_button("Sign In", use_container_width=True)
+                
+                if submit_button:
+                    if not username or not password:
+                        st.error("Please enter both username and password")
+                    else:
+                        with st.spinner("Authenticating..."):
+                            authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                            
+                        if authenticated_session:
+                            # Clear any temporary session state
+                            if 'temp_authenticated_session' in st.session_state:
+                                st.session_state.temp_authenticated_session = None
+                            
+                            # Set page to chat and force rerun
+                            st.session_state.page = "chat"
+                            st.success("Redirecting to chat...")
+                            time.sleep(1)  # Brief pause to show success message
+                            st.rerun()
+                        # Error messages are handled in authenticate_with_wordpress
+    
     with tab2:
+        st.markdown("""
+        **Continue as a guest** to try FiFi AI Assistant without signing in.
+        
+        ℹ️ Guest users have limited features:
+        - No chat history persistence
+        - No PDF export
+        - Session ends when browser is closed
+        """)
+        
         if st.button("Start as Guest", use_container_width=True):
             st.session_state.page = "chat"
             st.rerun()
-
 # =============================================================================
 # 8. MAIN APPLICATION
 # =============================================================================
