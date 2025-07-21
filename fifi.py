@@ -512,6 +512,10 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
 # 6. UNIFIED SESSION MANAGER - FINAL FIXED VERSION
 # =============================================================================
 
+# =============================================================================
+# 6. UNIFIED SESSION MANAGER - FINAL FIXED VERSION
+# =============================================================================
+
 class SessionManager:
     """A single, consolidated session manager with fixed flat JSON structure handling."""
     def __init__(self, config: Config, db_manager: DatabaseManager, zoho_manager: ZohoCRMManager, ai_system: EnhancedAI, rate_limiter: RateLimiter):
@@ -526,15 +530,14 @@ class SessionManager:
         session_id = st.session_state.get('current_session_id')
         
         if session_id:
-            # Always load from database to get the latest state
+            # Always load from the database to get the latest state
             session = self.db.load_session(session_id)
             if session and session.active:
-                # Update last activity
                 session.last_activity = datetime.now()
-                self.db.save_session(session)
+                # No need to save here, will be saved by the calling function
                 return session
         
-        # Create new guest session if no session exists
+        # Create new guest session if no valid session exists
         return self._create_guest_session()
 
     def _create_guest_session(self) -> UserSession:
@@ -546,6 +549,10 @@ class SessionManager:
 
     @handle_api_errors("Authentication", "WordPress Login")
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+        """
+        Authenticates against WordPress and correctly upgrades the current session
+        with the user's display name and token.
+        """
         if not self.config.WORDPRESS_URL:
             st.error("Authentication service is not configured.")
             return None
@@ -553,7 +560,6 @@ class SessionManager:
             st.error("Too many login attempts. Please wait.")
             return None
 
-        # Clean credentials (no HTML sanitization for authentication!)
         clean_username = username.strip()
         clean_password = password.strip()
 
@@ -568,107 +574,54 @@ class SessionManager:
             if response.status_code == 200:
                 data = response.json()
                 
-                # CRITICAL DEBUG: Log the complete response structure
-                logger.info("=== WordPress Authentication Success ===")
-                logger.info(f"Username: {clean_username}")
-                logger.info(f"Complete response structure: {json.dumps(data, indent=2)}")
+                # --- IMPORTANT DEBUGGING STEP ---
+                # This will print the full server response to your console/terminal.
+                logger.info("--- WordPress Auth Success: Full Response ---")
+                logger.info(json.dumps(data, indent=2))
+                logger.info("---------------------------------------------")
                 
-                # FIXED: Handle both nested and flat response structures
-                # Check if user data is nested under 'user' key or at root level
-                user_data = data.get('user', {}) if 'user' in data else data
-                
-                logger.info("=== User Data Extraction ===")
-                logger.info(f"Using {'nested' if 'user' in data else 'flat'} structure")
-                logger.info("Available user fields:")
-                for key, value in user_data.items():
-                    if key != 'token':  # Don't log the token
-                        logger.info(f"  {key}: {value}")
-                
-                # Get the current session (this will load from DB or create new)
+                # Get the current guest session to upgrade it.
                 session = self.get_session()
                 
-                # Update session to authenticated state
+                # --- ROBUST NAME EXTRACTION ---
+                # This logic now tries multiple common fields to find the user's display name.
+                # The most common one for your plugin is likely 'user_display_name'.
+                display_name = data.get('user_display_name') or \
+                               data.get('displayName') or \
+                               data.get('name') or \
+                               data.get('user_nicename') or \
+                               clean_username  # Fallback to the username if all else fails
+
+                logger.info(f"Extracted display name: '{display_name}'")
+
+                # Update the session object with the authenticated user's data.
                 session.user_type = UserType.REGISTERED_USER
-                session.email = user_data.get('user_email')
-                session.wp_token = data.get('token')  # Token is usually at root level
+                session.email = data.get('user_email')
+                session.first_name = display_name
+                session.wp_token = data.get('token')
                 session.last_activity = datetime.now()
                 
-                # FIXED: Try multiple possible display name fields in order of preference
-                display_name_candidates = [
-                    'user_display_name',     # This is what your WordPress returns!
-                    'display_name',          # Alternative
-                    'name',                  # Generic name field
-                    'first_name',            # First name only
-                    'user_nicename',         # Username-style but prettier
-                    'nickname',              # Nickname field
-                    'user_login',            # Login username (last resort)
-                ]
-                
-                # Find the first available display name field
-                display_name = None
-                field_used = None
-                
-                for field_name in display_name_candidates:
-                    if field_name in user_data and user_data[field_name] and user_data[field_name].strip():
-                        display_name = user_data[field_name].strip()
-                        field_used = field_name
-                        logger.info(f"✅ SUCCESS: Using field '{field_name}' for display name: {display_name}")
-                        break
-                
-                # Fallback to username if no display name found
-                if not display_name:
-                    display_name = clean_username
-                    field_used = "username_fallback"
-                    logger.warning(f"⚠️ No display name field found, using username: {display_name}")
-                
-                session.first_name = display_name
-                
-                # CRITICAL: Save the updated session immediately to database
+                # CRITICAL: Save the now-authenticated session back to the database.
                 self.db.save_session(session)
                 
-                # Ensure the session ID is properly set in Streamlit state
-                st.session_state.current_session_id = session.session_id
-                
-                # Clear any cached session data to force refresh
-                for cache_key in ['cached_session', 'temp_authenticated_session']:
-                    if cache_key in st.session_state:
-                        del st.session_state[cache_key]
-                
-                logger.info(f"✅ Session updated successfully:")
-                logger.info(f"   Session ID: {session.session_id}")
-                logger.info(f"   User Type: {session.user_type.value}")
-                logger.info(f"   Display Name: {display_name}")
-                logger.info(f"   Email: {session.email}")
-                logger.info(f"   Field Used: {field_used}")
-                logger.info("=====================================")
-                
-                # Show success with detailed info
-                st.success(f"🎉 Welcome back, {display_name}!")
-                
-                # Debug info - show what field was used
-                if field_used == 'user_display_name':
-                    st.info(f"✅ Using WordPress display name: {display_name}")
-                elif field_used != "username_fallback":
-                    st.info(f"🔧 Debug: Using WordPress field `{field_used}`: {display_name}")
-                else:
-                    st.warning("🔧 Debug: No display name field found, using username")
-                
+                st.success(f"Welcome back, {session.first_name}!")
                 return session
                 
             else:
+                error_message = f"Invalid username or password (Code: {response.status_code})."
                 try:
                     error_data = response.json()
-                    error_message = error_data.get('message', 'Authentication failed')
-                    st.error(f"Authentication failed: {error_message}")
-                    logger.error(f"Auth failed: {error_message}")
-                except:
-                    st.error(f"Authentication failed (HTTP {response.status_code})")
-                    logger.error(f"Auth failed with status {response.status_code}: {response.text}")
+                    error_message = error_data.get('message', error_message)
+                except json.JSONDecodeError:
+                    pass # Use the status code message if JSON is not available
+                
+                st.error(error_message)
+                logger.error(f"Auth failed: {error_message}")
                 return None
                 
-        except Exception as e:
-            st.error(f"Authentication error: {str(e)}")
-            logger.error(f"Auth exception: {str(e)}", exc_info=True)
+        except requests.exceptions.RequestException as e:
+            st.error(f"A network error occurred during authentication. Please check your connection.")
+            logger.error(f"Auth network exception: {e}", exc_info=True)
             return None
 
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
@@ -696,11 +649,10 @@ class SessionManager:
         session.active = False
         self.db.save_session(session)
         # Clear all session-related state
-        keys_to_clear = ['current_session_id', 'page', 'cached_session', 'temp_authenticated_session']
+        keys_to_clear = ['current_session_id', 'page']
         for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
-
 # =============================================================================
 # 7. UI RENDERING FUNCTIONS - FINAL FIXED VERSIONS
 # =============================================================================
@@ -828,90 +780,72 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
-        # FORCE FRESH SESSION DATA - Get the latest session from database
-        # In your render_sidebar function, replace this section:
+        # Get the absolute latest session data from the source of truth (the database)
+        fresh_session = session_manager.get_session()
 
-# FORCE FRESH SESSION DATA - Get the latest session from database
-fresh_session = session_manager.get_session()
-
-# FIXED: Force the conditional to use the fresh session data
-if fresh_session.user_type == UserType.REGISTERED_USER:
-    st.success("✅ **Authenticated User**") 
-    if fresh_session.first_name:
-        st.markdown(f"**Welcome:** {fresh_session.first_name}")
-    if fresh_session.email:
-        st.markdown(f"**Email:** {fresh_session.email}")
-else:
-    st.info("👤 **Guest User**")
-    st.markdown("*Sign in for full features*")
+        # Use the fresh session data for rendering the UI
+        if fresh_session.user_type == UserType.REGISTERED_USER:
+            st.success("✅ **Authenticated User**") 
+            if fresh_session.first_name:
+                st.markdown(f"**Welcome:** {fresh_session.first_name}")
+            if fresh_session.email:
+                st.markdown(f"**Email:** {fresh_session.email}")
+        else:
+            st.info("👤 **Guest User**")
+            st.markdown("*Sign in for full features*")
         
-        # Session Info
+        # --- START OF FIX ---
+        # 1. Corrected the indentation of this entire block.
+        # 2. Replaced the undefined `current_session` with the correct `fresh_session`.
+        
         st.divider()
-        st.markdown(f"**Messages:** {len(current_session.messages)}")
-        st.markdown(f"**Session:** `{current_session.session_id[:8]}...`")
+        st.markdown(f"**Messages:** {len(fresh_session.messages)}")
+        st.markdown(f"**Session:** `{fresh_session.session_id[:8]}...`")
         
-        # Enhanced Debug Info (temporary - remove in production)
-        with st.expander("🔧 Debug Session Info", expanded=True):  # Expanded by default for debugging
-            st.write(f"**User Type:** `{current_session.user_type.value}`")
-            st.write(f"**Display Name:** `{current_session.first_name or 'None'}`")
-            st.write(f"**Email:** `{current_session.email or 'None'}`")
-            st.write(f"**Has Token:** `{bool(current_session.wp_token)}`")
-            st.write(f"**Session ID:** `{current_session.session_id}`")
-            st.write(f"**Active:** `{current_session.active}`")
-            st.write(f"**Last Activity:** {current_session.last_activity.strftime('%Y-%m-%d %H:%M:%S')}")
-            
-            # Show database type
+        with st.expander("🔧 Debug Session Info"):
+            st.write(f"**User Type:** `{fresh_session.user_type.value}`")
+            st.write(f"**Display Name:** `{fresh_session.first_name or 'None'}`")
+            st.write(f"**Email:** `{fresh_session.email or 'None'}`")
+            st.write(f"**Has Token:** `{bool(fresh_session.wp_token)}`")
+            st.write(f"**Active:** `{fresh_session.active}`")
             db_type = "Cloud Database" if session_manager.db.use_cloud else "Local Memory"
             st.write(f"**Database Type:** `{db_type}`")
-            
-            # Test buttons
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🔄 Force Refresh", key="force_refresh_sidebar"):
-                    st.rerun()
-            
-            with col2:
-                if st.button("🆔 New Session", key="new_session_sidebar"):
-                    for key in ['current_session_id', 'cached_session', 'temp_authenticated_session']:
-                        if key in st.session_state:
-                            del st.session_state[key]
-                    st.rerun()
+            if st.button("🔄 Force Refresh", key="force_refresh_sidebar"):
+                st.rerun()
         
         st.divider()
         
-        # Action Buttons
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🗑️ Clear Chat", use_container_width=True):
-                session_manager.clear_chat_history(current_session)
+                session_manager.clear_chat_history(fresh_session)
                 st.rerun()
         
         with col2:
             if st.button("🚪 Sign Out", use_container_width=True):
-                session_manager.end_session(current_session)
+                session_manager.end_session(fresh_session)
                 st.rerun()
 
-        # PDF Download for authenticated users
-        if current_session.user_type == UserType.REGISTERED_USER and current_session.messages:
+        if fresh_session.user_type == UserType.REGISTERED_USER and fresh_session.messages:
             st.divider()
-            pdf_buffer = pdf_exporter.generate_chat_pdf(current_session)
+            pdf_buffer = pdf_exporter.generate_chat_pdf(fresh_session)
             if pdf_buffer:
                 st.download_button(
                     label="📄 Download PDF", 
                     data=pdf_buffer,
-                    file_name=f"fifi_chat_{current_session.session_id[:8]}.pdf",
+                    file_name=f"fifi_chat_{fresh_session.session_id[:8]}.pdf",
                     mime="application/pdf", 
                     use_container_width=True
                 )
         
-        # Sign-in prompt for guests
-        elif current_session.user_type == UserType.GUEST and current_session.messages:
+        elif fresh_session.user_type == UserType.GUEST and fresh_session.messages:
             st.divider()
             st.info("💡 **Sign in** to save chat history and export PDF!")
             if st.button("🔑 Go to Sign In", use_container_width=True):
                 if 'page' in st.session_state:
                     del st.session_state.page
                 st.rerun()
+        # --- END OF FIX ---
 
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
     st.title("🤖 FiFi AI Assistant")
