@@ -660,28 +660,75 @@ class SessionManager:
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     with st.sidebar:
         st.title("🎛️ Dashboard")
+        
+        # User Status Display
         if session.user_type == UserType.REGISTERED_USER:
-            st.success(f"Authenticated: {session.first_name}")
+            # Show authenticated user info
+            st.success(f"✅ **Authenticated User**")
+            if session.first_name:
+                st.markdown(f"**Welcome:** {session.first_name}")
+            if session.email:
+                st.markdown(f"**Email:** {session.email}")
         else:
-            st.info("Guest User")
-        st.write(f"Messages: {len(session.messages)}")
+            # Show guest user info
+            st.info("👤 **Guest User**")
+            st.markdown("*Limited features available*")
+        
+        # Session Info
+        st.divider()
+        st.markdown(f"**Messages:** {len(session.messages)}")
+        st.markdown(f"**Session:** `{session.session_id[:8]}...`")
+        
+        # Debug Info (remove in production)
+        with st.expander("🔧 Debug Info", expanded=False):
+            st.write(f"**User Type:** `{session.user_type.value}`")
+            st.write(f"**Has Token:** `{bool(session.wp_token)}`")
+            st.write(f"**Email:** `{session.email or 'None'}`")
+            st.write(f"**Display Name:** `{session.first_name or 'None'}`")
+            st.write(f"**Last Activity:** {session.last_activity.strftime('%H:%M:%S')}")
+            
+            # Test session retrieval
+            if st.button("🔄 Refresh Session"):
+                fresh_session = session_manager.get_session()
+                st.write(f"**Fresh Session Type:** `{fresh_session.user_type.value}`")
+                st.write(f"**Fresh Display Name:** `{fresh_session.first_name or 'None'}`")
+        
+        st.divider()
+        
+        # Action Buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ Clear Chat", use_container_width=True):
+                session_manager.clear_chat_history(session)
+                st.rerun()
+        
+        with col2:
+            if st.button("🚪 Sign Out", use_container_width=True):
+                session_manager.end_session(session)
+                st.rerun()
 
-        if st.button("🗑️ Clear History", use_container_width=True):
-            session_manager.clear_chat_history(session)
-            st.rerun()
-        if st.button("🚪 End Session", use_container_width=True):
-            session_manager.end_session(session)
-            st.rerun()
-
+        # PDF Download for authenticated users
         if session.user_type == UserType.REGISTERED_USER and session.messages:
+            st.divider()
             pdf_buffer = pdf_exporter.generate_chat_pdf(session)
             if pdf_buffer:
                 st.download_button(
-                    label="📄 Download PDF", data=pdf_buffer,
-                    file_name=f"fifi_chat_{session.session_id[:8]}.pdf",
-                    mime="application/pdf", use_container_width=True
+                    label="📄 Download PDF", 
+                    data=pdf_buffer,
+                    file_name=f"chat_transcript_{session.session_id[:8]}.pdf",
+                    mime="application/pdf", 
+                    use_container_width=True
                 )
-
+        
+        # Sign-in prompt for guests with messages
+        elif session.user_type == UserType.GUEST and session.messages:
+            st.divider()
+            st.info("💡 **Sign in** to save chat history and download PDF!")
+            if st.button("🔑 Sign In", use_container_width=True):
+                # Clear current page to go back to welcome
+                if 'page' in st.session_state:
+                    del st.session_state.page
+                st.rerun()
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
     st.title("🤖 FiFi AI Assistant")
     for msg in session.messages:
