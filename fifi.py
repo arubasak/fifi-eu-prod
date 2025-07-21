@@ -521,14 +521,29 @@ class SessionManager:
         self.ai = ai_system
         self.rate_limiter = rate_limiter
 
-    def get_session(self) -> UserSession:
-        session_id = st.session_state.get('current_session_id')
-        if session_id:
-            session = self.db.load_session(session_id)
-            if session:
-                session.last_activity = datetime.now()
-                return session
-        return self._create_guest_session()
+   def get_session(self) -> UserSession:
+    # FIX: Check if there's a temporary authenticated session first
+    if hasattr(st.session_state, 'temp_authenticated_session') and st.session_state.temp_authenticated_session:
+        session = st.session_state.temp_authenticated_session
+        # Clear the temporary session after retrieving it
+        st.session_state.temp_authenticated_session = None
+        # Update last activity and save
+        session.last_activity = datetime.now()
+        self.db.save_session(session)
+        return session
+    
+    # Normal session retrieval
+    session_id = st.session_state.get('current_session_id')
+    if session_id:
+        session = self.db.load_session(session_id)
+        if session:
+            session.last_activity = datetime.now()
+            # Save the updated activity time
+            self.db.save_session(session)
+            return session
+    
+    # Create new guest session if no session exists
+    return self._create_guest_session()
 
     def _create_guest_session(self) -> UserSession:
         session = UserSession(session_id=str(uuid.uuid4()))
