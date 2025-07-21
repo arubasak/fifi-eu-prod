@@ -536,6 +536,9 @@ class SessionManager:
         st.session_state.current_session_id = session.session_id
         return session
 
+   # Place this inside the SessionManager class, ensuring it's at the same indentation level
+# as the other methods like get_session and get_ai_response.
+
     @handle_api_errors("Authentication", "WordPress Login")
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
         if not self.config.WORDPRESS_URL:
@@ -551,30 +554,26 @@ class SessionManager:
             headers={'Content-Type': 'application/json'},
             timeout=15
         )
-       if response.status_code == 200:
-        data = response.json()
-        user_data = data.get('user', {})
-        
-        # --- START OF FIX ---
-        # 1. Get the current session instead of creating a new one.
-        session = self.get_session() 
+        if response.status_code == 200:
+            data = response.json()
+            user_data = data.get('user', {})
+            
+            # FIX: Get the current session instead of creating a new one.
+            session = self.get_session() 
 
-        # 2. Update the existing session's attributes.
-        session.user_type = UserType.REGISTERED_USER
-        session.email = user_data.get('user_email')
-        session.first_name = user_data.get('user_nicename')
-        session.wp_token = data.get('token')
-        session.last_activity = datetime.now()
-        # --- END OF FIX ---
-            )
+            # Update the existing session's attributes to upgrade it to an authenticated user.
+            session.user_type = UserType.REGISTERED_USER
+            session.email = user_data.get('user_email')
+            session.first_name = user_data.get('user_nicename')
+            session.wp_token = data.get('token')
+            session.last_activity = datetime.now()
+
             self.db.save_session(session)
-            st.session_state.current_session_id = session.session_id
             st.success(f"Welcome back, {session.first_name}!")
             return session
         else:
             st.error("Invalid username or password.")
             return None
-
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
         if not self.rate_limiter.is_allowed(session.session_id):
             return {"content": "Rate limit exceeded. Please wait.", "success": False}
