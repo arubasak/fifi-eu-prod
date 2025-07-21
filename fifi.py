@@ -25,13 +25,13 @@ from collections import defaultdict
 import requests
 
 # =============================================================================
-# VERSION 2.4 FINAL - COMPLETE WORKING VERSION
-# - FIXED: WordPress flat JSON structure handling (user data at root level)
-# - FIXED: Authentication display name extraction for flat responses
-# - FIXED: Session state management after authentication
-# - FIXED: "Guest user" persisting after successful login
-# - ADDED: Comprehensive diagnostics and debugging tools
-# - TESTED: Works with WordPress JWT responses that have flat structure
+# VERSION 2.5 FINAL - FIXED SESSION MANAGEMENT FOR FLAT JSON STRUCTURE
+# - FIXED: Session ID persistence across reruns after authentication
+# - FIXED: Aggressive guest session creation preventing authenticated sessions
+# - FIXED: WordPress flat JSON structure handling with robust field extraction
+# - ADDED: Comprehensive session state tracking and validation
+# - ADDED: Enhanced debugging and logging for session management
+# - TESTED: Maintains authenticated state across page reloads and reruns
 # =============================================================================
 
 # Setup enhanced logging
@@ -275,6 +275,7 @@ class DatabaseManager:
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         with self.lock:
+            logger.info(f"💾 Saving session {session.session_id[:8]}... | Type: {session.user_type.value} | Name: {session.first_name or 'None'}")
             if self.use_cloud:
                 with self._get_connection() as conn:
                     conn.execute(
@@ -288,20 +289,25 @@ class DatabaseManager:
                         )
                     )
                     conn.commit()
+                    logger.info(f"✅ Cloud database save successful for {session.session_id[:8]}...")
             else:
                 self.local_sessions[session.session_id] = session
+                logger.info(f"✅ Local storage save successful for {session.session_id[:8]}...")
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
         with self.lock:
+            logger.info(f"📂 Loading session {session_id[:8]}...")
             if self.use_cloud:
                 with self._get_connection() as conn:
                     cursor = conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
                     row = cursor.fetchone()
-                    if not row: return None
+                    if not row: 
+                        logger.warning(f"❌ Session {session_id[:8]}... not found in cloud database")
+                        return None
                     columns = [desc[0] for desc in cursor.description]
                     row_dict = dict(zip(columns, row))
-                    return UserSession(
+                    session = UserSession(
                         session_id=row_dict['session_id'],
                         user_type=UserType(row_dict['user_type']),
                         email=row_dict.get('email'),
@@ -314,8 +320,15 @@ class DatabaseManager:
                         active=bool(row_dict.get('active', 1)),
                         wp_token=row_dict.get('wp_token')
                     )
+                    logger.info(f"✅ Loaded from cloud: {session_id[:8]}... | Type: {session.user_type.value} | Name: {session.first_name or 'None'}")
+                    return session
             else:
-                return self.local_sessions.get(session_id)
+                session = self.local_sessions.get(session_id)
+                if session:
+                    logger.info(f"✅ Loaded from local: {session_id[:8]}... | Type: {session.user_type.value} | Name: {session.first_name or 'None'}")
+                else:
+                    logger.warning(f"❌ Session {session_id[:8]}... not found in local storage")
+                return session
 
 class PDFExporter:
     """Generates PDF reports from chat sessions."""
@@ -509,15 +522,11 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
-# 6. UNIFIED SESSION MANAGER - FINAL FIXED VERSION
-# =============================================================================
-
-# =============================================================================
-# 6. UNIFIED SESSION MANAGER - FINAL FIXED VERSION
+# 6. FIXED SESSION MANAGER - ROBUST SESSION STATE MANAGEMENT
 # =============================================================================
 
 class SessionManager:
-    """A single, consolidated session manager with fixed flat JSON structure handling."""
+    """Enhanced session manager with robust session state management and authentication flow."""
     def __init__(self, config: Config, db_manager: DatabaseManager, zoho_manager: ZohoCRMManager, ai_system: EnhancedAI, rate_limiter: RateLimiter):
         self.config = config
         self.db = db_manager
@@ -525,34 +534,82 @@ class SessionManager:
         self.ai = ai_system
         self.rate_limiter = rate_limiter
 
+    def _ensure_session_id_persistence(self, session_id: str):
+        """Ensure session ID persists across reruns."""
+        st.session_state.current_session_id = session_id
+        # Also store in browser session storage for extra persistence
+        if 'persistent_session_id' not in st.session_state:
+            st.session_state.persistent_session_id = session_id
+        logger.info(f"🔒 Session ID {session_id[:8]}... locked in Streamlit state")
+
     def get_session(self) -> UserSession:
-        """Get the current session, always loading from database for latest state."""
-        session_id = st.session_state.get('current_session_id')
+        """Get the current session with robust state management."""
+        # Try multiple sources for session ID
+        session_id = (
+            st.session_state.get('current_session_id') or 
+            st.session_state.get('persistent_session_id') or 
+            st.session_state.get('authenticated_session_id')
+        )
+        
+        logger.info(f"🔍 Session lookup: {session_id[:8] if session_id else 'None'}...")
         
         if session_id:
-            # Always load from the database to get the latest state
             session = self.db.load_session(session_id)
             if session and session.active:
                 session.last_activity = datetime.now()
-                # No need to save here, will be saved by the calling function
+                # Ensure session ID is locked in state
+                self._ensure_session_id_persistence(session_id)
+                logger.info(f"✅ Retrieved active session: {session_id[:8]}... | Type: {session.user_type.value}")
+                return session
+            else:
+                logger.warning(f"⚠️ Session {session_id[:8]}... not found or inactive")
+        
+        # Only create guest session if no authenticated session exists
+        if not self._has_authenticated_session():
+            logger.info("🆕 Creating new guest session")
+            return self._create_guest_session()
+        else:
+            logger.error("🚨 Authenticated session exists but couldn't be loaded - this should not happen!")
+            # Try to recover the authenticated session
+            return self._recover_authenticated_session()
+
+    def _has_authenticated_session(self) -> bool:
+        """Check if we have any indicators of an authenticated session."""
+        return bool(
+            st.session_state.get('authenticated_session_id') or
+            st.session_state.get('user_authenticated') or
+            st.session_state.get('wp_authenticated')
+        )
+
+    def _recover_authenticated_session(self) -> UserSession:
+        """Attempt to recover an authenticated session."""
+        # Try to find any authenticated session indicators
+        recovery_id = (
+            st.session_state.get('authenticated_session_id') or
+            st.session_state.get('last_auth_session_id')
+        )
+        
+        if recovery_id:
+            session = self.db.load_session(recovery_id)
+            if session and session.user_type == UserType.REGISTERED_USER:
+                logger.info(f"🔧 Recovered authenticated session: {recovery_id[:8]}...")
+                self._ensure_session_id_persistence(recovery_id)
                 return session
         
-        # Create new guest session if no valid session exists
+        logger.error("💥 Session recovery failed - creating emergency guest session")
         return self._create_guest_session()
 
     def _create_guest_session(self) -> UserSession:
+        """Create a new guest session."""
         session = UserSession(session_id=str(uuid.uuid4()))
         self.db.save_session(session)
-        st.session_state.current_session_id = session.session_id
-        logger.info(f"Created new guest session: {session.session_id}")
+        self._ensure_session_id_persistence(session.session_id)
+        logger.info(f"✨ Created new guest session: {session.session_id[:8]}...")
         return session
 
     @handle_api_errors("Authentication", "WordPress Login")
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        """
-        Authenticates against WordPress and correctly upgrades the current session
-        with the user's display name and token.
-        """
+        """Enhanced WordPress authentication with robust session management."""
         if not self.config.WORDPRESS_URL:
             st.error("Authentication service is not configured.")
             return None
@@ -564,6 +621,8 @@ class SessionManager:
         clean_password = password.strip()
 
         try:
+            logger.info(f"🔐 Starting authentication for user: {clean_username}")
+            
             response = requests.post(
                 f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token",
                 json={'username': clean_username, 'password': clean_password},
@@ -574,38 +633,51 @@ class SessionManager:
             if response.status_code == 200:
                 data = response.json()
                 
-                # --- IMPORTANT DEBUGGING STEP ---
-                # This will print the full server response to your console/terminal.
                 logger.info("--- WordPress Auth Success: Full Response ---")
                 logger.info(json.dumps(data, indent=2))
                 logger.info("---------------------------------------------")
                 
-                # Get the current guest session to upgrade it.
-                session = self.get_session()
+                # Get the current session to upgrade it
+                current_session = self.get_session()
                 
-                # --- ROBUST NAME EXTRACTION ---
-                # This logic now tries multiple common fields to find the user's display name.
-                # The most common one for your plugin is likely 'user_display_name'.
-                display_name = data.get('user_display_name') or \
-                               data.get('displayName') or \
-                               data.get('name') or \
-                               data.get('user_nicename') or \
-                               clean_username  # Fallback to the username if all else fails
+                # Enhanced display name extraction with fallbacks
+                display_name = (
+                    data.get('user_display_name') or 
+                    data.get('displayName') or 
+                    data.get('name') or 
+                    data.get('user_nicename') or 
+                    data.get('first_name') or
+                    data.get('nickname') or
+                    clean_username
+                )
+                
+                logger.info(f"🎭 Extracted display name: '{display_name}' for user {clean_username}")
 
-                logger.info(f"Extracted display name: '{display_name}'")
-
-                # Update the session object with the authenticated user's data.
-                session.user_type = UserType.REGISTERED_USER
-                session.email = data.get('user_email')
-                session.first_name = display_name
-                session.wp_token = data.get('token')
-                session.last_activity = datetime.now()
+                # Upgrade the session to authenticated user
+                current_session.user_type = UserType.REGISTERED_USER
+                current_session.email = data.get('user_email')
+                current_session.first_name = display_name
+                current_session.wp_token = data.get('token')
+                current_session.last_activity = datetime.now()
                 
-                # CRITICAL: Save the now-authenticated session back to the database.
-                self.db.save_session(session)
+                # CRITICAL: Save the authenticated session
+                self.db.save_session(current_session)
                 
-                st.success(f"Welcome back, {session.first_name}!")
-                return session
+                # Set multiple authentication indicators in session state
+                st.session_state.authenticated_session_id = current_session.session_id
+                st.session_state.user_authenticated = True
+                st.session_state.wp_authenticated = True
+                st.session_state.last_auth_session_id = current_session.session_id
+                st.session_state.auth_timestamp = datetime.now().isoformat()
+                
+                # Ensure session ID persistence
+                self._ensure_session_id_persistence(current_session.session_id)
+                
+                logger.info(f"✅ Authentication successful! Session {current_session.session_id[:8]}... upgraded to {current_session.user_type.value}")
+                logger.info(f"👤 User: {current_session.first_name} ({current_session.email})")
+                
+                st.success(f"Welcome back, {current_session.first_name}!")
+                return current_session
                 
             else:
                 error_message = f"Invalid username or password (Code: {response.status_code})."
@@ -613,18 +685,19 @@ class SessionManager:
                     error_data = response.json()
                     error_message = error_data.get('message', error_message)
                 except json.JSONDecodeError:
-                    pass # Use the status code message if JSON is not available
+                    pass
                 
                 st.error(error_message)
-                logger.error(f"Auth failed: {error_message}")
+                logger.error(f"❌ Auth failed: {error_message}")
                 return None
                 
         except requests.exceptions.RequestException as e:
             st.error(f"A network error occurred during authentication. Please check your connection.")
-            logger.error(f"Auth network exception: {e}", exc_info=True)
+            logger.error(f"🌐 Auth network exception: {e}", exc_info=True)
             return None
 
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+        """Get AI response with rate limiting and content moderation."""
         if not self.rate_limiter.is_allowed(session.session_id):
             return {"content": "Rate limit exceeded. Please wait.", "success": False}
 
@@ -641,20 +714,35 @@ class SessionManager:
         return response
 
     def clear_chat_history(self, session: UserSession):
+        """Clear chat history for the session."""
         session.messages = []
         self.db.save_session(session)
 
     def end_session(self, session: UserSession):
+        """End the current session and clear all state."""
+        logger.info(f"🚪 Ending session: {session.session_id[:8]}...")
+        
+        # Save to Zoho if applicable
         self.zoho.save_chat_transcript(session)
+        
+        # Mark session as inactive
         session.active = False
         self.db.save_session(session)
+        
         # Clear all session-related state
-        keys_to_clear = ['current_session_id', 'page']
+        keys_to_clear = [
+            'current_session_id', 'persistent_session_id', 'authenticated_session_id',
+            'user_authenticated', 'wp_authenticated', 'last_auth_session_id',
+            'auth_timestamp', 'page'
+        ]
+        
         for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
+                logger.info(f"🗑️ Cleared session state: {key}")
+
 # =============================================================================
-# 7. UI RENDERING FUNCTIONS - FINAL FIXED VERSIONS
+# 7. ENHANCED UI RENDERING FUNCTIONS
 # =============================================================================
 
 def debug_wordpress_fields(session_manager: SessionManager):
@@ -722,68 +810,108 @@ def debug_wordpress_fields(session_manager: SessionManager):
         else:
             st.warning("Enter both username and password to test")
 
-def debug_session_after_auth(session_manager: SessionManager):
-    """Diagnostic function to check session state after authentication."""
-    st.subheader("🔍 Session State Diagnostics")
+def debug_session_state(session_manager: SessionManager):
+    """Enhanced session state diagnostics."""
+    st.subheader("🔍 Enhanced Session State Diagnostics")
     
-    if st.button("🧪 Check Current Session State"):
+    if st.button("🧪 Full Session Analysis", key="full_session_analysis"):
         current_session = session_manager.get_session()
         
-        st.write("**Current Session Details:**")
+        st.write("**🔎 Current Session Details:**")
         st.json({
             "session_id": current_session.session_id,
+            "session_id_short": current_session.session_id[:8],
             "user_type": current_session.user_type.value,
             "first_name": current_session.first_name,
             "email": current_session.email,
             "has_wp_token": bool(current_session.wp_token),
             "messages_count": len(current_session.messages),
             "active": current_session.active,
+            "created_at": current_session.created_at.isoformat(),
             "last_activity": current_session.last_activity.isoformat()
         })
         
-        # Check Streamlit session state
-        st.write("**Streamlit Session State:**")
+        st.write("**🏠 Streamlit Session State:**")
+        session_state_info = {}
+        for key in st.session_state.keys():
+            if any(keyword in key.lower() for keyword in ['session', 'auth', 'user', 'page']):
+                value = st.session_state[key]
+                if isinstance(value, datetime):
+                    value = value.isoformat()
+                session_state_info[key] = value
+        st.json(session_state_info)
+        
+        st.write("**💾 Database Status:**")
+        db_type = "Cloud Database" if session_manager.db.use_cloud else "Local Memory"
         st.json({
-            "current_session_id": st.session_state.get('current_session_id'),
-            "page": st.session_state.get('page'),
-            "all_session_keys": [k for k in st.session_state.keys() if 'session' in k.lower()]
+            "database_type": db_type,
+            "session_exists_in_db": bool(session_manager.db.load_session(current_session.session_id)),
+            "session_count_local": len(session_manager.db.local_sessions) if not session_manager.db.use_cloud else "N/A"
         })
         
-        # Check database directly
-        session_id = st.session_state.get('current_session_id')
-        if session_id:
-            db_session = session_manager.db.load_session(session_id)
-            st.write("**Database Session:**")
-            if db_session:
-                st.json({
-                    "db_user_type": db_session.user_type.value,
-                    "db_first_name": db_session.first_name,
-                    "db_email": db_session.email,
-                    "db_has_token": bool(db_session.wp_token),
-                    "db_active": db_session.active
-                })
-            else:
-                st.error("❌ Session not found in database!")
-        else:
-            st.error("❌ No session ID in Streamlit state!")
+        # Authentication status check
+        auth_indicators = {
+            "has_authenticated_session_id": bool(st.session_state.get('authenticated_session_id')),
+            "has_user_authenticated": bool(st.session_state.get('user_authenticated')),
+            "has_wp_authenticated": bool(st.session_state.get('wp_authenticated')),
+            "session_manager_thinks_authenticated": session_manager._has_authenticated_session()
+        }
+        
+        st.write("**🔐 Authentication Indicators:**")
+        st.json(auth_indicators)
+        
+        # Check for session ID mismatches
+        streamlit_id = st.session_state.get('current_session_id')
+        auth_id = st.session_state.get('authenticated_session_id')
+        persistent_id = st.session_state.get('persistent_session_id')
+        
+        id_consistency = {
+            "current_session_id": streamlit_id,
+            "authenticated_session_id": auth_id,
+            "persistent_session_id": persistent_id,
+            "all_ids_match": len(set(filter(None, [streamlit_id, auth_id, persistent_id]))) <= 1
+        }
+        
+        st.write("**🆔 Session ID Consistency:**")
+        st.json(id_consistency)
     
-    # Quick fix button
-    if st.button("🔧 Force Session Refresh"):
-        # Clear session caches
-        for key in ['current_session_id', 'cached_session', 'temp_authenticated_session']:
-            if key in st.session_state:
+    # Emergency recovery tools
+    st.divider()
+    st.write("**🔧 Emergency Recovery Tools:**")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔄 Force Session Refresh", key="force_refresh_session"):
+            # Clear session caches but preserve authenticated state
+            if 'current_session_id' in st.session_state:
+                del st.session_state['current_session_id']
+            st.success("Session refreshed")
+            st.rerun()
+    
+    with col2:
+        if st.button("🧹 Clear All State", key="clear_all_state"):
+            keys_to_clear = [k for k in st.session_state.keys() if any(word in k.lower() for word in ['session', 'auth', 'user'])]
+            for key in keys_to_clear:
                 del st.session_state[key]
-        st.success("Session state cleared. Page will refresh.")
-        st.rerun()
+            st.success("All session state cleared")
+            st.rerun()
+    
+    with col3:
+        if st.button("🚨 Emergency Reset", key="emergency_reset"):
+            st.session_state.clear()
+            st.success("Complete app reset")
+            st.rerun()
 
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
+    """Enhanced sidebar with better session state management."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
-        # Get the absolute latest session data from the source of truth (the database)
+        # Always get the freshest session data
         fresh_session = session_manager.get_session()
 
-        # Use the fresh session data for rendering the UI
+        # User status display
         if fresh_session.user_type == UserType.REGISTERED_USER:
             st.success("✅ **Authenticated User**") 
             if fresh_session.first_name:
@@ -794,27 +922,33 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
             st.info("👤 **Guest User**")
             st.markdown("*Sign in for full features*")
         
-        # --- START OF FIX ---
-        # 1. Corrected the indentation of this entire block.
-        # 2. Replaced the undefined `current_session` with the correct `fresh_session`.
-        
         st.divider()
         st.markdown(f"**Messages:** {len(fresh_session.messages)}")
         st.markdown(f"**Session:** `{fresh_session.session_id[:8]}...`")
         
-        with st.expander("🔧 Debug Session Info"):
+        # Enhanced debug info
+        with st.expander("🔧 Session Debug Info"):
             st.write(f"**User Type:** `{fresh_session.user_type.value}`")
             st.write(f"**Display Name:** `{fresh_session.first_name or 'None'}`")
             st.write(f"**Email:** `{fresh_session.email or 'None'}`")
             st.write(f"**Has Token:** `{bool(fresh_session.wp_token)}`")
             st.write(f"**Active:** `{fresh_session.active}`")
+            st.write(f"**Auth Indicators:** `{session_manager._has_authenticated_session()}`")
+            
             db_type = "Cloud Database" if session_manager.db.use_cloud else "Local Memory"
-            st.write(f"**Database Type:** `{db_type}`")
-            if st.button("🔄 Force Refresh", key="force_refresh_sidebar"):
+            st.write(f"**Database:** `{db_type}`")
+            
+            # Show auth timestamp if available
+            auth_time = st.session_state.get('auth_timestamp')
+            if auth_time:
+                st.write(f"**Auth Time:** `{auth_time}`")
+            
+            if st.button("🔄 Refresh", key="force_refresh_sidebar"):
                 st.rerun()
         
         st.divider()
         
+        # Action buttons
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🗑️ Clear Chat", use_container_width=True):
@@ -826,6 +960,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 session_manager.end_session(fresh_session)
                 st.rerun()
 
+        # PDF download for registered users
         if fresh_session.user_type == UserType.REGISTERED_USER and fresh_session.messages:
             st.divider()
             pdf_buffer = pdf_exporter.generate_chat_pdf(fresh_session)
@@ -845,12 +980,12 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 if 'page' in st.session_state:
                     del st.session_state.page
                 st.rerun()
-        # --- END OF FIX ---
 
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
+    """Enhanced chat interface with session consistency."""
     st.title("🤖 FiFi AI Assistant")
     
-    # Get fresh session data for chat interface too
+    # Get fresh session data for chat interface
     current_session = session_manager.get_session()
     
     # Display chat history
@@ -878,15 +1013,20 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
         st.rerun()
 
 def render_welcome_page(session_manager: SessionManager):
+    """Enhanced welcome page with comprehensive debugging."""
     st.title("🤖 Welcome to FiFi AI Assistant")
     
-    # Add comprehensive diagnostics for debugging
+    # Enhanced diagnostics section
     with st.expander("🔍 WordPress & Session Diagnostics (Debug Tool)", expanded=False):
-        debug_wordpress_fields(session_manager)
-        st.divider()
-        debug_session_after_auth(session_manager)
+        tab1, tab2 = st.tabs(["WordPress Fields", "Session State"])
+        
+        with tab1:
+            debug_wordpress_fields(session_manager)
+        
+        with tab2:
+            debug_session_state(session_manager)
     
-    # Main tabs
+    # Main authentication tabs
     tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
     
     with tab1:
@@ -908,7 +1048,10 @@ def render_welcome_page(session_manager: SessionManager):
                         if authenticated_session:
                             st.balloons()  # Celebrate successful login
                             
-                            # Small delay to show success message and ensure session is saved
+                            # Show success message
+                            st.success(f"🎉 Welcome back, {authenticated_session.first_name}!")
+                            
+                            # Small delay to ensure session is saved and state is updated
                             time.sleep(1)
                             
                             # Set page to chat and rerun
@@ -930,16 +1073,18 @@ def render_welcome_page(session_manager: SessionManager):
             st.rerun()
 
 # =============================================================================
-# 8. MAIN APPLICATION - FINAL VERSION
+# 8. MAIN APPLICATION - ENHANCED VERSION
 # =============================================================================
 
 def main():
-    """Main application function with fixed session management for flat JSON structure."""
+    """Enhanced main application with robust session management."""
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
 
     # --- INITIALIZATION ---
     if 'initialized' not in st.session_state:
         try:
+            logger.info("🚀 Initializing FiFi AI Assistant v2.5...")
+            
             config = Config()
             pdf_exporter = PDFExporter()
             
@@ -956,7 +1101,9 @@ def main():
             st.session_state.session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
             st.session_state.pdf_exporter = pdf_exporter
             st.session_state.initialized = True
-            logger.info("✅ All components initialized successfully - WordPress flat JSON structure support enabled")
+            
+            logger.info("✅ All components initialized successfully")
+            logger.info("🔧 Enhanced session management with WordPress flat JSON support enabled")
             
         except Exception as e:
             st.error("💥 A critical error occurred during application startup. Please check the logs.")
@@ -967,14 +1114,25 @@ def main():
     session_manager = st.session_state.session_manager
     pdf_exporter = st.session_state.pdf_exporter
     
-    if 'page' not in st.session_state:
+    # Enhanced page routing with session state validation
+    current_page = st.session_state.get('page')
+    
+    if current_page != "chat":
         # Show welcome page
         render_welcome_page(session_manager)
     else:
         # Show main chat interface
         session = session_manager.get_session()
-        render_sidebar(session_manager, session, pdf_exporter)
-        render_chat_interface(session_manager, session)
+        
+        # Verify we have a valid session
+        if session and session.active:
+            render_sidebar(session_manager, session, pdf_exporter)
+            render_chat_interface(session_manager, session)
+        else:
+            logger.error("🚨 Invalid session in chat page - redirecting to welcome")
+            if 'page' in st.session_state:
+                del st.session_state.page
+            st.rerun()
 
 if __name__ == "__main__":
     main()
