@@ -673,6 +673,10 @@ def render_welcome_page(session_manager: SessionManager):
 # 8. MAIN APPLICATION
 # =============================================================================
 
+# =============================================================================
+# 8. MAIN APPLICATION
+# =============================================================================
+
 def main():
     """Main application function."""
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
@@ -682,14 +686,21 @@ def main():
         try:
             config = Config()
             pdf_exporter = PDFExporter()
-            db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+            
+            # MODIFICATION: Create and store the DB Manager directly in session state.
+            # This ensures its internal state (like the local_sessions dict) persists across reruns.
+            st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+            
+            # Retrieve the persistent DB manager from session state.
+            db_manager = st.session_state.db_manager
+            
             zoho_manager = ZohoCRMManager(config, pdf_exporter)
             ai_system = EnhancedAI(config)
             rate_limiter = RateLimiter()
 
-            st.session_state.config = config
-            st.session_state.pdf_exporter = pdf_exporter
+            # MODIFICATION: Pass the persistent db_manager to the SessionManager.
             st.session_state.session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
+            st.session_state.pdf_exporter = pdf_exporter
             st.session_state.initialized = True
             logger.info("All components initialized successfully.")
         except Exception as e:
@@ -702,8 +713,10 @@ def main():
     if 'page' not in st.session_state:
         render_welcome_page(session_manager)
     else:
+        # MODIFICATION: Ensure pdf_exporter is retrieved from session state here as well.
+        pdf_exporter = st.session_state.pdf_exporter
         session = session_manager.get_session()
-        render_sidebar(session_manager, session, st.session_state.pdf_exporter)
+        render_sidebar(session_manager, session, pdf_exporter)
         render_chat_interface(session_manager, session)
 
 if __name__ == "__main__":
