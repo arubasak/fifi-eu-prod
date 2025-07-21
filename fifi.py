@@ -514,6 +514,8 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
 
 # Replace the entire SessionManager class methods with these correctly indented ones:
 
+# Replace your SessionManager methods with these fixed versions:
+
 class SessionManager:
     """A single, consolidated session manager."""
     def __init__(self, config: Config, db_manager: DatabaseManager, zoho_manager: ZohoCRMManager, ai_system: EnhancedAI, rate_limiter: RateLimiter):
@@ -524,23 +526,15 @@ class SessionManager:
         self.rate_limiter = rate_limiter
 
     def get_session(self) -> UserSession:
-        # FIX: Check if there's a temporary authenticated session first
-        if hasattr(st.session_state, 'temp_authenticated_session') and st.session_state.temp_authenticated_session:
-            session = st.session_state.temp_authenticated_session
-            # Clear the temporary session after retrieving it
-            st.session_state.temp_authenticated_session = None
-            # Update last activity and save
-            session.last_activity = datetime.now()
-            self.db.save_session(session)
-            return session
-        
-        # Normal session retrieval
+        """Get the current session, always loading from database for latest state."""
         session_id = st.session_state.get('current_session_id')
+        
         if session_id:
+            # Always load from database to get the latest state
             session = self.db.load_session(session_id)
             if session:
+                # Update last activity
                 session.last_activity = datetime.now()
-                # Save the updated activity time
                 self.db.save_session(session)
                 return session
         
@@ -562,7 +556,7 @@ class SessionManager:
             st.error("Too many login attempts. Please wait.")
             return None
 
-        # Clean credentials (don't use sanitize_input for auth!)
+        # Clean credentials
         clean_username = username.strip()
         clean_password = password.strip()
 
@@ -578,43 +572,49 @@ class SessionManager:
                 data = response.json()
                 user_data = data.get('user', {})
                 
-                # DEBUG: Print the user data to see what's available
-                logger.info(f"WordPress user data: {json.dumps(user_data, indent=2)}")
+                # Log the user data for debugging
+                logger.info(f"WordPress authentication successful for user: {clean_username}")
+                logger.info(f"User data received: {json.dumps(user_data, indent=2)}")
                 
-                # Get the current session
+                # Get the current session (this will load from DB or create new)
                 session = self.get_session()
                 
-                # Update the session to make it authenticated
+                # Update session to authenticated state
                 session.user_type = UserType.REGISTERED_USER
                 session.email = user_data.get('user_email')
-                
-                # FIX 1: Use user_display_name instead of user_nicename
-                session.first_name = user_data.get('user_display_name', 
-                                                   user_data.get('user_nicename', 
-                                                               clean_username))
-                
                 session.wp_token = data.get('token')
                 session.last_activity = datetime.now()
                 
-                # Save the updated session
+                # Get display name with multiple fallbacks
+                display_name = (
+                    user_data.get('user_display_name') or 
+                    user_data.get('display_name') or
+                    user_data.get('user_nicename') or 
+                    user_data.get('user_login') or
+                    clean_username
+                )
+                
+                session.first_name = display_name
+                
+                # CRITICAL: Save the session immediately to database
                 self.db.save_session(session)
                 
-                # FIX 2: Force update the session in Streamlit's session state
-                if hasattr(st.session_state, 'current_session_id'):
-                    st.session_state.current_session_id = session.session_id
+                # Ensure the session ID is properly set in Streamlit state
+                st.session_state.current_session_id = session.session_id
                 
-                # FIX 3: Store the updated session object directly in session state temporarily
-                st.session_state.temp_authenticated_session = session
+                # Force a session state refresh by clearing any cached values
+                if hasattr(st.session_state, 'cached_session'):
+                    del st.session_state.cached_session
                 
-                st.success(f"Welcome back, {session.first_name}!")
-                logger.info(f"User authenticated successfully: {session.first_name}")
+                logger.info(f"Session updated - ID: {session.session_id}, User: {display_name}, Type: {session.user_type.value}")
+                
+                st.success(f"Welcome back, {display_name}!")
                 return session
             else:
                 try:
                     error_data = response.json()
                     error_message = error_data.get('message', 'Authentication failed')
                     st.error(f"Authentication failed: {error_message}")
-                    logger.error(f"Auth failed: {error_message}")
                 except:
                     st.error(f"Authentication failed (HTTP {response.status_code})")
                 return None
@@ -648,10 +648,11 @@ class SessionManager:
         self.zoho.save_chat_transcript(session)
         session.active = False
         self.db.save_session(session)
-        for key in ['current_session_id', 'page']:
+        # Clear all session-related state
+        keys_to_clear = ['current_session_id', 'page', 'cached_session', 'temp_authenticated_session']
+        for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
-
 # =============================================================================
 # 7. UI RENDERING FUNCTIONS
 # =============================================================================
