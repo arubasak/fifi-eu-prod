@@ -11,6 +11,6 @@ dataclasses-json
 langchain-tavily>=0.1.0
 python-dotenv
 sqlitecloud
-reportlab>=3.6.0
+python-multipart
 PyJWT>=2.0.0
 reportlab==4.2.0
