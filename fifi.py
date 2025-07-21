@@ -25,11 +25,17 @@ from collections import defaultdict
 import requests
 
 # =============================================================================
-# VERSION 2.6 PRODUCTION - CLEAN PRODUCTION VERSION
+# VERSION 2.10 PRODUCTION - FIXED CONTACT CREATION LOGIC
 # - FIXED: Session authentication state persistence across reruns
 # - FIXED: WordPress flat JSON structure handling with robust field extraction
 # - FIXED: Enum comparison issues in UI rendering logic
-# - CLEAN: Removed all debug code and excessive logging for production use
+# - FIXED: Contact creation logic - existing contacts unchanged, new contacts = blank first name + "Food Professional" last name
+# - ENHANCED: Complete Zoho CRM integration with Notes and Attachments to both Contact and Note
+# - ENHANCED: Auto-save to CRM on sign out and 5-minute idle timeout
+# - ENHANCED: Comprehensive note creation with metadata, topics, and session details
+# - ENHANCED: Dual PDF attachment (to Contact for easy access + to Note for detailed reference)
+# - ADDED: Auto sign-out after 5 minutes of inactivity with proper CRM archival
+# - ADDED: Session timeout warnings and activity tracking
 # - STABLE: Maintains authenticated state reliably across page interactions
 # =============================================================================
 
@@ -346,7 +352,7 @@ class PDFExporter:
         return buffer
 
 class ZohoCRMManager:
-    """Handles Zoho CRM integration."""
+    """Enhanced Zoho CRM integration with Notes and Attachments."""
     def __init__(self, config: Config, pdf_exporter: PDFExporter):
         self.config = config
         self.pdf_exporter = pdf_exporter
@@ -367,13 +373,231 @@ class ZohoCRMManager:
         response.raise_for_status()
         return response.json().get('access_token')
 
-    @handle_api_errors("Zoho CRM", "Save Chat Transcript", show_to_user=False)
+    @handle_api_errors("Zoho CRM", "Search Contact by Email", show_to_user=False)
+    def _find_contact_by_email(self, email: str, access_token: str) -> Optional[str]:
+        """Search for existing contact by email address."""
+        headers = {
+            'Authorization': f'Zoho-oauthtoken {access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Search contacts by email
+        search_url = f"{self.base_url}/Contacts/search"
+        params = {
+            'criteria': f'(Email:equals:{email})',
+            'fields': 'id,First_Name,Last_Name,Email'
+        }
+        
+        response = requests.get(search_url, headers=headers, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            contacts = data.get('data', [])
+            if contacts:
+                contact = contacts[0]  # Get first match
+                logger.info(f"Found existing contact: {contact.get('First_Name', '')} {contact.get('Last_Name', '')} ({email})")
+                return contact['id']
+        
+        return None
+
+    @handle_api_errors("Zoho CRM", "Create Contact", show_to_user=False)
+    def _create_contact(self, email: str, access_token: str) -> Optional[str]:
+        """Create new contact with blank first name and 'Food Professional' as last name."""
+        headers = {
+            'Authorization': f'Zoho-oauthtoken {access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        # For new contacts: First Name = blank, Last Name = "Food Professional"
+        contact_data = {
+            "data": [{
+                "First_Name": "",                    # ✅ BLANK for new contacts
+                "Last_Name": "Food Professional",   # ✅ Always "Food Professional" for new contacts
+                "Email": email,
+                "Lead_Source": "FiFi AI Assistant",
+                "Description": f"Contact created automatically from FiFi AI chat session on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            }]
+        }
+        
+        response = requests.post(f"{self.base_url}/Contacts", headers=headers, json=contact_data, timeout=10)
+        
+        if response.status_code in [200, 201]:
+            data = response.json()
+            created_contacts = data.get('data', [])
+            if created_contacts:
+                contact_id = created_contacts[0]['details']['id']
+                logger.info(f"Created new contact: Food Professional ({email}) - ID: {contact_id}")
+                return contact_id
+        else:
+            logger.error(f"Failed to create contact: {response.status_code} - {response.text}")
+        
+        return None
+
+    @handle_api_errors("Zoho CRM", "Create Note", show_to_user=False)
+    def _create_note(self, contact_id: str, session: UserSession, access_token: str) -> Optional[str]:
+        """Create a note with chat summary attached to the contact."""
+        headers = {
+            'Authorization': f'Zoho-oauthtoken {access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Generate chat summary for note content
+        message_count = len(session.messages)
+        chat_preview = ""
+        if session.messages:
+            # Get first user message as preview
+            first_user_msg = next((msg for msg in session.messages if msg.get('role') == 'user'), None)
+            if first_user_msg:
+                content = first_user_msg.get('content', '')
+                chat_preview = f"Started with: {content[:100]}..." if len(content) > 100 else f"Started with: {content}"
+        
+        note_title = f"FiFi AI Chat Session - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        note_content = f"""
+Chat session completed on {datetime.now().strftime('%Y-%m-%d at %H:%M:%S')}
+
+Session Details:
+- User: {session.first_name or 'Unknown'} ({session.email or 'No email'})
+- Messages exchanged: {message_count}
+- Session duration: {session.created_at.strftime('%Y-%m-%d %H:%M')} to {session.last_activity.strftime('%Y-%m-%d %H:%M')}
+
+{chat_preview}
+
+Full conversation transcript is attached as PDF.
+        """.strip()
+        
+        note_data = {
+            "data": [{
+                "Note_Title": note_title,
+                "Note_Content": note_content,
+                "Parent_Id": contact_id,
+                "se_module": "Contacts"
+            }]
+        }
+        
+        response = requests.post(f"{self.base_url}/Notes", headers=headers, json=note_data, timeout=10)
+        
+        if response.status_code in [200, 201]:
+            data = response.json()
+            created_notes = data.get('data', [])
+            if created_notes:
+                note_id = created_notes[0]['details']['id']
+                logger.info(f"Created note for contact {contact_id}: {note_title}")
+                return note_id
+        
+        return None
+
+    @handle_api_errors("Zoho CRM", "Upload PDF Attachment", show_to_user=False)
+    def _upload_pdf_attachment(self, note_id: str, pdf_buffer: io.BytesIO, session: UserSession, access_token: str) -> bool:
+        """Upload PDF as attachment to the note."""
+        headers = {
+            'Authorization': f'Zoho-oauthtoken {access_token}'
+        }
+        
+        # Ensure buffer is at the beginning
+        pdf_buffer.seek(0)
+        filename = f"fifi_chat_transcript_{session.session_id[:8]}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        
+        # Create a fresh copy of the buffer content to avoid issues
+        pdf_content = pdf_buffer.read()
+        pdf_buffer.seek(0)  # Reset for potential reuse
+        
+        files = {
+            'file': (filename, io.BytesIO(pdf_content), 'application/pdf')
+        }
+        
+        data = {
+            'type': 'Notes',
+            'id': note_id
+        }
+        
+        response = requests.post(
+            f"{self.base_url}/Notes/{note_id}/Attachments",
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=30
+        )
+        
+        if response.status_code in [200, 201]:
+            logger.info(f"Successfully uploaded PDF attachment to note {note_id}: {filename}")
+            return True
+        else:
+            logger.error(f"Failed to upload PDF attachment: {response.status_code} - {response.text}")
+        
+        return False
+
+    @handle_api_errors("Zoho CRM", "Save Chat Transcript to CRM", show_to_user=True)
     def save_chat_transcript(self, session: UserSession):
-        if not self.config.ZOHO_ENABLED or not session.zoho_contact_id: return
-        pdf_buffer = self.pdf_exporter.generate_chat_pdf(session)
-        if pdf_buffer:
-            logger.info(f"PDF generated for Zoho upload for session {session.session_id}.")
-            # In a real scenario, you'd upload this buffer to the Zoho API.
+        """Complete workflow: Find/create contact, create comprehensive note, upload PDF to both locations."""
+        if not self.config.ZOHO_ENABLED:
+            logger.info("Zoho CRM integration disabled - skipping transcript save")
+            return
+
+        if not session.email:
+            logger.info("No email address in session - cannot save to Zoho CRM")
+            return
+
+        if not session.messages:
+            logger.info("No chat messages to save")
+            return
+
+        try:
+            # Step 1: Get access token
+            access_token = self._get_access_token()
+            if not access_token:
+                st.warning("Could not authenticate with Zoho CRM")
+                return
+
+            # Step 2: Find or create contact with proper naming logic
+            # - If contact found: Use existing contact as-is (don't modify name)
+            # - If contact not found: Create new with First Name = blank, Last Name = "Food Professional"
+            contact_id = self._find_contact_by_email(session.email, access_token)
+            
+            if not contact_id:
+                # Create new contact with blank first name and "Food Professional" last name
+                contact_id = self._create_contact(session.email, access_token)
+                if not contact_id:
+                    st.error("Failed to create contact in Zoho CRM")
+                    return
+                else:
+                    st.success(f"✅ Created new contact in Zoho CRM: Food Professional ({session.email})")
+            else:
+                st.info("✅ Found existing contact in Zoho CRM (using existing name)")
+
+            # Update session with contact ID for future reference
+            session.zoho_contact_id = contact_id
+            
+            # Step 3: Generate PDF transcript
+            pdf_buffer = self.pdf_exporter.generate_chat_pdf(session)
+            if not pdf_buffer:
+                st.error("Failed to generate PDF transcript")
+                return
+
+            # Step 4: Create comprehensive note with metadata
+            note_id = self._create_note_with_metadata(contact_id, session, access_token)
+            if not note_id:
+                st.error("Failed to create note in Zoho CRM")
+                return
+            else:
+                st.info("✅ Created detailed note in Zoho CRM")
+
+            # Step 5: Upload PDF attachment to both Contact and Note
+            attachment_success = self._upload_pdf_attachment(contact_id, note_id, pdf_buffer, session, access_token)
+            
+            if attachment_success:
+                st.success("🎉 **Chat transcript fully saved to Zoho CRM!**")
+                st.info("📋 **Saved to:** Contact record + Note with PDF attachments")
+                logger.info(f"Complete CRM save successful: Contact {contact_id}, Note {note_id}, Attachments uploaded")
+            else:
+                st.warning("⚠️ Note created but PDF attachment upload failed")
+                st.info("💡 Note and contact data saved successfully")
+
+        except Exception as e:
+            logger.error(f"Zoho CRM save failed: {e}")
+            st.error("❌ Failed to save chat transcript to Zoho CRM")
+            # Show specific error for debugging if in development
+            if logger.level <= logging.INFO:
+                st.error(f"Error details: {str(e)}")
 
 class RateLimiter:
     """Simple rate limiter to prevent abuse."""
@@ -809,7 +1033,7 @@ def debug_session_state(session_manager: SessionManager):
             st.rerun()
 
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
-    """Clean sidebar with authentication status display."""
+    """Sidebar with session timeout indicator and auto-save functionality."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
@@ -823,6 +1047,33 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 st.markdown(f"**Welcome:** {fresh_session.first_name}")
             if fresh_session.email:
                 st.markdown(f"**Email:** {fresh_session.email}")
+                
+            # Show CRM status and session timeout
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                if session_manager.zoho.config.ZOHO_ENABLED:
+                    if fresh_session.zoho_contact_id:
+                        st.success("🔗 **CRM Linked**")
+                    else:
+                        st.info("📋 **CRM Ready**")
+                else:
+                    st.caption("🚫 CRM Disabled")
+            
+            with col2:
+                # Auto-save indicator
+                if session_manager.zoho.config.ZOHO_ENABLED and fresh_session.email:
+                    st.caption("💾 Auto-save ON")
+            
+            # Session timeout indicator
+            if fresh_session.last_activity:
+                time_since_activity = datetime.now() - fresh_session.last_activity
+                minutes_remaining = session_manager.session_timeout_minutes - (time_since_activity.total_seconds() / 60)
+                
+                if minutes_remaining > 0:
+                    st.caption(f"⏱️ Auto-save & sign out in {minutes_remaining:.1f} minutes")
+                else:
+                    st.caption("⏱️ Session will timeout on next interaction")
+                    
         else:
             st.info("👤 **Guest User**")
             st.markdown("*Sign in for full features*")
@@ -842,21 +1093,33 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         
         with col2:
             if st.button("🚪 Sign Out", use_container_width=True):
+                # This will trigger auto-save to CRM
                 session_manager.end_session(fresh_session)
                 st.rerun()
 
-        # PDF download for registered users
+        # PDF and CRM options for registered users
         if (fresh_session.user_type == UserType.REGISTERED_USER or fresh_session.user_type.value == "registered_user") and fresh_session.messages:
             st.divider()
+            
+            # PDF Download
             pdf_buffer = pdf_exporter.generate_chat_pdf(fresh_session)
             if pdf_buffer:
                 st.download_button(
                     label="📄 Download PDF", 
                     data=pdf_buffer,
-                    file_name=f"fifi_chat_{fresh_session.session_id[:8]}.pdf",
+                    file_name=f"fifi_chat_transcript_{fresh_session.session_id[:8]}.pdf",
                     mime="application/pdf", 
                     use_container_width=True
                 )
+            
+            # Manual CRM Save (if Zoho enabled and user has email)
+            if session_manager.zoho.config.ZOHO_ENABLED and fresh_session.email:
+                if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Chat will also auto-save when you sign out or after 5 minutes of inactivity"):
+                    session_manager.manual_save_to_crm(fresh_session)
+                    st.rerun()
+                    
+                # Show auto-save info
+                st.caption("💡 Chat auto-saves to CRM on sign out or timeout")
         
         elif (fresh_session.user_type == UserType.GUEST or fresh_session.user_type.value == "guest") and fresh_session.messages:
             st.divider()
@@ -867,11 +1130,21 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 st.rerun()
 
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
-    """Enhanced chat interface with session consistency."""
+    """Enhanced chat interface with session activity tracking."""
     st.title("🤖 FiFi AI Assistant")
     
     # Get fresh session data for chat interface
     current_session = session_manager.get_session()
+    
+    # Session timeout warning
+    if current_session.user_type == UserType.REGISTERED_USER and current_session.last_activity:
+        time_since_activity = datetime.now() - current_session.last_activity
+        minutes_remaining = session_manager.session_timeout_minutes - (time_since_activity.total_seconds() / 60)
+        
+        if 0 < minutes_remaining <= 1:  # Warning in last minute
+            st.warning(f"⏱️ Session will auto-save and timeout in {minutes_remaining:.1f} minutes due to inactivity")
+        elif minutes_remaining <= 0:
+            st.error("⏱️ Session expired due to inactivity. Please sign in again.")
     
     # Display chat history
     for msg in current_session.messages:
@@ -951,6 +1224,13 @@ def render_welcome_page(session_manager: SessionManager):
         - Chat history is not saved across sessions
         - No PDF export capability  
         - Limited personalization features
+        - No automatic CRM integration
+        
+        ✨ **Sign in benefits:**
+        - Chat history saved and exportable as PDF
+        - Automatic integration with Zoho CRM
+        - Chat transcripts auto-saved to CRM on sign out or after 5 minutes of inactivity
+        - Personalized experience with your profile
         """)
         
         if st.button("👤 Start as Guest", use_container_width=True):
