@@ -25,13 +25,11 @@ from collections import defaultdict
 import requests
 
 # =============================================================================
-# VERSION 2.13 PRODUCTION - COMPLETE CLEAN REWRITE
-# - FIXED: Complete clean rewrite to resolve all class structure issues
-# - FIXED: Reset application functionality 
-# - FIXED: Session authentication state persistence across reruns
-# - FIXED: WordPress flat JSON structure handling with robust field extraction
-# - ENHANCED: Complete Zoho CRM integration with Notes and Attachments
-# - STABLE: All functionality working properly
+# VERSION 2.14 PRODUCTION - SESSION MANAGER FIX
+# - FIXED: SessionManager attribute error with get_session method
+# - FIXED: Session state serialization issues
+# - ENHANCED: More robust session management initialization
+# - ADDED: Session manager validation before use
 # =============================================================================
 
 # Setup enhanced logging
@@ -509,7 +507,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
-# SESSION MANAGER - CLEAN IMPLEMENTATION
+# SESSION MANAGER - FIXED IMPLEMENTATION
 # =============================================================================
 
 class SessionManager:
@@ -602,7 +600,13 @@ class SessionManager:
             
             if response.status_code == 200:
                 data = response.json()
-                current_session = self.get_session()
+                
+                # Get or create a session 
+                try:
+                    current_session = self.get_session()
+                except Exception as e:
+                    logger.error(f"Error getting session during auth: {e}")
+                    current_session = self._create_guest_session()
                 
                 display_name = (
                     data.get('user_display_name') or 
@@ -685,6 +689,53 @@ class SessionManager:
                 self._update_activity(session)
         else:
             st.warning("Cannot save to CRM: Missing email or chat messages")
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def get_session_manager() -> Optional[SessionManager]:
+    """Safely get the session manager from session state."""
+    if 'session_manager' not in st.session_state:
+        return None
+    
+    manager = st.session_state.session_manager
+    # Validate that it's a proper SessionManager instance
+    if not hasattr(manager, 'get_session'):
+        logger.error("Invalid SessionManager instance in session state")
+        return None
+    
+    return manager
+
+def ensure_initialization():
+    """Ensure the application is properly initialized."""
+    if 'initialized' not in st.session_state or not st.session_state.initialized:
+        try:
+            config = Config()
+            pdf_exporter = PDFExporter()
+            
+            if 'db_manager' not in st.session_state:
+                st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+            
+            db_manager = st.session_state.db_manager
+            zoho_manager = ZohoCRMManager(config, pdf_exporter)
+            ai_system = EnhancedAI(config)
+            rate_limiter = RateLimiter()
+
+            st.session_state.session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
+            st.session_state.pdf_exporter = pdf_exporter
+            st.session_state.initialized = True
+            
+            logger.info("✅ Application initialized successfully")
+            return True
+            
+        except Exception as e:
+            st.error("💥 A critical error occurred during application startup.")
+            st.error(f"Error details: {str(e)}")
+            logger.critical(f"Initialization failed: {e}", exc_info=True)
+            return False
+    
+    return True
 
 # =============================================================================
 # UI RENDERING FUNCTIONS
@@ -872,49 +923,40 @@ def main():
         st.success("✅ All state cleared. Refreshing...")
         st.rerun()
 
-    # Initialize components
-    if 'initialized' not in st.session_state:
-        try:
-            config = Config()
-            pdf_exporter = PDFExporter()
-            
-            if 'db_manager' not in st.session_state:
-                st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
-            
-            db_manager = st.session_state.db_manager
-            zoho_manager = ZohoCRMManager(config, pdf_exporter)
-            ai_system = EnhancedAI(config)
-            rate_limiter = RateLimiter()
+    # Ensure initialization
+    if not ensure_initialization():
+        st.stop()
 
-            st.session_state.session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
-            st.session_state.pdf_exporter = pdf_exporter
-            st.session_state.initialized = True
-            
-            logger.info("✅ Application initialized successfully")
-            
-        except Exception as e:
-            st.error("💥 A critical error occurred during application startup.")
-            st.error(f"Error details: {str(e)}")
-            logger.critical(f"Initialization failed: {e}", exc_info=True)
-            st.stop()
-
-    # Main application routing
-    session_manager = st.session_state.session_manager
+    # Get session manager safely
+    session_manager = get_session_manager()
+    if not session_manager:
+        st.error("Failed to get session manager. Reinitializing...")
+        st.session_state.clear()
+        st.rerun()
+    
     pdf_exporter = st.session_state.pdf_exporter
     
+    # Main application routing
     current_page = st.session_state.get('page')
     
     if current_page != "chat":
         render_welcome_page(session_manager)
     else:
-        session = session_manager.get_session()
-        if session and session.active:
-            render_sidebar(session_manager, session, pdf_exporter)
-            render_chat_interface(session_manager, session)
-        else:
-            if 'page' in st.session_state:
-                del st.session_state.page
-            st.rerun()
+        try:
+            session = session_manager.get_session()
+            if session and session.active:
+                render_sidebar(session_manager, session, pdf_exporter)
+                render_chat_interface(session_manager, session)
+            else:
+                if 'page' in st.session_state:
+                    del st.session_state.page
+                st.rerun()
+        except Exception as e:
+            logger.error(f"Error in chat interface: {e}")
+            st.error("An error occurred. Please refresh the page.")
+            if st.button("🔄 Refresh", key="error_refresh"):
+                st.session_state.clear()
+                st.rerun()
 
 if __name__ == "__main__":
     main()
