@@ -1268,41 +1268,57 @@ def main():
             st.session_state.pdf_exporter = pdf_exporter
             st.session_state.initialized = True
             
+            # Clear any previous error flags
+            if 'show_emergency_reset' in st.session_state:
+                del st.session_state['show_emergency_reset']
+            
         except Exception as e:
             st.error("💥 A critical error occurred during application startup. Please check the logs.")
             logger.critical(f"Initialization failed: {e}", exc_info=True)
             st.stop()
 
-    # --- VERIFY SESSION MANAGER ---
-    # Handle potential session manager issues due to app updates
-    session_manager = st.session_state.get('session_manager')
-    if not session_manager or not hasattr(session_manager, 'get_session_timeout_minutes'):
-        st.warning("🔄 App updated - reinitializing session manager...")
-        # Force reinitialization
-        st.session_state.initialized = False
-        st.rerun()
-
     # --- PAGE ROUTING ---
+    session_manager = st.session_state.session_manager
     pdf_exporter = st.session_state.pdf_exporter
     
     current_page = st.session_state.get('page')
     
-    if current_page != "chat":
-        # Show welcome page
-        render_welcome_page(session_manager)
-    else:
-        # Show main chat interface
-        session = session_manager.get_session()
-        
-        # Verify we have a valid session
-        if session and session.active:
-            render_sidebar(session_manager, session, pdf_exporter)
-            render_chat_interface(session_manager, session)
+    try:
+        if current_page != "chat":
+            # Show welcome page
+            render_welcome_page(session_manager)
         else:
-            # Redirect to welcome if session is invalid
-            if 'page' in st.session_state:
-                del st.session_state.page
+            # Show main chat interface
+            session = session_manager.get_session()
+            
+            # Verify we have a valid session
+            if session and session.active:
+                render_sidebar(session_manager, session, pdf_exporter)
+                render_chat_interface(session_manager, session)
+            else:
+                # Redirect to welcome if session is invalid
+                if 'page' in st.session_state:
+                    del st.session_state.page
+                st.rerun()
+                
+    except AttributeError as e:
+        # Handle case where session_manager doesn't have required attributes
+        logger.error(f"Session manager attribute error: {e}")
+        st.session_state.show_emergency_reset = True
+        
+        st.error("⚠️ App compatibility issue detected. Please use the emergency reset option below.")
+        
+        if st.button("🔧 Emergency Reset App State", type="primary"):
+            # Clear all session state and reinitialize
+            keys_to_keep = []  # Don't keep any keys, full reset
+            for key in list(st.session_state.keys()):
+                if key not in keys_to_keep:
+                    del st.session_state[key]
+            st.success("✅ App state cleared. Refreshing...")
             st.rerun()
+            
+        st.info("💡 This usually happens after app updates. The reset will clear your current session but won't affect your saved data.")
+        st.stop()
 
 if __name__ == "__main__":
     main()
