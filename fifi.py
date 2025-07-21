@@ -551,15 +551,21 @@ class SessionManager:
             headers={'Content-Type': 'application/json'},
             timeout=15
         )
-        if response.status_code == 200:
-            data = response.json()
-            user_data = data.get('user', {})
-            session = UserSession(
-                session_id=str(uuid.uuid4()),
-                user_type=UserType.REGISTERED_USER,
-                email=user_data.get('user_email'),
-                first_name=user_data.get('user_nicename'),
-                wp_token=data.get('token')
+       if response.status_code == 200:
+        data = response.json()
+        user_data = data.get('user', {})
+        
+        # --- START OF FIX ---
+        # 1. Get the current session instead of creating a new one.
+        session = self.get_session() 
+
+        # 2. Update the existing session's attributes.
+        session.user_type = UserType.REGISTERED_USER
+        session.email = user_data.get('user_email')
+        session.first_name = user_data.get('user_nicename')
+        session.wp_token = data.get('token')
+        session.last_activity = datetime.now()
+        # --- END OF FIX ---
             )
             self.db.save_session(session)
             st.session_state.current_session_id = session.session_id
