@@ -829,23 +829,21 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         st.title("🎛️ Dashboard")
         
         # FORCE FRESH SESSION DATA - Get the latest session from database
-        fresh_session = session_manager.get_session()
-        
-        # Use the fresh session data instead of the passed session
-        current_session = fresh_session
-        
-        # FIXED: Proper user status display with fresh data
-        if current_session.user_type == UserType.REGISTERED_USER:
-            st.success("✅ **Authenticated User**")
-            if current_session.first_name:
-                st.markdown(f"**Welcome:** {current_session.first_name}")
-            else:
-                st.warning("⚠️ No display name available")
-            if current_session.email:
-                st.markdown(f"**Email:** {current_session.email}")
-        else:
-            st.info("👤 **Guest User**")
-            st.markdown("*Sign in for full features*")
+        # In your render_sidebar function, replace this section:
+
+# FORCE FRESH SESSION DATA - Get the latest session from database
+fresh_session = session_manager.get_session()
+
+# FIXED: Force the conditional to use the fresh session data
+if fresh_session.user_type == UserType.REGISTERED_USER:
+    st.success("✅ **Authenticated User**") 
+    if fresh_session.first_name:
+        st.markdown(f"**Welcome:** {fresh_session.first_name}")
+    if fresh_session.email:
+        st.markdown(f"**Email:** {fresh_session.email}")
+else:
+    st.info("👤 **Guest User**")
+    st.markdown("*Sign in for full features*")
         
         # Session Info
         st.divider()
