@@ -21,7 +21,7 @@ import html
 from urllib.parse import urlparse
 # --- NEW: ReportLab for PDF Generation ---
 try:
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ParagraphStyle
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.lib.units import inch
     from reportlab.lib.pagesizes import letter
