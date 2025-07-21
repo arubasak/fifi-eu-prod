@@ -540,40 +540,77 @@ class SessionManager:
 # as the other methods like get_session and get_ai_response.
 
     @handle_api_errors("Authentication", "WordPress Login")
-    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        if not self.config.WORDPRESS_URL:
-            st.error("Authentication service is not configured.")
-            return None
-        if not self.rate_limiter.is_allowed(f"auth_{username}"):
-            st.error("Too many login attempts. Please wait.")
-            return None
+def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+    if not self.config.WORDPRESS_URL:
+        st.error("Authentication service is not configured.")
+        return None
+    if not self.rate_limiter.is_allowed(f"auth_{username}"):
+        st.error("Too many login attempts. Please wait.")
+        return None
 
+    # Clean credentials (don't use sanitize_input for auth!)
+    clean_username = username.strip()
+    clean_password = password.strip()
+
+    try:
         response = requests.post(
             f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token",
-            json={'username': sanitize_input(username), 'password': password},
+            json={'username': clean_username, 'password': clean_password},
             headers={'Content-Type': 'application/json'},
             timeout=15
         )
+        
         if response.status_code == 200:
             data = response.json()
             user_data = data.get('user', {})
             
-            # FIX: Get the current session instead of creating a new one.
-            session = self.get_session() 
-
-            # Update the existing session's attributes to upgrade it to an authenticated user.
+            # DEBUG: Print the user data to see what's available
+            logger.info(f"WordPress user data: {json.dumps(user_data, indent=2)}")
+            
+            # Get the current session
+            session = self.get_session()
+            
+            # Update the session to make it authenticated
             session.user_type = UserType.REGISTERED_USER
             session.email = user_data.get('user_email')
-            session.first_name = user_data.get('user_nicename')
+            
+            # FIX 1: Use user_display_name instead of user_nicename
+            session.first_name = user_data.get('user_display_name', 
+                                               user_data.get('user_nicename', 
+                                                           clean_username))
+            
             session.wp_token = data.get('token')
             session.last_activity = datetime.now()
-
+            
+            # Save the updated session
             self.db.save_session(session)
+            
+            # FIX 2: Force update the session in Streamlit's session state
+            # This ensures the updated session is immediately available
+            if hasattr(st.session_state, 'current_session_id'):
+                st.session_state.current_session_id = session.session_id
+            
+            # FIX 3: Store the updated session object directly in session state temporarily
+            # This ensures immediate access to the updated session
+            st.session_state.temp_authenticated_session = session
+            
             st.success(f"Welcome back, {session.first_name}!")
+            logger.info(f"User authenticated successfully: {session.first_name}")
             return session
         else:
-            st.error("Invalid username or password.")
+            try:
+                error_data = response.json()
+                error_message = error_data.get('message', 'Authentication failed')
+                st.error(f"Authentication failed: {error_message}")
+                logger.error(f"Auth failed: {error_message}")
+            except:
+                st.error(f"Authentication failed (HTTP {response.status_code})")
             return None
+            
+    except Exception as e:
+        st.error(f"Authentication error: {str(e)}")
+        logger.error(f"Auth exception: {str(e)}")
+        return None
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
         if not self.rate_limiter.is_allowed(session.session_id):
             return {"content": "Rate limit exceeded. Please wait.", "success": False}
