@@ -828,90 +828,72 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
-        # FORCE FRESH SESSION DATA - Get the latest session from database
-        # In your render_sidebar function, replace this section:
+        # Get the absolute latest session data from the source of truth (the database)
+        fresh_session = session_manager.get_session()
 
-# FORCE FRESH SESSION DATA - Get the latest session from database
-fresh_session = session_manager.get_session()
-
-# FIXED: Force the conditional to use the fresh session data
-if fresh_session.user_type == UserType.REGISTERED_USER:
-    st.success("✅ **Authenticated User**") 
-    if fresh_session.first_name:
-        st.markdown(f"**Welcome:** {fresh_session.first_name}")
-    if fresh_session.email:
-        st.markdown(f"**Email:** {fresh_session.email}")
-else:
-    st.info("👤 **Guest User**")
-    st.markdown("*Sign in for full features*")
+        # Use the fresh session data for rendering the UI
+        if fresh_session.user_type == UserType.REGISTERED_USER:
+            st.success("✅ **Authenticated User**") 
+            if fresh_session.first_name:
+                st.markdown(f"**Welcome:** {fresh_session.first_name}")
+            if fresh_session.email:
+                st.markdown(f"**Email:** {fresh_session.email}")
+        else:
+            st.info("👤 **Guest User**")
+            st.markdown("*Sign in for full features*")
         
-        # Session Info
+        # --- START OF FIX ---
+        # 1. Corrected the indentation of this entire block.
+        # 2. Replaced the undefined `current_session` with the correct `fresh_session`.
+        
         st.divider()
-        st.markdown(f"**Messages:** {len(current_session.messages)}")
-        st.markdown(f"**Session:** `{current_session.session_id[:8]}...`")
+        st.markdown(f"**Messages:** {len(fresh_session.messages)}")
+        st.markdown(f"**Session:** `{fresh_session.session_id[:8]}...`")
         
-        # Enhanced Debug Info (temporary - remove in production)
-        with st.expander("🔧 Debug Session Info", expanded=True):  # Expanded by default for debugging
-            st.write(f"**User Type:** `{current_session.user_type.value}`")
-            st.write(f"**Display Name:** `{current_session.first_name or 'None'}`")
-            st.write(f"**Email:** `{current_session.email or 'None'}`")
-            st.write(f"**Has Token:** `{bool(current_session.wp_token)}`")
-            st.write(f"**Session ID:** `{current_session.session_id}`")
-            st.write(f"**Active:** `{current_session.active}`")
-            st.write(f"**Last Activity:** {current_session.last_activity.strftime('%Y-%m-%d %H:%M:%S')}")
-            
-            # Show database type
+        with st.expander("🔧 Debug Session Info"):
+            st.write(f"**User Type:** `{fresh_session.user_type.value}`")
+            st.write(f"**Display Name:** `{fresh_session.first_name or 'None'}`")
+            st.write(f"**Email:** `{fresh_session.email or 'None'}`")
+            st.write(f"**Has Token:** `{bool(fresh_session.wp_token)}`")
+            st.write(f"**Active:** `{fresh_session.active}`")
             db_type = "Cloud Database" if session_manager.db.use_cloud else "Local Memory"
             st.write(f"**Database Type:** `{db_type}`")
-            
-            # Test buttons
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🔄 Force Refresh", key="force_refresh_sidebar"):
-                    st.rerun()
-            
-            with col2:
-                if st.button("🆔 New Session", key="new_session_sidebar"):
-                    for key in ['current_session_id', 'cached_session', 'temp_authenticated_session']:
-                        if key in st.session_state:
-                            del st.session_state[key]
-                    st.rerun()
+            if st.button("🔄 Force Refresh", key="force_refresh_sidebar"):
+                st.rerun()
         
         st.divider()
         
-        # Action Buttons
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🗑️ Clear Chat", use_container_width=True):
-                session_manager.clear_chat_history(current_session)
+                session_manager.clear_chat_history(fresh_session)
                 st.rerun()
         
         with col2:
             if st.button("🚪 Sign Out", use_container_width=True):
-                session_manager.end_session(current_session)
+                session_manager.end_session(fresh_session)
                 st.rerun()
 
-        # PDF Download for authenticated users
-        if current_session.user_type == UserType.REGISTERED_USER and current_session.messages:
+        if fresh_session.user_type == UserType.REGISTERED_USER and fresh_session.messages:
             st.divider()
-            pdf_buffer = pdf_exporter.generate_chat_pdf(current_session)
+            pdf_buffer = pdf_exporter.generate_chat_pdf(fresh_session)
             if pdf_buffer:
                 st.download_button(
                     label="📄 Download PDF", 
                     data=pdf_buffer,
-                    file_name=f"fifi_chat_{current_session.session_id[:8]}.pdf",
+                    file_name=f"fifi_chat_{fresh_session.session_id[:8]}.pdf",
                     mime="application/pdf", 
                     use_container_width=True
                 )
         
-        # Sign-in prompt for guests
-        elif current_session.user_type == UserType.GUEST and current_session.messages:
+        elif fresh_session.user_type == UserType.GUEST and fresh_session.messages:
             st.divider()
             st.info("💡 **Sign in** to save chat history and export PDF!")
             if st.button("🔑 Go to Sign In", use_container_width=True):
                 if 'page' in st.session_state:
                     del st.session_state.page
                 st.rerun()
+        # --- END OF FIX ---
 
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
     st.title("🤖 FiFi AI Assistant")
