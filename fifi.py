@@ -325,6 +325,11 @@ class DatabaseManager:
             else:
                 session = self.local_sessions.get(session_id)
                 if session:
+                    # ENSURE USER_TYPE IS ALWAYS AN ENUM
+                    if isinstance(session.user_type, str):
+                        session.user_type = UserType(session.user_type)
+                        logger.info(f"🔧 Fixed user_type enum for session {session_id[:8]}...")
+                    
                     logger.info(f"✅ Loaded from local: {session_id[:8]}... | Type: {session.user_type.value} | Name: {session.first_name or 'None'}")
                 else:
                     logger.warning(f"❌ Session {session_id[:8]}... not found in local storage")
@@ -904,11 +909,13 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         
         # IMMEDIATE DEBUG INFO AT TOP
         st.write(f"**Debug:** Session Type = `{fresh_session.user_type.value}`")
+        st.write(f"**Debug:** Session Type Object = `{type(fresh_session.user_type)}`")
+        st.write(f"**Debug:** Is Registered User = `{fresh_session.user_type == UserType.REGISTERED_USER}`")
         st.write(f"**Debug:** Display Name = `{fresh_session.first_name or 'None'}`")
         st.write(f"**Debug:** Session ID = `{fresh_session.session_id[:8]}...`")
 
-        # User status display
-        if fresh_session.user_type == UserType.REGISTERED_USER:
+        # User status display - FIXED ENUM COMPARISON
+        if fresh_session.user_type == UserType.REGISTERED_USER or fresh_session.user_type.value == "registered_user":
             st.success("✅ **Authenticated User**") 
             if fresh_session.first_name:
                 st.markdown(f"**Welcome:** {fresh_session.first_name}")
@@ -954,8 +961,8 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 session_manager.end_session(fresh_session)
                 st.rerun()
 
-        # PDF download for registered users
-        if fresh_session.user_type == UserType.REGISTERED_USER and fresh_session.messages:
+        # PDF download for registered users - FIXED ENUM COMPARISON
+        if (fresh_session.user_type == UserType.REGISTERED_USER or fresh_session.user_type.value == "registered_user") and fresh_session.messages:
             st.divider()
             pdf_buffer = pdf_exporter.generate_chat_pdf(fresh_session)
             if pdf_buffer:
@@ -967,7 +974,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     use_container_width=True
                 )
         
-        elif fresh_session.user_type == UserType.GUEST and fresh_session.messages:
+        elif (fresh_session.user_type == UserType.GUEST or fresh_session.user_type.value == "guest") and fresh_session.messages:
             st.divider()
             st.info("💡 **Sign in** to save chat history and export PDF!")
             if st.button("🔑 Go to Sign In", use_container_width=True):
