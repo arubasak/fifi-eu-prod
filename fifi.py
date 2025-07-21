@@ -25,7 +25,8 @@ from collections import defaultdict
 import requests
 
 # =============================================================================
-# VERSION 2.10 PRODUCTION - FIXED CONTACT CREATION LOGIC
+# VERSION 2.11 PRODUCTION - FIXED SESSION TIMEOUT ATTRIBUTE ERROR
+# - FIXED: AttributeError for 'session_timeout_minutes' with proper initialization and fallback
 # - FIXED: Session authentication state persistence across reruns
 # - FIXED: WordPress flat JSON structure handling with robust field extraction
 # - FIXED: Enum comparison issues in UI rendering logic
@@ -1067,7 +1068,8 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
             # Session timeout indicator
             if fresh_session.last_activity:
                 time_since_activity = datetime.now() - fresh_session.last_activity
-                minutes_remaining = session_manager.session_timeout_minutes - (time_since_activity.total_seconds() / 60)
+                timeout_minutes = session_manager.get_session_timeout_minutes()
+                minutes_remaining = timeout_minutes - (time_since_activity.total_seconds() / 60)
                 
                 if minutes_remaining > 0:
                     st.caption(f"⏱️ Auto-save & sign out in {minutes_remaining:.1f} minutes")
@@ -1139,7 +1141,8 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
     # Session timeout warning
     if current_session.user_type == UserType.REGISTERED_USER and current_session.last_activity:
         time_since_activity = datetime.now() - current_session.last_activity
-        minutes_remaining = session_manager.session_timeout_minutes - (time_since_activity.total_seconds() / 60)
+        timeout_minutes = session_manager.get_session_timeout_minutes()
+        minutes_remaining = timeout_minutes - (time_since_activity.total_seconds() / 60)
         
         if 0 < minutes_remaining <= 1:  # Warning in last minute
             st.warning(f"⏱️ Session will auto-save and timeout in {minutes_remaining:.1f} minutes due to inactivity")
@@ -1270,8 +1273,16 @@ def main():
             logger.critical(f"Initialization failed: {e}", exc_info=True)
             st.stop()
 
+    # --- VERIFY SESSION MANAGER ---
+    # Handle potential session manager issues due to app updates
+    session_manager = st.session_state.get('session_manager')
+    if not session_manager or not hasattr(session_manager, 'get_session_timeout_minutes'):
+        st.warning("🔄 App updated - reinitializing session manager...")
+        # Force reinitialization
+        st.session_state.initialized = False
+        st.rerun()
+
     # --- PAGE ROUTING ---
-    session_manager = st.session_state.session_manager
     pdf_exporter = st.session_state.pdf_exporter
     
     current_page = st.session_state.get('page')
