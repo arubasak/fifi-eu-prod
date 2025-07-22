@@ -10,6 +10,7 @@ import io
 import html
 import jwt
 import threading
+import copy  # <-- SOLUTION: Imported for deep copy
 from enum import Enum
 from urllib.parse import urlparse
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -385,49 +386,47 @@ class ZohoCRMManager:
         self._access_token = None
         self._token_expiry = None
 
-    def _get_access_token(self, force_refresh: bool = False) -> Optional[str]:
-        """Get access token with caching and retry logic."""
-        if not self.config.ZOHO_ENABLED: 
+    # SOLUTION: New method to get token with a configurable timeout
+    def _get_access_token_with_timeout(self, force_refresh: bool = False, timeout: int = 15) -> Optional[str]:
+        """Get access token with caching, retry logic, and a configurable timeout."""
+        if not self.config.ZOHO_ENABLED:
             return None
+
+        if not force_refresh and self._access_token and self._token_expiry and datetime.now() < self._token_expiry:
+            return self._access_token
+        
+        try:
+            logger.info(f"Requesting new Zoho access token with a {timeout}s timeout...")
+            response = requests.post(
+                "https://accounts.zoho.com/oauth/v2/token",
+                data={
+                    'refresh_token': self.config.ZOHO_REFRESH_TOKEN,
+                    'client_id': self.config.ZOHO_CLIENT_ID,
+                    'client_secret': self.config.ZOHO_CLIENT_SECRET,
+                    'grant_type': 'refresh_token'
+                },
+                timeout=timeout # Using configurable timeout
+            )
+            response.raise_for_status()
+            data = response.json()
             
-        # Check if we have a valid cached token
-        if not force_refresh and self._access_token and self._token_expiry:
-            if datetime.now() < self._token_expiry:
-                logger.debug(f"Using cached Zoho token (expires in {(self._token_expiry - datetime.now()).seconds}s)")
-                return self._access_token
-        
-        # Get new token
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Requesting new Zoho access token (attempt {attempt + 1}/{max_retries})")
-                response = requests.post(
-                    "https://accounts.zoho.com/oauth/v2/token",
-                    data={
-                        'refresh_token': self.config.ZOHO_REFRESH_TOKEN,
-                        'client_id': self.config.ZOHO_CLIENT_ID,
-                        'client_secret': self.config.ZOHO_CLIENT_SECRET,
-                        'grant_type': 'refresh_token'
-                    }, 
-                    timeout=10
-                )
-                response.raise_for_status()
-                data = response.json()
-                
-                self._access_token = data.get('access_token')
-                # Zoho tokens typically expire in 1 hour, we'll refresh after 50 minutes
-                self._token_expiry = datetime.now() + timedelta(minutes=50)
-                
-                logger.info(f"Successfully obtained Zoho access token (attempt {attempt + 1})")
-                return self._access_token
-                
-            except Exception as e:
-                logger.error(f"Failed to get Zoho access token (attempt {attempt + 1}/{max_retries}): {e}")
-                if attempt == max_retries - 1:
-                    raise
-                time.sleep(2 ** attempt)  # Exponential backoff
-        
-        return None
+            self._access_token = data.get('access_token')
+            self._token_expiry = datetime.now() + timedelta(minutes=50)
+            
+            logger.info("Successfully obtained Zoho access token.")
+            return self._access_token
+            
+        except requests.exceptions.Timeout:
+            logger.error(f"Token request timed out after {timeout} seconds.")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get Zoho access token: {e}")
+            raise
+
+    def _get_access_token(self, force_refresh: bool = False) -> Optional[str]:
+        """Legacy get access token method, now calls the new one with a default timeout."""
+        return self._get_access_token_with_timeout(force_refresh=force_refresh, timeout=15)
+
 
     def _find_contact_by_email(self, email: str, access_token: str) -> Optional[str]:
         """Find contact with retry on token expiry."""
@@ -615,82 +614,121 @@ class ZohoCRMManager:
             logger.error(f"Error adding note: {e}")
             
         return False
+        
+    # SOLUTION: New method to validate session data before saving
+    def _validate_session_data(self, session: UserSession) -> bool:
+        """Validate critical session data before attempting a save to CRM."""
+        try:
+            if not session:
+                logger.error("SESSION VALIDATION FAILED: Session object is None.")
+                return False
+            if not session.session_id:
+                logger.error("SESSION VALIDATION FAILED: Session ID is missing.")
+                return False
+            if not session.email or not isinstance(session.email, str):
+                logger.error(f"SESSION VALIDATION FAILED: Invalid or missing email: {session.email}")
+                return False
+            if not session.messages or not isinstance(session.messages, list):
+                logger.error(f"SESSION VALIDATION FAILED: Invalid or missing messages list: {type(session.messages)}")
+                return False
+            
+            # Check for at least one valid message
+            if not any(isinstance(msg, dict) and 'role' in msg and 'content' in msg for msg in session.messages):
+                logger.error("SESSION VALIDATION FAILED: Messages list is empty or contains malformed message objects.")
+                return False
+                
+            logger.info("Session data validation successful.")
+            return True
+        except Exception as e:
+            logger.error(f"SESSION VALIDATION CRASHED: An unexpected error occurred during validation: {e}")
+            return False
 
+
+    # SOLUTION: Rewritten save method with retries, timeouts, and validation
     def save_chat_transcript_sync(self, session: UserSession, trigger_reason: str) -> bool:
         """
-        Synchronous save method specifically for non-interactive triggers.
+        Synchronous save method with retries, timeouts, and validation.
         Returns True on success, False on failure.
         """
         logger.info("=" * 80)
         logger.info(f"ZOHO SAVE START - Trigger: {trigger_reason}")
         logger.info(f"Session ID: {session.session_id}")
-        logger.info(f"User: {session.first_name} ({session.email})")
-        logger.info(f"Message Count: {len(session.messages) if session.messages else 0}")
-        logger.info("=" * 80)
         
-        if not self.config.ZOHO_ENABLED or not session.email or not session.messages:
-            logger.info(f"Skipping Zoho save - prerequisites not met. Trigger: {trigger_reason}")
-            return False
+        # Determine retry strategy based on trigger
+        max_retries = 3 if trigger_reason == "Session Timeout" else 1
+        
+        for attempt in range(max_retries):
+            logger.info(f"Save attempt {attempt + 1}/{max_retries}")
+            try:
+                # STEP 0: Validate session data on each attempt
+                if not self._validate_session_data(session):
+                    logger.error("Aborting save due to failed session data validation.")
+                    return False # No point in retrying if data is bad
 
-        try:
-            # Step 1: Get access token (fresh token for each save)
-            logger.info("Step 1: Getting access token...")
-            access_token = self._get_access_token(force_refresh=True)  # Always get fresh token
-            if not access_token:
-                logger.error("Failed to get Zoho access token")
-                return False
+                if not self.config.ZOHO_ENABLED:
+                    logger.info("Skipping Zoho save - feature is not enabled.")
+                    return False
 
-            # Step 2: Find or create contact
-            logger.info("Step 2: Finding/creating contact...")
-            contact_id = self._find_contact_by_email(session.email, access_token)
-            if not contact_id:
-                contact_id = self._create_contact(session.email, access_token, session.first_name)
-                
-            if not contact_id:
-                logger.error("Failed to find or create contact")
-                return False
-                
-            session.zoho_contact_id = contact_id
+                # STEP 1: Get access token with a shorter timeout for background saves
+                token_timeout = 10 if trigger_reason == "Session Timeout" else 15
+                access_token = self._get_access_token_with_timeout(force_refresh=True, timeout=token_timeout)
+                if not access_token:
+                    logger.error(f"Failed to get Zoho access token on attempt {attempt + 1}.")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt) # Exponential backoff
+                        continue
+                    return False
 
-            # Step 3: Generate PDF
-            logger.info("Step 3: Generating PDF...")
-            pdf_buffer = self.pdf_exporter.generate_chat_pdf(session)
-            if not pdf_buffer:
-                logger.error("Failed to generate PDF")
-                return False
+                # STEP 2: Find or create contact
+                contact_id = self._find_contact_by_email(session.email, access_token)
+                if not contact_id:
+                    contact_id = self._create_contact(session.email, access_token, session.first_name)
+                if not contact_id:
+                    logger.error("Failed to find or create contact.")
+                    # This is a critical failure, likely not transient, so we don't retry
+                    return False
+                session.zoho_contact_id = contact_id
 
-            # Step 4: Upload attachment
-            logger.info("Step 4: Uploading PDF attachment...")
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-            pdf_filename = f"fifi_chat_transcript_{timestamp}.pdf"
-            
-            upload_success = self._upload_attachment(contact_id, pdf_buffer, access_token, pdf_filename)
-            if not upload_success:
-                logger.warning("Failed to upload PDF attachment, continuing with note only")
+                # STEP 3: Generate PDF
+                pdf_buffer = self.pdf_exporter.generate_chat_pdf(session)
+                if not pdf_buffer:
+                    logger.error("Failed to generate PDF.")
+                    return False
 
-            # Step 5: Add note
-            logger.info("Step 5: Adding note to contact...")
-            note_title = f"FiFi AI Chat Transcript from {timestamp} ({trigger_reason})"
-            note_content = self._generate_note_content(session, upload_success, trigger_reason)
-            
-            note_success = self._add_note(contact_id, note_title, note_content, access_token)
-            if not note_success:
-                logger.error("Failed to add note to contact")
-                return False
+                # STEP 4: Upload attachment
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+                pdf_filename = f"fifi_chat_transcript_{timestamp}.pdf"
+                upload_success = self._upload_attachment(contact_id, pdf_buffer, access_token, pdf_filename)
+                if not upload_success:
+                    logger.warning("Failed to upload PDF attachment, continuing with note only.")
 
-            logger.info("=" * 80)
-            logger.info(f"ZOHO SAVE COMPLETED SUCCESSFULLY")
-            logger.info(f"Contact ID: {contact_id}")
-            logger.info(f"PDF Uploaded: {upload_success}")
-            logger.info("=" * 80)
-            return True
+                # STEP 5: Add note
+                note_title = f"FiFi AI Chat Transcript from {timestamp} ({trigger_reason})"
+                note_content = self._generate_note_content(session, upload_success, trigger_reason)
+                note_success = self._add_note(contact_id, note_title, note_content, access_token)
+                if not note_success:
+                    logger.error("Failed to add note to contact.")
+                    return False # A failure here means the save was incomplete
 
-        except Exception as e:
-            logger.error("=" * 80)
-            logger.error(f"ZOHO SAVE FAILED WITH EXCEPTION")
-            logger.error(f"Error: {type(e).__name__}: {str(e)}")
-            logger.error("=" * 80, exc_info=True)
-            return False
+                logger.info("=" * 80)
+                logger.info(f"ZOHO SAVE COMPLETED SUCCESSFULLY on attempt {attempt + 1}")
+                logger.info(f"Contact ID: {contact_id}")
+                logger.info("=" * 80)
+                return True # Success!
+
+            except Exception as e:
+                logger.error("=" * 80)
+                logger.error(f"ZOHO SAVE FAILED on attempt {attempt + 1} with an exception.")
+                logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
+                logger.error("=" * 80)
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt) # Exponential backoff before next retry
+                else:
+                    logger.error("Max retries reached. Aborting save.")
+                    return False
+        
+        return False # Should not be reached, but as a fallback
+
 
     def _generate_note_content(self, session: UserSession, attachment_uploaded: bool, trigger_reason: str) -> str:
         """Generate note content with session summary."""
@@ -1225,7 +1263,7 @@ class EnhancedAI:
 
         # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short or inline citations present)
         if not has_real_citations and not has_inline_citations:
-            if "[1]" not in content_raw and "**Sources:**" not in content_raw:
+            if "[1]" not in content_raw and "**Sources:**" in content_raw:
                 if len(content_raw.strip()) > 30:
                     return True
 
@@ -1442,16 +1480,12 @@ class SessionManager:
             logger.info("SAVE SKIPPED: Zoho is not enabled")
             return
 
-        # Determine if this is interactive
         is_interactive = trigger_reason in ["Manual Sign Out", "Manual Save to Zoho CRM"]
 
         try:
             if is_interactive:
-                # Interactive save with UI feedback
                 with st.spinner(f"💾 Saving chat to CRM ({trigger_reason.lower()})..."):
-                    # Create a fresh Zoho manager instance to ensure fresh token
-                    temp_zoho = ZohoCRMManager(self.zoho.config, self.zoho.pdf_exporter)
-                    success = temp_zoho.save_chat_transcript_sync(session, trigger_reason)
+                    success = self.zoho.save_chat_transcript_sync(session, trigger_reason)
                 
                 if success:
                     st.success("✅ Chat saved to Zoho CRM!")
@@ -1462,49 +1496,23 @@ class SessionManager:
             else:
                 # Non-interactive save (timeout, browser close)
                 logger.info(f"Starting non-interactive save...")
-                
-                # CRITICAL: Create a fresh Zoho manager to avoid stale tokens
-                temp_zoho = ZohoCRMManager(self.zoho.config, self.zoho.pdf_exporter)
-                
-                # Add timeout to prevent hanging
-                import signal
-                
-                def timeout_handler(signum, frame):
-                    raise TimeoutError("Zoho save operation timed out")
-                
-                # Set 30-second timeout for entire save operation
-                if hasattr(signal, 'SIGALRM'):  # Unix-like systems
-                    signal.signal(signal.SIGALRM, timeout_handler)
-                    signal.alarm(30)
-                
-                try:
-                    success = temp_zoho.save_chat_transcript_sync(session, trigger_reason)
-                    
-                    if hasattr(signal, 'SIGALRM'):
-                        signal.alarm(0)  # Cancel alarm
-                    
-                    if success:
-                        logger.info("SAVE COMPLETED: Non-interactive save successful")
-                    else:
-                        logger.error("SAVE FAILED: Non-interactive save failed")
-                        
-                except TimeoutError:
-                    logger.error("SAVE FAILED: Operation timed out after 30 seconds")
-                    if hasattr(signal, 'SIGALRM'):
-                        signal.alarm(0)
+                success = self.zoho.save_chat_transcript_sync(session, trigger_reason)
+                if success:
+                    logger.info("SAVE COMPLETED: Non-interactive save successful")
+                else:
+                    logger.error("SAVE FAILED: Non-interactive save failed")
                     
         except Exception as e:
             logger.error(f"SAVE FAILED: Unexpected error - {type(e).__name__}: {str(e)}", exc_info=True)
-            
             if is_interactive:
                 st.error(f"❌ An error occurred while saving: {str(e)}")
-        
         finally:
             logger.info(f"=== AUTO SAVE TO CRM ENDED ===\n")
 
+    # SOLUTION: Rewritten method with deep copy for session backup
     def get_session(self) -> UserSession:
         """
-        FIXED: Enhanced session retrieval with guaranteed save on timeout
+        Enhanced session retrieval with guaranteed save on timeout using a deep copy backup.
         """
         session_id = st.session_state.get('current_session_id')
         
@@ -1512,41 +1520,40 @@ class SessionManager:
             session = self.db.load_session(session_id)
             if session and session.active:
                 if self._is_session_expired(session):
-                    logger.info(f"Session {session_id[:8]}... expired due to inactivity")
+                    logger.info(f"Session {session_id[:8]}... expired due to inactivity.")
                     
-                    # CRITICAL FIX: Ensure session is still valid before save
+                    # Check if session is eligible for saving before creating a backup
                     if (session.user_type == UserType.REGISTERED_USER and 
                         session.email and 
                         session.messages):
                         
-                        logger.info("Attempting to save expired session to CRM...")
+                        logger.info("Session is eligible for saving. Creating a deep copy backup.")
                         
-                        # Create a copy of session data in case it gets cleared
-                        session_backup = UserSession(
-                            session_id=session.session_id,
-                            user_type=session.user_type,
-                            email=session.email,
-                            first_name=session.first_name,
-                            zoho_contact_id=session.zoho_contact_id,
-                            messages=session.messages.copy(),  # Important: copy the list
-                            created_at=session.created_at,
-                            last_activity=session.last_activity
-                        )
+                        # CRITICAL FIX: Create a deep copy to prevent data corruption
+                        # during the save process, which can be affected by Streamlit's state.
+                        session_backup = copy.deepcopy(session)
                         
+                        logger.info("Attempting to save expired session to CRM using the backup...")
                         try:
-                            # Use the backup for save to prevent data loss
+                            # Use the immutable backup for the save operation
                             self._auto_save_to_crm(session_backup, "Session Timeout")
                         except Exception as e:
-                            logger.error(f"Critical error during timeout save: {e}", exc_info=True)
+                            logger.error(f"CRITICAL ERROR during timeout save logic: {e}", exc_info=True)
+                    else:
+                        logger.info("Session expired but was not eligible for saving (not a registered user, no email, or no messages).")
                     
-                    # End session after save attempt
+                    # End the original session after the save attempt
                     self._end_session_internal(session)
+                    # Create and return a fresh guest session
                     return self._create_guest_session()
                 else:
+                    # Session is active and not expired, update activity and return it
                     self._update_activity(session)
                     return session
         
+        # No session_id or session not found/inactive, create a new guest session
         return self._create_guest_session()
+
 
     def _end_session_internal(self, session: UserSession):
         session.active = False
@@ -1768,9 +1775,10 @@ def render_auto_logout_component(timeout_seconds: int):
     """
     components.html(js_code, height=0, width=0)
 
+# SOLUTION: Updated JavaScript to prevent redundant save calls
 def render_browser_close_component(session_id: str):
     """
-    Enhanced browser close detection with multiple fallback methods.
+    Enhanced browser close detection that avoids redundant saves.
     """
     if not session_id:
         return
@@ -1779,44 +1787,51 @@ def render_browser_close_component(session_id: str):
     <script>
     (function() {{
         if (window.browserCloseListenerAdded) return;
+        window.browserCloseListenerAdded = true;
         
         const sessionId = '{session_id}';
         const baseUrl = window.location.origin + window.location.pathname;
-        
-        // Method 1: Beacon API (most reliable)
-        function sendBeacon() {{
-            const url = `${{baseUrl}}?event=close&session_id=${{sessionId}}`;
-            if (navigator.sendBeacon) {{
-                navigator.sendBeacon(url);
-            }} else {{
-                // Fallback to sync XMLHttpRequest
-                const xhr = new XMLHttpRequest();
-                xhr.open('GET', url, false); // Synchronous
-                try {{
-                    xhr.send();
-                }} catch(e) {{
-                    console.error('Failed to send close event:', e);
+        let saveHasBeenTriggered = false;
+
+        function sendBeaconRequest() {{
+            // This function is the core of the save-on-close logic.
+            // It uses navigator.sendBeacon, which is designed for this exact purpose.
+            if (!saveHasBeenTriggered) {{
+                saveHasBeenTriggered = true;
+                const url = `${{baseUrl}}?event=close&session_id=${{sessionId}}`;
+                if (navigator.sendBeacon) {{
+                    navigator.sendBeacon(url);
+                }} else {{
+                    // Fallback for older browsers
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', url, false); // Synchronous is required for beforeunload
+                    try {{
+                        xhr.send();
+                    }} catch(e) {{
+                        console.error('Failed to send close event via XHR:', e);
+                    }}
                 }}
             }}
         }}
         
-        // Method 2: Page visibility change (backup)
-        document.addEventListener('visibilitychange', function() {{
+        // 'visibilitychange' is a modern and reliable event for when a tab is hidden.
+        document.addEventListener('visibilitychange', () => {{
             if (document.visibilityState === 'hidden') {{
-                sendBeacon();
+                sendBeaconRequest();
             }}
         }});
         
-        // Method 3: Traditional unload events
-        window.addEventListener('pagehide', sendBeacon);
-        window.addEventListener('beforeunload', sendBeacon);
-        
-        // Mark as added
-        window.browserCloseListenerAdded = true;
+        // 'pagehide' is the recommended event for session cleanup on mobile.
+        window.addEventListener('pagehide', sendBeaconRequest, {{capture: true}});
+
+        // 'beforeunload' is a fallback for desktop browsers but is less reliable.
+        window.addEventListener('beforeunload', sendBeaconRequest, {{capture: true}});
+
     }})();
     </script>
     """
     components.html(js_code, height=0, width=0)
+
 
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     with st.sidebar:
