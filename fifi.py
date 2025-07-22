@@ -1172,11 +1172,12 @@ class SessionManager:
         
         return self._create_guest_session()
 
-    # --- NEW: CONTEXT-AWARE SAVE LOGIC ---
+    # --- START: MODIFIED CONTEXT-AWARE SAVE LOGIC ---
 
     def _perform_save_logic(self, session: UserSession, trigger_reason: str) -> bool:
         """
         Core worker function to save a session to Zoho CRM without any UI elements.
+        This runs in a background thread for non-interactive events.
         Returns True on success, False on failure.
         """
         logger.info(f"Executing Zoho save logic. Trigger: {trigger_reason}")
@@ -1233,12 +1234,10 @@ class SessionManager:
                 self.zoho.config.ZOHO_ENABLED):
             return
 
-        # Determine if the context is interactive based on the trigger reason.
-        # Manual actions by the user are interactive. Automated events are not.
         is_interactive = trigger_reason in ["Manual Sign Out", "Manual Save to Zoho CRM"]
 
         if is_interactive:
-            # For user-initiated actions, show spinners and toast notifications.
+            # For user-initiated actions, show spinners and run in the main thread.
             with st.spinner(f"💾 Saving chat to CRM ({trigger_reason.lower()})..."):
                 success = self._perform_save_logic(session, trigger_reason)
             
@@ -1247,9 +1246,18 @@ class SessionManager:
             else:
                 st.toast("⚠️ Failed to save chat to CRM. Check logs for details.", icon="❌")
         else:
-            # For background actions (timeout, browser close), run silently.
-            # The worker function already logs everything.
-            self._perform_save_logic(session, trigger_reason)
+            # For background actions, run the save logic in a separate thread.
+            # This prevents the slow Zoho API calls from blocking or being killed by
+            # the main script that is trying to serve the reloaded page.
+            logger.info(f"Spawning background thread for Zoho CRM save. Trigger: {trigger_reason}")
+            save_thread = threading.Thread(
+                target=self._perform_save_logic,
+                args=(session, trigger_reason),
+                daemon=True  # Ensures thread exits when the main app exits
+            )
+            save_thread.start()
+            
+    # --- END: MODIFIED CONTEXT-AWARE SAVE LOGIC ---
 
     def _end_session_internal(self, session: UserSession):
         session.active = False
@@ -1401,7 +1409,6 @@ class SessionManager:
             session.messages and 
             self.zoho.config.ZOHO_ENABLED):
             
-            # Pass a reason that our dispatcher knows is interactive.
             self._auto_save_to_crm(session, "Manual Save to Zoho CRM")
             self._update_activity(session)
         else:
