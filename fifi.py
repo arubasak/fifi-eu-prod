@@ -10,6 +10,7 @@ import io
 import html
 import jwt
 import threading
+import queue  # <-- IMPORT ADDED
 from enum import Enum
 from urllib.parse import urlparse
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -1136,6 +1137,27 @@ class SessionManager:
         self.rate_limiter = rate_limiter
         self.session_timeout_minutes = 5
 
+        # --- NEW: Initialize and start the persistent worker queue ---
+        self.task_queue = queue.Queue()
+        self._worker_thread = threading.Thread(target=self._zoho_worker_loop, daemon=True)
+        self._worker_thread.start()
+        logger.info("✅ Persistent Zoho background worker started.")
+        # --- END NEW ---
+
+    def _zoho_worker_loop(self):
+        """
+        The target function for the persistent background thread.
+        It waits for a task on the queue and executes it.
+        """
+        while True:
+            try:
+                session, reason = self.task_queue.get()
+                logger.info(f"Worker picked up task: Save session {session.session_id[:8]} for reason: {reason}")
+                self._perform_save_logic(session, reason)
+                self.task_queue.task_done()
+            except Exception as e:
+                logger.error(f"Error in Zoho worker thread: {e}", exc_info=True)
+
     def get_session_timeout_minutes(self) -> int:
         return getattr(self, 'session_timeout_minutes', 5)
 
@@ -1162,7 +1184,7 @@ class SessionManager:
             session = self.db.load_session(session_id)
             if session and session.active:
                 if self._is_session_expired(session):
-                    logger.info(f"Session {session_id[:8]}... expired due to inactivity")
+                    logger.info(f"Session {session_id[:8]}... expired due to inactivity.")
                     self._auto_save_to_crm(session, "Session Timeout")
                     self._end_session_internal(session)
                     return self._create_guest_session()
@@ -1172,43 +1194,30 @@ class SessionManager:
         
         return self._create_guest_session()
 
-    # --- START: MODIFIED CONTEXT-AWARE SAVE LOGIC ---
-
     def _perform_save_logic(self, session: UserSession, trigger_reason: str) -> bool:
         """
         Core worker function to save a session to Zoho CRM without any UI elements.
-        This runs in a background thread for non-interactive events.
         Returns True on success, False on failure.
         """
         logger.info(f"Executing Zoho save logic. Trigger: {trigger_reason}")
-
-        # 1. Get Access Token
         access_token = self.zoho._get_access_token()
         if not access_token:
             logger.error(f"Zoho Save Failed for session {session.session_id[:8]}: Could not get access token.")
             return False
-
-        # 2. Find or Create Contact
         contact_id = self.zoho._find_contact_by_email(session.email, access_token) or self.zoho._create_contact(session.email, access_token)
         if not contact_id:
             logger.error(f"Zoho Save Failed for session {session.session_id[:8]}: Could not find or create contact.")
             return False
         session.zoho_contact_id = contact_id
-
-        # 3. Generate PDF
         pdf_buffer = self.zoho.pdf_exporter.generate_chat_pdf(session)
         if not pdf_buffer:
             logger.error(f"Zoho Save Failed for session {session.session_id[:8]}: Could not generate PDF.")
             return False
-
-        # 4. Upload Attachment and Add Note
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         pdf_filename = f"fifi_chat_transcript_{timestamp}.pdf"
-        
         upload_success = self.zoho._upload_attachment(contact_id, pdf_buffer, access_token, pdf_filename)
         if not upload_success:
             logger.warning(f"Zoho Save Warning for session {session.session_id[:8]}: Failed to upload PDF attachment. A note will still be added.")
-
         note_title = f"FiFi AI Chat Transcript from {timestamp}"
         note_content = "A new chat transcript has been saved as an attachment.\n\n" if upload_success else "[Attachment upload failed] \n\n"
         note_content += "Summary of the conversation:\n"
@@ -1218,12 +1227,10 @@ class SessionManager:
             note_content += f"- **{role}:** {content[:100]}{'...' if len(content) > 100 else ''}\n"
             if msg.get("source"):
                 note_content += f"  (Source: {msg['source']})\n"
-
         note_success = self.zoho._add_note(contact_id, note_title, note_content, access_token)
         if not note_success:
             logger.error(f"Zoho Save Failed for session {session.session_id[:8]}: Failed to add note.")
             return False
-
         logger.info(f"Zoho save logic completed successfully for session {session.session_id[:8]}.")
         return True
 
@@ -1246,19 +1253,11 @@ class SessionManager:
             else:
                 st.toast("⚠️ Failed to save chat to CRM. Check logs for details.", icon="❌")
         else:
-            # For background actions, run the save logic in a separate thread.
-            # This prevents the slow Zoho API calls from blocking or being killed by
-            # the main script that is trying to serve the reloaded page.
-            logger.info(f"Spawning background thread for Zoho CRM save. Trigger: {trigger_reason}")
-            save_thread = threading.Thread(
-                target=self._perform_save_logic,
-                args=(session, trigger_reason),
-                daemon=True  # Ensures thread exits when the main app exits
-            )
-            save_thread.start()
-            
-    # --- END: MODIFIED CONTEXT-AWARE SAVE LOGIC ---
-
+            # For background actions, just put the task on the queue. This is instant.
+            # The persistent worker thread will pick it up and process it safely.
+            logger.info(f"Queueing background Zoho save. Trigger: {trigger_reason}")
+            self.task_queue.put((session, trigger_reason))
+    
     def _end_session_internal(self, session: UserSession):
         session.active = False
         self.db.save_session(session)
@@ -1345,10 +1344,8 @@ class SessionManager:
 
         self._update_activity(session)
 
-        # Sanitize input
         sanitized_prompt = sanitize_input(prompt)
         
-        # Check content moderation
         moderation = check_content_moderation(sanitized_prompt, self.ai.openai_client)
         if moderation and moderation.get("flagged"):
             return {
@@ -1357,17 +1354,14 @@ class SessionManager:
                 "source": "Content Safety"
             }
 
-        # Get AI response
         response = self.ai.get_response(sanitized_prompt, session.messages)
         
-        # Add to message history
         session.messages.append({
             "role": "user", 
             "content": sanitized_prompt,
             "timestamp": datetime.now().isoformat()
         })
         
-        # Add response metadata
         response_message = {
             "role": "assistant",
             "content": response.get("content", "No response generated."),
@@ -1375,7 +1369,6 @@ class SessionManager:
             "timestamp": datetime.now().isoformat()
         }
         
-        # Include AI metadata if available
         if response.get("used_search"):
             response_message["used_search"] = True
         if response.get("used_pinecone"):
@@ -1389,7 +1382,6 @@ class SessionManager:
             
         session.messages.append(response_message)
         
-        # Keep last 100 messages
         session.messages = session.messages[-100:]
         
         self._update_activity(session)
@@ -1462,6 +1454,10 @@ def ensure_initialization():
     
     return True
 
+# =============================================================================
+# UI RENDERING FUNCTIONS
+# =============================================================================
+
 def render_auto_logout_component(timeout_seconds: int):
     """
     Injects a client-side JavaScript component to force a page reload on timeout.
@@ -1510,17 +1506,12 @@ def render_browser_close_component(session_id: str):
     """
     components.html(js_code, height=0, width=0)
 
-# =============================================================================
-# UI RENDERING FUNCTIONS
-# =============================================================================
-
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
         fresh_session = session_manager.get_session()
 
-        # User Status Section
         if fresh_session.user_type == UserType.REGISTERED_USER or fresh_session.user_type.value == "registered_user":
             st.success("✅ **Authenticated User**") 
             if fresh_session.first_name:
@@ -1564,22 +1555,18 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         
         st.divider()
         
-        # Session Info
         st.markdown(f"**Messages:** {len(fresh_session.messages)}")
         st.markdown(f"**Session:** `{fresh_session.session_id[:8]}...`")
         
-        # System Status
         st.divider()
         st.subheader("📊 System Status")
         
-        # AI Components Status
         if hasattr(st.session_state, 'ai_system'):
             ai = st.session_state.ai_system
             st.write(f"**Pinecone KB:** {'✅' if ai.pinecone_tool else '❌'}")
             st.write(f"**Web Search:** {'✅' if ai.tavily_agent else '❌'}")
             st.write(f"**OpenAI:** {'✅' if ai.openai_client else '❌'}")
         
-        # System Health Dashboard
         with st.expander("🚨 System Health"):
             health_summary = error_handler.get_system_health_summary()
             health_color = {"Healthy": "🟢", "Degraded": "🟡", "Critical": "🔴"}.get(health_summary["overall_health"], "❓")
@@ -1595,7 +1582,6 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         
         st.divider()
         
-        # Control Buttons
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🗑️ Clear Chat", use_container_width=True):
@@ -1607,7 +1593,6 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 session_manager.end_session(fresh_session)
                 st.rerun()
 
-        # Registered User Features
         if (fresh_session.user_type == UserType.REGISTERED_USER or fresh_session.user_type.value == "registered_user") and fresh_session.messages:
             st.divider()
             
@@ -1627,7 +1612,6 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     
                 st.caption("💡 Chat auto-saves to CRM on sign out or timeout")
         
-        # Guest User Prompt
         elif (fresh_session.user_type == UserType.GUEST or fresh_session.user_type.value == "guest") and fresh_session.messages:
             st.divider()
             st.info("💡 **Sign in** to save chat history and export PDF!")
@@ -1636,7 +1620,6 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     del st.session_state.page
                 st.rerun()
 
-        # Example Queries
         st.divider()
         st.subheader("💡 Try These Queries")
         example_queries = [
@@ -1649,7 +1632,6 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         
         for query in example_queries:
             if st.button(f"💬 {query}", key=f"example_{hash(query)}", use_container_width=True):
-                # This will be handled by the chat interface
                 st.session_state.pending_query = query
                 st.rerun()
 
@@ -1661,7 +1643,6 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
     
     render_browser_close_component(current_session.session_id)
     
-    # Timeout warning for registered users
     if current_session.user_type == UserType.REGISTERED_USER and current_session.last_activity:
         time_since_activity = datetime.now() - current_session.last_activity
         timeout_minutes = session_manager.get_session_timeout_minutes()
@@ -1672,24 +1653,17 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
         elif minutes_remaining <= 0:
             st.error("⏱️ Session expired due to inactivity. Please sign in again.")
     
-    # Display chat history
     for msg in current_session.messages:
         with st.chat_message(msg.get("role", "user")):
-            # Enable HTML for clickable citations
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
-            # Show metadata for assistant messages
             if msg.get("role") == "assistant":
                 if "source" in msg:
                     st.caption(f"Source: {msg['source']}")
                 
-                # Show knowledge base and search indicators
                 indicators = []
                 if msg.get("used_pinecone"):
-                    if msg.get("has_inline_citations"):
-                        indicators.append("🧠 Knowledge Base (with inline citations)")
-                    else:
-                        indicators.append("🧠 Knowledge Base")
+                    indicators.append("🧠 Knowledge Base" + (" (with inline citations)" if msg.get("has_inline_citations") else ""))
                 
                 if msg.get("used_search"):
                     indicators.append("🌐 Web Search")
@@ -1697,11 +1671,9 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
                 if indicators:
                     st.caption(f"Enhanced with: {', '.join(indicators)}")
                 
-                # Show safety override if triggered
                 if msg.get("safety_override"):
                     st.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switched to verified web sources.")
 
-    # Check for pending query from sidebar
     pending_query = st.session_state.get('pending_query')
     if pending_query:
         prompt = pending_query
@@ -1710,11 +1682,9 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
         prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...")
     
     if prompt:
-        # Display user message
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Check content moderation
         moderation_result = check_content_moderation(prompt, session_manager.ai.openai_client)
         
         if moderation_result.get("flagged"):
@@ -1729,25 +1699,18 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
             })
             st.rerun()
         else:
-            # Get AI response
             with st.chat_message("assistant"):
                 with st.spinner("🔍 Searching knowledge base and web..."):
                     response = session_manager.get_ai_response(current_session, prompt)
                     
-                    # Display response with HTML enabled for citations
                     st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                     
-                    # Show source
                     if response.get("source"):
                         st.caption(f"Source: {response['source']}")
                     
-                    # Show enhancements
                     enhancements = []
                     if response.get("used_pinecone"):
-                        if response.get("has_inline_citations"):
-                            enhancements.append("🧠 Enhanced with Knowledge Base (inline citations)")
-                        else:
-                            enhancements.append("🧠 Enhanced with Knowledge Base")
+                        enhancements.append("🧠 Enhanced with Knowledge Base" + (" (inline citations)" if response.get("has_inline_citations") else ""))
                     
                     if response.get("used_search"):
                         enhancements.append("🌐 Enhanced with verified web search")
@@ -1756,7 +1719,6 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
                         for enhancement in enhancements:
                             st.success(enhancement)
                     
-                    # Show safety override
                     if response.get("safety_override"):
                         st.error("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switched to verified web sources.")
             
@@ -1766,7 +1728,6 @@ def render_welcome_page(session_manager: SessionManager):
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
     
-    # Info about the system
     col1, col2, col3 = st.columns(3)
     with col1:
         st.info("🧠 **Knowledge Base**\nAccess curated F&B industry information")
@@ -1830,7 +1791,6 @@ def render_welcome_page(session_manager: SessionManager):
             st.session_state.page = "chat"
             st.rerun()
     
-    # System capabilities
     st.divider()
     st.subheader("🛡️ Safety Features")
     col1, col2 = st.columns(2)
@@ -1874,21 +1834,18 @@ def main():
                 if session_to_close and session_to_close.active:
                     session_manager._auto_save_to_crm(session_to_close, "Browser Closed")
                     session_manager._end_session_internal(session_to_close)
-                    logger.info(f"Successfully closed session: {session_id_to_close[:8]}...")
+                    logger.info(f"Successfully processed close event for session: {session_id_to_close[:8]}...")
         
         st.stop()
 
-    # Emergency reset button
     if st.button("🔄 Fresh Start (Clear All State)", key="emergency_clear"):
         st.session_state.clear()
         st.success("✅ All state cleared. Refreshing...")
         st.rerun()
 
-    # Ensure initialization
     if not ensure_initialization():
         st.stop()
 
-    # Get session manager safely
     session_manager = get_session_manager()
     if not session_manager:
         st.error("Failed to get session manager. Reinitializing...")
@@ -1897,7 +1854,6 @@ def main():
     
     pdf_exporter = st.session_state.pdf_exporter
     
-    # Main application routing
     current_page = st.session_state.get('page')
     
     if current_page != "chat":
@@ -1913,7 +1869,7 @@ def main():
                     del st.session_state.page
                 st.rerun()
         except Exception as e:
-            logger.error(f"Error in chat interface: {e}")
+            logger.error(f"Error in chat interface: {e}", exc_info=True)
             st.error("An error occurred. Please refresh the page.")
             if st.button("🔄 Refresh", key="error_refresh"):
                 st.session_state.clear()
