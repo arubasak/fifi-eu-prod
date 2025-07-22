@@ -1999,11 +1999,13 @@ def render_welcome_page(session_manager: SessionManager):
                         wordpress_in_secrets = 'WORDPRESS_URL' in st.secrets
                 except Exception:
                     pass
+                
+                jwt_endpoint = f"{session_manager.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token" if session_manager.config.WORDPRESS_URL else "N/A"
                     
                 st.code(f"""
 Authentication Configuration:
 - WordPress URL: {session_manager.config.WORDPRESS_URL if session_manager.config.WORDPRESS_URL else "NOT CONFIGURED"}
-- JWT Endpoint: {session_manager.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token if session_manager.config.WORDPRESS_URL else "N/A"}
+- JWT Endpoint: {jwt_endpoint}
 - Rate Limit: 30 requests per minute
 
 Environment Check:
