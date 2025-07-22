@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from collections import defaultdict
 import requests
-import streamlit.components.v1 as components  # <-- ADDED IMPORT
+import streamlit.components.v1 as components
 
 # =============================================================================
 # VERSION 3.0 PRODUCTION - COMPLETE AI INTEGRATION
@@ -1172,20 +1172,84 @@ class SessionManager:
         
         return self._create_guest_session()
 
+    # --- NEW: CONTEXT-AWARE SAVE LOGIC ---
+
+    def _perform_save_logic(self, session: UserSession, trigger_reason: str) -> bool:
+        """
+        Core worker function to save a session to Zoho CRM without any UI elements.
+        Returns True on success, False on failure.
+        """
+        logger.info(f"Executing Zoho save logic. Trigger: {trigger_reason}")
+
+        # 1. Get Access Token
+        access_token = self.zoho._get_access_token()
+        if not access_token:
+            logger.error(f"Zoho Save Failed for session {session.session_id[:8]}: Could not get access token.")
+            return False
+
+        # 2. Find or Create Contact
+        contact_id = self.zoho._find_contact_by_email(session.email, access_token) or self.zoho._create_contact(session.email, access_token)
+        if not contact_id:
+            logger.error(f"Zoho Save Failed for session {session.session_id[:8]}: Could not find or create contact.")
+            return False
+        session.zoho_contact_id = contact_id
+
+        # 3. Generate PDF
+        pdf_buffer = self.zoho.pdf_exporter.generate_chat_pdf(session)
+        if not pdf_buffer:
+            logger.error(f"Zoho Save Failed for session {session.session_id[:8]}: Could not generate PDF.")
+            return False
+
+        # 4. Upload Attachment and Add Note
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        pdf_filename = f"fifi_chat_transcript_{timestamp}.pdf"
+        
+        upload_success = self.zoho._upload_attachment(contact_id, pdf_buffer, access_token, pdf_filename)
+        if not upload_success:
+            logger.warning(f"Zoho Save Warning for session {session.session_id[:8]}: Failed to upload PDF attachment. A note will still be added.")
+
+        note_title = f"FiFi AI Chat Transcript from {timestamp}"
+        note_content = "A new chat transcript has been saved as an attachment.\n\n" if upload_success else "[Attachment upload failed] \n\n"
+        note_content += "Summary of the conversation:\n"
+        for msg in session.messages:
+            role = msg.get("role", "Unknown").capitalize()
+            content = re.sub(r'<[^>]+>', '', msg.get("content", ""))
+            note_content += f"- **{role}:** {content[:100]}{'...' if len(content) > 100 else ''}\n"
+            if msg.get("source"):
+                note_content += f"  (Source: {msg['source']})\n"
+
+        note_success = self.zoho._add_note(contact_id, note_title, note_content, access_token)
+        if not note_success:
+            logger.error(f"Zoho Save Failed for session {session.session_id[:8]}: Failed to add note.")
+            return False
+
+        logger.info(f"Zoho save logic completed successfully for session {session.session_id[:8]}.")
+        return True
+
     def _auto_save_to_crm(self, session: UserSession, trigger_reason: str):
-        if (session.user_type == UserType.REGISTERED_USER and 
-            session.email and 
-            session.messages and 
-            self.zoho.config.ZOHO_ENABLED):
+        if not (session.user_type == UserType.REGISTERED_USER and 
+                session.email and 
+                session.messages and 
+                self.zoho.config.ZOHO_ENABLED):
+            return
+
+        # Determine if the context is interactive based on the trigger reason.
+        # Manual actions by the user are interactive. Automated events are not.
+        is_interactive = trigger_reason in ["Manual Sign Out", "Manual Save to Zoho CRM"]
+
+        if is_interactive:
+            # For user-initiated actions, show spinners and toast notifications.
+            with st.spinner(f"💾 Saving chat to CRM ({trigger_reason.lower()})..."):
+                success = self._perform_save_logic(session, trigger_reason)
             
-            try:
-                logger.info(f"Auto-saving session {session.session_id[:8]}... to CRM. Trigger: {trigger_reason}")
-                with st.spinner(f"💾 Auto-saving chat to CRM ({trigger_reason.lower()})..."):
-                    self.zoho.save_chat_transcript(session)
-                    st.toast("💾 Chat automatically saved to Zoho CRM!", icon="✅")
-            except Exception as e:
-                logger.error(f"Auto-save to CRM failed: {e}")
-                st.toast("⚠️ Auto-save to CRM failed", icon="❌")
+            if success:
+                st.toast("✅ Chat saved to Zoho CRM!", icon="✅")
+            else:
+                st.toast("⚠️ Failed to save chat to CRM. Check logs for details.", icon="❌")
+        else:
+            # For background actions (timeout, browser close), run silently.
+            # The worker function already logs everything.
+            self._perform_save_logic(session, trigger_reason)
 
     def _end_session_internal(self, session: UserSession):
         session.active = False
@@ -1337,7 +1401,8 @@ class SessionManager:
             session.messages and 
             self.zoho.config.ZOHO_ENABLED):
             
-            self.zoho.save_chat_transcript(session)
+            # Pass a reason that our dispatcher knows is interactive.
+            self._auto_save_to_crm(session, "Manual Save to Zoho CRM")
             self._update_activity(session)
         else:
             st.warning("Cannot save to CRM: Missing email or chat messages")
@@ -1390,8 +1455,6 @@ def ensure_initialization():
     
     return True
 
-# --- NEW HELPER FUNCTIONS ADDED HERE ---
-
 def render_auto_logout_component(timeout_seconds: int):
     """
     Injects a client-side JavaScript component to force a page reload on timeout.
@@ -1399,26 +1462,17 @@ def render_auto_logout_component(timeout_seconds: int):
     if timeout_seconds <= 0:
         return
 
-    # JavaScript to run a countdown and reload the page.
     js_code = f"""
     <script>
-    // Function to reload the page
     function reloadPage() {{
-        // Using parent.location.reload() is necessary because Streamlit runs components in an iframe.
         window.parent.location.reload();
     }}
-
-    // Set a timer to execute the reload function after the specified timeout.
-    // We clear any existing timer to prevent duplicates from multiple reruns.
     if (window.streamlitAutoLogoutTimer) {{
         clearTimeout(window.streamlitAutoLogoutTimer);
     }}
-
-    // The timeout is set in milliseconds.
     window.streamlitAutoLogoutTimer = setTimeout(reloadPage, {timeout_seconds * 1000});
     </script>
     """
-    # Embed the JavaScript in the Streamlit app.
     components.html(js_code, height=0, width=0)
 
 def render_browser_close_component(session_id: str):
@@ -1429,37 +1483,25 @@ def render_browser_close_component(session_id: str):
     if not session_id:
         return
 
-    # This JavaScript listens for the 'pagehide' event, which is a reliable way to detect
-    # when a user is navigating away from or closing the page.
     js_code = f"""
     <script>
-    // Ensure this listener is only added once.
     if (!window.browserCloseListenerAdded) {{
         window.addEventListener('pagehide', function() {{
-            // Construct the URL with query parameters to trigger the cleanup.
-            // This is a "fire-and-forget" request. We don't expect a response.
             const url = `/?event=close&session_id={session_id}`;
-
-            // Use fetch with 'keepalive: true'. This is crucial.
-            // It tells the browser to keep this network request alive in the background
-            // even after the page has been terminated.
             try {{
                 fetch(url, {{
                     method: 'GET',
                     keepalive: true
                 }});
             }} catch(e) {{
-                // This might fail in very old browsers, but it's the best modern approach.
                 console.error("Could not send close beacon: ", e);
             }}
-        }}, {{ once: true }}); // Use 'once' to ensure it only fires once per page load.
-        
+        }}, {{ once: true }});
         window.browserCloseListenerAdded = true;
     }}
     </script>
     """
     components.html(js_code, height=0, width=0)
-
 
 # =============================================================================
 # UI RENDERING FUNCTIONS
@@ -1493,12 +1535,10 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 if session_manager.zoho.config.ZOHO_ENABLED and fresh_session.email:
                     st.caption("💾 Auto-save ON")
             
-            # --- MODIFIED SECTION FOR AUTO-LOGOUT ---
             if fresh_session.last_activity:
                 time_since_activity = datetime.now() - fresh_session.last_activity
                 timeout_minutes = session_manager.get_session_timeout_minutes()
                 
-                # Calculate remaining time in seconds
                 total_timeout_seconds = timeout_minutes * 60
                 seconds_elapsed = time_since_activity.total_seconds()
                 seconds_remaining = total_timeout_seconds - seconds_elapsed
@@ -1506,14 +1546,10 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 if seconds_remaining > 0:
                     minutes_remaining = seconds_remaining / 60
                     st.caption(f"⏱️ Auto-save & sign out in {minutes_remaining:.1f} minutes")
-                    
-                    # Call the component to start the client-side timer
                     render_auto_logout_component(timeout_seconds=int(seconds_remaining))
                 else:
-                    st.caption("⏱️ Session expired. Signing out...")
-                    # If the session has already expired, trigger a reload almost immediately
+                    st.caption("⏱️ Session will timeout on next interaction")
                     render_auto_logout_component(timeout_seconds=2)
-            # --- END OF MODIFIED SECTION ---
                     
         else:
             st.info("👤 **Guest User**")
@@ -1615,11 +1651,8 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
     st.caption("Your intelligent food & beverage sourcing companion with knowledge base and web search")
     
     current_session = session_manager.get_session()
-
-    # --- ADDED CALL FOR BROWSER CLOSE EVENT ---
-    # Add the browser-close event listener to the page for the current session.
+    
     render_browser_close_component(current_session.session_id)
-    # --- END OF ADDED CALL ---
     
     # Timeout warning for registered users
     if current_session.user_type == UserType.REGISTERED_USER and current_session.last_activity:
@@ -1822,28 +1855,21 @@ def main():
         layout="wide"
     )
 
-    # --- ADDED: Handler for browser close event ---
-    # Check for a browser-close event triggered by our JavaScript component.
-    # This must be run before any other logic.
     query_params = st.query_params
     if query_params.get("event") == "close" and "session_id" in query_params:
         session_id_to_close = query_params["session_id"]
         logger.info(f"Received browser-close event for session: {session_id_to_close[:8]}...")
         
-        # We need to initialize the session manager to perform the cleanup.
         if ensure_initialization():
             session_manager = get_session_manager()
             if session_manager:
                 session_to_close = session_manager.db.load_session(session_id_to_close)
                 if session_to_close and session_to_close.active:
-                    # Perform the same cleanup as a manual sign-out.
                     session_manager._auto_save_to_crm(session_to_close, "Browser Closed")
                     session_manager._end_session_internal(session_to_close)
                     logger.info(f"Successfully closed session: {session_id_to_close[:8]}...")
         
-        # Stop execution of the script. We don't need to render anything for this beacon request.
         st.stop()
-    # --- END OF ADDED HANDLER ---
 
     # Emergency reset button
     if st.button("🔄 Fresh Start (Clear All State)", key="emergency_clear"):
