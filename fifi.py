@@ -1373,33 +1373,53 @@ class SessionManager:
         return time_diff.total_seconds() > (self.session_timeout_minutes * 60)
 
     def _update_activity(self, session: UserSession):
-        session.last_activity = datetime.now()
-        self.db.save_session(session)
+        """Update session's last activity timestamp."""
+        try:
+            session.last_activity = datetime.now()
+            self.db.save_session(session)
+        except Exception as e:
+            logger.error(f"Error updating session activity: {e}")
+            # Don't propagate the error - just log it
 
     def _create_guest_session(self) -> UserSession:
-        session = UserSession(session_id=str(uuid.uuid4()))
-        self.db.save_session(session)
-        st.session_state.current_session_id = session.session_id
-        return session
+        """Create a new guest session."""
+        try:
+            session = UserSession(session_id=str(uuid.uuid4()))
+            self.db.save_session(session)
+            st.session_state.current_session_id = session.session_id
+            logger.info(f"Created new guest session: {session.session_id[:8]}...")
+            return session
+        except Exception as e:
+            logger.error(f"Error creating guest session: {e}")
+            # Fallback to in-memory session
+            session = UserSession(session_id=str(uuid.uuid4()))
+            st.session_state.current_session_id = session.session_id
+            return session
 
     def get_session(self) -> UserSession:
-        session_id = st.session_state.get('current_session_id')
-        
-        if session_id:
-            session = self.db.load_session(session_id)
-            if session and session.active:
-                if self._is_session_expired(session):
-                    logger.info(f"Session {session_id[:8]}... expired due to inactivity")
-                    # Check if this is a registered user session that needs saving
-                    if session.user_type == UserType.REGISTERED_USER and session.email and session.messages:
-                        self._auto_save_to_crm(session, "Session Timeout")
-                    self._end_session_internal(session)
-                    return self._create_guest_session()
-                else:
-                    self._update_activity(session)
-                    return session
-        
-        return self._create_guest_session()
+        """Get current session or create a new one."""
+        try:
+            session_id = st.session_state.get('current_session_id')
+            
+            if session_id:
+                session = self.db.load_session(session_id)
+                if session and session.active:
+                    if self._is_session_expired(session):
+                        logger.info(f"Session {session_id[:8]}... expired due to inactivity")
+                        # Check if this is a registered user session that needs saving
+                        if session.user_type == UserType.REGISTERED_USER and session.email and session.messages:
+                            self._auto_save_to_crm(session, "Session Timeout")
+                        self._end_session_internal(session)
+                        return self._create_guest_session()
+                    else:
+                        self._update_activity(session)
+                        return session
+            
+            return self._create_guest_session()
+        except Exception as e:
+            logger.error(f"Error in get_session: {e}")
+            # Fallback to creating a new guest session
+            return self._create_guest_session()
 
     def _auto_save_to_crm(self, session: UserSession, trigger_reason: str):
         if (session.user_type == UserType.REGISTERED_USER and 
@@ -1459,11 +1479,21 @@ class SessionManager:
                 data = response.json()
                 logger.debug(f"Auth response keys: {list(data.keys())}")
                 
+                # Get or create current session
+                current_session = None
                 try:
                     current_session = self.get_session()
+                    logger.info(f"Got existing session: {current_session.session_id[:8]}...")
                 except Exception as e:
                     logger.error(f"Error getting session during auth: {e}")
-                    current_session = self._create_guest_session()
+                    # Create a new session manually if get_session fails
+                    current_session = UserSession(session_id=str(uuid.uuid4()))
+                    st.session_state.current_session_id = current_session.session_id
+                    logger.info(f"Created fallback session: {current_session.session_id[:8]}...")
+                
+                if not current_session:
+                    st.error("Failed to create session. Please try again.")
+                    return None
                 
                 display_name = (
                     data.get('user_display_name') or 
@@ -1475,24 +1505,39 @@ class SessionManager:
                     clean_username
                 )
 
+                # Update session with user data
                 current_session.user_type = UserType.REGISTERED_USER
                 current_session.email = data.get('user_email')
                 current_session.first_name = display_name
                 current_session.wp_token = data.get('token')
                 current_session.last_activity = datetime.now()
                 
-                self.db.save_session(current_session)
-                
-                verification_session = self.db.load_session(current_session.session_id)
-                if verification_session and verification_session.user_type == UserType.REGISTERED_USER:
-                    st.session_state.current_session_id = current_session.session_id
-                    st.success(f"Welcome back, {current_session.first_name}!")
-                    logger.info(f"Authentication successful for user: {clean_username}")
-                    return current_session
-                else:
-                    st.error("Authentication failed - session could not be saved.")
-                    logger.error("Session verification failed after authentication")
+                # Save the updated session
+                try:
+                    self.db.save_session(current_session)
+                    logger.info("Session saved successfully")
+                except Exception as e:
+                    logger.error(f"Error saving authenticated session: {e}")
+                    st.error("Failed to save session. Please try again.")
                     return None
+                
+                # Verify the session was saved correctly
+                try:
+                    verification_session = self.db.load_session(current_session.session_id)
+                    if verification_session and verification_session.user_type == UserType.REGISTERED_USER:
+                        st.session_state.current_session_id = current_session.session_id
+                        st.success(f"Welcome back, {current_session.first_name}!")
+                        logger.info(f"Authentication successful for user: {clean_username}")
+                        return current_session
+                    else:
+                        st.error("Authentication failed - session verification failed.")
+                        logger.error("Session verification failed after authentication")
+                        return None
+                except Exception as e:
+                    logger.error(f"Error verifying session: {e}")
+                    # Even if verification fails, we can still return the session
+                    st.success(f"Welcome back, {current_session.first_name}!")
+                    return current_session
                 
             else:
                 # Log the full error response for debugging
@@ -1636,15 +1681,26 @@ def ensure_initialization():
             config = Config()
             pdf_exporter = PDFExporter()
             
+            # Initialize database manager
             if 'db_manager' not in st.session_state:
-                st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+                db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+                st.session_state.db_manager = db_manager
+                logger.info(f"Database manager initialized (cloud: {db_manager.use_cloud})")
+            else:
+                db_manager = st.session_state.db_manager
             
-            db_manager = st.session_state.db_manager
+            # Verify database manager has required methods
+            if not hasattr(db_manager, 'load_session') or not hasattr(db_manager, 'save_session'):
+                logger.error("Database manager missing required methods")
+                st.error("Database initialization error. Please refresh the page.")
+                return False
+            
             zoho_manager = ZohoCRMManager(config, pdf_exporter)
             ai_system = EnhancedAI(config)
             rate_limiter = RateLimiter()
 
-            st.session_state.session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
+            session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
+            st.session_state.session_manager = session_manager
             st.session_state.pdf_exporter = pdf_exporter
             st.session_state.error_handler = error_handler
             st.session_state.ai_system = ai_system
@@ -1666,26 +1722,29 @@ def ensure_initialization():
         # Run cleanup every 60 seconds
         if time_since_cleanup.total_seconds() > 60:
             if 'db_manager' in st.session_state and 'session_manager' in st.session_state:
-                # Get expired sessions that need CRM save
-                expired_sessions = st.session_state.db_manager.cleanup_expired_sessions()
-                
-                # Process CRM saves for expired registered user sessions
-                if expired_sessions and st.session_state.session_manager.zoho.config.ZOHO_ENABLED:
-                    for session_data in expired_sessions:
-                        try:
-                            # Create a temporary session object for CRM save
-                            temp_session = UserSession(
-                                session_id=session_data['session_id'],
-                                user_type=UserType.REGISTERED_USER,
-                                email=session_data['email'],
-                                messages=session_data['messages']
-                            )
-                            logger.info(f"Auto-saving expired session {session_data['session_id'][:8]}... to CRM")
-                            st.session_state.session_manager.zoho.save_chat_transcript(temp_session)
-                        except Exception as e:
-                            logger.error(f"Failed to save expired session to CRM: {e}")
-                
-                st.session_state.last_cleanup = datetime.now()
+                try:
+                    # Get expired sessions that need CRM save
+                    expired_sessions = st.session_state.db_manager.cleanup_expired_sessions()
+                    
+                    # Process CRM saves for expired registered user sessions
+                    if expired_sessions and st.session_state.session_manager.zoho.config.ZOHO_ENABLED:
+                        for session_data in expired_sessions:
+                            try:
+                                # Create a temporary session object for CRM save
+                                temp_session = UserSession(
+                                    session_id=session_data['session_id'],
+                                    user_type=UserType.REGISTERED_USER,
+                                    email=session_data['email'],
+                                    messages=session_data['messages']
+                                )
+                                logger.info(f"Auto-saving expired session {session_data['session_id'][:8]}... to CRM")
+                                st.session_state.session_manager.zoho.save_chat_transcript(temp_session)
+                            except Exception as e:
+                                logger.error(f"Failed to save expired session to CRM: {e}")
+                    
+                    st.session_state.last_cleanup = datetime.now()
+                except Exception as e:
+                    logger.error(f"Error during cleanup: {e}")
     
     return True
 
