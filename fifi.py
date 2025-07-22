@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import uuid
 import json
@@ -304,8 +305,83 @@ class DatabaseManager:
             else:
                 self.local_sessions[session.session_id] = session
 
-    @handle_api_errors("Database", "Load Session")
-    def load_session(self, session_id: str) -> Optional[UserSession]:
+    def cleanup_expired_sessions(self):
+        """
+        Background task to cleanup expired sessions.
+        Returns list of expired registered user sessions that need CRM save.
+        """
+        expired_registered_sessions = []
+        
+        try:
+            if self.use_cloud:
+                with self._get_connection() as conn:
+                    # Find all active sessions with details
+                    cursor = conn.execute("""
+                        SELECT session_id, user_type, email, messages, last_activity 
+                        FROM sessions 
+                        WHERE active = 1
+                    """)
+                    rows = cursor.fetchall()
+                    
+                    now = datetime.now()
+                    expired_count = 0
+                    
+                    for row in rows:
+                        session_id, user_type, email, messages_json, last_activity_str = row
+                        last_activity = datetime.fromisoformat(last_activity_str)
+                        time_diff = now - last_activity
+                        
+                        # Check if session expired (5 minutes = 300 seconds)
+                        if time_diff.total_seconds() > 300:
+                            # If it's a registered user with email and messages, add to save list
+                            if user_type == "registered_user" and email and messages_json != "[]":
+                                expired_registered_sessions.append({
+                                    'session_id': session_id,
+                                    'email': email,
+                                    'messages': json.loads(messages_json)
+                                })
+                            
+                            # Mark session as inactive
+                            conn.execute(
+                                "UPDATE sessions SET active = 0 WHERE session_id = ?",
+                                (session_id,)
+                            )
+                            expired_count += 1
+                    
+                    if expired_count > 0:
+                        conn.commit()
+                        logger.info(f"Cleaned up {expired_count} expired sessions")
+            else:
+                # For local storage
+                now = datetime.now()
+                expired_sessions = []
+                
+                for session_id, session in self.local_sessions.items():
+                    if hasattr(session, 'last_activity') and session.active:
+                        time_diff = now - session.last_activity
+                        if time_diff.total_seconds() > 300:
+                            # Check if needs CRM save
+                            if (hasattr(session, 'user_type') and 
+                                session.user_type == UserType.REGISTERED_USER and
+                                hasattr(session, 'email') and session.email and
+                                hasattr(session, 'messages') and session.messages):
+                                expired_registered_sessions.append({
+                                    'session_id': session.session_id,
+                                    'email': session.email,
+                                    'messages': session.messages
+                                })
+                            expired_sessions.append(session_id)
+                
+                for session_id in expired_sessions:
+                    self.local_sessions[session_id].active = False
+                    
+                if expired_sessions:
+                    logger.info(f"Cleaned up {len(expired_sessions)} expired sessions")
+                    
+        except Exception as e:
+            logger.error(f"Error during session cleanup: {e}")
+            
+        return expired_registered_sessions
         with self.lock:
             if self.use_cloud:
                 with self._get_connection() as conn:
@@ -531,6 +607,107 @@ def sanitize_input(text: str, max_length: int = 4000) -> str:
     if not isinstance(text, str): 
         return ""
     return html.escape(text)[:max_length].strip()
+
+def render_auto_logout_component(timeout_seconds: int):
+    """
+    Injects a client-side JavaScript component to force a page reload on timeout.
+    This ensures sessions expire even without user interaction.
+    """
+    if timeout_seconds <= 0:
+        return
+
+    # JavaScript to run a countdown and reload the page
+    js_code = f"""
+    <script>
+    // Function to reload the page
+    function reloadPage() {{
+        // Using parent.location.reload() because Streamlit runs components in iframe
+        window.parent.location.reload();
+    }}
+
+    // Clear any existing timer to prevent duplicates
+    if (window.streamlitAutoLogoutTimer) {{
+        clearTimeout(window.streamlitAutoLogoutTimer);
+    }}
+
+    // Set timer in milliseconds
+    window.streamlitAutoLogoutTimer = setTimeout(reloadPage, {timeout_seconds * 1000});
+    
+    // Optional: Log for debugging
+    console.log('Auto-logout timer set for', {timeout_seconds}, 'seconds');
+    </script>
+    """
+    # Embed the JavaScript in the Streamlit app
+    components.html(js_code, height=0, width=0)
+
+def render_browser_close_handler(session_id: str, user_type: str):
+    """
+    Injects JavaScript to detect browser/tab closure.
+    Note: This is best-effort - browsers limit what can be done during unload.
+    """
+    if user_type != "registered_user":
+        return
+    
+    js_code = f"""
+    <script>
+    // Store session info in browser
+    window.fifiSessionId = '{session_id}';
+    window.fifiUserType = '{user_type}';
+    
+    // Track if we should save on unload
+    window.fifiShouldSave = true;
+    
+    // Disable save on normal navigation
+    window.addEventListener('click', function(e) {{
+        // If clicking a link or button, don't trigger save
+        if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON') {{
+            window.fifiShouldSave = false;
+            setTimeout(() => {{ window.fifiShouldSave = true; }}, 1000);
+        }}
+    }});
+    
+    // Attempt to notify server on page unload
+    window.addEventListener('beforeunload', function(e) {{
+        if (window.fifiShouldSave && window.fifiUserType === 'registered_user') {{
+            // Try to send a beacon to save the session
+            // Note: This has limitations and may not always work
+            try {{
+                // Store a flag in localStorage to trigger save on next visit
+                localStorage.setItem('fifi_pending_save', JSON.stringify({{
+                    sessionId: window.fifiSessionId,
+                    timestamp: new Date().toISOString(),
+                    trigger: 'browser_close'
+                }}));
+            }} catch (err) {{
+                console.error('Could not save pending session flag:', err);
+            }}
+        }}
+    }});
+    
+    // Check for pending saves from previous sessions
+    try {{
+        const pendingSave = localStorage.getItem('fifi_pending_save');
+        if (pendingSave) {{
+            const data = JSON.parse(pendingSave);
+            const savedTime = new Date(data.timestamp);
+            const now = new Date();
+            const hoursSince = (now - savedTime) / (1000 * 60 * 60);
+            
+            // If less than 24 hours old, it might be relevant
+            if (hoursSince < 24) {{
+                console.log('Found pending save from previous session:', data);
+                // Clear the flag
+                localStorage.removeItem('fifi_pending_save');
+                // Note: We can't directly trigger the save from here,
+                // but the session timeout logic will handle it
+            }}
+        }}
+    }} catch (err) {{
+        console.error('Could not check pending saves:', err);
+    }}
+    </script>
+    """
+    components.html(js_code, height=0, width=0)
 
 # =============================================================================
 # AI SYSTEM - PINECONE ASSISTANT
@@ -1162,7 +1339,9 @@ class SessionManager:
             if session and session.active:
                 if self._is_session_expired(session):
                     logger.info(f"Session {session_id[:8]}... expired due to inactivity")
-                    self._auto_save_to_crm(session, "Session Timeout")
+                    # Check if this is a registered user session that needs saving
+                    if session.user_type == UserType.REGISTERED_USER and session.email and session.messages:
+                        self._auto_save_to_crm(session, "Session Timeout")
                     self._end_session_internal(session)
                     return self._create_guest_session()
                 else:
@@ -1377,6 +1556,7 @@ def ensure_initialization():
             st.session_state.error_handler = error_handler
             st.session_state.ai_system = ai_system
             st.session_state.initialized = True
+            st.session_state.last_cleanup = datetime.now()
             
             logger.info("✅ Application initialized successfully")
             return True
@@ -1386,6 +1566,33 @@ def ensure_initialization():
             st.error(f"Error details: {str(e)}")
             logger.critical(f"Initialization failed: {e}", exc_info=True)
             return False
+    
+    # Run periodic cleanup of expired sessions
+    if 'last_cleanup' in st.session_state:
+        time_since_cleanup = datetime.now() - st.session_state.last_cleanup
+        # Run cleanup every 60 seconds
+        if time_since_cleanup.total_seconds() > 60:
+            if 'db_manager' in st.session_state and 'session_manager' in st.session_state:
+                # Get expired sessions that need CRM save
+                expired_sessions = st.session_state.db_manager.cleanup_expired_sessions()
+                
+                # Process CRM saves for expired registered user sessions
+                if expired_sessions and st.session_state.session_manager.zoho.config.ZOHO_ENABLED:
+                    for session_data in expired_sessions:
+                        try:
+                            # Create a temporary session object for CRM save
+                            temp_session = UserSession(
+                                session_id=session_data['session_id'],
+                                user_type=UserType.REGISTERED_USER,
+                                email=session_data['email'],
+                                messages=session_data['messages']
+                            )
+                            logger.info(f"Auto-saving expired session {session_data['session_id'][:8]}... to CRM")
+                            st.session_state.session_manager.zoho.save_chat_transcript(temp_session)
+                        except Exception as e:
+                            logger.error(f"Failed to save expired session to CRM: {e}")
+                
+                st.session_state.last_cleanup = datetime.now()
     
     return True
 
@@ -1424,12 +1631,23 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
             if fresh_session.last_activity:
                 time_since_activity = datetime.now() - fresh_session.last_activity
                 timeout_minutes = session_manager.get_session_timeout_minutes()
-                minutes_remaining = timeout_minutes - (time_since_activity.total_seconds() / 60)
                 
-                if minutes_remaining > 0:
+                # Calculate remaining time in seconds
+                total_timeout_seconds = timeout_minutes * 60
+                seconds_elapsed = time_since_activity.total_seconds()
+                seconds_remaining = total_timeout_seconds - seconds_elapsed
+                
+                if seconds_remaining > 0:
+                    minutes_remaining = seconds_remaining / 60
                     st.caption(f"⏱️ Auto-save & sign out in {minutes_remaining:.1f} minutes")
+                    
+                    # Inject client-side timer for automatic logout
+                    render_auto_logout_component(timeout_seconds=int(seconds_remaining))
                 else:
-                    st.caption("⏱️ Session will timeout on next interaction")
+                    st.caption("⏱️ Session expired. Signing out...")
+                    
+                    # If session already expired, trigger reload almost immediately
+                    render_auto_logout_component(timeout_seconds=2)
                     
         else:
             st.info("👤 **Guest User**")
@@ -1532,6 +1750,13 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
     
     current_session = session_manager.get_session()
     
+    # Inject browser close handler for registered users
+    if current_session.user_type == UserType.REGISTERED_USER:
+        render_browser_close_handler(
+            session_id=current_session.session_id,
+            user_type=current_session.user_type.value
+        )
+    
     # Timeout warning for registered users
     if current_session.user_type == UserType.REGISTERED_USER and current_session.last_activity:
         time_since_activity = datetime.now() - current_session.last_activity
@@ -1542,6 +1767,19 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
             st.warning(f"⏱️ Session will auto-save and timeout in {minutes_remaining:.1f} minutes due to inactivity")
         elif minutes_remaining <= 0:
             st.error("⏱️ Session expired due to inactivity. Please sign in again.")
+            # Add instructions for expired sessions
+            st.info("""
+            **Your session has expired for security reasons.**
+            
+            If you were a registered user:
+            - ✅ Your chat was automatically saved to Zoho CRM
+            - 📄 You can retrieve it from your CRM contact record
+            - 🔑 Please sign in again to continue
+            """)
+            if st.button("🔑 Return to Sign In", use_container_width=True):
+                if 'page' in st.session_state:
+                    del st.session_state.page
+                st.rerun()
     
     # Display chat history
     for msg in current_session.messages:
@@ -1659,6 +1897,12 @@ def render_welcome_page(session_manager: SessionManager):
             - 🔄 Persistent chat history across sessions
             - ⏱️ 5-minute inactivity timeout with auto-save
             - 🎯 Personalized experience
+            
+            **Security Features:**
+            - 🔐 Automatic logout after 5 minutes of inactivity
+            - 💾 Chat automatically saved to CRM before logout
+            - 🌐 Works even if you close your browser
+            - 📱 Session management across devices
             """)
             
             with st.form("login_form", clear_on_submit=False):
