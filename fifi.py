@@ -204,23 +204,74 @@ DEFAULT_EXCLUDED_DOMAINS = [
 
 class Config:
     def __init__(self):
-        self.JWT_SECRET = st.secrets.get("JWT_SECRET", "default-secret")
-        self.OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
-        self.TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY")
-        self.PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY")
-        self.PINECONE_ASSISTANT_NAME = st.secrets.get("PINECONE_ASSISTANT_NAME", "my-chat-assistant")
-        self.WORDPRESS_URL = self._validate_url(st.secrets.get("WORDPRESS_URL", ""))
-        self.SQLITE_CLOUD_CONNECTION = st.secrets.get("SQLITE_CLOUD_CONNECTION")
-        self.ZOHO_CLIENT_ID = st.secrets.get("ZOHO_CLIENT_ID")
-        self.ZOHO_CLIENT_SECRET = st.secrets.get("ZOHO_CLIENT_SECRET")
-        self.ZOHO_REFRESH_TOKEN = st.secrets.get("ZOHO_REFRESH_TOKEN")
+        # Handle missing secrets gracefully
+        try:
+            secrets = st.secrets
+        except Exception as e:
+            logger.warning(f"Streamlit secrets not available: {e}")
+            secrets = {}
+            
+        self.JWT_SECRET = self._get_secret(secrets, "JWT_SECRET", "default-secret")
+        self.OPENAI_API_KEY = self._get_secret(secrets, "OPENAI_API_KEY")
+        self.TAVILY_API_KEY = self._get_secret(secrets, "TAVILY_API_KEY")
+        self.PINECONE_API_KEY = self._get_secret(secrets, "PINECONE_API_KEY")
+        self.PINECONE_ASSISTANT_NAME = self._get_secret(secrets, "PINECONE_ASSISTANT_NAME", "my-chat-assistant")
+        self.WORDPRESS_URL = self._validate_url(self._get_secret(secrets, "WORDPRESS_URL", ""))
+        self.SQLITE_CLOUD_CONNECTION = self._get_secret(secrets, "SQLITE_CLOUD_CONNECTION")
+        self.ZOHO_CLIENT_ID = self._get_secret(secrets, "ZOHO_CLIENT_ID")
+        self.ZOHO_CLIENT_SECRET = self._get_secret(secrets, "ZOHO_CLIENT_SECRET")
+        self.ZOHO_REFRESH_TOKEN = self._get_secret(secrets, "ZOHO_REFRESH_TOKEN")
         self.ZOHO_ENABLED = all([self.ZOHO_CLIENT_ID, self.ZOHO_CLIENT_SECRET, self.ZOHO_REFRESH_TOKEN])
+        
+        # Log configuration status for debugging
+        logger.info("Configuration loaded:")
+        logger.info(f"- WordPress URL configured: {'Yes' if self.WORDPRESS_URL else 'No'}")
+        logger.info(f"- OpenAI API configured: {'Yes' if self.OPENAI_API_KEY else 'No'}")
+        logger.info(f"- Tavily API configured: {'Yes' if self.TAVILY_API_KEY else 'No'}")
+        logger.info(f"- Pinecone API configured: {'Yes' if self.PINECONE_API_KEY else 'No'}")
+        logger.info(f"- SQLite Cloud configured: {'Yes' if self.SQLITE_CLOUD_CONNECTION else 'No'}")
+        logger.info(f"- Zoho CRM enabled: {'Yes' if self.ZOHO_ENABLED else 'No'}")
+
+    def _get_secret(self, secrets, key: str, default=None):
+        """Safely get a secret value."""
+        if isinstance(secrets, dict):
+            return secrets.get(key, default)
+        else:
+            try:
+                return secrets.get(key, default)
+            except Exception:
+                return default
 
     def _validate_url(self, url: str) -> str:
-        if url and not url.startswith(('http://', 'https://')):
-            logger.warning(f"Invalid URL format for WORDPRESS_URL: {url}. Disabling feature.")
+        if not url:
+            logger.warning("WORDPRESS_URL not configured in secrets")
             return ""
-        return url.rstrip('/')
+            
+        # Clean up the URL
+        url = url.strip()
+        
+        # Check for common issues
+        if url.endswith('/'):
+            url = url.rstrip('/')
+            logger.debug(f"Removed trailing slash from WORDPRESS_URL: {url}")
+            
+        if not url.startswith(('http://', 'https://')):
+            logger.error(f"Invalid WORDPRESS_URL format: {url}. URL must start with http:// or https://")
+            return ""
+            
+        # Parse URL to validate format
+        try:
+            parsed = urlparse(url)
+            if not parsed.netloc:
+                logger.error(f"Invalid WORDPRESS_URL: {url}. No domain found.")
+                return ""
+                
+            logger.info(f"WordPress URL validated: {parsed.scheme}://{parsed.netloc}")
+            return url
+            
+        except Exception as e:
+            logger.error(f"Error parsing WORDPRESS_URL: {e}")
+            return ""
 
 # =============================================================================
 # USER MODELS
@@ -1373,28 +1424,40 @@ class SessionManager:
             if key in st.session_state:
                 del st.session_state[key]
 
-    @handle_api_errors("Authentication", "WordPress Login")
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+        """Authenticate user with WordPress JWT endpoint."""
         if not self.config.WORDPRESS_URL:
             st.error("Authentication service is not configured.")
+            logger.error("WORDPRESS_URL is not set in secrets")
             return None
+            
         if not self.rate_limiter.is_allowed(f"auth_{username}"):
             st.error("Too many login attempts. Please wait.")
             return None
 
         clean_username = username.strip()
         clean_password = password.strip()
+        
+        # Log the authentication attempt (without password)
+        logger.info(f"Attempting WordPress authentication for user: {clean_username}")
+        logger.debug(f"WordPress URL: {self.config.WORDPRESS_URL}")
 
         try:
+            auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
+            logger.debug(f"Auth endpoint: {auth_url}")
+            
             response = requests.post(
-                f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token",
+                auth_url,
                 json={'username': clean_username, 'password': clean_password},
                 headers={'Content-Type': 'application/json'},
                 timeout=15
             )
             
+            logger.info(f"Auth response status code: {response.status_code}")
+            
             if response.status_code == 200:
                 data = response.json()
+                logger.debug(f"Auth response keys: {list(data.keys())}")
                 
                 try:
                     current_session = self.get_session()
@@ -1424,25 +1487,55 @@ class SessionManager:
                 if verification_session and verification_session.user_type == UserType.REGISTERED_USER:
                     st.session_state.current_session_id = current_session.session_id
                     st.success(f"Welcome back, {current_session.first_name}!")
+                    logger.info(f"Authentication successful for user: {clean_username}")
                     return current_session
                 else:
                     st.error("Authentication failed - session could not be saved.")
+                    logger.error("Session verification failed after authentication")
                     return None
                 
             else:
+                # Log the full error response for debugging
+                logger.warning(f"Authentication failed with status {response.status_code}")
+                
                 error_message = f"Invalid username or password (Code: {response.status_code})."
                 try:
                     error_data = response.json()
+                    logger.debug(f"Error response: {error_data}")
                     error_message = error_data.get('message', error_message)
+                    
+                    # Common WordPress JWT Auth plugin error messages
+                    if response.status_code == 403:
+                        error_message = "Invalid credentials. Please check your username and password."
+                    elif response.status_code == 404:
+                        error_message = "Authentication endpoint not found. Please contact support."
+                        logger.error(f"JWT Auth endpoint not found at: {auth_url}")
                 except json.JSONDecodeError:
-                    pass
+                    logger.error(f"Could not parse error response: {response.text[:200]}")
                 
                 st.error(error_message)
                 return None
                 
+        except requests.exceptions.ConnectionError as e:
+            st.error("Cannot connect to authentication server. Please check your internet connection.")
+            logger.error(f"Connection error during authentication: {str(e)}")
+            logger.debug(f"Failed to connect to: {self.config.WORDPRESS_URL}")
+            return None
+            
+        except requests.exceptions.Timeout as e:
+            st.error("Authentication server is not responding. Please try again later.")
+            logger.error(f"Timeout during authentication: {str(e)}")
+            return None
+            
         except requests.exceptions.RequestException as e:
-            st.error(f"A network error occurred during authentication. Please check your connection.")
-            logger.error(f"Authentication network exception: {e}")
+            st.error(f"A network error occurred during authentication. Please try again.")
+            logger.error(f"Authentication request exception: {type(e).__name__}: {str(e)}")
+            return None
+            
+        except Exception as e:
+            # This catches any other unexpected errors
+            st.error("An unexpected error occurred during authentication. Please contact support.")
+            logger.error(f"Unexpected authentication error: {type(e).__name__}: {str(e)}", exc_info=True)
             return None
 
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
@@ -1889,7 +1982,44 @@ def render_welcome_page(session_manager: SessionManager):
     with tab1:
         if not session_manager.config.WORDPRESS_URL:
             st.warning("Sign-in is disabled because the authentication service is not configured.")
+            st.info("""
+            **For administrators:**
+            Please set the `WORDPRESS_URL` in your Streamlit secrets configuration.
+            Example: `WORDPRESS_URL = "https://your-wordpress-site.com"`
+            """)
         else:
+            # Show WordPress URL for debugging (without sensitive info)
+            if st.checkbox("🔧 Show debug info", key="debug_auth"):
+                # Check if secrets are available
+                secrets_available = False
+                wordpress_in_secrets = False
+                try:
+                    if hasattr(st, 'secrets'):
+                        secrets_available = True
+                        wordpress_in_secrets = 'WORDPRESS_URL' in st.secrets
+                except Exception:
+                    pass
+                    
+                st.code(f"""
+Authentication Configuration:
+- WordPress URL: {session_manager.config.WORDPRESS_URL if session_manager.config.WORDPRESS_URL else "NOT CONFIGURED"}
+- JWT Endpoint: {session_manager.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token if session_manager.config.WORDPRESS_URL else "N/A"}
+- Rate Limit: 30 requests per minute
+
+Environment Check:
+- Streamlit Secrets Available: {'Yes' if secrets_available else 'No'}
+- WORDPRESS_URL in secrets: {'Yes' if wordpress_in_secrets else 'No'}
+
+Common Issues:
+1. Ensure JWT Authentication plugin is installed on WordPress
+2. Verify the WordPress URL is correct and accessible
+3. Check that HTTPS is properly configured
+4. Ensure CORS is configured if needed
+5. Add these to wp-config.php:
+   define('JWT_AUTH_SECRET_KEY', 'your-secret-key');
+   define('JWT_AUTH_CORS_ENABLE', true);
+                """)
+            
             st.markdown("""
             **Sign in for full features:**
             - 💾 Auto-save conversations to Zoho CRM
@@ -1923,6 +2053,41 @@ def render_welcome_page(session_manager: SessionManager):
                             time.sleep(1)
                             st.session_state.page = "chat"
                             st.rerun()
+            
+            # Add connection test button for debugging
+            if st.button("🧪 Test Authentication Connection", help="Test if the WordPress JWT endpoint is accessible"):
+                with st.spinner("Testing connection..."):
+                    try:
+                        test_url = f"{session_manager.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
+                        st.info(f"Testing endpoint: {test_url}")
+                        
+                        # Try a simple GET request first
+                        response = requests.get(f"{session_manager.config.WORDPRESS_URL}/wp-json", timeout=5)
+                        
+                        if response.status_code == 200:
+                            # Check if JWT auth route exists
+                            routes = response.json()
+                            if 'routes' in routes and '/jwt-auth/v1/token' in routes['routes']:
+                                st.success("✅ JWT Authentication endpoint found and accessible!")
+                            else:
+                                st.warning("⚠️ WordPress REST API is working but JWT Auth plugin may not be installed.")
+                                st.info("""
+                                To fix this:
+                                1. Install the 'JWT Authentication for WP REST API' plugin
+                                2. Configure the plugin with your secret key
+                                3. Add required constants to wp-config.php
+                                """)
+                        else:
+                            st.error(f"❌ WordPress REST API returned status code: {response.status_code}")
+                            
+                    except requests.exceptions.ConnectionError:
+                        st.error("❌ Cannot connect to WordPress site. Please check:")
+                        st.code(f"URL: {session_manager.config.WORDPRESS_URL}")
+                        st.info("Ensure the URL is correct and the site is accessible.")
+                    except requests.exceptions.Timeout:
+                        st.error("❌ Connection timeout. The server is not responding.")
+                    except Exception as e:
+                        st.error(f"❌ Connection test failed: {type(e).__name__}: {str(e)}")
     
     with tab2:
         st.markdown("""
