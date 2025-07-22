@@ -2092,7 +2092,7 @@ def render_welcome_page(session_manager: SessionManager):
     with col3:
         st.info("📚 **Smart Citations**\nClickable inline source references")
     
-tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
+    tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
     
     with tab1:
         if not session_manager.config.WORDPRESS_URL:
