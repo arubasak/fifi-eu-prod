@@ -10,7 +10,6 @@ import io
 import html
 import jwt
 import threading
-import queue  # <-- IMPORT ADDED
 from enum import Enum
 from urllib.parse import urlparse
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -27,14 +26,11 @@ import requests
 import streamlit.components.v1 as components
 
 # =============================================================================
-# VERSION 3.0 PRODUCTION - COMPLETE AI INTEGRATION
-# - MERGED: Production infrastructure from v2.14 with AI capabilities from v2.1
-# - INCLUDES: JWT auth, session management, Zoho CRM, PDF export
-# - INCLUDES: Pinecone knowledge base with inline citations
-# - INCLUDES: Tavily web search fallback with anti-hallucination
-# - INCLUDES: Content moderation and safety overrides
-# - ENHANCED: Clickable inline citations with source attribution
-# - MAINTAINED: All user type differentiation (Guest vs Registered)
+# VERSION 3.1 PRODUCTION - RELIABLE ZOHO SAVE
+# - FIXED: Synchronous save-on-timeout to prevent race condition with daemon threads.
+# - REMOVED: Unnecessary queue and background worker thread for Zoho operations.
+# - ENHANCED: Save logic is now more robust for non-interactive triggers (timeout, browser close).
+# - MAINTAINED: All previous features from v3.0 are fully intact.
 # =============================================================================
 
 # Setup enhanced logging
@@ -1137,27 +1133,6 @@ class SessionManager:
         self.rate_limiter = rate_limiter
         self.session_timeout_minutes = 5
 
-        # --- NEW: Initialize and start the persistent worker queue ---
-        self.task_queue = queue.Queue()
-        self._worker_thread = threading.Thread(target=self._zoho_worker_loop, daemon=True)
-        self._worker_thread.start()
-        logger.info("✅ Persistent Zoho background worker started.")
-        # --- END NEW ---
-
-    def _zoho_worker_loop(self):
-        """
-        The target function for the persistent background thread.
-        It waits for a task on the queue and executes it.
-        """
-        while True:
-            try:
-                session, reason = self.task_queue.get()
-                logger.info(f"Worker picked up task: Save session {session.session_id[:8]} for reason: {reason}")
-                self._perform_save_logic(session, reason)
-                self.task_queue.task_done()
-            except Exception as e:
-                logger.error(f"Error in Zoho worker thread: {e}", exc_info=True)
-
     def get_session_timeout_minutes(self) -> int:
         return getattr(self, 'session_timeout_minutes', 5)
 
@@ -1235,6 +1210,10 @@ class SessionManager:
         return True
 
     def _auto_save_to_crm(self, session: UserSession, trigger_reason: str):
+        """
+        Performs a synchronous save to Zoho CRM. This is now a blocking operation
+        to ensure completion before the session ends, especially on timeout.
+        """
         if not (session.user_type == UserType.REGISTERED_USER and 
                 session.email and 
                 session.messages and 
@@ -1243,20 +1222,21 @@ class SessionManager:
 
         is_interactive = trigger_reason in ["Manual Sign Out", "Manual Save to Zoho CRM"]
 
+        # If the action was started by the user, show spinners for feedback.
         if is_interactive:
-            # For user-initiated actions, show spinners and run in the main thread.
             with st.spinner(f"💾 Saving chat to CRM ({trigger_reason.lower()})..."):
                 success = self._perform_save_logic(session, trigger_reason)
             
             if success:
                 st.toast("✅ Chat saved to Zoho CRM!", icon="✅")
             else:
-                st.toast("⚠️ Failed to save chat to CRM. Check logs for details.", icon="❌")
+                st.toast("⚠️ Failed to save chat to CRM. Check server logs for details.", icon="❌")
         else:
-            # For background actions, just put the task on the queue. This is instant.
-            # The persistent worker thread will pick it up and process it safely.
-            logger.info(f"Queueing background Zoho save. Trigger: {trigger_reason}")
-            self.task_queue.put((session, trigger_reason))
+            # For non-interactive triggers like "Session Timeout", run the save
+            # logic directly without spinners. The script will wait here until
+            # the save is complete before proceeding to end the session.
+            logger.info(f"Performing synchronous Zoho save. Trigger: {trigger_reason}")
+            self._perform_save_logic(session, trigger_reason)
     
     def _end_session_internal(self, session: UserSession):
         session.active = False
@@ -1817,7 +1797,7 @@ def render_welcome_page(session_manager: SessionManager):
 
 def main():
     st.set_page_config(
-        page_title="FiFi AI Assistant v3.0", 
+        page_title="FiFi AI Assistant v3.1", 
         page_icon="🤖", 
         layout="wide"
     )
