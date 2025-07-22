@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import os
 import uuid
 import json
@@ -24,6 +23,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from collections import defaultdict
 import requests
+import streamlit.components.v1 as components  # <-- ADDED IMPORT
 
 # =============================================================================
 # VERSION 3.0 PRODUCTION - COMPLETE AI INTEGRATION
@@ -204,74 +204,23 @@ DEFAULT_EXCLUDED_DOMAINS = [
 
 class Config:
     def __init__(self):
-        # Handle missing secrets gracefully
-        try:
-            secrets = st.secrets
-        except Exception as e:
-            logger.warning(f"Streamlit secrets not available: {e}")
-            secrets = {}
-            
-        self.JWT_SECRET = self._get_secret(secrets, "JWT_SECRET", "default-secret")
-        self.OPENAI_API_KEY = self._get_secret(secrets, "OPENAI_API_KEY")
-        self.TAVILY_API_KEY = self._get_secret(secrets, "TAVILY_API_KEY")
-        self.PINECONE_API_KEY = self._get_secret(secrets, "PINECONE_API_KEY")
-        self.PINECONE_ASSISTANT_NAME = self._get_secret(secrets, "PINECONE_ASSISTANT_NAME", "my-chat-assistant")
-        self.WORDPRESS_URL = self._validate_url(self._get_secret(secrets, "WORDPRESS_URL", ""))
-        self.SQLITE_CLOUD_CONNECTION = self._get_secret(secrets, "SQLITE_CLOUD_CONNECTION")
-        self.ZOHO_CLIENT_ID = self._get_secret(secrets, "ZOHO_CLIENT_ID")
-        self.ZOHO_CLIENT_SECRET = self._get_secret(secrets, "ZOHO_CLIENT_SECRET")
-        self.ZOHO_REFRESH_TOKEN = self._get_secret(secrets, "ZOHO_REFRESH_TOKEN")
+        self.JWT_SECRET = st.secrets.get("JWT_SECRET", "default-secret")
+        self.OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
+        self.TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY")
+        self.PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY")
+        self.PINECONE_ASSISTANT_NAME = st.secrets.get("PINECONE_ASSISTANT_NAME", "my-chat-assistant")
+        self.WORDPRESS_URL = self._validate_url(st.secrets.get("WORDPRESS_URL", ""))
+        self.SQLITE_CLOUD_CONNECTION = st.secrets.get("SQLITE_CLOUD_CONNECTION")
+        self.ZOHO_CLIENT_ID = st.secrets.get("ZOHO_CLIENT_ID")
+        self.ZOHO_CLIENT_SECRET = st.secrets.get("ZOHO_CLIENT_SECRET")
+        self.ZOHO_REFRESH_TOKEN = st.secrets.get("ZOHO_REFRESH_TOKEN")
         self.ZOHO_ENABLED = all([self.ZOHO_CLIENT_ID, self.ZOHO_CLIENT_SECRET, self.ZOHO_REFRESH_TOKEN])
-        
-        # Log configuration status for debugging
-        logger.info("Configuration loaded:")
-        logger.info(f"- WordPress URL configured: {'Yes' if self.WORDPRESS_URL else 'No'}")
-        logger.info(f"- OpenAI API configured: {'Yes' if self.OPENAI_API_KEY else 'No'}")
-        logger.info(f"- Tavily API configured: {'Yes' if self.TAVILY_API_KEY else 'No'}")
-        logger.info(f"- Pinecone API configured: {'Yes' if self.PINECONE_API_KEY else 'No'}")
-        logger.info(f"- SQLite Cloud configured: {'Yes' if self.SQLITE_CLOUD_CONNECTION else 'No'}")
-        logger.info(f"- Zoho CRM enabled: {'Yes' if self.ZOHO_ENABLED else 'No'}")
-
-    def _get_secret(self, secrets, key: str, default=None):
-        """Safely get a secret value."""
-        if isinstance(secrets, dict):
-            return secrets.get(key, default)
-        else:
-            try:
-                return secrets.get(key, default)
-            except Exception:
-                return default
 
     def _validate_url(self, url: str) -> str:
-        if not url:
-            logger.warning("WORDPRESS_URL not configured in secrets")
+        if url and not url.startswith(('http://', 'https://')):
+            logger.warning(f"Invalid URL format for WORDPRESS_URL: {url}. Disabling feature.")
             return ""
-            
-        # Clean up the URL
-        url = url.strip()
-        
-        # Check for common issues
-        if url.endswith('/'):
-            url = url.rstrip('/')
-            logger.debug(f"Removed trailing slash from WORDPRESS_URL: {url}")
-            
-        if not url.startswith(('http://', 'https://')):
-            logger.error(f"Invalid WORDPRESS_URL format: {url}. URL must start with http:// or https://")
-            return ""
-            
-        # Parse URL to validate format
-        try:
-            parsed = urlparse(url)
-            if not parsed.netloc:
-                logger.error(f"Invalid WORDPRESS_URL: {url}. No domain found.")
-                return ""
-                
-            logger.info(f"WordPress URL validated: {parsed.scheme}://{parsed.netloc}")
-            return url
-            
-        except Exception as e:
-            logger.error(f"Error parsing WORDPRESS_URL: {e}")
-            return ""
+        return url.rstrip('/')
 
 # =============================================================================
 # USER MODELS
@@ -356,83 +305,8 @@ class DatabaseManager:
             else:
                 self.local_sessions[session.session_id] = session
 
-    def cleanup_expired_sessions(self):
-        """
-        Background task to cleanup expired sessions.
-        Returns list of expired registered user sessions that need CRM save.
-        """
-        expired_registered_sessions = []
-        
-        try:
-            if self.use_cloud:
-                with self._get_connection() as conn:
-                    # Find all active sessions with details
-                    cursor = conn.execute("""
-                        SELECT session_id, user_type, email, messages, last_activity 
-                        FROM sessions 
-                        WHERE active = 1
-                    """)
-                    rows = cursor.fetchall()
-                    
-                    now = datetime.now()
-                    expired_count = 0
-                    
-                    for row in rows:
-                        session_id, user_type, email, messages_json, last_activity_str = row
-                        last_activity = datetime.fromisoformat(last_activity_str)
-                        time_diff = now - last_activity
-                        
-                        # Check if session expired (5 minutes = 300 seconds)
-                        if time_diff.total_seconds() > 300:
-                            # If it's a registered user with email and messages, add to save list
-                            if user_type == "registered_user" and email and messages_json != "[]":
-                                expired_registered_sessions.append({
-                                    'session_id': session_id,
-                                    'email': email,
-                                    'messages': json.loads(messages_json)
-                                })
-                            
-                            # Mark session as inactive
-                            conn.execute(
-                                "UPDATE sessions SET active = 0 WHERE session_id = ?",
-                                (session_id,)
-                            )
-                            expired_count += 1
-                    
-                    if expired_count > 0:
-                        conn.commit()
-                        logger.info(f"Cleaned up {expired_count} expired sessions")
-            else:
-                # For local storage
-                now = datetime.now()
-                expired_sessions = []
-                
-                for session_id, session in self.local_sessions.items():
-                    if hasattr(session, 'last_activity') and session.active:
-                        time_diff = now - session.last_activity
-                        if time_diff.total_seconds() > 300:
-                            # Check if needs CRM save
-                            if (hasattr(session, 'user_type') and 
-                                session.user_type == UserType.REGISTERED_USER and
-                                hasattr(session, 'email') and session.email and
-                                hasattr(session, 'messages') and session.messages):
-                                expired_registered_sessions.append({
-                                    'session_id': session.session_id,
-                                    'email': session.email,
-                                    'messages': session.messages
-                                })
-                            expired_sessions.append(session_id)
-                
-                for session_id in expired_sessions:
-                    self.local_sessions[session_id].active = False
-                    
-                if expired_sessions:
-                    logger.info(f"Cleaned up {len(expired_sessions)} expired sessions")
-                    
-        except Exception as e:
-            logger.error(f"Error during session cleanup: {e}")
-            
-        return expired_registered_sessions
+    @handle_api_errors("Database", "Load Session")
+    def load_session(self, session_id: str) -> Optional[UserSession]:
         with self.lock:
             if self.use_cloud:
                 with self._get_connection() as conn:
@@ -658,107 +532,6 @@ def sanitize_input(text: str, max_length: int = 4000) -> str:
     if not isinstance(text, str): 
         return ""
     return html.escape(text)[:max_length].strip()
-
-def render_auto_logout_component(timeout_seconds: int):
-    """
-    Injects a client-side JavaScript component to force a page reload on timeout.
-    This ensures sessions expire even without user interaction.
-    """
-    if timeout_seconds <= 0:
-        return
-
-    # JavaScript to run a countdown and reload the page
-    js_code = f"""
-    <script>
-    // Function to reload the page
-    function reloadPage() {{
-        // Using parent.location.reload() because Streamlit runs components in iframe
-        window.parent.location.reload();
-    }}
-
-    // Clear any existing timer to prevent duplicates
-    if (window.streamlitAutoLogoutTimer) {{
-        clearTimeout(window.streamlitAutoLogoutTimer);
-    }}
-
-    // Set timer in milliseconds
-    window.streamlitAutoLogoutTimer = setTimeout(reloadPage, {timeout_seconds * 1000});
-    
-    // Optional: Log for debugging
-    console.log('Auto-logout timer set for', {timeout_seconds}, 'seconds');
-    </script>
-    """
-    # Embed the JavaScript in the Streamlit app
-    components.html(js_code, height=0, width=0)
-
-def render_browser_close_handler(session_id: str, user_type: str):
-    """
-    Injects JavaScript to detect browser/tab closure.
-    Note: This is best-effort - browsers limit what can be done during unload.
-    """
-    if user_type != "registered_user":
-        return
-    
-    js_code = f"""
-    <script>
-    // Store session info in browser
-    window.fifiSessionId = '{session_id}';
-    window.fifiUserType = '{user_type}';
-    
-    // Track if we should save on unload
-    window.fifiShouldSave = true;
-    
-    // Disable save on normal navigation
-    window.addEventListener('click', function(e) {{
-        // If clicking a link or button, don't trigger save
-        if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON') {{
-            window.fifiShouldSave = false;
-            setTimeout(() => {{ window.fifiShouldSave = true; }}, 1000);
-        }}
-    }});
-    
-    // Attempt to notify server on page unload
-    window.addEventListener('beforeunload', function(e) {{
-        if (window.fifiShouldSave && window.fifiUserType === 'registered_user') {{
-            // Try to send a beacon to save the session
-            // Note: This has limitations and may not always work
-            try {{
-                // Store a flag in localStorage to trigger save on next visit
-                localStorage.setItem('fifi_pending_save', JSON.stringify({{
-                    sessionId: window.fifiSessionId,
-                    timestamp: new Date().toISOString(),
-                    trigger: 'browser_close'
-                }}));
-            }} catch (err) {{
-                console.error('Could not save pending session flag:', err);
-            }}
-        }}
-    }});
-    
-    // Check for pending saves from previous sessions
-    try {{
-        const pendingSave = localStorage.getItem('fifi_pending_save');
-        if (pendingSave) {{
-            const data = JSON.parse(pendingSave);
-            const savedTime = new Date(data.timestamp);
-            const now = new Date();
-            const hoursSince = (now - savedTime) / (1000 * 60 * 60);
-            
-            // If less than 24 hours old, it might be relevant
-            if (hoursSince < 24) {{
-                console.log('Found pending save from previous session:', data);
-                // Clear the flag
-                localStorage.removeItem('fifi_pending_save');
-                // Note: We can't directly trigger the save from here,
-                // but the session timeout logic will handle it
-            }}
-        }}
-    }} catch (err) {{
-        console.error('Could not check pending saves:', err);
-    }}
-    </script>
-    """
-    components.html(js_code, height=0, width=0)
 
 # =============================================================================
 # AI SYSTEM - PINECONE ASSISTANT
@@ -1373,53 +1146,31 @@ class SessionManager:
         return time_diff.total_seconds() > (self.session_timeout_minutes * 60)
 
     def _update_activity(self, session: UserSession):
-        """Update session's last activity timestamp."""
-        try:
-            session.last_activity = datetime.now()
-            self.db.save_session(session)
-        except Exception as e:
-            logger.error(f"Error updating session activity: {e}")
-            # Don't propagate the error - just log it
+        session.last_activity = datetime.now()
+        self.db.save_session(session)
 
     def _create_guest_session(self) -> UserSession:
-        """Create a new guest session."""
-        try:
-            session = UserSession(session_id=str(uuid.uuid4()))
-            self.db.save_session(session)
-            st.session_state.current_session_id = session.session_id
-            logger.info(f"Created new guest session: {session.session_id[:8]}...")
-            return session
-        except Exception as e:
-            logger.error(f"Error creating guest session: {e}")
-            # Fallback to in-memory session
-            session = UserSession(session_id=str(uuid.uuid4()))
-            st.session_state.current_session_id = session.session_id
-            return session
+        session = UserSession(session_id=str(uuid.uuid4()))
+        self.db.save_session(session)
+        st.session_state.current_session_id = session.session_id
+        return session
 
     def get_session(self) -> UserSession:
-        """Get current session or create a new one."""
-        try:
-            session_id = st.session_state.get('current_session_id')
-            
-            if session_id:
-                session = self.db.load_session(session_id)
-                if session and session.active:
-                    if self._is_session_expired(session):
-                        logger.info(f"Session {session_id[:8]}... expired due to inactivity")
-                        # Check if this is a registered user session that needs saving
-                        if session.user_type == UserType.REGISTERED_USER and session.email and session.messages:
-                            self._auto_save_to_crm(session, "Session Timeout")
-                        self._end_session_internal(session)
-                        return self._create_guest_session()
-                    else:
-                        self._update_activity(session)
-                        return session
-            
-            return self._create_guest_session()
-        except Exception as e:
-            logger.error(f"Error in get_session: {e}")
-            # Fallback to creating a new guest session
-            return self._create_guest_session()
+        session_id = st.session_state.get('current_session_id')
+        
+        if session_id:
+            session = self.db.load_session(session_id)
+            if session and session.active:
+                if self._is_session_expired(session):
+                    logger.info(f"Session {session_id[:8]}... expired due to inactivity")
+                    self._auto_save_to_crm(session, "Session Timeout")
+                    self._end_session_internal(session)
+                    return self._create_guest_session()
+                else:
+                    self._update_activity(session)
+                    return session
+        
+        return self._create_guest_session()
 
     def _auto_save_to_crm(self, session: UserSession, trigger_reason: str):
         if (session.user_type == UserType.REGISTERED_USER and 
@@ -1444,56 +1195,34 @@ class SessionManager:
             if key in st.session_state:
                 del st.session_state[key]
 
+    @handle_api_errors("Authentication", "WordPress Login")
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        """Authenticate user with WordPress JWT endpoint."""
         if not self.config.WORDPRESS_URL:
             st.error("Authentication service is not configured.")
-            logger.error("WORDPRESS_URL is not set in secrets")
             return None
-            
         if not self.rate_limiter.is_allowed(f"auth_{username}"):
             st.error("Too many login attempts. Please wait.")
             return None
 
         clean_username = username.strip()
         clean_password = password.strip()
-        
-        # Log the authentication attempt (without password)
-        logger.info(f"Attempting WordPress authentication for user: {clean_username}")
-        logger.debug(f"WordPress URL: {self.config.WORDPRESS_URL}")
 
         try:
-            auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
-            logger.debug(f"Auth endpoint: {auth_url}")
-            
             response = requests.post(
-                auth_url,
+                f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token",
                 json={'username': clean_username, 'password': clean_password},
                 headers={'Content-Type': 'application/json'},
                 timeout=15
             )
             
-            logger.info(f"Auth response status code: {response.status_code}")
-            
             if response.status_code == 200:
                 data = response.json()
-                logger.debug(f"Auth response keys: {list(data.keys())}")
                 
-                # Get or create current session
-                current_session = None
                 try:
                     current_session = self.get_session()
-                    logger.info(f"Got existing session: {current_session.session_id[:8]}...")
                 except Exception as e:
                     logger.error(f"Error getting session during auth: {e}")
-                    # Create a new session manually if get_session fails
-                    current_session = UserSession(session_id=str(uuid.uuid4()))
-                    st.session_state.current_session_id = current_session.session_id
-                    logger.info(f"Created fallback session: {current_session.session_id[:8]}...")
-                
-                if not current_session:
-                    st.error("Failed to create session. Please try again.")
-                    return None
+                    current_session = self._create_guest_session()
                 
                 display_name = (
                     data.get('user_display_name') or 
@@ -1505,82 +1234,37 @@ class SessionManager:
                     clean_username
                 )
 
-                # Update session with user data
                 current_session.user_type = UserType.REGISTERED_USER
                 current_session.email = data.get('user_email')
                 current_session.first_name = display_name
                 current_session.wp_token = data.get('token')
                 current_session.last_activity = datetime.now()
                 
-                # Save the updated session
-                try:
-                    self.db.save_session(current_session)
-                    logger.info("Session saved successfully")
-                except Exception as e:
-                    logger.error(f"Error saving authenticated session: {e}")
-                    st.error("Failed to save session. Please try again.")
-                    return None
+                self.db.save_session(current_session)
                 
-                # Verify the session was saved correctly
-                try:
-                    verification_session = self.db.load_session(current_session.session_id)
-                    if verification_session and verification_session.user_type == UserType.REGISTERED_USER:
-                        st.session_state.current_session_id = current_session.session_id
-                        st.success(f"Welcome back, {current_session.first_name}!")
-                        logger.info(f"Authentication successful for user: {clean_username}")
-                        return current_session
-                    else:
-                        st.error("Authentication failed - session verification failed.")
-                        logger.error("Session verification failed after authentication")
-                        return None
-                except Exception as e:
-                    logger.error(f"Error verifying session: {e}")
-                    # Even if verification fails, we can still return the session
+                verification_session = self.db.load_session(current_session.session_id)
+                if verification_session and verification_session.user_type == UserType.REGISTERED_USER:
+                    st.session_state.current_session_id = current_session.session_id
                     st.success(f"Welcome back, {current_session.first_name}!")
                     return current_session
+                else:
+                    st.error("Authentication failed - session could not be saved.")
+                    return None
                 
             else:
-                # Log the full error response for debugging
-                logger.warning(f"Authentication failed with status {response.status_code}")
-                
                 error_message = f"Invalid username or password (Code: {response.status_code})."
                 try:
                     error_data = response.json()
-                    logger.debug(f"Error response: {error_data}")
                     error_message = error_data.get('message', error_message)
-                    
-                    # Common WordPress JWT Auth plugin error messages
-                    if response.status_code == 403:
-                        error_message = "Invalid credentials. Please check your username and password."
-                    elif response.status_code == 404:
-                        error_message = "Authentication endpoint not found. Please contact support."
-                        logger.error(f"JWT Auth endpoint not found at: {auth_url}")
                 except json.JSONDecodeError:
-                    logger.error(f"Could not parse error response: {response.text[:200]}")
+                    pass
                 
                 st.error(error_message)
                 return None
                 
-        except requests.exceptions.ConnectionError as e:
-            st.error("Cannot connect to authentication server. Please check your internet connection.")
-            logger.error(f"Connection error during authentication: {str(e)}")
-            logger.debug(f"Failed to connect to: {self.config.WORDPRESS_URL}")
-            return None
-            
-        except requests.exceptions.Timeout as e:
-            st.error("Authentication server is not responding. Please try again later.")
-            logger.error(f"Timeout during authentication: {str(e)}")
-            return None
-            
         except requests.exceptions.RequestException as e:
-            st.error(f"A network error occurred during authentication. Please try again.")
-            logger.error(f"Authentication request exception: {type(e).__name__}: {str(e)}")
-            return None
-            
-        except Exception as e:
-            # This catches any other unexpected errors
-            st.error("An unexpected error occurred during authentication. Please contact support.")
-            logger.error(f"Unexpected authentication error: {type(e).__name__}: {str(e)}", exc_info=True)
+            st.error(f"A network error occurred during authentication. Please check your connection.")
+            logger.error(f"Authentication network exception: {e}")
             return None
 
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
@@ -1681,31 +1365,19 @@ def ensure_initialization():
             config = Config()
             pdf_exporter = PDFExporter()
             
-            # Initialize database manager
             if 'db_manager' not in st.session_state:
-                db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
-                st.session_state.db_manager = db_manager
-                logger.info(f"Database manager initialized (cloud: {db_manager.use_cloud})")
-            else:
-                db_manager = st.session_state.db_manager
+                st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
             
-            # Verify database manager has required methods
-            if not hasattr(db_manager, 'load_session') or not hasattr(db_manager, 'save_session'):
-                logger.error("Database manager missing required methods")
-                st.error("Database initialization error. Please refresh the page.")
-                return False
-            
+            db_manager = st.session_state.db_manager
             zoho_manager = ZohoCRMManager(config, pdf_exporter)
             ai_system = EnhancedAI(config)
             rate_limiter = RateLimiter()
 
-            session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
-            st.session_state.session_manager = session_manager
+            st.session_state.session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
             st.session_state.pdf_exporter = pdf_exporter
             st.session_state.error_handler = error_handler
             st.session_state.ai_system = ai_system
             st.session_state.initialized = True
-            st.session_state.last_cleanup = datetime.now()
             
             logger.info("✅ Application initialized successfully")
             return True
@@ -1716,37 +1388,78 @@ def ensure_initialization():
             logger.critical(f"Initialization failed: {e}", exc_info=True)
             return False
     
-    # Run periodic cleanup of expired sessions
-    if 'last_cleanup' in st.session_state:
-        time_since_cleanup = datetime.now() - st.session_state.last_cleanup
-        # Run cleanup every 60 seconds
-        if time_since_cleanup.total_seconds() > 60:
-            if 'db_manager' in st.session_state and 'session_manager' in st.session_state:
-                try:
-                    # Get expired sessions that need CRM save
-                    expired_sessions = st.session_state.db_manager.cleanup_expired_sessions()
-                    
-                    # Process CRM saves for expired registered user sessions
-                    if expired_sessions and st.session_state.session_manager.zoho.config.ZOHO_ENABLED:
-                        for session_data in expired_sessions:
-                            try:
-                                # Create a temporary session object for CRM save
-                                temp_session = UserSession(
-                                    session_id=session_data['session_id'],
-                                    user_type=UserType.REGISTERED_USER,
-                                    email=session_data['email'],
-                                    messages=session_data['messages']
-                                )
-                                logger.info(f"Auto-saving expired session {session_data['session_id'][:8]}... to CRM")
-                                st.session_state.session_manager.zoho.save_chat_transcript(temp_session)
-                            except Exception as e:
-                                logger.error(f"Failed to save expired session to CRM: {e}")
-                    
-                    st.session_state.last_cleanup = datetime.now()
-                except Exception as e:
-                    logger.error(f"Error during cleanup: {e}")
-    
     return True
+
+# --- NEW HELPER FUNCTIONS ADDED HERE ---
+
+def render_auto_logout_component(timeout_seconds: int):
+    """
+    Injects a client-side JavaScript component to force a page reload on timeout.
+    """
+    if timeout_seconds <= 0:
+        return
+
+    # JavaScript to run a countdown and reload the page.
+    js_code = f"""
+    <script>
+    // Function to reload the page
+    function reloadPage() {{
+        // Using parent.location.reload() is necessary because Streamlit runs components in an iframe.
+        window.parent.location.reload();
+    }}
+
+    // Set a timer to execute the reload function after the specified timeout.
+    // We clear any existing timer to prevent duplicates from multiple reruns.
+    if (window.streamlitAutoLogoutTimer) {{
+        clearTimeout(window.streamlitAutoLogoutTimer);
+    }}
+
+    // The timeout is set in milliseconds.
+    window.streamlitAutoLogoutTimer = setTimeout(reloadPage, {timeout_seconds * 1000});
+    </script>
+    """
+    # Embed the JavaScript in the Streamlit app.
+    components.html(js_code, height=0, width=0)
+
+def render_browser_close_component(session_id: str):
+    """
+    Injects JavaScript to send a "beacon" request when the browser tab is closed.
+    This request will trigger a server-side session cleanup.
+    """
+    if not session_id:
+        return
+
+    # This JavaScript listens for the 'pagehide' event, which is a reliable way to detect
+    # when a user is navigating away from or closing the page.
+    js_code = f"""
+    <script>
+    // Ensure this listener is only added once.
+    if (!window.browserCloseListenerAdded) {{
+        window.addEventListener('pagehide', function() {{
+            // Construct the URL with query parameters to trigger the cleanup.
+            // This is a "fire-and-forget" request. We don't expect a response.
+            const url = `/?event=close&session_id={session_id}`;
+
+            // Use fetch with 'keepalive: true'. This is crucial.
+            // It tells the browser to keep this network request alive in the background
+            // even after the page has been terminated.
+            try {{
+                fetch(url, {{
+                    method: 'GET',
+                    keepalive: true
+                }});
+            }} catch(e) {{
+                // This might fail in very old browsers, but it's the best modern approach.
+                console.error("Could not send close beacon: ", e);
+            }}
+        }}, {{ once: true }}); // Use 'once' to ensure it only fires once per page load.
+        
+        window.browserCloseListenerAdded = true;
+    }}
+    </script>
+    """
+    components.html(js_code, height=0, width=0)
+
 
 # =============================================================================
 # UI RENDERING FUNCTIONS
@@ -1780,6 +1493,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 if session_manager.zoho.config.ZOHO_ENABLED and fresh_session.email:
                     st.caption("💾 Auto-save ON")
             
+            # --- MODIFIED SECTION FOR AUTO-LOGOUT ---
             if fresh_session.last_activity:
                 time_since_activity = datetime.now() - fresh_session.last_activity
                 timeout_minutes = session_manager.get_session_timeout_minutes()
@@ -1793,13 +1507,13 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     minutes_remaining = seconds_remaining / 60
                     st.caption(f"⏱️ Auto-save & sign out in {minutes_remaining:.1f} minutes")
                     
-                    # Inject client-side timer for automatic logout
+                    # Call the component to start the client-side timer
                     render_auto_logout_component(timeout_seconds=int(seconds_remaining))
                 else:
                     st.caption("⏱️ Session expired. Signing out...")
-                    
-                    # If session already expired, trigger reload almost immediately
+                    # If the session has already expired, trigger a reload almost immediately
                     render_auto_logout_component(timeout_seconds=2)
+            # --- END OF MODIFIED SECTION ---
                     
         else:
             st.info("👤 **Guest User**")
@@ -1901,13 +1615,11 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
     st.caption("Your intelligent food & beverage sourcing companion with knowledge base and web search")
     
     current_session = session_manager.get_session()
-    
-    # Inject browser close handler for registered users
-    if current_session.user_type == UserType.REGISTERED_USER:
-        render_browser_close_handler(
-            session_id=current_session.session_id,
-            user_type=current_session.user_type.value
-        )
+
+    # --- ADDED CALL FOR BROWSER CLOSE EVENT ---
+    # Add the browser-close event listener to the page for the current session.
+    render_browser_close_component(current_session.session_id)
+    # --- END OF ADDED CALL ---
     
     # Timeout warning for registered users
     if current_session.user_type == UserType.REGISTERED_USER and current_session.last_activity:
@@ -1919,19 +1631,6 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
             st.warning(f"⏱️ Session will auto-save and timeout in {minutes_remaining:.1f} minutes due to inactivity")
         elif minutes_remaining <= 0:
             st.error("⏱️ Session expired due to inactivity. Please sign in again.")
-            # Add instructions for expired sessions
-            st.info("""
-            **Your session has expired for security reasons.**
-            
-            If you were a registered user:
-            - ✅ Your chat was automatically saved to Zoho CRM
-            - 📄 You can retrieve it from your CRM contact record
-            - 🔑 Please sign in again to continue
-            """)
-            if st.button("🔑 Return to Sign In", use_container_width=True):
-                if 'page' in st.session_state:
-                    del st.session_state.page
-                st.rerun()
     
     # Display chat history
     for msg in current_session.messages:
@@ -2041,46 +1740,7 @@ def render_welcome_page(session_manager: SessionManager):
     with tab1:
         if not session_manager.config.WORDPRESS_URL:
             st.warning("Sign-in is disabled because the authentication service is not configured.")
-            st.info("""
-            **For administrators:**
-            Please set the `WORDPRESS_URL` in your Streamlit secrets configuration.
-            Example: `WORDPRESS_URL = "https://your-wordpress-site.com"`
-            """)
         else:
-            # Show WordPress URL for debugging (without sensitive info)
-            if st.checkbox("🔧 Show debug info", key="debug_auth"):
-                # Check if secrets are available
-                secrets_available = False
-                wordpress_in_secrets = False
-                try:
-                    if hasattr(st, 'secrets'):
-                        secrets_available = True
-                        wordpress_in_secrets = 'WORDPRESS_URL' in st.secrets
-                except Exception:
-                    pass
-                
-                jwt_endpoint = f"{session_manager.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token" if session_manager.config.WORDPRESS_URL else "N/A"
-                    
-                st.code(f"""
-Authentication Configuration:
-- WordPress URL: {session_manager.config.WORDPRESS_URL if session_manager.config.WORDPRESS_URL else "NOT CONFIGURED"}
-- JWT Endpoint: {jwt_endpoint}
-- Rate Limit: 30 requests per minute
-
-Environment Check:
-- Streamlit Secrets Available: {'Yes' if secrets_available else 'No'}
-- WORDPRESS_URL in secrets: {'Yes' if wordpress_in_secrets else 'No'}
-
-Common Issues:
-1. Ensure JWT Authentication plugin is installed on WordPress
-2. Verify the WordPress URL is correct and accessible
-3. Check that HTTPS is properly configured
-4. Ensure CORS is configured if needed
-5. Add these to wp-config.php:
-   define('JWT_AUTH_SECRET_KEY', 'your-secret-key');
-   define('JWT_AUTH_CORS_ENABLE', true);
-                """)
-            
             st.markdown("""
             **Sign in for full features:**
             - 💾 Auto-save conversations to Zoho CRM
@@ -2088,12 +1748,6 @@ Common Issues:
             - 🔄 Persistent chat history across sessions
             - ⏱️ 5-minute inactivity timeout with auto-save
             - 🎯 Personalized experience
-            
-            **Security Features:**
-            - 🔐 Automatic logout after 5 minutes of inactivity
-            - 💾 Chat automatically saved to CRM before logout
-            - 🌐 Works even if you close your browser
-            - 📱 Session management across devices
             """)
             
             with st.form("login_form", clear_on_submit=False):
@@ -2114,41 +1768,6 @@ Common Issues:
                             time.sleep(1)
                             st.session_state.page = "chat"
                             st.rerun()
-            
-            # Add connection test button for debugging
-            if st.button("🧪 Test Authentication Connection", help="Test if the WordPress JWT endpoint is accessible"):
-                with st.spinner("Testing connection..."):
-                    try:
-                        test_url = f"{session_manager.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
-                        st.info(f"Testing endpoint: {test_url}")
-                        
-                        # Try a simple GET request first
-                        response = requests.get(f"{session_manager.config.WORDPRESS_URL}/wp-json", timeout=5)
-                        
-                        if response.status_code == 200:
-                            # Check if JWT auth route exists
-                            routes = response.json()
-                            if 'routes' in routes and '/jwt-auth/v1/token' in routes['routes']:
-                                st.success("✅ JWT Authentication endpoint found and accessible!")
-                            else:
-                                st.warning("⚠️ WordPress REST API is working but JWT Auth plugin may not be installed.")
-                                st.info("""
-                                To fix this:
-                                1. Install the 'JWT Authentication for WP REST API' plugin
-                                2. Configure the plugin with your secret key
-                                3. Add required constants to wp-config.php
-                                """)
-                        else:
-                            st.error(f"❌ WordPress REST API returned status code: {response.status_code}")
-                            
-                    except requests.exceptions.ConnectionError:
-                        st.error("❌ Cannot connect to WordPress site. Please check:")
-                        st.code(f"URL: {session_manager.config.WORDPRESS_URL}")
-                        st.info("Ensure the URL is correct and the site is accessible.")
-                    except requests.exceptions.Timeout:
-                        st.error("❌ Connection timeout. The server is not responding.")
-                    except Exception as e:
-                        st.error(f"❌ Connection test failed: {type(e).__name__}: {str(e)}")
     
     with tab2:
         st.markdown("""
@@ -2202,6 +1821,29 @@ def main():
         page_icon="🤖", 
         layout="wide"
     )
+
+    # --- ADDED: Handler for browser close event ---
+    # Check for a browser-close event triggered by our JavaScript component.
+    # This must be run before any other logic.
+    query_params = st.query_params
+    if query_params.get("event") == "close" and "session_id" in query_params:
+        session_id_to_close = query_params["session_id"]
+        logger.info(f"Received browser-close event for session: {session_id_to_close[:8]}...")
+        
+        # We need to initialize the session manager to perform the cleanup.
+        if ensure_initialization():
+            session_manager = get_session_manager()
+            if session_manager:
+                session_to_close = session_manager.db.load_session(session_id_to_close)
+                if session_to_close and session_to_close.active:
+                    # Perform the same cleanup as a manual sign-out.
+                    session_manager._auto_save_to_crm(session_to_close, "Browser Closed")
+                    session_manager._end_session_internal(session_to_close)
+                    logger.info(f"Successfully closed session: {session_id_to_close[:8]}...")
+        
+        # Stop execution of the script. We don't need to render anything for this beacon request.
+        st.stop()
+    # --- END OF ADDED HANDLER ---
 
     # Emergency reset button
     if st.button("🔄 Fresh Start (Clear All State)", key="emergency_clear"):
