@@ -2769,14 +2769,24 @@ def enhanced_session_timeout_handler():
 def main():
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
 
+    # DEBUG: Log all query parameters at the start
+    query_params = st.query_params
+    if query_params:
+        logger.info(f"🔍 MAIN() RECEIVED QUERY PARAMS: {dict(query_params)}")
+    
     # Handle browser events from JavaScript using enhanced handler
     enhanced_session_timeout_handler()
+    
+    # DEBUG: Log if we get past the event handler
+    logger.info("🔍 MAIN() CONTINUING AFTER EVENT HANDLER")
 
     # Emergency state clear
     if st.button("🔄 Fresh Start (Clear All State)", key="emergency_clear"):
         st.session_state.clear()
         st.success("✅ All state cleared. Refreshing...")
         st.rerun()
+
+    # Rest of main() function...
 
     # Ensure initialization
     if not ensure_initialization():
