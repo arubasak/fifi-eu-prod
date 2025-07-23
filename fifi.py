@@ -263,14 +263,20 @@ class DatabaseManager:
             except Exception as e:
                 error_context = error_handler.handle_api_error("Database", "Initialize", e)
                 error_handler.log_error(error_context)
+                # Fallback to Streamlit session state if cloud init fails
                 self._init_local_storage()
         else:
+            # Explicitly use Streamlit session state if no cloud connection
             self._init_local_storage()
 
+    # --- FIX 1: Change local_storage to use st.session_state ---
     def _init_local_storage(self):
-        logger.info("Using local in-memory storage for sessions (not persistent across restarts).")
-        self.local_sessions = {}
-        self.use_cloud = False
+        logger.info("Using Streamlit session state for session storage (persists across reruns, but not full server restarts or different browser tabs).")
+        # Initialize the session storage in Streamlit's session state
+        if 'fifi_sessions' not in st.session_state:
+            st.session_state.fifi_sessions = {}
+        self.use_cloud = False # Ensure this is False for local storage mode
+    # --- END FIX 1 ---
 
     def _get_connection(self):
         if not self.use_cloud: 
@@ -305,7 +311,9 @@ class DatabaseManager:
                     )
                     conn.commit()
             else:
-                self.local_sessions[session.session_id] = session
+                # --- FIX 2: Store in Streamlit session state for local persistence ---
+                st.session_state.fifi_sessions[session.session_id] = session
+                # --- END FIX 2 ---
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
@@ -333,11 +341,17 @@ class DatabaseManager:
                     )
                     return session
             else:
-                session = self.local_sessions.get(session_id)
+                # --- FIX 3: Load from Streamlit session state for local persistence ---
+                if 'fifi_sessions' not in st.session_state:
+                    st.session_state.fifi_sessions = {} # Defensive check
+                
+                session = st.session_state.fifi_sessions.get(session_id)
                 if session:
+                    # Ensure UserType is enum, not string, when loaded
                     if isinstance(session.user_type, str):
                         session.user_type = UserType(session.user_type)
                 return session
+                # --- END FIX 3 ---
 
 # =============================================================================
 # PDF EXPORTER
@@ -1430,7 +1444,7 @@ class SessionManager:
         self.zoho = zoho_manager
         self.ai = ai_system
         self.rate_limiter = rate_limiter
-        self.session_timeout_minutes = 2
+        self.session_timeout_minutes = 2 # Changed to 2 minutes for quicker testing
 
     def get_session_timeout_minutes(self) -> int:
         return getattr(self, 'session_timeout_minutes', 2)
@@ -1449,6 +1463,11 @@ class SessionManager:
         session = UserSession(session_id=str(uuid.uuid4()))
         self.db.save_session(session)
         st.session_state.current_session_id = session.session_id
+        # --- FIX: Clear all pre_timeout_saved flags when a new guest session is created ---
+        if 'pre_timeout_saved' in st.session_state:
+            st.session_state.pre_timeout_saved = {} # Clear the entire dictionary
+        logger.info(f"Created new guest session {session.session_id[:8]}... and cleared pre_timeout_saved flags.")
+        # -----------------------------------------------------------------------------------
         return session
 
     # --- CORRECTED METHOD ---
@@ -1635,7 +1654,8 @@ class SessionManager:
                     current_session = self.get_session()
                 except Exception as e:
                     logger.error(f"Error getting session during auth: {e}")
-                    current_session = self._create_guest_session()
+                    # If get_session fails, create a fresh guest session (which clears flags)
+                    current_session = self._create_guest_session() 
                 
                 display_name = (
                     data.get('user_display_name') or 
@@ -1653,6 +1673,13 @@ class SessionManager:
                 current_session.wp_token = data.get('token')
                 current_session.last_activity = datetime.now()
                 
+                # --- FIX: Clear all pre_timeout_saved flags on successful authentication ---
+                # This ensures that if a user logs in, any past session flags are reset
+                if 'pre_timeout_saved' in st.session_state:
+                    st.session_state.pre_timeout_saved = {} # Clear the entire dictionary
+                logger.info(f"Authenticated user {current_session.email} and cleared pre_timeout_saved flags.")
+                # -----------------------------------------------------------------------------
+
                 self.db.save_session(current_session)
                 
                 verification_session = self.db.load_session(current_session.session_id)
@@ -1772,6 +1799,7 @@ def ensure_initialization():
             pdf_exporter = PDFExporter()
             
             if 'db_manager' not in st.session_state:
+                # Initialize DatabaseManager, which will use cloud or local (st.session_state based)
                 st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
             
             db_manager = st.session_state.db_manager
@@ -1802,7 +1830,7 @@ def ensure_initialization():
 
 def render_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
     """
-    SOLUTION: Use fetch/sendBeacon to the parent Streamlit app's URL.
+    FIX: Use fetch/sendBeacon to the parent Streamlit app's URL, and ensure GET for pre-timeout save.
     """
     if timeout_seconds <= 0:
         return
@@ -1837,10 +1865,8 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
 
             // Send the request as GET, with keepalive for reliability on unload
             return fetch(saveUrl, {{
-                method: 'GET', // Keep as GET for Streamlit query param handling
+                method: 'GET', // <-- FIX: Ensure GET for Streamlit query param handling
                 keepalive: true, // Ensures request is sent even if page unloads
-                // No 'mode' specified, defaults to 'cors' which is appropriate for cross-origin iframes
-                // fetching to their parent (assuming parent allows it, which Streamlit generally does for GET).
             }})
             .then(response => {{
                 if (!response.ok) {{
@@ -1915,11 +1941,11 @@ def render_browser_close_component(session_id: str):
                     xhr.open('GET', url, false); // Fallback to synchronous GET for older browsers
                     try {{
                         xhr.send();
-                    }} catch(e) {{
+                    } catch(e) {{
                         console.error('Failed to send close event via XHR:', e);
-                    }}
-                }}
-            }}
+                    }
+                }
+            }
         }}
         
         document.addEventListener('visibilitychange', () => {{
