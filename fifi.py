@@ -1802,8 +1802,7 @@ def ensure_initialization():
 
 def render_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
     """
-    SOLUTION: More robust auto-logout that chains the save and reload events.
-    This helps prevent the "message channel closed" error from browser extensions.
+    SOLUTION: Use fetch/sendBeacon to the parent Streamlit app's URL.
     """
     if timeout_seconds <= 0:
         return
@@ -1815,18 +1814,20 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
     <script>
     (function() {{
         const sessionId = '{session_id}';
-        // IMPORTANT: Get the main Streamlit app's URL (parent window)
-        const parentUrl = window.parent.location.origin + window.parent.location.pathname;
+        // --- CRITICAL CHANGE ---
+        // Get the main Streamlit app's URL from the parent window.
+        // This is the URL of 'fifi-eu.streamlit.app'.
+        const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
+        // --- END CRITICAL CHANGE ---
         
         // Clear any existing timers to prevent duplicates
         if (window.streamlitAutoSaveTimer) clearTimeout(window.streamlitAutoSaveTimer);
         if (window.streamlitAutoLogoutTimer) clearTimeout(window.streamlitAutoLogoutTimer);
         
-        // Function to trigger the save by navigating the parent window
+        // Function to trigger the save using fetch
         function triggerPreTimeoutSave() {{
-            console.log('Triggering pre-timeout save by navigating parent window to GET request...');
-            // Construct the URL to target the parent Streamlit app with query parameters
-            const saveUrl = `${{parentUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
+            console.log('Triggering pre-timeout save with GET fetch to parent Streamlit app URL...');
+            const saveUrl = `${{parentStreamlitAppUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
             
             // Show saving indicator
             const savingDiv = document.createElement('div');
@@ -1834,28 +1835,52 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
             savingDiv.textContent = 'Auto-saving session...';
             document.body.appendChild(savingDiv);
 
-            // Navigate the parent window directly to the new URL.
-            // This will force a full Streamlit rerun on the parent page with the new query parameters.
-            window.parent.location.href = saveUrl; 
-            
-            console.log('Parent window navigation triggered for pre-timeout save.');
+            // Send the request as GET, with keepalive for reliability on unload
+            return fetch(saveUrl, {{
+                method: 'GET', // Keep as GET for Streamlit query param handling
+                keepalive: true, // Ensures request is sent even if page unloads
+                // No 'mode' specified, defaults to 'cors' which is appropriate for cross-origin iframes
+                // fetching to their parent (assuming parent allows it, which Streamlit generally does for GET).
+            }})
+            .then(response => {{
+                if (!response.ok) {{
+                    console.error('Pre-timeout save fetch failed with status:', response.status, response.statusText);
+                    return response.text().then(text => Promise.reject(new Error(text)));
+                }}
+                console.log('Pre-timeout save fetch successful:', response.status);
+                return response.text(); // Or response.json() if you expect a response
+            }})
+            .catch(error => {{
+                console.error('Pre-timeout save fetch error:', error);
+                throw error; // Re-throw to be caught by the .finally block
+            }});
         }}
         
-        // The main timer now calls the full logout sequence.
-        // It's set to fire 30 seconds before the actual timeout.
-        window.streamlitAutoLogoutTimer = setTimeout(() => {{
-            console.log('Starting logout sequence (direct parent navigation)...');
-            triggerPreTimeoutSave();
-            // The reload of the page will happen naturally because triggerPreTimeoutSave
-            // changes the parent window's URL, which causes a full page load.
-            // No need for a separate setTimeout for reload here.
-        }}, {save_trigger_seconds * 1000});
+        // This function orchestrates the save and then the reload
+        function executeLogoutSequence() {{
+            console.log('Starting logout sequence...');
+            triggerPreTimeoutSave()
+                .catch(err => console.error('Pre-timeout save fetch failed:', err))
+                .finally(() => {{
+                    // This block runs whether the save succeeded or failed.
+                    console.log('Save request sent. Preparing to reload parent page in 500ms...');
+                    // Give a small grace period for the keepalive request to be fully sent
+                    setTimeout(() => {{
+                        console.log('Session timeout - reloading parent page now.');
+                        window.parent.location.reload(); // Reload the entire parent page
+                    }}, 500);
+                }});
+        }}
+        
+        // Schedule the auto-save and logout
+        window.streamlitAutoLogoutTimer = setTimeout(executeLogoutSequence, {save_trigger_seconds * 1000});
         
         console.log(`Auto-save and logout scheduled in {save_trigger_seconds} seconds.`);
     }})();
     </script>
     """
     components.html(js_code, height=0, width=0)
+
 def render_browser_close_component(session_id: str):
     """
     Enhanced browser close detection that avoids redundant saves.
@@ -1870,18 +1895,24 @@ def render_browser_close_component(session_id: str):
         window.browserCloseListenerAdded = true;
         
         const sessionId = '{session_id}';
-        const baseUrl = window.location.origin + window.location.pathname;
+        // --- CRITICAL CHANGE ---
+        // Get the main Streamlit app's URL from the parent window for sendBeacon.
+        const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
+        // --- END CRITICAL CHANGE ---
+        
         let saveHasBeenTriggered = false;
 
         function sendBeaconRequest() {{
             if (!saveHasBeenTriggered) {{
                 saveHasBeenTriggered = true;
-                const url = `${{baseUrl}}?event=close&session_id=${{sessionId}}`;
+                // Target the parent Streamlit app URL
+                const url = `${{parentStreamlitAppUrl}}?event=close&session_id=${{sessionId}}`; 
                 if (navigator.sendBeacon) {{
-                    navigator.sendBeacon(url);
+                    // sendBeacon inherently uses POST
+                    navigator.sendBeacon(url); 
                 }} else {{
                     const xhr = new XMLHttpRequest();
-                    xhr.open('GET', url, false);
+                    xhr.open('GET', url, false); // Fallback to synchronous GET for older browsers
                     try {{
                         xhr.send();
                     }} catch(e) {{
@@ -1897,6 +1928,7 @@ def render_browser_close_component(session_id: str):
             }}
         }});
         
+        // Use 'pagehide' for more reliable unload event handling
         window.addEventListener('pagehide', sendBeaconRequest, {{capture: true}});
         window.addEventListener('beforeunload', sendBeaconRequest, {{capture: true}});
 
@@ -1904,7 +1936,6 @@ def render_browser_close_component(session_id: str):
     </script>
     """
     components.html(js_code, height=0, width=0)
-
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     with st.sidebar:
         st.title("🎛️ Dashboard")
