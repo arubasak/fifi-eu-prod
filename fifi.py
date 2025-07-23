@@ -10,7 +10,7 @@ import io
 import html
 import jwt
 import threading
-import copy  # <-- SOLUTION: Imported for deep copy
+import copy
 from enum import Enum
 from urllib.parse import urlparse
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -27,12 +27,12 @@ import requests
 import streamlit.components.v1 as components
 
 # =============================================================================
-# VERSION 3.2 PRODUCTION - FIXED ZOHO SAVE ISSUES
-# - FIXED: Token expiration handling with automatic refresh
-# - FIXED: Session timeout save with data backup
-# - FIXED: Browser close event handling with multiple fallbacks
-# - ENHANCED: Comprehensive error logging and recovery
-# - ENHANCED: Debug diagnostics for troubleshooting
+# VERSION 3.3 PRODUCTION - FIXED PRE-TIMEOUT SAVE
+# - FIXED: Pre-timeout save mechanism triggers 30 seconds before timeout
+# - FIXED: JavaScript coordination ensures save completes before reload
+# - FIXED: Query parameter handling for save requests
+# - ENHANCED: Save tracking prevents duplicate saves
+# - ENHANCED: Visual feedback during auto-save
 # =============================================================================
 
 # Setup enhanced logging
@@ -1451,9 +1451,10 @@ class SessionManager:
         st.session_state.current_session_id = session.session_id
         return session
 
+    # --- CORRECTED METHOD ---
     def _auto_save_to_crm(self, session: UserSession, trigger_reason: str):
         """
-        FIXED: Enhanced auto-save with proper error handling and logging
+        FIXED: Enhanced auto-save with proper error handling, logging, and separated logic.
         """
         logger.info(f"=== AUTO SAVE TO CRM STARTED ===")
         logger.info(f"Trigger: {trigger_reason}")
@@ -1462,25 +1463,22 @@ class SessionManager:
         logger.info(f"Has Email: {bool(session.email)}")
         logger.info(f"Message Count: {len(session.messages) if session.messages else 0}")
         logger.info(f"Zoho Enabled: {self.zoho.config.ZOHO_ENABLED}")
-        
+
         # Check prerequisites
         if not session.user_type == UserType.REGISTERED_USER:
             logger.info("SAVE SKIPPED: Not a registered user")
             return
-            
         if not session.email:
             logger.info("SAVE SKIPPED: No email address")
             return
-            
         if not session.messages:
             logger.info("SAVE SKIPPED: No messages to save")
             return
-            
         if not self.zoho.config.ZOHO_ENABLED:
             logger.info("SAVE SKIPPED: Zoho is not enabled")
             return
 
-        is_interactive = trigger_reason in ["Manual Sign Out", "Manual Save to Zoho CRM"]
+        is_interactive = trigger_reason in ["Manual Sign Out", "Manual Save to Zoho CRM", "Manual Test"]
 
         try:
             if is_interactive:
@@ -1494,14 +1492,14 @@ class SessionManager:
                     st.error("❌ Failed to save chat to CRM. Please try again.")
                     logger.error("SAVE FAILED: Interactive save failed")
             else:
-                # Non-interactive save (timeout, browser close)
+                # Non-interactive save (e.g., timeout, browser close)
                 logger.info(f"Starting non-interactive save...")
                 success = self.zoho.save_chat_transcript_sync(session, trigger_reason)
                 if success:
                     logger.info("SAVE COMPLETED: Non-interactive save successful")
                 else:
                     logger.error("SAVE FAILED: Non-interactive save failed")
-                    
+
         except Exception as e:
             logger.error(f"SAVE FAILED: Unexpected error - {type(e).__name__}: {str(e)}", exc_info=True)
             if is_interactive:
@@ -1510,52 +1508,51 @@ class SessionManager:
             logger.info(f"=== AUTO SAVE TO CRM ENDED ===\n")
 
     def trigger_pre_timeout_save(self, session_id: str) -> bool:
-    """
-    Trigger a save 30 seconds before timeout expires.
-    Called by JavaScript via query parameter.
-    """
-    logger.info(f"PRE-TIMEOUT SAVE TRIGGERED for session {session_id[:8]}...")
-    
-    session = self.db.load_session(session_id)
-    if not session or not session.active:
-        logger.warning("Session not found or inactive for pre-timeout save")
-        return False
-    
-    if (session.user_type == UserType.REGISTERED_USER and 
-        session.email and 
-        session.messages):
+        """
+        SOLUTION: Trigger a save 30 seconds before timeout expires.
+        Called by JavaScript via query parameter.
+        """
+        logger.info(f"PRE-TIMEOUT SAVE TRIGGERED for session {session_id[:8]}...")
         
-        # Create a backup copy to ensure data integrity
-        session_backup = copy.deepcopy(session)
-        
-        try:
-            # Mark in session that save is in progress
-            session.last_activity = datetime.now()  # Update activity to prevent concurrent timeout
-            self.db.save_session(session)
-            
-            # Perform the save
-            success = self.zoho.save_chat_transcript_sync(session_backup, "Auto-Save Before Timeout")
-            
-            if success:
-                logger.info("PRE-TIMEOUT SAVE COMPLETED SUCCESSFULLY")
-                # Mark session as saved
-                if 'pre_timeout_saved' not in st.session_state:
-                    st.session_state.pre_timeout_saved = {}
-                st.session_state.pre_timeout_saved[session_id] = True
-                return True
-            else:
-                logger.error("PRE-TIMEOUT SAVE FAILED")
-                return False
-                
-        except Exception as e:
-            logger.error(f"PRE-TIMEOUT SAVE ERROR: {e}", exc_info=True)
+        session = self.db.load_session(session_id)
+        if not session or not session.active:
+            logger.warning("Session not found or inactive for pre-timeout save")
             return False
-    else:
-        logger.info("Session not eligible for pre-timeout save")
-        return False
+        
+        if (session.user_type == UserType.REGISTERED_USER and 
+            session.email and 
+            session.messages):
+            
+            # Create a backup copy to ensure data integrity
+            session_backup = copy.deepcopy(session)
+            
+            try:
+                # Mark in session that save is in progress
+                session.last_activity = datetime.now()  # Update activity to prevent concurrent timeout
+                self.db.save_session(session)
+                
+                # Perform the save
+                success = self.zoho.save_chat_transcript_sync(session_backup, "Auto-Save Before Timeout")
+                
+                if success:
+                    logger.info("PRE-TIMEOUT SAVE COMPLETED SUCCESSFULLY")
+                    # Mark session as saved
+                    if 'pre_timeout_saved' not in st.session_state:
+                        st.session_state.pre_timeout_saved = {}
+                    st.session_state.pre_timeout_saved[session_id] = True
+                    return True
+                else:
+                    logger.error("PRE-TIMEOUT SAVE FAILED")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"PRE-TIMEOUT SAVE ERROR: {e}", exc_info=True)
+                return False
+        else:
+            logger.info("Session not eligible for pre-timeout save")
+            return False
 
-    # SOLUTION: Rewritten method with deep copy for session backup
-def get_session(self) -> UserSession:
+    def get_session(self) -> UserSession:
         """
         Enhanced session retrieval with pre-timeout save check.
         """
@@ -1600,9 +1597,8 @@ def get_session(self) -> UserSession:
                     self._update_activity(session)
                     return session
         
-        # No session_id or session not found/inactive, create a new guest session
+        # No session or inactive
         return self._create_guest_session()
-
 
     def _end_session_internal(self, session: UserSession):
         session.active = False
@@ -1806,7 +1802,7 @@ def ensure_initialization():
 
 def render_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
     """
-    Enhanced auto-logout with pre-timeout save trigger.
+    SOLUTION: Enhanced auto-logout with pre-timeout save trigger.
     Saves 30 seconds before timeout, then reloads.
     """
     if timeout_seconds <= 0:
@@ -1882,7 +1878,6 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
     """
     components.html(js_code, height=0, width=0)
 
-# SOLUTION: Updated JavaScript to prevent redundant save calls
 def render_browser_close_component(session_id: str):
     """
     Enhanced browser close detection that avoids redundant saves.
@@ -1901,17 +1896,14 @@ def render_browser_close_component(session_id: str):
         let saveHasBeenTriggered = false;
 
         function sendBeaconRequest() {{
-            // This function is the core of the save-on-close logic.
-            // It uses navigator.sendBeacon, which is designed for this exact purpose.
             if (!saveHasBeenTriggered) {{
                 saveHasBeenTriggered = true;
                 const url = `${{baseUrl}}?event=close&session_id=${{sessionId}}`;
                 if (navigator.sendBeacon) {{
                     navigator.sendBeacon(url);
                 }} else {{
-                    // Fallback for older browsers
                     const xhr = new XMLHttpRequest();
-                    xhr.open('GET', url, false); // Synchronous is required for beforeunload
+                    xhr.open('GET', url, false);
                     try {{
                         xhr.send();
                     }} catch(e) {{
@@ -1921,24 +1913,19 @@ def render_browser_close_component(session_id: str):
             }}
         }}
         
-        // 'visibilitychange' is a modern and reliable event for when a tab is hidden.
         document.addEventListener('visibilitychange', () => {{
             if (document.visibilityState === 'hidden') {{
                 sendBeaconRequest();
             }}
         }});
         
-        // 'pagehide' is the recommended event for session cleanup on mobile.
         window.addEventListener('pagehide', sendBeaconRequest, {{capture: true}});
-
-        // 'beforeunload' is a fallback for desktop browsers but is less reliable.
         window.addEventListener('beforeunload', sendBeaconRequest, {{capture: true}});
 
     }})();
     </script>
     """
     components.html(js_code, height=0, width=0)
-
 
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     with st.sidebar:
@@ -1979,13 +1966,17 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     minutes_remaining = seconds_remaining / 60
                     st.caption(f"⏱️ Auto-save & sign out in {minutes_remaining:.1f} minutes")
                     render_auto_logout_component(
-                        timeout_seconds=2,
+                        timeout_seconds=int(seconds_remaining),
                         session_id=fresh_session.session_id,
                         session_manager=session_manager
                     )
                 else:
                     st.caption("⏱️ Session will timeout on next interaction")
-                    render_auto_logout_component(timeout_seconds=2)
+                    render_auto_logout_component(
+                        timeout_seconds=2,
+                        session_id=fresh_session.session_id,
+                        session_manager=session_manager
+                    )
                     
         else:
             st.info("👤 **Guest User**")
@@ -2296,7 +2287,6 @@ def main():
                     
             # Stop here to prevent normal page rendering during save
             st.stop()
-
 
     # Clear any problematic session state first
     if st.button("🔄 Fresh Start (Clear All State)", key="emergency_clear"):
