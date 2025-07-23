@@ -283,11 +283,18 @@ class DatabaseManager:
     def _get_connection(self):
         if not self.use_cloud or not self.connection_string: 
             return None
-        return sqlitecloud.connect(self.connection_string)
+        try:
+            return sqlitecloud.connect(self.connection_string)
+        except Exception as e:
+            logger.error(f"Failed to create SQLite Cloud connection: {e}")
+            return None
 
     def _init_database(self):
         with self.lock:
-            with self._get_connection() as conn:
+            conn = self._get_connection()
+            if conn is None:
+                raise Exception("Cannot initialize database - connection failed")
+            try:
                 conn.execute('''
                     CREATE TABLE IF NOT EXISTS sessions (
                         session_id TEXT PRIMARY KEY, user_type TEXT, email TEXT, first_name TEXT,
@@ -295,25 +302,34 @@ class DatabaseManager:
                         last_activity TEXT, messages TEXT, active INTEGER, wp_token TEXT
                     )''')
                 conn.commit()
+                logger.info("Database initialized successfully")
+            finally:
+                conn.close()
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         with self.lock:
             if self.use_cloud:
                 try:
-                    with self._get_connection() as conn:
-                        conn.execute(
-                            '''REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                            (
-                                session.session_id, session.user_type.value, session.email,
-                                session.first_name, session.zoho_contact_id,
-                                int(session.guest_email_requested), session.created_at.isoformat(),
-                                session.last_activity.isoformat(), json.dumps(session.messages),
-                                int(session.active), session.wp_token
+                    conn = self._get_connection()
+                    if conn:
+                        try:
+                            conn.execute(
+                                '''REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                (
+                                    session.session_id, session.user_type.value, session.email,
+                                    session.first_name, session.zoho_contact_id,
+                                    int(session.guest_email_requested), session.created_at.isoformat(),
+                                    session.last_activity.isoformat(), json.dumps(session.messages),
+                                    int(session.active), session.wp_token
+                                )
                             )
-                        )
-                        conn.commit()
-                        logger.debug(f"Saved session {session.session_id[:8]} to SQLite Cloud")
+                            conn.commit()
+                            logger.debug(f"Saved session {session.session_id[:8]} to SQLite Cloud")
+                        finally:
+                            conn.close()
+                    else:
+                        raise Exception("Could not connect to SQLite Cloud")
                 except Exception as e:
                     logger.error(f"Failed to save session to SQLite Cloud: {e}")
                     # Fall back to session state
@@ -329,29 +345,35 @@ class DatabaseManager:
         with self.lock:
             if self.use_cloud:
                 try:
-                    with self._get_connection() as conn:
-                        cursor = conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
-                        row = cursor.fetchone()
-                        if not row: 
-                            logger.debug(f"Session {session_id[:8]} not found in SQLite Cloud")
-                            return None
-                        columns = [desc[0] for desc in cursor.description]
-                        row_dict = dict(zip(columns, row))
-                        session = UserSession(
-                            session_id=row_dict['session_id'],
-                            user_type=UserType(row_dict['user_type']),
-                            email=row_dict.get('email'),
-                            first_name=row_dict.get('first_name'),
-                            zoho_contact_id=row_dict.get('zoho_contact_id'),
-                            guest_email_requested=bool(row_dict.get('guest_email_requested')),
-                            created_at=datetime.fromisoformat(row_dict['created_at']),
-                            last_activity=datetime.fromisoformat(row_dict['last_activity']),
-                            messages=json.loads(row_dict.get('messages', '[]')),
-                            active=bool(row_dict.get('active', 1)),
-                            wp_token=row_dict.get('wp_token')
-                        )
-                        logger.debug(f"Loaded session {session_id[:8]} from SQLite Cloud")
-                        return session
+                    conn = self._get_connection()
+                    if conn:
+                        try:
+                            cursor = conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+                            row = cursor.fetchone()
+                            if not row: 
+                                logger.debug(f"Session {session_id[:8]} not found in SQLite Cloud")
+                                return None
+                            columns = [desc[0] for desc in cursor.description]
+                            row_dict = dict(zip(columns, row))
+                            session = UserSession(
+                                session_id=row_dict['session_id'],
+                                user_type=UserType(row_dict['user_type']),
+                                email=row_dict.get('email'),
+                                first_name=row_dict.get('first_name'),
+                                zoho_contact_id=row_dict.get('zoho_contact_id'),
+                                guest_email_requested=bool(row_dict.get('guest_email_requested')),
+                                created_at=datetime.fromisoformat(row_dict['created_at']),
+                                last_activity=datetime.fromisoformat(row_dict['last_activity']),
+                                messages=json.loads(row_dict.get('messages', '[]')),
+                                active=bool(row_dict.get('active', 1)),
+                                wp_token=row_dict.get('wp_token')
+                            )
+                            logger.debug(f"Loaded session {session_id[:8]} from SQLite Cloud")
+                            return session
+                        finally:
+                            conn.close()
+                    else:
+                        logger.warning("Could not connect to SQLite Cloud for load")
                 except Exception as e:
                     logger.error(f"Failed to load session from SQLite Cloud: {e}")
                     # Fall back to session state
