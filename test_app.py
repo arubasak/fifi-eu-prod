@@ -1895,32 +1895,27 @@ def render_browser_close_component(session_id: str):
         window.browserCloseListenerAdded = true;
         
         const sessionId = '{session_id}';
-        // --- CRITICAL CHANGE ---
-        // Get the main Streamlit app's URL from the parent window for sendBeacon.
         const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
-        // --- END CRITICAL CHANGE ---
         
         let saveHasBeenTriggered = false;
 
         function sendBeaconRequest() {{
             if (!saveHasBeenTriggered) {{
                 saveHasBeenTriggered = true;
-                // Target the parent Streamlit app URL
                 const url = `${{parentStreamlitAppUrl}}?event=close&session_id=${{sessionId}}`; 
                 if (navigator.sendBeacon) {{
-                    // sendBeacon inherently uses POST
                     navigator.sendBeacon(url); 
                 }} else {{
                     const xhr = new XMLHttpRequest();
-                    xhr.open('GET', url, false); // Fallback to synchronous GET for older browsers
+                    xhr.open('GET', url, false); 
                     try {{
                         xhr.send();
                     }} catch(e) {{
                         console.error('Failed to send close event via XHR:', e);
-                    }}
-                }}
-            }}
-        }}
+                    }} // This `}}` was fixed previously (approx. line 1946)
+                }} // <-- THIS IS THE LINE (1947) THAT NEEDS THE FIX
+            }} // This `}}`
+        }} // This `}}`
         
         document.addEventListener('visibilitychange', () => {{
             if (document.visibilityState === 'hidden') {{
@@ -1928,7 +1923,6 @@ def render_browser_close_component(session_id: str):
             }}
         }});
         
-        // Use 'pagehide' for more reliable unload event handling
         window.addEventListener('pagehide', sendBeaconRequest, {{capture: true}});
         window.addEventListener('beforeunload', sendBeaconRequest, {{capture: true}});
 
@@ -1936,7 +1930,8 @@ def render_browser_close_component(session_id: str):
     </script>
     """
     components.html(js_code, height=0, width=0)
-def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
+    
+    def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
