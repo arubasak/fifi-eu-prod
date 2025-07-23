@@ -27,11 +27,12 @@ import requests
 import streamlit.components.v1 as components
 
 # =============================================================================
-# VERSION 3.6 PRODUCTION - SESSION STATE AUTO-SAVE
-# - FIXED: Replaced query parameter approach with session state detection
-# - ENHANCED: Post-timeout reload detection for reliable auto-save
-# - ENHANCED: Multiple fallback mechanisms and comprehensive logging
-# - ENHANCED: More reliable for Streamlit Cloud deployment
+# VERSION 3.7 PRODUCTION - ENHANCED SESSION STATE AUTO-SAVE
+# - FIXED: Enhanced auto-save detection with multiple fallback methods
+# - ENHANCED: Simplified and more reliable URL parameter approach
+# - ENHANCED: Triple detection system: URL params + session state + browser storage
+# - ENHANCED: Better error handling and comprehensive logging
+# - ENHANCED: Visual feedback during auto-save process
 # =============================================================================
 
 # Setup enhanced logging
@@ -1531,7 +1532,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
-# SESSION MANAGER WITH SESSION STATE AUTO-SAVE
+# SESSION MANAGER WITH ENHANCED AUTO-SAVE
 # =============================================================================
 
 class SessionManager:
@@ -1794,75 +1795,209 @@ class SessionManager:
             return None
 
 # =============================================================================
-# UTILITY FUNCTIONS
+# ENHANCED AUTO-SAVE DETECTION FUNCTIONS - SIMPLIFIED & RELIABLE
 # =============================================================================
 
-def get_session_manager() -> Optional[SessionManager]:
-    """Safely get the session manager from session state."""
-    if 'session_manager' not in st.session_state:
-        logger.error("SessionManager not found in session state")
-        return None
+def check_session_storage_save_request():
+    """SIMPLIFIED auto-save detection with multiple reliable methods"""
     
-    manager = st.session_state.session_manager
-    if not hasattr(manager, 'get_session'):
-        logger.error("Invalid SessionManager instance in session state")
-        return None
+    # Method 1: Check URL parameters (primary method)
+    try:
+        query_params = st.query_params
+        logger.info(f"🔍 Checking URL params: {dict(query_params)}")
+        
+        if query_params.get("auto_save_trigger") or query_params.get("auto_save"):
+            session_id = query_params.get("session_id")
+            trigger = query_params.get("trigger", "url_auto_save")
+            
+            if session_id:
+                logger.info("=" * 80)
+                logger.info(f"🚨 AUTO-SAVE DETECTED VIA URL PARAMS")
+                logger.info(f"Session ID: {session_id[:8]}...")
+                logger.info(f"Trigger: {trigger}")
+                logger.info(f"Full URL params: {dict(query_params)}")
+                logger.info("=" * 80)
+                
+                # Clear the query params to prevent re-processing
+                st.query_params.clear()
+                
+                # Process the save immediately
+                success = process_auto_save_request(session_id)
+                
+                if success:
+                    st.success("✅ Chat automatically saved to CRM before timeout!")
+                    logger.info("✅ URL PARAM AUTO-SAVE COMPLETED")
+                else:
+                    st.warning("⚠️ Could not save chat before timeout")
+                    logger.error("❌ URL PARAM AUTO-SAVE FAILED")
+                
+                # Show result and stop
+                time.sleep(2)
+                st.stop()
+                
+    except Exception as e:
+        logger.error(f"Error checking URL params: {e}")
     
-    return manager
-
-def ensure_initialization():
-    """Ensure the application is properly initialized with enhanced error handling."""
-    if 'initialized' not in st.session_state or not st.session_state.initialized:
-        try:
-            logger.info("Initializing FiFi AI Assistant...")
+    # Method 2: Check session state (backup method)
+    try:
+        if st.session_state.get('auto_save_requested'):
+            session_id = st.session_state.get('auto_save_session_id')
+            trigger = st.session_state.get('auto_save_trigger', 'session_state')
             
-            config = Config()
-            pdf_exporter = PDFExporter()
-            
-            # Initialize database manager with enhanced error handling
-            if 'db_manager' not in st.session_state:
-                logger.info("Initializing database manager...")
-                st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
-            
-            db_manager = st.session_state.db_manager
-            
-            # Initialize other components
-            logger.info("Initializing Zoho CRM manager...")
-            zoho_manager = ZohoCRMManager(config, pdf_exporter)
-            
-            logger.info("Initializing AI system...")
-            ai_system = EnhancedAI(config)
-            
-            logger.info("Initializing rate limiter...")
-            rate_limiter = RateLimiter()
-
-            # Create session manager
-            logger.info("Creating session manager...")
-            st.session_state.session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
-            st.session_state.pdf_exporter = pdf_exporter
-            st.session_state.error_handler = error_handler
-            st.session_state.ai_system = ai_system
-            st.session_state.initialized = True
-            
-            logger.info("✅ Application initialized successfully")
-            
-            # Log initialization summary
-            storage_info = db_manager.get_storage_info()
-            logger.info(f"Using {storage_info['storage_type']} for session storage")
-            
-            return True
-            
-        except Exception as e:
-            st.error("💥 A critical error occurred during application startup.")
-            st.error(f"Error details: {str(e)}")
-            logger.critical(f"Initialization failed: {e}", exc_info=True)
-            return False
+            if session_id:
+                logger.info("=" * 80)
+                logger.info(f"🚨 AUTO-SAVE DETECTED VIA SESSION STATE")
+                logger.info(f"Session ID: {session_id[:8]}...")
+                logger.info(f"Trigger: {trigger}")
+                logger.info("=" * 80)
+                
+                # Clear the flags
+                for key in ['auto_save_requested', 'auto_save_session_id', 'auto_save_trigger']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                
+                # Process the save
+                success = process_auto_save_request(session_id)
+                
+                if success:
+                    st.success("✅ Chat automatically saved to CRM!")
+                    logger.info("✅ SESSION STATE AUTO-SAVE COMPLETED")
+                else:
+                    st.warning("⚠️ Could not save chat to CRM")
+                    logger.error("❌ SESSION STATE AUTO-SAVE FAILED")
+                
+                # Show result and stop
+                time.sleep(2)
+                st.stop()
+                
+    except Exception as e:
+        logger.error(f"Error checking session state: {e}")
     
-    return True
+    # Method 3: Check for browser storage communication (enhanced)
+    try:
+        # This uses a JavaScript component to check browser storage
+        check_result = check_browser_storage_for_save_request()
+        if check_result:
+            session_id = check_result.get('session_id')
+            trigger = check_result.get('trigger', 'browser_storage')
+            
+            if session_id:
+                logger.info("=" * 80)
+                logger.info(f"🚨 AUTO-SAVE DETECTED VIA BROWSER STORAGE")
+                logger.info(f"Session ID: {session_id[:8]}...")
+                logger.info(f"Trigger: {trigger}")
+                logger.info("=" * 80)
+                
+                success = process_auto_save_request(session_id)
+                
+                if success:
+                    st.success("✅ Chat automatically saved to CRM!")
+                    logger.info("✅ BROWSER STORAGE AUTO-SAVE COMPLETED")
+                else:
+                    st.warning("⚠️ Could not save chat to CRM")
+                    logger.error("❌ BROWSER STORAGE AUTO-SAVE FAILED")
+                
+                time.sleep(2)
+                st.stop()
+                
+    except Exception as e:
+        logger.error(f"Error checking browser storage: {e}")
 
-# =============================================================================
-# AUTO-SAVE FUNCTIONS - SESSION STATE BASED
-# =============================================================================
+def check_browser_storage_for_save_request():
+    """Enhanced browser storage check using JavaScript component"""
+    
+    js_code = f"""
+    <script>
+    (function() {{
+        try {{
+            // Check session storage for save request
+            const saveRequest = sessionStorage.getItem('fifi_auto_save_request');
+            
+            if (saveRequest) {{
+                console.log('🔍 Found save request in session storage:', saveRequest);
+                
+                try {{
+                    const data = JSON.parse(saveRequest);
+                    
+                    if (data.sessionId && data.timestamp) {{
+                        // Clear the request to prevent re-processing
+                        sessionStorage.removeItem('fifi_auto_save_request');
+                        
+                        // Send to Streamlit via session state
+                        const message = {{
+                            type: 'auto_save_request',
+                            sessionId: data.sessionId,
+                            trigger: data.trigger || 'browser_storage',
+                            timestamp: data.timestamp
+                        }};
+                        
+                        // Multiple methods to communicate with Streamlit
+                        
+                        // Method 1: Try to set URL parameters
+                        try {{
+                            const url = new URL(window.parent.location.href);
+                            url.searchParams.set('auto_save', 'true');
+                            url.searchParams.set('session_id', data.sessionId);
+                            url.searchParams.set('trigger', data.trigger || 'browser_storage');
+                            url.searchParams.set('timestamp', Date.now().toString());
+                            
+                            console.log('🚀 Redirecting to auto-save URL:', url.href);
+                            window.parent.location.href = url.href;
+                            return;
+                        }} catch(urlError) {{
+                            console.warn('Could not set URL params:', urlError);
+                        }}
+                        
+                        // Method 2: Try postMessage (if parent supports it)
+                        try {{
+                            window.parent.postMessage({{
+                                type: 'streamlit_auto_save',
+                                ...message
+                            }}, '*');
+                            console.log('📤 Sent postMessage to parent');
+                        }} catch(postError) {{
+                            console.warn('Could not send postMessage:', postError);
+                        }}
+                        
+                        // Method 3: Set a global flag that Streamlit can check
+                        window.parent.streamlitAutoSaveRequest = message;
+                        console.log('🎯 Set global auto-save flag');
+                        
+                        // Method 4: Force a page reload with parameters
+                        setTimeout(() => {{
+                            const currentUrl = window.parent.location.href.split('?')[0];
+                            const autoSaveUrl = `${{currentUrl}}?auto_save=true&session_id=${{data.sessionId}}&trigger=${{data.trigger || 'browser_storage'}}&ts=${{Date.now()}}`;
+                            console.log('🔄 Force reloading with auto-save URL:', autoSaveUrl);
+                            window.parent.location.href = autoSaveUrl;
+                        }}, 100);
+                    }}
+                }} catch(parseError) {{
+                    console.error('Error parsing save request:', parseError);
+                    sessionStorage.removeItem('fifi_auto_save_request');
+                }}
+            }} else {{
+                console.log('ℹ️ No save request found in session storage');
+            }}
+        }} catch(error) {{
+            console.error('Error checking browser storage:', error);
+        }}
+    }})();
+    </script>
+    """
+    
+    try:
+        components.html(js_code, height=0, width=0)
+        
+        # Check if the global flag was set
+        if hasattr(st.session_state, '_js_auto_save_request'):
+            request = st.session_state._js_auto_save_request
+            del st.session_state._js_auto_save_request
+            return request
+            
+    except Exception as e:
+        logger.error(f"Error in browser storage check: {e}")
+    
+    return None
 
 def process_auto_save_request(session_id: str):
     """Process auto-save request - more reliable than query parameters"""
@@ -1991,16 +2126,12 @@ def check_pending_auto_save(session_manager: SessionManager, session: UserSessio
                 else:
                     logger.info("ℹ️ Post-timeout save already completed")
 
-# =============================================================================
-# UI COMPONENTS - SESSION STATE AUTO-SAVE
-# =============================================================================
-
-def render_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
-    """Session state based auto-save - more reliable than query parameters"""
+def render_enhanced_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
+    """SIMPLIFIED and more reliable auto-logout with multiple fallback methods"""
     if timeout_seconds <= 0:
         return
 
-    # Calculate save trigger time
+    # Calculate save trigger time (75% of timeout, minimum 10 seconds)
     save_trigger_seconds = max(int(timeout_seconds * 0.75), 10)
     
     js_code = f"""
@@ -2010,7 +2141,7 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
         const timeoutSeconds = {timeout_seconds};
         const saveTriggerSeconds = {save_trigger_seconds};
         
-        console.log(`Auto-logout initialized: timeout=${timeout_seconds}s, save_trigger=${save_trigger_seconds}s`);
+        console.log(`🔧 Enhanced auto-logout initialized: timeout=${{timeoutSeconds}}s, save_trigger=${{saveTriggerSeconds}}s`);
         
         // Clear any existing timers
         if (window.streamlitAutoSaveTimer) {{
@@ -2020,84 +2151,140 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
             clearTimeout(window.streamlitAutoLogoutTimer);
         }}
         
-        // Function to trigger save via page reload
-        function triggerPreTimeoutSave() {{
-            console.log('=== TRIGGERING PRE-TIMEOUT SAVE VIA PAGE RELOAD ===');
-            console.log('Session ID:', sessionId);
+        // Enhanced save function with multiple methods
+        function triggerEnhancedSave() {{
+            console.log('=== ENHANCED AUTO-SAVE TRIGGER ===');
+            
+            const saveData = {{
+                sessionId: sessionId,
+                timestamp: Date.now(),
+                trigger: 'pre_timeout_enhanced'
+            }};
+            
+            // Method 1: Session storage (for browser close detection)
+            try {{
+                sessionStorage.setItem('fifi_auto_save_request', JSON.stringify(saveData));
+                console.log('✅ Saved to session storage');
+            }} catch(e) {{
+                console.warn('Could not save to session storage:', e);
+            }}
+            
+            // Method 2: Immediate URL redirect (most reliable)
+            try {{
+                const currentUrl = window.parent.location.href.split('?')[0];
+                const autoSaveUrl = `${{currentUrl}}?auto_save=true&session_id=${{sessionId}}&trigger=enhanced_pre_timeout&ts=${{Date.now()}}`;
+                
+                console.log('🚀 Redirecting to auto-save URL:', autoSaveUrl);
+                window.parent.location.href = autoSaveUrl;
+                return true;
+            }} catch(e) {{
+                console.error('URL redirect failed:', e);
+            }}
+            
+            // Method 3: Force reload as fallback
+            console.log('⚠️ Using fallback reload method');
+            setTimeout(() => {{
+                window.parent.location.reload();
+            }}, 1000);
+            
+            return false;
+        }}
+        
+        // Enhanced logout sequence
+        function executeEnhancedLogout() {{
+            console.log('=== ENHANCED LOGOUT SEQUENCE START ===');
             
             // Show saving indicator
-            let savingDiv = document.getElementById('saving-indicator');
-            if (!savingDiv) {{
-                savingDiv = document.createElement('div');
-                savingDiv.id = 'saving-indicator';
-                savingDiv.style.cssText = `
+            let indicator = document.getElementById('enhanced-saving-indicator');
+            if (!indicator) {{
+                indicator = document.createElement('div');
+                indicator.id = 'enhanced-saving-indicator';
+                indicator.style.cssText = `
                     position: fixed; 
                     top: 20px; 
                     right: 20px; 
-                    background: #ff6b6b; 
+                    background: linear-gradient(45deg, #ff6b6b, #ff8e8e); 
                     color: white; 
-                    padding: 12px 20px; 
-                    border-radius: 8px; 
+                    padding: 16px 24px; 
+                    border-radius: 12px; 
                     z-index: 9999; 
                     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-                    font-weight: 500;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+                    font-weight: 600;
+                    box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+                    animation: pulse 1s infinite;
                 `;
-                document.body.appendChild(savingDiv);
+                document.head.insertAdjacentHTML('beforeend', `
+                    <style>
+                        @keyframes pulse {{
+                            0% {{ transform: scale(1); }}
+                            50% {{ transform: scale(1.05); }}
+                            100% {{ transform: scale(1); }}
+                        }}
+                    </style>
+                `);
+                document.body.appendChild(indicator);
             }}
-            savingDiv.textContent = '💾 Auto-saving session...';
-
-            // Set session storage flag to indicate save request
-            try {{
-                sessionStorage.setItem('fifi_auto_save_request', JSON.stringify({{
-                    sessionId: sessionId,
-                    timestamp: Date.now(),
-                    trigger: 'pre_timeout'
-                }}));
-                console.log('✅ Auto-save request stored in session storage');
-            }} catch(e) {{
-                console.warn('Could not set session storage:', e);
-            }}
+            indicator.innerHTML = '💾 Auto-saving your chat to CRM...<br><small>Please wait...</small>';
             
-            return Promise.resolve(true);
+            // Trigger the save
+            const saveSuccess = triggerEnhancedSave();
+            
+            if (!saveSuccess) {{
+                // If immediate save failed, try again after a short delay
+                setTimeout(triggerEnhancedSave, 2000);
+            }}
         }}
         
-        function executeLogoutSequence() {{
-            console.log('=== STARTING LOGOUT SEQUENCE ===');
-            
-            triggerPreTimeoutSave()
-                .then(() => {{
-                    console.log('Save requested, scheduling page reload in 2 seconds...');
-                    setTimeout(() => {{
-                        console.log('=== SESSION TIMEOUT - RELOADING PAGE ===');
-                        window.parent.location.reload();
-                    }}, 2000);
-                }})
-                .catch(err => {{
-                    console.error('Error in logout sequence:', err);
-                    setTimeout(() => {{
-                        window.parent.location.reload();
-                    }}, 1000);
-                }});
+        // Schedule the enhanced logout
+        console.log(`📅 Scheduling enhanced logout in ${{saveTriggerSeconds}} seconds`);
+        window.streamlitAutoLogoutTimer = setTimeout(executeEnhancedLogout, saveTriggerSeconds * 1000);
+        
+        // Enhanced browser close detection
+        let closeEventSent = false;
+        function handleBrowserClose() {{
+            if (!closeEventSent) {{
+                closeEventSent = true;
+                console.log('🚪 Enhanced browser close detected');
+                
+                try {{
+                    sessionStorage.setItem('fifi_auto_save_request', JSON.stringify({{
+                        sessionId: sessionId,
+                        timestamp: Date.now(),
+                        trigger: 'enhanced_browser_close'
+                    }}));
+                    console.log('✅ Browser close save request stored');
+                }} catch(e) {{
+                    console.warn('Could not store browser close request:', e);
+                }}
+            }}
         }}
         
-        // Schedule the logout sequence
-        console.log(`Scheduling logout sequence in ${{saveTriggerSeconds}} seconds`);
-        window.streamlitAutoLogoutTimer = setTimeout(executeLogoutSequence, saveTriggerSeconds * 1000);
+        // Multiple browser close event listeners
+        document.addEventListener('visibilitychange', () => {{
+            if (document.visibilityState === 'hidden') {{
+                handleBrowserClose();
+            }}
+        }});
         
-        // Debug info
-        window.fijiDebugInfo = {{
+        window.addEventListener('beforeunload', handleBrowserClose, {{capture: true}});
+        window.addEventListener('pagehide', handleBrowserClose, {{capture: true}});
+        
+        // Debug info for troubleshooting
+        window.enhancedFijiDebug = {{
             sessionId: sessionId,
             timeoutSeconds: timeoutSeconds,
             saveTriggerSeconds: saveTriggerSeconds,
-            scheduledTime: new Date(Date.now() + (saveTriggerSeconds * 1000)).toISOString()
+            scheduledTime: new Date(Date.now() + (saveTriggerSeconds * 1000)).toISOString(),
+            version: 'enhanced_v1'
         }};
         
-        console.log('Auto-logout component fully initialized');
+        console.log('✅ Enhanced auto-logout component fully initialized');
+        console.log('🐛 Debug info:', window.enhancedFijiDebug);
         
     }})();
     </script>
     """
+    
     components.html(js_code, height=0, width=0)
 
 def render_browser_close_component(session_id: str):
@@ -2208,8 +2395,8 @@ def add_auto_save_debug_panel(session_manager: SessionManager, session: UserSess
         st.write("**JavaScript Debug:**")
         js_debug = """
         <script>
-        if (window.fijiDebugInfo) {
-            const info = window.fijiDebugInfo;
+        if (window.enhancedFijiDebug) {
+            const info = window.enhancedFijiDebug;
             const debugDiv = document.createElement('div');
             debugDiv.innerHTML = `
                 <div style="font-family: monospace; font-size: 12px; background: #f0f0f0; padding: 10px; border-radius: 4px;">
@@ -2277,7 +2464,7 @@ def render_enhanced_sidebar_diagnostics(session_manager: SessionManager, session
                 st.success("✅ Session saved to storage")
 
 def render_enhanced_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
-    """Enhanced sidebar with session state auto-save and comprehensive diagnostics."""
+    """Enhanced sidebar with enhanced auto-logout component and comprehensive diagnostics."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
@@ -2305,7 +2492,7 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
                 if session_manager.zoho.config.ZOHO_ENABLED and fresh_session.email:
                     st.caption("💾 Auto-save ON")
             
-            # Timeout countdown with session state auto-save
+            # Timeout countdown with ENHANCED auto-save
             if fresh_session.last_activity:
                 time_since_activity = datetime.now() - fresh_session.last_activity
                 timeout_minutes = session_manager.get_session_timeout_minutes()
@@ -2325,8 +2512,8 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
                     else:
                         st.error(f"🚨 Auto-save imminent - {minutes_remaining:.1f} minutes")
                     
-                    # Trigger the component with proper timing
-                    render_auto_logout_component(
+                    # Use the ENHANCED auto-logout component
+                    render_enhanced_auto_logout_component(
                         timeout_seconds=int(seconds_remaining),
                         session_id=fresh_session.session_id,
                         session_manager=session_manager
@@ -2348,7 +2535,7 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
                 else:
                     st.error("⏱️ Session expired - will timeout on next interaction")
                     # Still render component with minimal time
-                    render_auto_logout_component(
+                    render_enhanced_auto_logout_component(
                         timeout_seconds=5,
                         session_id=fresh_session.session_id,
                         session_manager=session_manager
@@ -2610,14 +2797,83 @@ def render_welcome_page(session_manager: SessionManager):
             st.rerun()
 
 # =============================================================================
-# MAIN APPLICATION WITH SESSION STATE AUTO-SAVE
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def get_session_manager() -> Optional[SessionManager]:
+    """Safely get the session manager from session state."""
+    if 'session_manager' not in st.session_state:
+        logger.error("SessionManager not found in session state")
+        return None
+    
+    manager = st.session_state.session_manager
+    if not hasattr(manager, 'get_session'):
+        logger.error("Invalid SessionManager instance in session state")
+        return None
+    
+    return manager
+
+def ensure_initialization():
+    """Ensure the application is properly initialized with enhanced error handling."""
+    if 'initialized' not in st.session_state or not st.session_state.initialized:
+        try:
+            logger.info("Initializing FiFi AI Assistant...")
+            
+            config = Config()
+            pdf_exporter = PDFExporter()
+            
+            # Initialize database manager with enhanced error handling
+            if 'db_manager' not in st.session_state:
+                logger.info("Initializing database manager...")
+                st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+            
+            db_manager = st.session_state.db_manager
+            
+            # Initialize other components
+            logger.info("Initializing Zoho CRM manager...")
+            zoho_manager = ZohoCRMManager(config, pdf_exporter)
+            
+            logger.info("Initializing AI system...")
+            ai_system = EnhancedAI(config)
+            
+            logger.info("Initializing rate limiter...")
+            rate_limiter = RateLimiter()
+
+            # Create session manager
+            logger.info("Creating session manager...")
+            st.session_state.session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
+            st.session_state.pdf_exporter = pdf_exporter
+            st.session_state.error_handler = error_handler
+            st.session_state.ai_system = ai_system
+            st.session_state.initialized = True
+            
+            logger.info("✅ Application initialized successfully")
+            
+            # Log initialization summary
+            storage_info = db_manager.get_storage_info()
+            logger.info(f"Using {storage_info['storage_type']} for session storage")
+            
+            return True
+            
+        except Exception as e:
+            st.error("💥 A critical error occurred during application startup.")
+            st.error(f"Error details: {str(e)}")
+            logger.critical(f"Initialization failed: {e}", exc_info=True)
+            return False
+    
+    return True
+
+# =============================================================================
+# MAIN APPLICATION WITH ENHANCED AUTO-SAVE DETECTION
 # =============================================================================
 
 def main():
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
 
-    # Check for session storage auto-save request first
+    # PRIORITY 1: Check for auto-save requests FIRST (before any other processing)
+    logger.info("🔍 Checking for auto-save requests...")
     check_session_storage_save_request()
+    logger.info("✅ Auto-save check completed")
 
     # Emergency state clear
     if st.button("🔄 Fresh Start (Clear All State)", key="emergency_clear"):
@@ -2662,65 +2918,6 @@ def main():
             if st.button("🔄 Refresh", key="error_refresh"):
                 st.session_state.clear()
                 st.rerun()
-
-def check_session_storage_save_request():
-    """Check for auto-save request from JavaScript session storage"""
-    js_check = """
-    <script>
-    (function() {
-        try {
-            const saveRequest = sessionStorage.getItem('fifi_auto_save_request');
-            if (saveRequest) {
-                const data = JSON.parse(saveRequest);
-                console.log('Found auto-save request:', data);
-                
-                // Clear the request to prevent reprocessing
-                sessionStorage.removeItem('fifi_auto_save_request');
-                
-                // Set Streamlit session state flag
-                window.parent.postMessage({
-                    type: 'fifi_auto_save',
-                    sessionId: data.sessionId,
-                    trigger: data.trigger,
-                    timestamp: data.timestamp
-                }, '*');
-                
-                console.log('Auto-save request forwarded to Streamlit');
-            }
-        } catch (e) {
-            console.error('Error checking session storage:', e);
-        }
-    })();
-    </script>
-    """
-    components.html(js_check, height=0, width=0)
-    
-    # Check if auto-save was requested via message
-    if 'auto_save_requested' in st.session_state:
-        session_id = st.session_state.get('auto_save_session_id')
-        trigger = st.session_state.get('auto_save_trigger', 'Unknown')
-        
-        if session_id:
-            logger.info(f"🚨 AUTO-SAVE REQUESTED VIA SESSION STORAGE - Trigger: {trigger}")
-            logger.info(f"Session ID: {session_id[:8]}...")
-            
-            # Clear the flags
-            del st.session_state.auto_save_requested
-            if 'auto_save_session_id' in st.session_state:
-                del st.session_state.auto_save_session_id
-            if 'auto_save_trigger' in st.session_state:
-                del st.session_state.auto_save_trigger
-            
-            # Process the save
-            success = process_auto_save_request(session_id)
-            
-            if success:
-                st.success("✅ Chat automatically saved to CRM")
-            else:
-                st.warning("⚠️ Could not save chat to CRM")
-            
-            # Stop processing to show result
-            st.stop()
 
 if __name__ == "__main__":
     main()
