@@ -1815,16 +1815,18 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
     <script>
     (function() {{
         const sessionId = '{session_id}';
-        const baseUrl = window.location.origin + window.location.pathname;
+        // IMPORTANT: Get the main Streamlit app's URL (parent window)
+        const parentUrl = window.parent.location.origin + window.parent.location.pathname;
         
         // Clear any existing timers to prevent duplicates
         if (window.streamlitAutoSaveTimer) clearTimeout(window.streamlitAutoSaveTimer);
         if (window.streamlitAutoLogoutTimer) clearTimeout(window.streamlitAutoLogoutTimer);
         
-        // Function to trigger the save. It now returns the fetch promise.
+        // Function to trigger the save by navigating the parent window
         function triggerPreTimeoutSave() {{
-            console.log('Triggering pre-timeout save with GET...');
-            const saveUrl = `${{baseUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
+            console.log('Triggering pre-timeout save by navigating parent window to GET request...');
+            // Construct the URL to target the parent Streamlit app with query parameters
+            const saveUrl = `${{parentUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
             
             // Show saving indicator
             const savingDiv = document.createElement('div');
@@ -1832,34 +1834,22 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
             savingDiv.textContent = 'Auto-saving session...';
             document.body.appendChild(savingDiv);
 
-            // Return the fetch promise so we can chain actions to it
-            return fetch(saveUrl, {{
-                method: 'GET',
-                keepalive: true,
-                mode: 'no-cors'
-            }});
-        }}
-        
-        // This function will now be responsible for the full sequence
-        function executeLogoutSequence() {{
-            console.log('Starting logout sequence...');
-            triggerPreTimeoutSave()
-                .catch(err => console.error('Pre-timeout save fetch failed:', err))
-                .finally(() => {{
-                    // This block runs whether the save succeeded or failed.
-                    console.log('Save request sent. Preparing to reload page in 500ms...');
-                    // Give the browser a moment to process the keepalive request
-                    // before reloading the page. This helps avoid the extension error.
-                    setTimeout(() => {{
-                        console.log('Session timeout - reloading page now.');
-                        window.parent.location.reload();
-                    }}, 500); // 500ms grace period
-                }});
+            // Navigate the parent window directly to the new URL.
+            // This will force a full Streamlit rerun on the parent page with the new query parameters.
+            window.parent.location.href = saveUrl; 
+            
+            console.log('Parent window navigation triggered for pre-timeout save.');
         }}
         
         // The main timer now calls the full logout sequence.
         // It's set to fire 30 seconds before the actual timeout.
-        window.streamlitAutoLogoutTimer = setTimeout(executeLogoutSequence, {save_trigger_seconds * 1000});
+        window.streamlitAutoLogoutTimer = setTimeout(() => {{
+            console.log('Starting logout sequence (direct parent navigation)...');
+            triggerPreTimeoutSave();
+            // The reload of the page will happen naturally because triggerPreTimeoutSave
+            // changes the parent window's URL, which causes a full page load.
+            // No need for a separate setTimeout for reload here.
+        }}, {save_trigger_seconds * 1000});
         
         console.log(`Auto-save and logout scheduled in {save_trigger_seconds} seconds.`);
     }})();
