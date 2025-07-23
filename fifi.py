@@ -1433,7 +1433,7 @@ class SessionManager:
         self.session_timeout_minutes = 5
 
     def get_session_timeout_minutes(self) -> int:
-        return getattr(self, 'session_timeout_minutes', 5)
+        return getattr(self, 'session_timeout_minutes', 2)
 
     def _is_session_expired(self, session: UserSession) -> bool:
         if not session.last_activity:
