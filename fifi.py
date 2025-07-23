@@ -1943,7 +1943,7 @@ def render_browser_close_component(session_id: str):
                         xhr.send();
                     }} catch(e) {{
                         console.error('Failed to send close event via XHR:', e);
-                    }
+                    }}
                 }
             }
         }}
