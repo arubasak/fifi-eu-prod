@@ -1509,10 +1509,55 @@ class SessionManager:
         finally:
             logger.info(f"=== AUTO SAVE TO CRM ENDED ===\n")
 
+    def trigger_pre_timeout_save(self, session_id: str) -> bool:
+    """
+    Trigger a save 30 seconds before timeout expires.
+    Called by JavaScript via query parameter.
+    """
+    logger.info(f"PRE-TIMEOUT SAVE TRIGGERED for session {session_id[:8]}...")
+    
+    session = self.db.load_session(session_id)
+    if not session or not session.active:
+        logger.warning("Session not found or inactive for pre-timeout save")
+        return False
+    
+    if (session.user_type == UserType.REGISTERED_USER and 
+        session.email and 
+        session.messages):
+        
+        # Create a backup copy to ensure data integrity
+        session_backup = copy.deepcopy(session)
+        
+        try:
+            # Mark in session that save is in progress
+            session.last_activity = datetime.now()  # Update activity to prevent concurrent timeout
+            self.db.save_session(session)
+            
+            # Perform the save
+            success = self.zoho.save_chat_transcript_sync(session_backup, "Auto-Save Before Timeout")
+            
+            if success:
+                logger.info("PRE-TIMEOUT SAVE COMPLETED SUCCESSFULLY")
+                # Mark session as saved
+                if 'pre_timeout_saved' not in st.session_state:
+                    st.session_state.pre_timeout_saved = {}
+                st.session_state.pre_timeout_saved[session_id] = True
+                return True
+            else:
+                logger.error("PRE-TIMEOUT SAVE FAILED")
+                return False
+                
+        except Exception as e:
+            logger.error(f"PRE-TIMEOUT SAVE ERROR: {e}", exc_info=True)
+            return False
+    else:
+        logger.info("Session not eligible for pre-timeout save")
+        return False
+
     # SOLUTION: Rewritten method with deep copy for session backup
-    def get_session(self) -> UserSession:
+def get_session(self) -> UserSession:
         """
-        Enhanced session retrieval with guaranteed save on timeout using a deep copy backup.
+        Enhanced session retrieval with pre-timeout save check.
         """
         session_id = st.session_state.get('current_session_id')
         
@@ -1522,32 +1567,36 @@ class SessionManager:
                 if self._is_session_expired(session):
                     logger.info(f"Session {session_id[:8]}... expired due to inactivity.")
                     
-                    # Check if session is eligible for saving before creating a backup
+                    # Check if pre-timeout save already happened
+                    already_saved = st.session_state.get('pre_timeout_saved', {}).get(session_id, False)
+                    
                     if (session.user_type == UserType.REGISTERED_USER and 
                         session.email and 
-                        session.messages):
+                        session.messages and
+                        not already_saved):  # Only save if not already saved by pre-timeout
                         
-                        logger.info("Session is eligible for saving. Creating a deep copy backup.")
-                        
-                        # CRITICAL FIX: Create a deep copy to prevent data corruption
-                        # during the save process, which can be affected by Streamlit's state.
+                        logger.info("Session expired without pre-timeout save. Attempting emergency save...")
                         session_backup = copy.deepcopy(session)
                         
-                        logger.info("Attempting to save expired session to CRM using the backup...")
                         try:
-                            # Use the immutable backup for the save operation
-                            self._auto_save_to_crm(session_backup, "Session Timeout")
+                            self._auto_save_to_crm(session_backup, "Session Timeout (Emergency)")
                         except Exception as e:
-                            logger.error(f"CRITICAL ERROR during timeout save logic: {e}", exc_info=True)
+                            logger.error(f"Emergency save failed: {e}", exc_info=True)
                     else:
-                        logger.info("Session expired but was not eligible for saving (not a registered user, no email, or no messages).")
+                        if already_saved:
+                            logger.info("Session expired. Pre-timeout save was already completed.")
+                        else:
+                            logger.info("Session expired but was not eligible for saving.")
                     
-                    # End the original session after the save attempt
+                    # Clear the pre-timeout save flag
+                    if 'pre_timeout_saved' in st.session_state and session_id in st.session_state.pre_timeout_saved:
+                        del st.session_state.pre_timeout_saved[session_id]
+                    
+                    # End the session
                     self._end_session_internal(session)
-                    # Create and return a fresh guest session
                     return self._create_guest_session()
                 else:
-                    # Session is active and not expired, update activity and return it
+                    # Session is active and not expired
                     self._update_activity(session)
                     return session
         
@@ -1755,22 +1804,80 @@ def ensure_initialization():
 # UI RENDERING FUNCTIONS
 # =============================================================================
 
-def render_auto_logout_component(timeout_seconds: int):
+def render_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
     """
-    Injects a client-side JavaScript component to force a page reload on timeout.
+    Enhanced auto-logout with pre-timeout save trigger.
+    Saves 30 seconds before timeout, then reloads.
     """
     if timeout_seconds <= 0:
         return
 
+    # Calculate when to trigger the save (30 seconds before timeout)
+    save_trigger_seconds = max(timeout_seconds - 30, 1)
+    
     js_code = f"""
     <script>
-    function reloadPage() {{
-        window.parent.location.reload();
-    }}
-    if (window.streamlitAutoLogoutTimer) {{
-        clearTimeout(window.streamlitAutoLogoutTimer);
-    }}
-    window.streamlitAutoLogoutTimer = setTimeout(reloadPage, {timeout_seconds * 1000});
+    (function() {{
+        const sessionId = '{session_id}';
+        const baseUrl = window.location.origin + window.location.pathname;
+        
+        // Clear any existing timers
+        if (window.streamlitAutoSaveTimer) {{
+            clearTimeout(window.streamlitAutoSaveTimer);
+        }}
+        if (window.streamlitAutoLogoutTimer) {{
+            clearTimeout(window.streamlitAutoLogoutTimer);
+        }}
+        
+        // Function to trigger save via beacon
+        function triggerPreTimeoutSave() {{
+            console.log('Triggering pre-timeout save...');
+            const saveUrl = `${{baseUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
+            
+            // Use fetch with keepalive for better reliability
+            fetch(saveUrl, {{
+                method: 'GET',
+                keepalive: true,
+                mode: 'no-cors'
+            }}).then(() => {{
+                console.log('Pre-timeout save request sent');
+            }}).catch((error) => {{
+                console.error('Pre-timeout save failed:', error);
+                // Try beacon as fallback
+                if (navigator.sendBeacon) {{
+                    navigator.sendBeacon(saveUrl);
+                }}
+            }});
+            
+            // Show saving indicator (optional)
+            const savingDiv = document.createElement('div');
+            savingDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #ff6b6b; color: white; padding: 10px 20px; border-radius: 5px; z-index: 9999;';
+            savingDiv.textContent = 'Saving chat to CRM...';
+            document.body.appendChild(savingDiv);
+            
+            // Remove indicator after 3 seconds
+            setTimeout(() => {{
+                if (savingDiv.parentNode) {{
+                    savingDiv.parentNode.removeChild(savingDiv);
+                }}
+            }}, 3000);
+        }}
+        
+        // Function to reload page
+        function reloadPage() {{
+            console.log('Session timeout - reloading page');
+            window.parent.location.reload();
+        }}
+        
+        // Set up the pre-timeout save (30 seconds before timeout)
+        window.streamlitAutoSaveTimer = setTimeout(triggerPreTimeoutSave, {save_trigger_seconds * 1000});
+        
+        // Set up the actual logout/reload
+        window.streamlitAutoLogoutTimer = setTimeout(reloadPage, {timeout_seconds * 1000});
+        
+        console.log(`Auto-save scheduled in ${{Math.floor({save_trigger_seconds} / 60)}} minutes ${{({save_trigger_seconds} % 60)}} seconds`);
+        console.log(`Auto-logout scheduled in ${{Math.floor({timeout_seconds} / 60)}} minutes ${{({timeout_seconds} % 60)}} seconds`);
+    }})();
     </script>
     """
     components.html(js_code, height=0, width=0)
@@ -1871,7 +1978,11 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 if seconds_remaining > 0:
                     minutes_remaining = seconds_remaining / 60
                     st.caption(f"⏱️ Auto-save & sign out in {minutes_remaining:.1f} minutes")
-                    render_auto_logout_component(timeout_seconds=int(seconds_remaining))
+                    render_auto_logout_component(
+                        timeout_seconds=2,
+                        session_id=fresh_session.session_id,
+                        session_manager=session_manager
+                    )
                 else:
                     st.caption("⏱️ Session will timeout on next interaction")
                     render_auto_logout_component(timeout_seconds=2)
@@ -2159,6 +2270,33 @@ def render_welcome_page(session_manager: SessionManager):
 
 def main():
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
+
+    # SOLUTION: Handle pre-timeout save requests from JavaScript
+    query_params = st.query_params
+    if query_params.get("event") == "pre_timeout_save":
+        session_id = query_params.get("session_id")
+        if session_id:
+            logger.info(f"Received pre-timeout save request for session {session_id[:8]}...")
+            
+            # Clear the query params to prevent loops
+            st.query_params.clear()
+            
+            # Ensure initialization
+            if ensure_initialization():
+                session_manager = get_session_manager()
+                if session_manager:
+                    # Check if we haven't already saved this session
+                    already_saved = st.session_state.get('pre_timeout_saved', {}).get(session_id, False)
+                    if not already_saved:
+                        success = session_manager.trigger_pre_timeout_save(session_id)
+                        if success:
+                            st.success("✅ Chat automatically saved to CRM before timeout")
+                        else:
+                            st.warning("⚠️ Could not save chat before timeout")
+                    
+            # Stop here to prevent normal page rendering during save
+            st.stop()
+
 
     # Clear any problematic session state first
     if st.button("🔄 Fresh Start (Clear All State)", key="emergency_clear"):
