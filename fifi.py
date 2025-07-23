@@ -382,7 +382,7 @@ class PDFExporter:
             
             # Add source information if available
             if msg.get('source'):
-                story.append(Paragraph("<i>Source: " + str(msg['source']) + "</i>", self.styles['Normal']))
+                story.append(Paragraph(f"<i>Source: {msg['source']}</i>", self.styles['Normal']))
                 
         doc.build(story)
         buffer.seek(0)
@@ -1841,7 +1841,7 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
     js_code = f"""
     <script>
     (function() {{
-        const sessionId = '{session_id}';
+        const sessionId = '{str(session_id)}'; 
         // --- CRITICAL CHANGE ---
         // Get the main Streamlit app's URL from the parent window.
         // This is the URL of 'fifi-eu.streamlit.app'.
@@ -1920,7 +1920,7 @@ def render_browser_close_component(session_id: str):
         if (window.browserCloseListenerAdded) return;
         window.browserCloseListenerAdded = true;
         
-        const sessionId = '{session_id}';
+        const sessionId = '{str(session_id)}';
         // --- CRITICAL CHANGE ---
         // Get the main Streamlit app's URL from the parent window for sendBeacon.
         const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
