@@ -1827,12 +1827,12 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
         
         // Function to trigger save via beacon
         function triggerPreTimeoutSave() {{
-            console.log('Triggering pre-timeout save...');
+            console.log('Triggering pre-timeout save with POST...');
             const saveUrl = `${{baseUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
             
             // Use fetch with keepalive for better reliability
             fetch(saveUrl, {{
-                method: 'GET',
+                method: 'POST',  // <-- SOLUTION: Changed from GET to POST
                 keepalive: true,
                 mode: 'no-cors'
             }}).then(() => {{
