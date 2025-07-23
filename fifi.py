@@ -1823,7 +1823,7 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
         
         // Function to trigger the save. It now returns the fetch promise.
         function triggerPreTimeoutSave() {{
-            console.log('Triggering pre-timeout save with POST...');
+            console.log('Triggering pre-timeout save with GET...');
             const saveUrl = `${{baseUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
             
             // Show saving indicator
@@ -1834,7 +1834,7 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
 
             // Return the fetch promise so we can chain actions to it
             return fetch(saveUrl, {{
-                method: 'POST',
+                method: 'GET',
                 keepalive: true,
                 mode: 'no-cors'
             }});
