@@ -27,12 +27,12 @@ import requests
 import streamlit.components.v1 as components
 
 # =============================================================================
-# VERSION 3.7 PRODUCTION - ENHANCED SESSION STATE AUTO-SAVE
-# - FIXED: Enhanced auto-save detection with multiple fallback methods
-# - ENHANCED: Simplified and more reliable URL parameter approach
-# - ENHANCED: Triple detection system: URL params + session state + browser storage
-# - ENHANCED: Better error handling and comprehensive logging
-# - ENHANCED: Visual feedback during auto-save process
+# VERSION 3.3 PRODUCTION - FIXED PRE-TIMEOUT SAVE
+# - FIXED: Pre-timeout save mechanism triggers 30 seconds before timeout
+# - FIXED: JavaScript coordination ensures save completes before reload
+# - FIXED: Query parameter handling for save requests
+# - ENHANCED: Save tracking prevents duplicate saves
+# - ENHANCED: Visual feedback during auto-save
 # =============================================================================
 
 # Setup enhanced logging
@@ -247,58 +247,39 @@ class UserSession:
     last_activity: datetime = field(default_factory=datetime.now)
 
 # =============================================================================
-# DATABASE MANAGER - SESSION STATE PRIMARY
+# DATABASE MANAGER
 # =============================================================================
 
 class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
         self.lock = threading.Lock()
         self.use_cloud = False
-        self.connection_string = connection_string
-        
-        # Always initialize session state storage first
-        self._init_local_storage()
-        
-        # Try SQLite Cloud as secondary option
         if connection_string and SQLITECLOUD_AVAILABLE:
             try:
-                logger.info("Attempting to initialize SQLite Cloud database...")
+                self.connection_string = connection_string
                 self._init_database()
                 self.use_cloud = True
-                logger.info("✅ SQLite Cloud database initialized successfully")
                 error_handler.mark_component_healthy("Database")
             except Exception as e:
-                logger.warning(f"SQLite Cloud initialization failed: {e}")
-                logger.info("Continuing with session state storage only")
                 error_context = error_handler.handle_api_error("Database", "Initialize", e)
                 error_handler.log_error(error_context)
+                self._init_local_storage()
         else:
-            logger.info("SQLite Cloud not available or not configured - using session state only")
+            self._init_local_storage()
 
     def _init_local_storage(self):
-        logger.info("Initializing Streamlit session state for session storage")
-        # Initialize the session storage in Streamlit's session state
-        if 'fifi_sessions' not in st.session_state:
-            st.session_state.fifi_sessions = {}
-            logger.info("Created new fifi_sessions storage in session state")
-        else:
-            logger.info(f"Found existing fifi_sessions storage with {len(st.session_state.fifi_sessions)} sessions")
+        logger.info("Using local in-memory storage for sessions (not persistent across restarts).")
+        self.local_sessions = {}
+        self.use_cloud = False
 
     def _get_connection(self):
-        if not self.use_cloud or not self.connection_string: 
+        if not self.use_cloud: 
             return None
-        try:
-            return sqlitecloud.connect(self.connection_string)
-        except Exception as e:
-            logger.error(f"Failed to create SQLite Cloud connection: {e}")
-            return None
+        return sqlitecloud.connect(self.connection_string)
 
     def _init_database(self):
         with self.lock:
-            conn = self._get_connection()
-            if conn is None:
-                raise Exception("Cannot initialize database - connection failed")
-            try:
+            with self._get_connection() as conn:
                 conn.execute('''
                     CREATE TABLE IF NOT EXISTS sessions (
                         session_id TEXT PRIMARY KEY, user_type TEXT, email TEXT, first_name TEXT,
@@ -306,156 +287,57 @@ class DatabaseManager:
                         last_activity TEXT, messages TEXT, active INTEGER, wp_token TEXT
                     )''')
                 conn.commit()
-                logger.info("Database initialized successfully")
-            finally:
-                conn.close()
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         with self.lock:
-            # ALWAYS save to session state first (primary storage)
-            st.session_state.fifi_sessions[session.session_id] = session
-            logger.debug(f"Saved session {session.session_id[:8]} to session state (messages: {len(session.messages)})")
-            
-            # Also try to save to SQLite Cloud if available (backup storage)
             if self.use_cloud:
-                try:
-                    conn = self._get_connection()
-                    if conn:
-                        try:
-                            conn.execute(
-                                '''REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                                (
-                                    session.session_id, session.user_type.value, session.email,
-                                    session.first_name, session.zoho_contact_id,
-                                    int(session.guest_email_requested), session.created_at.isoformat(),
-                                    session.last_activity.isoformat(), json.dumps(session.messages),
-                                    int(session.active), session.wp_token
-                                )
-                            )
-                            conn.commit()
-                            logger.debug(f"Also saved session {session.session_id[:8]} to SQLite Cloud")
-                        finally:
-                            conn.close()
-                    else:
-                        logger.warning("Could not connect to SQLite Cloud for save")
-                except Exception as e:
-                    logger.error(f"Failed to save session to SQLite Cloud (continuing with session state): {e}")
+                with self._get_connection() as conn:
+                    conn.execute(
+                        '''REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (
+                            session.session_id, session.user_type.value, session.email,
+                            session.first_name, session.zoho_contact_id,
+                            int(session.guest_email_requested), session.created_at.isoformat(),
+                            session.last_activity.isoformat(), json.dumps(session.messages),
+                            int(session.active), session.wp_token
+                        )
+                    )
+                    conn.commit()
+            else:
+                self.local_sessions[session.session_id] = session
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
         with self.lock:
-            # ALWAYS try session state first (primary storage)
-            logger.debug(f"Loading session {session_id[:8]} from session state")
-            
-            if 'fifi_sessions' not in st.session_state:
-                st.session_state.fifi_sessions = {}
-                logger.debug("Initialized empty fifi_sessions in session state")
-            
-            session = st.session_state.fifi_sessions.get(session_id)
-            
-            if session:
-                logger.debug(f"Found session {session_id[:8]} in session state (messages: {len(session.messages)})")
-                if isinstance(session.user_type, str):
-                    session.user_type = UserType(session.user_type)
-                return session
-            
-            # If not found in session state, try SQLite Cloud as fallback
             if self.use_cloud:
-                try:
-                    conn = self._get_connection()
-                    if conn:
-                        try:
-                            cursor = conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
-                            row = cursor.fetchone()
-                            if row: 
-                                logger.debug(f"Found session {session_id[:8]} in SQLite Cloud, loading...")
-                                columns = [desc[0] for desc in cursor.description]
-                                row_dict = dict(zip(columns, row))
-                                session = UserSession(
-                                    session_id=row_dict['session_id'],
-                                    user_type=UserType(row_dict['user_type']),
-                                    email=row_dict.get('email'),
-                                    first_name=row_dict.get('first_name'),
-                                    zoho_contact_id=row_dict.get('zoho_contact_id'),
-                                    guest_email_requested=bool(row_dict.get('guest_email_requested')),
-                                    created_at=datetime.fromisoformat(row_dict['created_at']),
-                                    last_activity=datetime.fromisoformat(row_dict['last_activity']),
-                                    messages=json.loads(row_dict.get('messages', '[]')),
-                                    active=bool(row_dict.get('active', 1)),
-                                    wp_token=row_dict.get('wp_token')
-                                )
-                                
-                                # Save to session state for future access
-                                st.session_state.fifi_sessions[session_id] = session
-                                logger.debug(f"Loaded session {session_id[:8]} from SQLite Cloud and cached in session state")
-                                return session
-                        finally:
-                            conn.close()
-                    else:
-                        logger.warning("Could not connect to SQLite Cloud for load")
-                except Exception as e:
-                    logger.error(f"Failed to load session from SQLite Cloud: {e}")
-            
-            # Session not found anywhere
-            logger.debug(f"Session {session_id[:8]} not found in any storage")
-            available_sessions = list(st.session_state.fifi_sessions.keys())
-            logger.debug(f"Available sessions in session state: {[s[:8] for s in available_sessions]}")
-            return None
-
-    def get_storage_info(self) -> Dict[str, Any]:
-        """Get diagnostic information about current storage"""
-        info = {
-            "storage_type": f"Session State (primary){' + SQLite Cloud (backup)' if self.use_cloud else ''}",
-            "cloud_available": SQLITECLOUD_AVAILABLE,
-            "connection_configured": bool(self.connection_string),
-            "cloud_working": False,
-            "session_count": 0,
-            "sessions": []
-        }
-        
-        # Always check session state first (primary storage)
-        if 'fifi_sessions' in st.session_state:
-            info["session_count"] = len(st.session_state.fifi_sessions)
-            for session_id, session in st.session_state.fifi_sessions.items():
-                info["sessions"].append({
-                    "session_id": session_id[:8] + "...",
-                    "email": session.email or "No email",
-                    "message_count": len(session.messages),
-                    "user_type": session.user_type.value if hasattr(session.user_type, 'value') else str(session.user_type),
-                    "storage": "session_state"
-                })
-        
-        # Also check SQLite Cloud if available
-        if self.use_cloud:
-            try:
-                conn = self._get_connection()
-                if conn:
-                    try:
-                        cursor = conn.execute("SELECT COUNT(*) FROM sessions WHERE active = 1")
-                        cloud_count = cursor.fetchone()[0]
-                        info["cloud_working"] = True
-                        info["cloud_session_count"] = cloud_count
-                        
-                        cursor = conn.execute("SELECT session_id, email, created_at FROM sessions WHERE active = 1 LIMIT 5")
-                        for row in cursor.fetchall():
-                            # Only add if not already in session state list
-                            session_short_id = row[0][:8] + "..."
-                            if not any(s["session_id"] == session_short_id for s in info["sessions"]):
-                                info["sessions"].append({
-                                    "session_id": session_short_id,
-                                    "email": row[1] or "No email",
-                                    "created_at": row[2],
-                                    "storage": "sqlite_cloud_only"
-                                })
-                    finally:
-                        conn.close()
-                else:
-                    info["error"] = "Could not connect to SQLite Cloud"
-            except Exception as e:
-                info["error"] = str(e)
-        
-        return info
+                with self._get_connection() as conn:
+                    cursor = conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+                    row = cursor.fetchone()
+                    if not row: 
+                        return None
+                    columns = [desc[0] for desc in cursor.description]
+                    row_dict = dict(zip(columns, row))
+                    session = UserSession(
+                        session_id=row_dict['session_id'],
+                        user_type=UserType(row_dict['user_type']),
+                        email=row_dict.get('email'),
+                        first_name=row_dict.get('first_name'),
+                        zoho_contact_id=row_dict.get('zoho_contact_id'),
+                        guest_email_requested=bool(row_dict.get('guest_email_requested')),
+                        created_at=datetime.fromisoformat(row_dict['created_at']),
+                        last_activity=datetime.fromisoformat(row_dict['last_activity']),
+                        messages=json.loads(row_dict.get('messages', '[]')),
+                        active=bool(row_dict.get('active', 1)),
+                        wp_token=row_dict.get('wp_token')
+                    )
+                    return session
+            else:
+                session = self.local_sessions.get(session_id)
+                if session:
+                    if isinstance(session.user_type, str):
+                        session.user_type = UserType(session.user_type)
+                return session
 
 # =============================================================================
 # PDF EXPORTER
@@ -493,7 +375,7 @@ class PDFExporter:
         return buffer
 
 # =============================================================================
-# ZOHO CRM MANAGER
+# FIXED ZOHO CRM MANAGER
 # =============================================================================
 
 class ZohoCRMManager:
@@ -504,6 +386,7 @@ class ZohoCRMManager:
         self._access_token = None
         self._token_expiry = None
 
+    # SOLUTION: New method to get token with a configurable timeout
     def _get_access_token_with_timeout(self, force_refresh: bool = False, timeout: int = 15) -> Optional[str]:
         """Get access token with caching, retry logic, and a configurable timeout."""
         if not self.config.ZOHO_ENABLED:
@@ -522,7 +405,7 @@ class ZohoCRMManager:
                     'client_secret': self.config.ZOHO_CLIENT_SECRET,
                     'grant_type': 'refresh_token'
                 },
-                timeout=timeout
+                timeout=timeout # Using configurable timeout
             )
             response.raise_for_status()
             data = response.json()
@@ -543,6 +426,7 @@ class ZohoCRMManager:
     def _get_access_token(self, force_refresh: bool = False) -> Optional[str]:
         """Legacy get access token method, now calls the new one with a default timeout."""
         return self._get_access_token_with_timeout(force_refresh=force_refresh, timeout=15)
+
 
     def _find_contact_by_email(self, email: str, access_token: str) -> Optional[str]:
         """Find contact with retry on token expiry."""
@@ -731,6 +615,7 @@ class ZohoCRMManager:
             
         return False
         
+    # SOLUTION: New method to validate session data before saving
     def _validate_session_data(self, session: UserSession) -> bool:
         """Validate critical session data before attempting a save to CRM."""
         try:
@@ -758,6 +643,8 @@ class ZohoCRMManager:
             logger.error(f"SESSION VALIDATION CRASHED: An unexpected error occurred during validation: {e}")
             return False
 
+
+    # SOLUTION: Rewritten save method with retries, timeouts, and validation
     def save_chat_transcript_sync(self, session: UserSession, trigger_reason: str) -> bool:
         """
         Synchronous save method with retries, timeouts, and validation.
@@ -841,6 +728,7 @@ class ZohoCRMManager:
                     return False
         
         return False # Should not be reached, but as a fallback
+
 
     def _generate_note_content(self, session: UserSession, attachment_uploaded: bool, trigger_reason: str) -> str:
         """Generate note content with session summary."""
@@ -1532,7 +1420,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
-# SESSION MANAGER WITH ENHANCED AUTO-SAVE
+# FIXED SESSION MANAGER
 # =============================================================================
 
 class SessionManager:
@@ -1561,13 +1449,15 @@ class SessionManager:
         session = UserSession(session_id=str(uuid.uuid4()))
         self.db.save_session(session)
         st.session_state.current_session_id = session.session_id
-        logger.info(f"Created new guest session: {session.session_id[:8]}")
         return session
 
+    # --- CORRECTED METHOD ---
     def _auto_save_to_crm(self, session: UserSession, trigger_reason: str):
-        """Enhanced auto-save with comprehensive logging and error handling."""
-        logger.info("=" * 80)
-        logger.info(f"ZOHO SAVE START - Trigger: {trigger_reason}")
+        """
+        FIXED: Enhanced auto-save with proper error handling, logging, and separated logic.
+        """
+        logger.info(f"=== AUTO SAVE TO CRM STARTED ===")
+        logger.info(f"Trigger: {trigger_reason}")
         logger.info(f"Session ID: {session.session_id[:8] if session.session_id else 'None'}")
         logger.info(f"User Type: {session.user_type}")
         logger.info(f"Has Email: {bool(session.email)}")
@@ -1603,7 +1493,7 @@ class SessionManager:
                     logger.error("SAVE FAILED: Interactive save failed")
             else:
                 # Non-interactive save (e.g., timeout, browser close)
-                logger.info("Starting non-interactive save...")
+                logger.info(f"Starting non-interactive save...")
                 success = self.zoho.save_chat_transcript_sync(session, trigger_reason)
                 if success:
                     logger.info("SAVE COMPLETED: Non-interactive save successful")
@@ -1615,10 +1505,57 @@ class SessionManager:
             if is_interactive:
                 st.error(f"❌ An error occurred while saving: {str(e)}")
         finally:
-            logger.info("=" * 80 + "\n")
+            logger.info(f"=== AUTO SAVE TO CRM ENDED ===\n")
+
+    def trigger_pre_timeout_save(self, session_id: str) -> bool:
+        """
+        SOLUTION: Trigger a save 30 seconds before timeout expires.
+        Called by JavaScript via query parameter.
+        """
+        logger.info(f"PRE-TIMEOUT SAVE TRIGGERED for session {session_id[:8]}...")
+        
+        session = self.db.load_session(session_id)
+        if not session or not session.active:
+            logger.warning("Session not found or inactive for pre-timeout save")
+            return False
+        
+        if (session.user_type == UserType.REGISTERED_USER and 
+            session.email and 
+            session.messages):
+            
+            # Create a backup copy to ensure data integrity
+            session_backup = copy.deepcopy(session)
+            
+            try:
+                # Mark in session that save is in progress
+                session.last_activity = datetime.now()  # Update activity to prevent concurrent timeout
+                self.db.save_session(session)
+                
+                # Perform the save
+                success = self.zoho.save_chat_transcript_sync(session_backup, "Auto-Save Before Timeout")
+                
+                if success:
+                    logger.info("PRE-TIMEOUT SAVE COMPLETED SUCCESSFULLY")
+                    # Mark session as saved
+                    if 'pre_timeout_saved' not in st.session_state:
+                        st.session_state.pre_timeout_saved = {}
+                    st.session_state.pre_timeout_saved[session_id] = True
+                    return True
+                else:
+                    logger.error("PRE-TIMEOUT SAVE FAILED")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"PRE-TIMEOUT SAVE ERROR: {e}", exc_info=True)
+                return False
+        else:
+            logger.info("Session not eligible for pre-timeout save")
+            return False
 
     def get_session(self) -> UserSession:
-        """Enhanced session retrieval with better error handling."""
+        """
+        Enhanced session retrieval with pre-timeout save check.
+        """
         session_id = st.session_state.get('current_session_id')
         
         if session_id:
@@ -1627,16 +1564,30 @@ class SessionManager:
                 if self._is_session_expired(session):
                     logger.info(f"Session {session_id[:8]}... expired due to inactivity.")
                     
-                    # Check if this session needs auto-save
+                    # Check if pre-timeout save already happened
+                    already_saved = st.session_state.get('pre_timeout_saved', {}).get(session_id, False)
+                    
                     if (session.user_type == UserType.REGISTERED_USER and 
                         session.email and 
-                        session.messages):
+                        session.messages and
+                        not already_saved):  # Only save if not already saved by pre-timeout
                         
-                        logger.info("Session expired - performing emergency save...")
+                        logger.info("Session expired without pre-timeout save. Attempting emergency save...")
+                        session_backup = copy.deepcopy(session)
+                        
                         try:
-                            self._auto_save_to_crm(session, "Session Timeout (Emergency)")
+                            self._auto_save_to_crm(session_backup, "Session Timeout (Emergency)")
                         except Exception as e:
                             logger.error(f"Emergency save failed: {e}", exc_info=True)
+                    else:
+                        if already_saved:
+                            logger.info("Session expired. Pre-timeout save was already completed.")
+                        else:
+                            logger.info("Session expired but was not eligible for saving.")
+                    
+                    # Clear the pre-timeout save flag
+                    if 'pre_timeout_saved' in st.session_state and session_id in st.session_state.pre_timeout_saved:
+                        del st.session_state.pre_timeout_saved[session_id]
                     
                     # End the session
                     self._end_session_internal(session)
@@ -1656,71 +1607,6 @@ class SessionManager:
         for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
-
-    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-        if not self.rate_limiter.is_allowed(session.session_id):
-            return {"content": "Rate limit exceeded. Please wait.", "success": False}
-
-        self._update_activity(session)
-
-        sanitized_prompt = sanitize_input(prompt)
-        
-        moderation = check_content_moderation(sanitized_prompt, self.ai.openai_client)
-        if moderation and moderation.get("flagged"):
-            return {
-                "content": moderation["message"], 
-                "success": False, 
-                "source": "Content Safety"
-            }
-
-        response = self.ai.get_response(sanitized_prompt, session.messages)
-        
-        session.messages.append({
-            "role": "user", 
-            "content": sanitized_prompt,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        response_message = {
-            "role": "assistant",
-            "content": response.get("content", "No response generated."),
-            "source": response.get("source", "Unknown"),
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # Add response metadata
-        for key in ["used_search", "used_pinecone", "has_citations", "has_inline_citations", "safety_override"]:
-            if response.get(key):
-                response_message[key] = True
-                
-        session.messages.append(response_message)
-        session.messages = session.messages[-100:]  # Keep last 100 messages
-        
-        # Force save session to ensure persistence
-        self.db.save_session(session)
-        logger.debug(f"Saved session after AI response (total messages: {len(session.messages)})")
-        
-        self._update_activity(session)
-        return response
-
-    def clear_chat_history(self, session: UserSession):
-        session.messages = []
-        self._update_activity(session)
-
-    def end_session(self, session: UserSession):
-        self._auto_save_to_crm(session, "Manual Sign Out")
-        self._end_session_internal(session)
-
-    def manual_save_to_crm(self, session: UserSession):
-        if (session.user_type == UserType.REGISTERED_USER and 
-            session.email and 
-            session.messages and 
-            self.zoho.config.ZOHO_ENABLED):
-            
-            self._auto_save_to_crm(session, "Manual Save to Zoho CRM")
-            self._update_activity(session)
-        else:
-            st.warning("Cannot save to CRM: Missing email or chat messages")
 
     @handle_api_errors("Authentication", "WordPress Login")
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
@@ -1790,505 +1676,215 @@ class SessionManager:
                 return None
                 
         except requests.exceptions.RequestException as e:
-            st.error("A network error occurred during authentication. Please check your connection.")
+            st.error(f"A network error occurred during authentication. Please check your connection.")
             logger.error(f"Authentication network exception: {e}")
             return None
 
-# =============================================================================
-# ENHANCED AUTO-SAVE DETECTION FUNCTIONS - SIMPLIFIED & RELIABLE
-# =============================================================================
+    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+        if not self.rate_limiter.is_allowed(session.session_id):
+            return {"content": "Rate limit exceeded. Please wait.", "success": False}
 
-def check_session_storage_save_request():
-    """SIMPLIFIED auto-save detection with multiple reliable methods"""
-    
-    # Method 1: Check URL parameters (primary method)
-    try:
-        query_params = st.query_params
-        logger.info(f"🔍 Checking URL params: {dict(query_params)}")
+        self._update_activity(session)
+
+        sanitized_prompt = sanitize_input(prompt)
         
-        if query_params.get("auto_save_trigger") or query_params.get("auto_save"):
-            session_id = query_params.get("session_id")
-            trigger = query_params.get("trigger", "url_auto_save")
-            
-            if session_id:
-                logger.info("=" * 80)
-                logger.info(f"🚨 AUTO-SAVE DETECTED VIA URL PARAMS")
-                logger.info(f"Session ID: {session_id[:8]}...")
-                logger.info(f"Trigger: {trigger}")
-                logger.info(f"Full URL params: {dict(query_params)}")
-                logger.info("=" * 80)
-                
-                # Clear the query params to prevent re-processing
-                st.query_params.clear()
-                
-                # Process the save immediately
-                success = process_auto_save_request(session_id)
-                
-                if success:
-                    st.success("✅ Chat automatically saved to CRM before timeout!")
-                    logger.info("✅ URL PARAM AUTO-SAVE COMPLETED")
-                else:
-                    st.warning("⚠️ Could not save chat before timeout")
-                    logger.error("❌ URL PARAM AUTO-SAVE FAILED")
-                
-                # Show result and stop
-                time.sleep(2)
-                st.stop()
-                
-    except Exception as e:
-        logger.error(f"Error checking URL params: {e}")
-    
-    # Method 2: Check session state (backup method)
-    try:
-        if st.session_state.get('auto_save_requested'):
-            session_id = st.session_state.get('auto_save_session_id')
-            trigger = st.session_state.get('auto_save_trigger', 'session_state')
-            
-            if session_id:
-                logger.info("=" * 80)
-                logger.info(f"🚨 AUTO-SAVE DETECTED VIA SESSION STATE")
-                logger.info(f"Session ID: {session_id[:8]}...")
-                logger.info(f"Trigger: {trigger}")
-                logger.info("=" * 80)
-                
-                # Clear the flags
-                for key in ['auto_save_requested', 'auto_save_session_id', 'auto_save_trigger']:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                
-                # Process the save
-                success = process_auto_save_request(session_id)
-                
-                if success:
-                    st.success("✅ Chat automatically saved to CRM!")
-                    logger.info("✅ SESSION STATE AUTO-SAVE COMPLETED")
-                else:
-                    st.warning("⚠️ Could not save chat to CRM")
-                    logger.error("❌ SESSION STATE AUTO-SAVE FAILED")
-                
-                # Show result and stop
-                time.sleep(2)
-                st.stop()
-                
-    except Exception as e:
-        logger.error(f"Error checking session state: {e}")
-    
-    # Method 3: Check for browser storage communication (enhanced)
-    try:
-        # This uses a JavaScript component to check browser storage
-        check_result = check_browser_storage_for_save_request()
-        if check_result:
-            session_id = check_result.get('session_id')
-            trigger = check_result.get('trigger', 'browser_storage')
-            
-            if session_id:
-                logger.info("=" * 80)
-                logger.info(f"🚨 AUTO-SAVE DETECTED VIA BROWSER STORAGE")
-                logger.info(f"Session ID: {session_id[:8]}...")
-                logger.info(f"Trigger: {trigger}")
-                logger.info("=" * 80)
-                
-                success = process_auto_save_request(session_id)
-                
-                if success:
-                    st.success("✅ Chat automatically saved to CRM!")
-                    logger.info("✅ BROWSER STORAGE AUTO-SAVE COMPLETED")
-                else:
-                    st.warning("⚠️ Could not save chat to CRM")
-                    logger.error("❌ BROWSER STORAGE AUTO-SAVE FAILED")
-                
-                time.sleep(2)
-                st.stop()
-                
-    except Exception as e:
-        logger.error(f"Error checking browser storage: {e}")
+        moderation = check_content_moderation(sanitized_prompt, self.ai.openai_client)
+        if moderation and moderation.get("flagged"):
+            return {
+                "content": moderation["message"], 
+                "success": False, 
+                "source": "Content Safety"
+            }
 
-def check_browser_storage_for_save_request():
-    """Enhanced browser storage check using JavaScript component"""
-    
-    js_code = f"""
-    <script>
-    (function() {{
-        try {{
-            // Check session storage for save request
-            const saveRequest = sessionStorage.getItem('fifi_auto_save_request');
-            
-            if (saveRequest) {{
-                console.log('🔍 Found save request in session storage:', saveRequest);
-                
-                try {{
-                    const data = JSON.parse(saveRequest);
-                    
-                    if (data.sessionId && data.timestamp) {{
-                        // Clear the request to prevent re-processing
-                        sessionStorage.removeItem('fifi_auto_save_request');
-                        
-                        // Send to Streamlit via session state
-                        const message = {{
-                            type: 'auto_save_request',
-                            sessionId: data.sessionId,
-                            trigger: data.trigger || 'browser_storage',
-                            timestamp: data.timestamp
-                        }};
-                        
-                        // Multiple methods to communicate with Streamlit
-                        
-                        // Method 1: Try to set URL parameters
-                        try {{
-                            const url = new URL(window.parent.location.href);
-                            url.searchParams.set('auto_save', 'true');
-                            url.searchParams.set('session_id', data.sessionId);
-                            url.searchParams.set('trigger', data.trigger || 'browser_storage');
-                            url.searchParams.set('timestamp', Date.now().toString());
-                            
-                            console.log('🚀 Redirecting to auto-save URL:', url.href);
-                            window.parent.location.href = url.href;
-                            return;
-                        }} catch(urlError) {{
-                            console.warn('Could not set URL params:', urlError);
-                        }}
-                        
-                        // Method 2: Try postMessage (if parent supports it)
-                        try {{
-                            window.parent.postMessage({{
-                                type: 'streamlit_auto_save',
-                                ...message
-                            }}, '*');
-                            console.log('📤 Sent postMessage to parent');
-                        }} catch(postError) {{
-                            console.warn('Could not send postMessage:', postError);
-                        }}
-                        
-                        // Method 3: Set a global flag that Streamlit can check
-                        window.parent.streamlitAutoSaveRequest = message;
-                        console.log('🎯 Set global auto-save flag');
-                        
-                        // Method 4: Force a page reload with parameters
-                        setTimeout(() => {{
-                            const currentUrl = window.parent.location.href.split('?')[0];
-                            const autoSaveUrl = `${{currentUrl}}?auto_save=true&session_id=${{data.sessionId}}&trigger=${{data.trigger || 'browser_storage'}}&ts=${{Date.now()}}`;
-                            console.log('🔄 Force reloading with auto-save URL:', autoSaveUrl);
-                            window.parent.location.href = autoSaveUrl;
-                        }}, 100);
-                    }}
-                }} catch(parseError) {{
-                    console.error('Error parsing save request:', parseError);
-                    sessionStorage.removeItem('fifi_auto_save_request');
-                }}
-            }} else {{
-                console.log('ℹ️ No save request found in session storage');
-            }}
-        }} catch(error) {{
-            console.error('Error checking browser storage:', error);
-        }}
-    }})();
-    </script>
-    """
-    
-    try:
-        components.html(js_code, height=0, width=0)
+        response = self.ai.get_response(sanitized_prompt, session.messages)
         
-        # Check if the global flag was set
-        if hasattr(st.session_state, '_js_auto_save_request'):
-            request = st.session_state._js_auto_save_request
-            del st.session_state._js_auto_save_request
-            return request
+        session.messages.append({
+            "role": "user", 
+            "content": sanitized_prompt,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        response_message = {
+            "role": "assistant",
+            "content": response.get("content", "No response generated."),
+            "source": response.get("source", "Unknown"),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        if response.get("used_search"):
+            response_message["used_search"] = True
+        if response.get("used_pinecone"):
+            response_message["used_pinecone"] = True
+        if response.get("has_citations"):
+            response_message["has_citations"] = True
+        if response.get("has_inline_citations"):
+            response_message["has_inline_citations"] = True
+        if response.get("safety_override"):
+            response_message["safety_override"] = True
             
-    except Exception as e:
-        logger.error(f"Error in browser storage check: {e}")
-    
-    return None
+        session.messages.append(response_message)
+        
+        session.messages = session.messages[-100:]
+        
+        self._update_activity(session)
+        return response
 
-def process_auto_save_request(session_id: str):
-    """Process auto-save request - more reliable than query parameters"""
-    logger.info("=" * 80)
-    logger.info(f"🚨 PROCESSING AUTO-SAVE REQUEST")
-    logger.info(f"Session ID: {session_id[:8]}...")
-    logger.info(f"Server time: {datetime.now().isoformat()}")
-    
-    try:
-        # Ensure initialization
-        if ensure_initialization():
-            session_manager = get_session_manager()
-            if session_manager:
-                logger.info("Session manager obtained for auto-save")
-                
-                # Load session
-                session = session_manager.db.load_session(session_id)
-                
-                if session:
-                    logger.info(f"✅ Session loaded for auto-save:")
-                    logger.info(f"  - User Type: {session.user_type}")
-                    logger.info(f"  - Email: {session.email}")
-                    logger.info(f"  - Messages: {len(session.messages)}")
-                    logger.info(f"  - Active: {session.active}")
-                    
-                    # Check eligibility
-                    is_registered = (session.user_type == UserType.REGISTERED_USER or 
-                                   (hasattr(session.user_type, 'value') and session.user_type.value == "registered_user"))
-                    has_email = bool(session.email)
-                    has_messages = bool(session.messages)
-                    is_active = bool(session.active)
-                    zoho_enabled = session_manager.zoho.config.ZOHO_ENABLED
-                    
-                    logger.info(f"🔍 AUTO-SAVE ELIGIBILITY CHECK:")
-                    logger.info(f"  - Is registered user: {is_registered}")
-                    logger.info(f"  - Has email: {has_email}")
-                    logger.info(f"  - Has messages: {has_messages}")
-                    logger.info(f"  - Is active: {is_active}")
-                    logger.info(f"  - Zoho enabled: {zoho_enabled}")
-                    
-                    if is_registered and has_email and has_messages and is_active and zoho_enabled:
-                        logger.info("🚀 SESSION IS ELIGIBLE FOR AUTO-SAVE - PROCEEDING...")
-                        
-                        # Perform the save
-                        success = session_manager.zoho.save_chat_transcript_sync(session, "Auto-Save Before Timeout")
-                        
-                        if success:
-                            logger.info("✅ AUTO-SAVE COMPLETED SUCCESSFULLY")
-                            return True
-                        else:
-                            logger.error("❌ AUTO-SAVE FAILED")
-                            return False
-                    else:
-                        reasons = []
-                        if not is_registered:
-                            reasons.append("not a registered user")
-                        if not has_email:
-                            reasons.append("no email")
-                        if not has_messages:
-                            reasons.append("no messages")
-                        if not is_active:
-                            reasons.append("session not active")
-                        if not zoho_enabled:
-                            reasons.append("Zoho CRM not enabled")
-                        
-                        logger.info(f"❌ Session not eligible for auto-save: {', '.join(reasons)}")
-                        return False
-                        
-                else:
-                    logger.error(f"❌ Session {session_id[:8]} not found for auto-save")
-                    return False
-            else:
-                logger.error("❌ Could not get session manager for auto-save")
-                return False
+    def clear_chat_history(self, session: UserSession):
+        session.messages = []
+        self._update_activity(session)
+
+    def end_session(self, session: UserSession):
+        self._auto_save_to_crm(session, "Manual Sign Out")
+        self._end_session_internal(session)
+
+    def manual_save_to_crm(self, session: UserSession):
+        if (session.user_type == UserType.REGISTERED_USER and 
+            session.email and 
+            session.messages and 
+            self.zoho.config.ZOHO_ENABLED):
+            
+            self._auto_save_to_crm(session, "Manual Save to Zoho CRM")
+            self._update_activity(session)
         else:
-            logger.error("❌ Application not initialized for auto-save")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ CRITICAL ERROR in auto-save: {e}", exc_info=True)
-        return False
-    finally:
-        logger.info("=" * 80)
+            st.warning("Cannot save to CRM: Missing email or chat messages")
 
-def check_pending_auto_save(session_manager: SessionManager, session: UserSession):
-    """Check if there's a pending auto-save request on page load"""
-    # This runs when the page loads after timeout
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def get_session_manager() -> Optional[SessionManager]:
+    """Safely get the session manager from session state."""
+    if 'session_manager' not in st.session_state:
+        return None
     
-    # Check if this is a reload after timeout (session was recently active)
-    if session.last_activity:
-        time_since_activity = datetime.now() - session.last_activity
-        timeout_minutes = session_manager.get_session_timeout_minutes()
-        
-        # If it's been close to the timeout period, this might be a post-timeout reload
-        if 110 <= time_since_activity.total_seconds() <= 180:  # Between 1:50 and 3:00
-            logger.info(f"🔍 Detected potential post-timeout reload for session {session.session_id[:8]}")
-            logger.info(f"Time since last activity: {time_since_activity.total_seconds():.1f} seconds")
-            
-            # Check if we should trigger an auto-save
-            if (session.user_type == UserType.REGISTERED_USER and 
-                session.email and 
-                session.messages and
-                session.active and
-                session_manager.zoho.config.ZOHO_ENABLED):
-                
-                # Check if we haven't already saved recently
-                save_key = f"post_timeout_{session.session_id}"
-                already_saved = st.session_state.get('post_timeout_saved', {}).get(save_key, False)
-                
-                if not already_saved:
-                    logger.info("🚀 Triggering post-timeout auto-save...")
-                    
-                    success = session_manager.zoho.save_chat_transcript_sync(session, "Post-Timeout Auto-Save")
-                    
-                    if success:
-                        # Mark as saved
-                        if 'post_timeout_saved' not in st.session_state:
-                            st.session_state.post_timeout_saved = {}
-                        st.session_state.post_timeout_saved[save_key] = True
-                        
-                        st.success("✅ Chat automatically saved to CRM after timeout")
-                        logger.info("✅ POST-TIMEOUT AUTO-SAVE SUCCESSFUL")
-                    else:
-                        st.warning("⚠️ Could not save chat after timeout")
-                        logger.error("❌ POST-TIMEOUT AUTO-SAVE FAILED")
-                else:
-                    logger.info("ℹ️ Post-timeout save already completed")
+    manager = st.session_state.session_manager
+    if not hasattr(manager, 'get_session'):
+        logger.error("Invalid SessionManager instance in session state")
+        return None
+    
+    return manager
 
-def render_enhanced_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
-    """SIMPLIFIED and more reliable auto-logout with multiple fallback methods"""
+def ensure_initialization():
+    """Ensure the application is properly initialized."""
+    if 'initialized' not in st.session_state or not st.session_state.initialized:
+        try:
+            config = Config()
+            pdf_exporter = PDFExporter()
+            
+            if 'db_manager' not in st.session_state:
+                st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+            
+            db_manager = st.session_state.db_manager
+            zoho_manager = ZohoCRMManager(config, pdf_exporter)
+            ai_system = EnhancedAI(config)
+            rate_limiter = RateLimiter()
+
+            st.session_state.session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
+            st.session_state.pdf_exporter = pdf_exporter
+            st.session_state.error_handler = error_handler
+            st.session_state.ai_system = ai_system
+            st.session_state.initialized = True
+            
+            logger.info("✅ Application initialized successfully")
+            return True
+            
+        except Exception as e:
+            st.error("💥 A critical error occurred during application startup.")
+            st.error(f"Error details: {str(e)}")
+            logger.critical(f"Initialization failed: {e}", exc_info=True)
+            return False
+    
+    return True
+
+# =============================================================================
+# UI RENDERING FUNCTIONS
+# =============================================================================
+
+def render_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
+    """
+    SOLUTION: Use fetch/sendBeacon to the parent Streamlit app's URL.
+    """
     if timeout_seconds <= 0:
         return
 
-    # Calculate save trigger time (75% of timeout, minimum 10 seconds)
-    save_trigger_seconds = max(int(timeout_seconds * 0.75), 10)
+    # Calculate when to trigger the save (30 seconds before timeout)
+    save_trigger_seconds = max(timeout_seconds - 30, 1)
     
     js_code = f"""
     <script>
     (function() {{
         const sessionId = '{session_id}';
-        const timeoutSeconds = {timeout_seconds};
-        const saveTriggerSeconds = {save_trigger_seconds};
+        // --- CRITICAL CHANGE ---
+        // Get the main Streamlit app's URL from the parent window.
+        // This is the URL of 'fifi-eu.streamlit.app'.
+        const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
+        // --- END CRITICAL CHANGE ---
         
-        console.log(`🔧 Enhanced auto-logout initialized: timeout=${{timeoutSeconds}}s, save_trigger=${{saveTriggerSeconds}}s`);
+        // Clear any existing timers to prevent duplicates
+        if (window.streamlitAutoSaveTimer) clearTimeout(window.streamlitAutoSaveTimer);
+        if (window.streamlitAutoLogoutTimer) clearTimeout(window.streamlitAutoLogoutTimer);
         
-        // Clear any existing timers
-        if (window.streamlitAutoSaveTimer) {{
-            clearTimeout(window.streamlitAutoSaveTimer);
-        }}
-        if (window.streamlitAutoLogoutTimer) {{
-            clearTimeout(window.streamlitAutoLogoutTimer);
-        }}
-        
-        // Enhanced save function with multiple methods
-        function triggerEnhancedSave() {{
-            console.log('=== ENHANCED AUTO-SAVE TRIGGER ===');
-            
-            const saveData = {{
-                sessionId: sessionId,
-                timestamp: Date.now(),
-                trigger: 'pre_timeout_enhanced'
-            }};
-            
-            // Method 1: Session storage (for browser close detection)
-            try {{
-                sessionStorage.setItem('fifi_auto_save_request', JSON.stringify(saveData));
-                console.log('✅ Saved to session storage');
-            }} catch(e) {{
-                console.warn('Could not save to session storage:', e);
-            }}
-            
-            // Method 2: Immediate URL redirect (most reliable)
-            try {{
-                const currentUrl = window.parent.location.href.split('?')[0];
-                const autoSaveUrl = `${{currentUrl}}?auto_save=true&session_id=${{sessionId}}&trigger=enhanced_pre_timeout&ts=${{Date.now()}}`;
-                
-                console.log('🚀 Redirecting to auto-save URL:', autoSaveUrl);
-                window.parent.location.href = autoSaveUrl;
-                return true;
-            }} catch(e) {{
-                console.error('URL redirect failed:', e);
-            }}
-            
-            // Method 3: Force reload as fallback
-            console.log('⚠️ Using fallback reload method');
-            setTimeout(() => {{
-                window.parent.location.reload();
-            }}, 1000);
-            
-            return false;
-        }}
-        
-        // Enhanced logout sequence
-        function executeEnhancedLogout() {{
-            console.log('=== ENHANCED LOGOUT SEQUENCE START ===');
+        // Function to trigger the save using fetch
+        function triggerPreTimeoutSave() {{
+            console.log('Triggering pre-timeout save with GET fetch to parent Streamlit app URL...');
+            const saveUrl = `${{parentStreamlitAppUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
             
             // Show saving indicator
-            let indicator = document.getElementById('enhanced-saving-indicator');
-            if (!indicator) {{
-                indicator = document.createElement('div');
-                indicator.id = 'enhanced-saving-indicator';
-                indicator.style.cssText = `
-                    position: fixed; 
-                    top: 20px; 
-                    right: 20px; 
-                    background: linear-gradient(45deg, #ff6b6b, #ff8e8e); 
-                    color: white; 
-                    padding: 16px 24px; 
-                    border-radius: 12px; 
-                    z-index: 9999; 
-                    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-                    font-weight: 600;
-                    box-shadow: 0 6px 20px rgba(0,0,0,0.3);
-                    animation: pulse 1s infinite;
-                `;
-                document.head.insertAdjacentHTML('beforeend', `
-                    <style>
-                        @keyframes pulse {{
-                            0% {{ transform: scale(1); }}
-                            50% {{ transform: scale(1.05); }}
-                            100% {{ transform: scale(1); }}
-                        }}
-                    </style>
-                `);
-                document.body.appendChild(indicator);
-            }}
-            indicator.innerHTML = '💾 Auto-saving your chat to CRM...<br><small>Please wait...</small>';
-            
-            // Trigger the save
-            const saveSuccess = triggerEnhancedSave();
-            
-            if (!saveSuccess) {{
-                // If immediate save failed, try again after a short delay
-                setTimeout(triggerEnhancedSave, 2000);
-            }}
-        }}
-        
-        // Schedule the enhanced logout
-        console.log(`📅 Scheduling enhanced logout in ${{saveTriggerSeconds}} seconds`);
-        window.streamlitAutoLogoutTimer = setTimeout(executeEnhancedLogout, saveTriggerSeconds * 1000);
-        
-        // Enhanced browser close detection
-        let closeEventSent = false;
-        function handleBrowserClose() {{
-            if (!closeEventSent) {{
-                closeEventSent = true;
-                console.log('🚪 Enhanced browser close detected');
-                
-                try {{
-                    sessionStorage.setItem('fifi_auto_save_request', JSON.stringify({{
-                        sessionId: sessionId,
-                        timestamp: Date.now(),
-                        trigger: 'enhanced_browser_close'
-                    }}));
-                    console.log('✅ Browser close save request stored');
-                }} catch(e) {{
-                    console.warn('Could not store browser close request:', e);
+            const savingDiv = document.createElement('div');
+            savingDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #ff6b6b; color: white; padding: 10px 20px; border-radius: 5px; z-index: 9999;';
+            savingDiv.textContent = 'Auto-saving session...';
+            document.body.appendChild(savingDiv);
+
+            // Send the request as GET, with keepalive for reliability on unload
+            return fetch(saveUrl, {{
+                method: 'GET', // Keep as GET for Streamlit query param handling
+                keepalive: true, // Ensures request is sent even if page unloads
+                // No 'mode' specified, defaults to 'cors' which is appropriate for cross-origin iframes
+                // fetching to their parent (assuming parent allows it, which Streamlit generally does for GET).
+            }})
+            .then(response => {{
+                if (!response.ok) {{
+                    console.error('Pre-timeout save fetch failed with status:', response.status, response.statusText);
+                    return response.text().then(text => Promise.reject(new Error(text)));
                 }}
-            }}
+                console.log('Pre-timeout save fetch successful:', response.status);
+                return response.text(); // Or response.json() if you expect a response
+            }})
+            .catch(error => {{
+                console.error('Pre-timeout save fetch error:', error);
+                throw error; // Re-throw to be caught by the .finally block
+            }});
         }}
         
-        // Multiple browser close event listeners
-        document.addEventListener('visibilitychange', () => {{
-            if (document.visibilityState === 'hidden') {{
-                handleBrowserClose();
-            }}
-        }});
+        // This function orchestrates the save and then the reload
+        function executeLogoutSequence() {{
+            console.log('Starting logout sequence...');
+            triggerPreTimeoutSave()
+                .catch(err => console.error('Pre-timeout save fetch failed:', err))
+                .finally(() => {{
+                    // This block runs whether the save succeeded or failed.
+                    console.log('Save request sent. Preparing to reload parent page in 500ms...');
+                    // Give a small grace period for the keepalive request to be fully sent
+                    setTimeout(() => {{
+                        console.log('Session timeout - reloading parent page now.');
+                        window.parent.location.reload(); // Reload the entire parent page
+                    }}, 500);
+                }});
+        }}
         
-        window.addEventListener('beforeunload', handleBrowserClose, {{capture: true}});
-        window.addEventListener('pagehide', handleBrowserClose, {{capture: true}});
+        // Schedule the auto-save and logout
+        window.streamlitAutoLogoutTimer = setTimeout(executeLogoutSequence, {save_trigger_seconds * 1000});
         
-        // Debug info for troubleshooting
-        window.enhancedFijiDebug = {{
-            sessionId: sessionId,
-            timeoutSeconds: timeoutSeconds,
-            saveTriggerSeconds: saveTriggerSeconds,
-            scheduledTime: new Date(Date.now() + (saveTriggerSeconds * 1000)).toISOString(),
-            version: 'enhanced_v1'
-        }};
-        
-        console.log('✅ Enhanced auto-logout component fully initialized');
-        console.log('🐛 Debug info:', window.enhancedFijiDebug);
-        
+        console.log(`Auto-save and logout scheduled in {save_trigger_seconds} seconds.`);
     }})();
     </script>
     """
-    
     components.html(js_code, height=0, width=0)
 
 def render_browser_close_component(session_id: str):
-    """Enhanced browser close detection using session storage method."""
+    """
+    Enhanced browser close detection that avoids redundant saves.
+    """
     if not session_id:
         return
 
@@ -2299,178 +1895,53 @@ def render_browser_close_component(session_id: str):
         window.browserCloseListenerAdded = true;
         
         const sessionId = '{session_id}';
+        // --- CRITICAL CHANGE ---
+        // Get the main Streamlit app's URL from the parent window for sendBeacon.
+        const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
+        // --- END CRITICAL CHANGE ---
         
         let saveHasBeenTriggered = false;
 
-        function sendCloseEvent() {{
+        function sendBeaconRequest() {{
             if (!saveHasBeenTriggered) {{
                 saveHasBeenTriggered = true;
-                
-                console.log('Sending browser close event via session storage...');
-                
-                // Set session storage flag for browser close
-                try {{
-                    sessionStorage.setItem('fifi_auto_save_request', JSON.stringify({{
-                        sessionId: sessionId,
-                        timestamp: Date.now(),
-                        trigger: 'browser_close'
-                    }}));
-                    console.log('✅ Browser close save request stored');
-                }} catch(e) {{
-                    console.warn('Could not set session storage for browser close:', e);
+                // Target the parent Streamlit app URL
+                const url = `${{parentStreamlitAppUrl}}?event=close&session_id=${{sessionId}}`; 
+                if (navigator.sendBeacon) {{
+                    // sendBeacon inherently uses POST
+                    navigator.sendBeacon(url); 
+                }} else {{
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', url, false); // Fallback to synchronous GET for older browsers
+                    try {{
+                        xhr.send();
+                    }} catch(e) {{
+                        console.error('Failed to send close event via XHR:', e);
+                    }}
                 }}
             }}
         }}
         
-        // Multiple event listeners for comprehensive coverage
         document.addEventListener('visibilitychange', () => {{
             if (document.visibilityState === 'hidden') {{
-                sendCloseEvent();
+                sendBeaconRequest();
             }}
         }});
         
-        window.addEventListener('pagehide', sendCloseEvent, {{capture: true}});
-        window.addEventListener('beforeunload', sendCloseEvent, {{capture: true}});
-        
-        console.log('Enhanced browser close detection initialized');
+        // Use 'pagehide' for more reliable unload event handling
+        window.addEventListener('pagehide', sendBeaconRequest, {{capture: true}});
+        window.addEventListener('beforeunload', sendBeaconRequest, {{capture: true}});
 
     }})();
     </script>
     """
     components.html(js_code, height=0, width=0)
-
-def add_auto_save_debug_panel(session_manager: SessionManager, session: UserSession):
-    """Add this to your sidebar for debugging auto-save issues"""
-    
-    with st.expander("🔧 Auto-Save Debug Panel", expanded=False):
-        st.write("**Current Session Status:**")
-        st.write(f"- Session ID: `{session.session_id[:8]}...`")
-        st.write(f"- User Type: {session.user_type}")
-        st.write(f"- Email: {session.email or 'None'}")
-        st.write(f"- Messages: {len(session.messages)}")
-        st.write(f"- Active: {session.active}")
-        
-        if session.last_activity:
-            time_diff = datetime.now() - session.last_activity
-            st.write(f"- Last Activity: {session.last_activity}")
-            st.write(f"- Inactive For: {time_diff.total_seconds():.1f} seconds")
-        
-        st.write("**CRM Configuration:**")
-        st.write(f"- Zoho Enabled: {session_manager.zoho.config.ZOHO_ENABLED}")
-        st.write(f"- Contact ID: {session.zoho_contact_id or 'None'}")
-        
-        # Test buttons
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("🧪 Test CRM Connection"):
-                if session_manager.zoho.config.ZOHO_ENABLED:
-                    try:
-                        token = session_manager.zoho._get_access_token()
-                        if token:
-                            st.success("✅ CRM connection works!")
-                        else:
-                            st.error("❌ Failed to get CRM token")
-                    except Exception as e:
-                        st.error(f"❌ CRM Error: {e}")
-                else:
-                    st.warning("⚠️ CRM not enabled")
-        
-        with col2:
-            if st.button("💾 Force Auto-Save Test"):
-                if (session.user_type == UserType.REGISTERED_USER and 
-                    session.email and session.messages):
-                    
-                    success = session_manager.zoho.save_chat_transcript_sync(
-                        session, "Manual Test"
-                    )
-                    if success:
-                        st.success("✅ Test save successful!")
-                    else:
-                        st.error("❌ Test save failed!")
-                else:
-                    st.warning("⚠️ Session not eligible for save")
-        
-        # JavaScript debug info
-        st.write("**JavaScript Debug:**")
-        js_debug = """
-        <script>
-        if (window.enhancedFijiDebug) {
-            const info = window.enhancedFijiDebug;
-            const debugDiv = document.createElement('div');
-            debugDiv.innerHTML = `
-                <div style="font-family: monospace; font-size: 12px; background: #f0f0f0; padding: 10px; border-radius: 4px;">
-                    <strong>JS Debug Info:</strong><br>
-                    Session: ${info.sessionId.substring(0,8)}...<br>
-                    Timeout: ${info.timeoutSeconds}s<br>
-                    Save Trigger: ${info.saveTriggerSeconds}s<br>
-                    Scheduled: ${info.scheduledTime}<br>
-                    <button onclick="console.log('Current timers:', {autoSave: window.streamlitAutoSaveTimer, autoLogout: window.streamlitAutoLogoutTimer})">Check Timers</button>
-                </div>
-            `;
-            document.getElementById('js-debug-info').appendChild(debugDiv);
-        } else {
-            document.getElementById('js-debug-info').innerHTML = '<em>No JavaScript debug info available</em>';
-        }
-        </script>
-        <div id="js-debug-info"></div>
-        """
-        components.html(js_debug, height=120)
-        
-        # Recent save attempts
-        if 'post_timeout_saved' in st.session_state:
-            st.write("**Recent Save Attempts:**")
-            for save_key, saved in st.session_state.post_timeout_saved.items():
-                status = "✅" if saved else "❌"
-                st.write(f"- {save_key[:16]}...: {status}")
-
-def render_enhanced_sidebar_diagnostics(session_manager: SessionManager, session: UserSession):
-    """Enhanced sidebar with comprehensive diagnostics."""
-    with st.expander("🔍 Storage Diagnostics", expanded=False):
-        storage_info = session_manager.db.get_storage_info()
-        
-        st.write("**Storage Information:**")
-        st.write(f"Type: {storage_info['storage_type']}")
-        st.write(f"Sessions: {storage_info['session_count']}")
-        
-        if storage_info.get('error'):
-            st.error(f"Error: {storage_info['error']}")
-        
-        if storage_info['sessions']:
-            st.write("**Stored Sessions:**")
-            for sess in storage_info['sessions'][:5]:  # Show first 5
-                st.write(f"- {sess['session_id']}: {sess.get('email', 'No email')}")
-        
-        # Current session info
-        st.write("**Current Session:**")
-        st.write(f"ID: {session.session_id[:8]}...")
-        st.write(f"Type: {session.user_type}")
-        st.write(f"Email: {session.email or 'None'}")
-        st.write(f"Messages: {len(session.messages)}")
-        
-        # Test buttons
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🧪 Test Load", help="Test loading current session from storage"):
-                test_session = session_manager.db.load_session(session.session_id)
-                if test_session:
-                    st.success(f"✅ Loaded session with {len(test_session.messages)} messages")
-                else:
-                    st.error("❌ Failed to load session from storage")
-        
-        with col2:
-            if st.button("💾 Force Save", help="Force save current session to storage"):
-                session_manager.db.save_session(session)
-                st.success("✅ Session saved to storage")
-
-def render_enhanced_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
-    """Enhanced sidebar with enhanced auto-logout component and comprehensive diagnostics."""
+def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
         fresh_session = session_manager.get_session()
 
-        # User Status Section
         if fresh_session.user_type == UserType.REGISTERED_USER or fresh_session.user_type.value == "registered_user":
             st.success("✅ **Authenticated User**") 
             if fresh_session.first_name:
@@ -2492,7 +1963,6 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
                 if session_manager.zoho.config.ZOHO_ENABLED and fresh_session.email:
                     st.caption("💾 Auto-save ON")
             
-            # Timeout countdown with ENHANCED auto-save
             if fresh_session.last_activity:
                 time_since_activity = datetime.now() - fresh_session.last_activity
                 timeout_minutes = session_manager.get_session_timeout_minutes()
@@ -2503,40 +1973,16 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
                 
                 if seconds_remaining > 0:
                     minutes_remaining = seconds_remaining / 60
-                    
-                    # Show different messages based on time remaining
-                    if minutes_remaining > 1.5:
-                        st.info(f"⏱️ Session active - {minutes_remaining:.1f} minutes until auto-save")
-                    elif minutes_remaining > 0.5:
-                        st.warning(f"⚠️ Auto-save in {minutes_remaining:.1f} minutes")
-                    else:
-                        st.error(f"🚨 Auto-save imminent - {minutes_remaining:.1f} minutes")
-                    
-                    # Use the ENHANCED auto-logout component
-                    render_enhanced_auto_logout_component(
+                    st.caption(f"⏱️ Auto-save & sign out in {minutes_remaining:.1f} minutes")
+                    render_auto_logout_component(
                         timeout_seconds=int(seconds_remaining),
                         session_id=fresh_session.session_id,
                         session_manager=session_manager
                     )
-                    
-                    # Add debug info
-                    with st.expander("🔍 Timeout Debug Info", expanded=False):
-                        st.write(f"**Last Activity:** {fresh_session.last_activity}")
-                        st.write(f"**Current Time:** {datetime.now()}")
-                        st.write(f"**Seconds Elapsed:** {seconds_elapsed:.1f}")
-                        st.write(f"**Seconds Remaining:** {seconds_remaining:.1f}")
-                        st.write(f"**Timeout Minutes:** {timeout_minutes}")
-                        
-                        # Show save trigger timing
-                        save_trigger = max(int(seconds_remaining * 0.75), 10)
-                        st.write(f"**Save Trigger:** {save_trigger} seconds from now")
-                        st.write(f"**Save Time:** {datetime.now() + timedelta(seconds=save_trigger)}")
-                        
                 else:
-                    st.error("⏱️ Session expired - will timeout on next interaction")
-                    # Still render component with minimal time
-                    render_enhanced_auto_logout_component(
-                        timeout_seconds=5,
+                    st.caption("⏱️ Session will timeout on next interaction")
+                    render_auto_logout_component(
+                        timeout_seconds=2,
                         session_id=fresh_session.session_id,
                         session_manager=session_manager
                     )
@@ -2547,17 +1993,10 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
         
         st.divider()
         
-        # Session Info
         st.markdown(f"**Messages:** {len(fresh_session.messages)}")
         st.markdown(f"**Session:** `{fresh_session.session_id[:8]}...`")
         
-        # Storage info
-        storage_info = session_manager.db.get_storage_info()
-        st.markdown(f"**Storage:** {storage_info['storage_type']}")
-        
         st.divider()
-        
-        # System Status
         st.subheader("📊 System Status")
         
         if hasattr(st.session_state, 'ai_system'):
@@ -2565,12 +2004,6 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
             st.write(f"**Pinecone KB:** {'✅' if ai.pinecone_tool else '❌'}")
             st.write(f"**Web Search:** {'✅' if ai.tavily_agent else '❌'}")
             st.write(f"**OpenAI:** {'✅' if ai.openai_client else '❌'}")
-        
-        # Enhanced diagnostics
-        render_enhanced_sidebar_diagnostics(session_manager, fresh_session)
-        
-        # Auto-save debug panel
-        add_auto_save_debug_panel(session_manager, fresh_session)
         
         with st.expander("🚨 System Health"):
             health_summary = error_handler.get_system_health_summary()
@@ -2585,9 +2018,52 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
                     else:
                         st.write(f"❌ {component}")
         
+        # Zoho Diagnostics (optional - remove in production)
+        with st.expander("🔧 Zoho Diagnostics", expanded=False):
+            if st.button("Run Zoho Diagnostic"):
+                # Test 1: Configuration
+                st.write("**1. Configuration Check:**")
+                config = session_manager.config
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"Client ID: {'✅' if config.ZOHO_CLIENT_ID else '❌'}")
+                    st.write(f"Client Secret: {'✅' if config.ZOHO_CLIENT_SECRET else '❌'}")
+                with col2:
+                    st.write(f"Refresh Token: {'✅' if config.ZOHO_REFRESH_TOKEN else '❌'}")
+                    st.write(f"Zoho Enabled: {'✅' if config.ZOHO_ENABLED else '❌'}")
+                
+                # Test 2: Token Generation
+                st.write("\n**2. Token Test:**")
+                try:
+                    zoho = session_manager.zoho
+                    with st.spinner("Getting access token..."):
+                        token = zoho._get_access_token()
+                    if token:
+                        st.success(f"✅ Token obtained: {token[:20]}...")
+                    else:
+                        st.error("❌ Failed to get token")
+                except Exception as e:
+                    st.error(f"❌ Token error: {str(e)}")
+                
+                # Test 3: Session State
+                st.write("\n**3. Current Session:**")
+                st.write(f"Session ID: {fresh_session.session_id[:8]}...")
+                st.write(f"Type: {fresh_session.user_type}")
+                st.write(f"Email: {fresh_session.email or 'None'}")
+                st.write(f"Messages: {len(fresh_session.messages)}")
+                
+                if st.button("Test Save Now"):
+                    if fresh_session.email and fresh_session.messages:
+                        with st.spinner("Testing save..."):
+                            try:
+                                session_manager._auto_save_to_crm(fresh_session, "Manual Test")
+                            except Exception as e:
+                                st.error(f"Save test failed: {str(e)}")
+                    else:
+                        st.warning("Need email and messages to test save")
+        
         st.divider()
         
-        # Action buttons
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🗑️ Clear Chat", use_container_width=True):
@@ -2599,7 +2075,6 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
                 session_manager.end_session(fresh_session)
                 st.rerun()
 
-        # Export and save options
         if (fresh_session.user_type == UserType.REGISTERED_USER or fresh_session.user_type.value == "registered_user") and fresh_session.messages:
             st.divider()
             
@@ -2614,7 +2089,7 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
                 )
             
             if session_manager.zoho.config.ZOHO_ENABLED and fresh_session.email:
-                if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Chat will also auto-save when you sign out or after timeout"):
+                if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Chat will also auto-save when you sign out or after 5 minutes of inactivity"):
                     session_manager.manual_save_to_crm(fresh_session)
                     
                 st.caption("💡 Chat auto-saves to CRM on sign out or timeout")
@@ -2627,7 +2102,6 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
                     del st.session_state.page
                 st.rerun()
 
-        # Example queries
         st.divider()
         st.subheader("💡 Try These Queries")
         example_queries = [
@@ -2644,16 +2118,13 @@ def render_enhanced_sidebar(session_manager: SessionManager, session: UserSessio
                 st.rerun()
 
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
-    """Enhanced chat interface with session state auto-save detection."""
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion with knowledge base and web search")
     
     current_session = session_manager.get_session()
     
-    # Add browser close detection
     render_browser_close_component(current_session.session_id)
     
-    # Session timeout warning
     if current_session.user_type == UserType.REGISTERED_USER and current_session.last_activity:
         time_since_activity = datetime.now() - current_session.last_activity
         timeout_minutes = session_manager.get_session_timeout_minutes()
@@ -2664,7 +2135,6 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
         elif minutes_remaining <= 0:
             st.error("⏱️ Session expired due to inactivity. Please sign in again.")
     
-    # Display chat messages
     for msg in current_session.messages:
         with st.chat_message(msg.get("role", "user")):
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
@@ -2686,7 +2156,6 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
                 if msg.get("safety_override"):
                     st.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switched to verified web sources.")
 
-    # Handle input
     pending_query = st.session_state.get('pending_query')
     if pending_query:
         prompt = pending_query
@@ -2738,7 +2207,6 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
             st.rerun()
 
 def render_welcome_page(session_manager: SessionManager):
-    """Welcome page with authentication options."""
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
     
@@ -2788,7 +2256,7 @@ def render_welcome_page(session_manager: SessionManager):
         ✨ **Sign in benefits:**
         - Chat history saved and exportable as PDF
         - Automatic integration with Zoho CRM
-        - Chat transcripts auto-saved to CRM on sign out or after timeout
+        - Chat transcripts auto-saved to CRM on sign out or after 5 minutes of inactivity
         - Personalized experience with your profile
         """)
         
@@ -2797,85 +2265,39 @@ def render_welcome_page(session_manager: SessionManager):
             st.rerun()
 
 # =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
-def get_session_manager() -> Optional[SessionManager]:
-    """Safely get the session manager from session state."""
-    if 'session_manager' not in st.session_state:
-        logger.error("SessionManager not found in session state")
-        return None
-    
-    manager = st.session_state.session_manager
-    if not hasattr(manager, 'get_session'):
-        logger.error("Invalid SessionManager instance in session state")
-        return None
-    
-    return manager
-
-def ensure_initialization():
-    """Ensure the application is properly initialized with enhanced error handling."""
-    if 'initialized' not in st.session_state or not st.session_state.initialized:
-        try:
-            logger.info("Initializing FiFi AI Assistant...")
-            
-            config = Config()
-            pdf_exporter = PDFExporter()
-            
-            # Initialize database manager with enhanced error handling
-            if 'db_manager' not in st.session_state:
-                logger.info("Initializing database manager...")
-                st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
-            
-            db_manager = st.session_state.db_manager
-            
-            # Initialize other components
-            logger.info("Initializing Zoho CRM manager...")
-            zoho_manager = ZohoCRMManager(config, pdf_exporter)
-            
-            logger.info("Initializing AI system...")
-            ai_system = EnhancedAI(config)
-            
-            logger.info("Initializing rate limiter...")
-            rate_limiter = RateLimiter()
-
-            # Create session manager
-            logger.info("Creating session manager...")
-            st.session_state.session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
-            st.session_state.pdf_exporter = pdf_exporter
-            st.session_state.error_handler = error_handler
-            st.session_state.ai_system = ai_system
-            st.session_state.initialized = True
-            
-            logger.info("✅ Application initialized successfully")
-            
-            # Log initialization summary
-            storage_info = db_manager.get_storage_info()
-            logger.info(f"Using {storage_info['storage_type']} for session storage")
-            
-            return True
-            
-        except Exception as e:
-            st.error("💥 A critical error occurred during application startup.")
-            st.error(f"Error details: {str(e)}")
-            logger.critical(f"Initialization failed: {e}", exc_info=True)
-            return False
-    
-    return True
-
-# =============================================================================
-# MAIN APPLICATION WITH ENHANCED AUTO-SAVE DETECTION
+# MAIN APPLICATION
 # =============================================================================
 
 def main():
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
 
-    # PRIORITY 1: Check for auto-save requests FIRST (before any other processing)
-    logger.info("🔍 Checking for auto-save requests...")
-    check_session_storage_save_request()
-    logger.info("✅ Auto-save check completed")
+    # SOLUTION: Handle pre-timeout save requests from JavaScript
+    query_params = st.query_params
+    if query_params.get("event") == "pre_timeout_save":
+        session_id = query_params.get("session_id")
+        if session_id:
+            logger.info(f"Received pre-timeout save request for session {session_id[:8]}...")
+            
+            # Clear the query params to prevent loops
+            st.query_params.clear()
+            
+            # Ensure initialization
+            if ensure_initialization():
+                session_manager = get_session_manager()
+                if session_manager:
+                    # Check if we haven't already saved this session
+                    already_saved = st.session_state.get('pre_timeout_saved', {}).get(session_id, False)
+                    if not already_saved:
+                        success = session_manager.trigger_pre_timeout_save(session_id)
+                        if success:
+                            st.success("✅ Chat automatically saved to CRM before timeout")
+                        else:
+                            st.warning("⚠️ Could not save chat before timeout")
+                    
+            # Stop here to prevent normal page rendering during save
+            st.stop()
 
-    # Emergency state clear
+    # Clear any problematic session state first
     if st.button("🔄 Fresh Start (Clear All State)", key="emergency_clear"):
         st.session_state.clear()
         st.success("✅ All state cleared. Refreshing...")
@@ -2903,10 +2325,7 @@ def main():
         try:
             session = session_manager.get_session()
             if session and session.active:
-                # Check for pending auto-save on page load
-                check_pending_auto_save(session_manager, session)
-                
-                render_enhanced_sidebar(session_manager, session, pdf_exporter)
+                render_sidebar(session_manager, session, pdf_exporter)
                 render_chat_interface(session_manager, session)
             else:
                 if 'page' in st.session_state:
