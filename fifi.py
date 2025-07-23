@@ -1802,8 +1802,8 @@ def ensure_initialization():
 
 def render_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
     """
-    SOLUTION: Enhanced auto-logout with pre-timeout save trigger.
-    Saves 30 seconds before timeout, then reloads.
+    SOLUTION: More robust auto-logout that chains the save and reload events.
+    This helps prevent the "message channel closed" error from browser extensions.
     """
     if timeout_seconds <= 0:
         return
@@ -1817,67 +1817,55 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
         const sessionId = '{session_id}';
         const baseUrl = window.location.origin + window.location.pathname;
         
-        // Clear any existing timers
-        if (window.streamlitAutoSaveTimer) {{
-            clearTimeout(window.streamlitAutoSaveTimer);
-        }}
-        if (window.streamlitAutoLogoutTimer) {{
-            clearTimeout(window.streamlitAutoLogoutTimer);
-        }}
+        // Clear any existing timers to prevent duplicates
+        if (window.streamlitAutoSaveTimer) clearTimeout(window.streamlitAutoSaveTimer);
+        if (window.streamlitAutoLogoutTimer) clearTimeout(window.streamlitAutoLogoutTimer);
         
-        // Function to trigger save via beacon
+        // Function to trigger the save. It now returns the fetch promise.
         function triggerPreTimeoutSave() {{
             console.log('Triggering pre-timeout save with POST...');
             const saveUrl = `${{baseUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
             
-            // Use fetch with keepalive for better reliability
-            fetch(saveUrl, {{
-                method: 'POST',  // <-- SOLUTION: Changed from GET to POST
-                keepalive: true,
-                mode: 'no-cors'
-            }}).then(() => {{
-                console.log('Pre-timeout save request sent');
-            }}).catch((error) => {{
-                console.error('Pre-timeout save failed:', error);
-                // Try beacon as fallback
-                if (navigator.sendBeacon) {{
-                    navigator.sendBeacon(saveUrl);
-                }}
-            }});
-            
-            // Show saving indicator (optional)
+            // Show saving indicator
             const savingDiv = document.createElement('div');
             savingDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #ff6b6b; color: white; padding: 10px 20px; border-radius: 5px; z-index: 9999;';
-            savingDiv.textContent = 'Saving chat to CRM...';
+            savingDiv.textContent = 'Auto-saving session...';
             document.body.appendChild(savingDiv);
-            
-            // Remove indicator after 3 seconds
-            setTimeout(() => {{
-                if (savingDiv.parentNode) {{
-                    savingDiv.parentNode.removeChild(savingDiv);
-                }}
-            }}, 3000);
+
+            // Return the fetch promise so we can chain actions to it
+            return fetch(saveUrl, {{
+                method: 'POST',
+                keepalive: true,
+                mode: 'no-cors'
+            }});
         }}
         
-        // Function to reload page
-        function reloadPage() {{
-            console.log('Session timeout - reloading page');
-            window.parent.location.reload();
+        // This function will now be responsible for the full sequence
+        function executeLogoutSequence() {{
+            console.log('Starting logout sequence...');
+            triggerPreTimeoutSave()
+                .catch(err => console.error('Pre-timeout save fetch failed:', err))
+                .finally(() => {{
+                    // This block runs whether the save succeeded or failed.
+                    console.log('Save request sent. Preparing to reload page in 500ms...');
+                    // Give the browser a moment to process the keepalive request
+                    // before reloading the page. This helps avoid the extension error.
+                    setTimeout(() => {{
+                        console.log('Session timeout - reloading page now.');
+                        window.parent.location.reload();
+                    }}, 500); // 500ms grace period
+                }});
         }}
         
-        // Set up the pre-timeout save (30 seconds before timeout)
-        window.streamlitAutoSaveTimer = setTimeout(triggerPreTimeoutSave, {save_trigger_seconds * 1000});
+        // The main timer now calls the full logout sequence.
+        // It's set to fire 30 seconds before the actual timeout.
+        window.streamlitAutoLogoutTimer = setTimeout(executeLogoutSequence, {save_trigger_seconds * 1000});
         
-        // Set up the actual logout/reload
-        window.streamlitAutoLogoutTimer = setTimeout(reloadPage, {timeout_seconds * 1000});
-        
-        console.log(`Auto-save scheduled in ${{Math.floor({save_trigger_seconds} / 60)}} minutes ${{({save_trigger_seconds} % 60)}} seconds`);
-        console.log(`Auto-logout scheduled in ${{Math.floor({timeout_seconds} / 60)}} minutes ${{({timeout_seconds} % 60)}} seconds`);
+        console.log(`Auto-save and logout scheduled in {save_trigger_seconds} seconds.`);
     }})();
     </script>
     """
     components.html(js_code, height=0, width=0)
-
 def render_browser_close_component(session_id: str):
     """
     Enhanced browser close detection that avoids redundant saves.
