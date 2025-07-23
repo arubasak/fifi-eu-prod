@@ -1941,7 +1941,7 @@ def render_browser_close_component(session_id: str):
                     xhr.open('GET', url, false); // Fallback to synchronous GET for older browsers
                     try {{
                         xhr.send();
-                    } catch(e) {{
+                    }} catch(e) {{
                         console.error('Failed to send close event via XHR:', e);
                     }
                 }
