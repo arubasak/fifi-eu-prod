@@ -1430,7 +1430,7 @@ class SessionManager:
         self.zoho = zoho_manager
         self.ai = ai_system
         self.rate_limiter = rate_limiter
-        self.session_timeout_minutes = 5
+        self.session_timeout_minutes = 2
 
     def get_session_timeout_minutes(self) -> int:
         return getattr(self, 'session_timeout_minutes', 2)
