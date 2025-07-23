@@ -382,7 +382,7 @@ class PDFExporter:
             
             # Add source information if available
             if msg.get('source'):
-                story.append(Paragraph(f"<i>Source: {msg['source']}</i>", self.styles['Normal']))
+                story.append(Paragraph("<i>Source: " + str(msg['source']) + "</i>", self.styles['Normal']))
                 
         doc.build(story)
         buffer.seek(0)
