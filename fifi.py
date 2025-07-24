@@ -29,16 +29,14 @@ import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
 # =============================================================================
-# FIFI - FIXED AUTHENTICATION VERSION (Further Refinements for UserType display)
-# =============================================================================
-# ✅ FIXED: Authentication persistence issues
-# ✅ FIXED: Session state management between reruns
-# ✅ FIXED: UserType enum handling
-# ✅ FIXED: Database synchronization timing
-# ✅ ADDED: Session caching for better performance
-# ✅ ADDED: Explicit authentication state tracking
-# ✅ FIXED: Robust UserType check in sidebar display
-# ✅ ADDED: More granular debug logging for UserType
+# FINAL INTEGRATED VERSION - ALL FEATURES COMBINED WITH CORRECTED TIMER
+# - JavaScript timer with corrected st_javascript patterns using IIFE
+# - Python CRM save processing
+# - window.parent.location for all reloads
+# - SQLite Cloud database integration
+# - All existing features preserved
+# - Complete error handling and validation
+# - Fixed timer return value issues
 # =============================================================================
 
 # Setup logging
@@ -121,7 +119,7 @@ class Config:
         return url.rstrip('/')
 
 # =============================================================================
-# ENHANCED ERROR HANDLING SYSTEM
+# ERROR HANDLING SYSTEM
 # =============================================================================
 
 class ErrorSeverity(Enum):
@@ -262,7 +260,6 @@ class DatabaseManager:
         self.lock = threading.Lock()
         self.connection_string = connection_string
         self.conn = None
-        self.session_cache = {} # Added in-memory cache
         
         logger.info("🔄 INITIALIZING DATABASE MANAGER")
         
@@ -371,9 +368,6 @@ class DatabaseManager:
     def save_session(self, session: UserSession):
         """Save session with SQLite Cloud compatibility"""
         with self.lock:
-            # Update cache
-            self.session_cache[session.session_id] = copy.deepcopy(session)
-
             if self.db_type == "memory":
                 self.local_sessions[session.session_id] = session
                 return
@@ -383,12 +377,9 @@ class DatabaseManager:
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
                 
-                # Ensure enum is properly serialized to string for DB
-                user_type_value = session.user_type.value if isinstance(session.user_type, UserType) else str(session.user_type)
-
                 self.conn.execute(
                     '''REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                    (session.session_id, user_type_value, session.email, session.first_name,
+                    (session.session_id, session.user_type.value, session.email, session.first_name,
                      session.zoho_contact_id, int(session.guest_email_requested), session.created_at.isoformat(),
                      session.last_activity.isoformat(), json.dumps(session.messages), int(session.active),
                      session.wp_token, int(session.timeout_saved_to_crm)))
@@ -404,17 +395,10 @@ class DatabaseManager:
     def load_session(self, session_id: str) -> Optional[UserSession]:
         """Load session with complete SQLite Cloud compatibility"""
         with self.lock:
-            # Check cache first
-            if session_id in self.session_cache:
-                logger.debug(f"✅ Cache hit: {session_id[:8]}")
-                return copy.deepcopy(self.session_cache[session_id])
-
             if self.db_type == "memory":
                 session = self.local_sessions.get(session_id)
                 if session and isinstance(session.user_type, str):
                     session.user_type = UserType(session.user_type)
-                # Update cache
-                self.session_cache[session_id] = copy.deepcopy(session) if session else None
                 return session
 
             try:
@@ -474,16 +458,9 @@ class DatabaseManager:
                 
                 # Create and return UserSession
                 try:
-                    # Robust UserType conversion
-                    user_type_from_db = row_dict.get('user_type', 'guest').lower()
-                    if user_type_from_db == "registered_user":
-                        user_type_enum = UserType.REGISTERED_USER
-                    else:
-                        user_type_enum = UserType.GUEST
-
                     user_session = UserSession(
                         session_id=row_dict['session_id'], 
-                        user_type=user_type_enum,
+                        user_type=UserType(row_dict['user_type']),
                         email=row_dict.get('email'), 
                         first_name=row_dict.get('first_name'),
                         zoho_contact_id=row_dict.get('zoho_contact_id'),
@@ -497,8 +474,6 @@ class DatabaseManager:
                     )
                     
                     logger.info(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type}")
-                    # Update cache
-                    self.session_cache[session_id] = copy.deepcopy(user_session)
                     return user_session
                     
                 except Exception as e:
@@ -512,12 +487,6 @@ class DatabaseManager:
                 if 'row' in locals():
                     logger.error(f"Row type: {type(row)}")
                 return None
-
-    def clear_cache(self):
-        """Clears the in-memory session cache."""
-        with self.lock:
-            self.session_cache.clear()
-            logger.debug("Session cache cleared")
 
     def test_connection(self) -> bool:
         """Test database connection for health checks"""
@@ -897,7 +866,7 @@ class ZohoCRMManager:
             
             max_msg_length = 500
             if len(content) > max_msg_length:
-                content = content[:500] + "..."
+                content = content[:max_msg_length] + "..."
                 
             note_content += f"\n{i+1}. **{role}:** {content}\n"
             
@@ -1340,18 +1309,9 @@ def render_activity_status_indicator(session, session_manager):
     """
     Show activity status for registered users
     """
-    # Defensive check: ensure session is not None and user_type exists
-    if session is None or not hasattr(session, 'user_type') or session.last_activity is None:
-        return
+    if (session.user_type == UserType.REGISTERED_USER and 
+        session.last_activity):
         
-    # Robust check for user_type value
-    is_registered = False
-    if isinstance(session.user_type, UserType):
-        is_registered = (session.user_type == UserType.REGISTERED_USER)
-    elif isinstance(session.user_type, str):
-        is_registered = (session.user_type.lower() == UserType.REGISTERED_USER.value.lower())
-
-    if is_registered: # Only show this indicator for registered users
         time_since_activity = datetime.now() - session.last_activity
         minutes_since = time_since_activity.total_seconds() / 60
         
@@ -1415,13 +1375,10 @@ class SessionManager:
             logger.info(f"Reset auto-save flag for active session {session.session_id[:8]}")
         
         # Ensure user_type is properly maintained as enum
-        # This is already handled robustly by _validate_and_fix_session,
-        # but a direct cast can be dangerous here if the type is unexpected.
-        # Instead, we rely on _validate_and_fix_session for proper type conversion.
+        if isinstance(session.user_type, str):
+            session.user_type = UserType(session.user_type)
         
         try:
-            # Ensure the session object is valid before saving
-            session = self._validate_and_fix_session(session) 
             self.db.save_session(session)
             logger.debug(f"Session activity updated for {session.session_id[:8]}...")
         except Exception as e:
@@ -1434,33 +1391,19 @@ class SessionManager:
         return session
 
     def _validate_and_fix_session(self, session: UserSession) -> UserSession:
-        """Validate and fix common session issues, especially UserType conversion."""
+        """Validate and fix common session issues"""
         if not session:
-            # This should ideally not happen if called correctly, but defensive.
-            return UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST)
+            return session
             
-        # Fix user_type if it's a string, or ensure it's a valid Enum member
+        # Fix user_type if it's a string
         if isinstance(session.user_type, str):
             try:
-                # Attempt to convert to Enum member
-                # Case-insensitive comparison for common string values
-                user_type_str_lower = session.user_type.lower()
-                if user_type_str_lower == UserType.REGISTERED_USER.value:
-                    session.user_type = UserType.REGISTERED_USER
-                elif user_type_str_lower == UserType.GUEST.value:
-                    session.user_type = UserType.GUEST
-                else:
-                    # If string is not a valid known enum member, default to GUEST and log
-                    logger.warning(f"Invalid user_type string found during validation: '{session.user_type}'. Defaulting to GUEST.")
-                    session.user_type = UserType.GUEST
-            except ValueError: # Catch potential errors if string is truly unparseable
-                logger.error(f"Error converting user_type string '{session.user_type}' to Enum: {e}. Defaulting to GUEST.")
+                session.user_type = UserType(session.user_type)
+                logger.info(f"Fixed user_type conversion for session {session.session_id[:8]}")
+            except ValueError:
+                logger.error(f"Invalid user_type string: {session.user_type}")
                 session.user_type = UserType.GUEST
-        elif not isinstance(session.user_type, UserType):
-             # If it's neither string nor a valid Enum (e.g., None, int, etc.), default to GUEST and log
-            logger.warning(f"Unexpected type for session.user_type during validation: {type(session.user_type)}. Value: {session.user_type}. Defaulting to GUEST.")
-            session.user_type = UserType.GUEST
-
+        
         # Ensure messages is a list
         if not isinstance(session.messages, list):
             session.messages = []
@@ -1529,39 +1472,16 @@ class SessionManager:
                 logger.info(f"=== AUTO SAVE TO CRM ENDED ===\n")
 
     def get_session(self) -> UserSession:
-        """Get session with server-side validation and authentication preference."""
+        """Get session with server-side validation"""
         session_id = st.session_state.get('current_session_id')
-        authenticated_session_id = st.session_state.get('authenticated_session_id')
-
-        # Prioritize authenticated session if set
-        if authenticated_session_id:
-            session = self.db.load_session(authenticated_session_id)
-            if session and session.active: # Removed `session.user_type == UserType.REGISTERED_USER` here
-                                          # because _validate_and_fix_session will handle enum consistency.
-                                          # We just need to load *any* session associated with the authenticated_session_id.
-                session = self._validate_and_fix_session(session) # Ensure type is Enum here
-                if session.user_type == UserType.REGISTERED_USER: # Now check after validation
-                    st.session_state.current_session_id = authenticated_session_id
-                    self._update_activity(session)
-                    logger.debug(f"Retrieved authenticated session: {authenticated_session_id[:8]}")
-                    return session
-                else:
-                    # Session loaded by authenticated_session_id is not actually registered (e.g., manually changed in DB)
-                    logger.info(f"Session {authenticated_session_id[:8]} loaded by authenticated_id is not REGISTERED_USER. Resetting auth state.")
-                    del st.session_state['authenticated_session_id']
-                    # Fall through to check current_session_id or create guest
-            else:
-                # Authenticated session ID in state is stale or invalid in DB
-                logger.info(f"Authenticated session {authenticated_session_id[:8]} found in st.session_state but invalid/inactive in DB. Resetting auth state.")
-                del st.session_state['authenticated_session_id']
-                # Fall through to check current_session_id (if it existed before auth) or create guest
         
-        # If no authenticated session (or it was invalid), try to load current_session_id
         if session_id:
             session = self.db.load_session(session_id)
             if session and session.active:
+                # Validate and fix session data
                 session = self._validate_and_fix_session(session)
                 
+                # Check if session has completely expired server-side (fallback)
                 if self._is_session_expired(session):
                     logger.info(f"Server detected session {session_id[:8]} expired")
                     
@@ -1587,8 +1507,7 @@ class SessionManager:
                     self._update_activity(session)
                     return session
         
-        # No session_id in state, or it pointed to an inactive/non-existent session
-        logger.info("No active session found in state or DB. Creating new guest session.")
+        # No session or inactive
         return self._create_guest_session()
 
     def _end_session_internal(self, session: UserSession):
@@ -1599,7 +1518,7 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to mark session as inactive: {e}")
         
-        keys_to_clear = ['current_session_id', 'authenticated_session_id', 'page']
+        keys_to_clear = ['current_session_id', 'page']
         for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
@@ -1627,9 +1546,11 @@ class SessionManager:
             if response.status_code == 200:
                 data = response.json()
                 
-                # Retrieve the current session to update it
-                # Calling get_session() here ensures we have a valid (potentially guest) session to modify
-                current_session = self.get_session() 
+                try:
+                    current_session = self.get_session()
+                except Exception as e:
+                    logger.error(f"Error getting session during auth: {e}")
+                    current_session = self._create_guest_session()
                 
                 display_name = (
                     data.get('user_display_name') or 
@@ -1641,7 +1562,7 @@ class SessionManager:
                     clean_username
                 )
 
-                # Update the existing session object with authenticated details
+                # Ensure proper enum assignment
                 current_session.user_type = UserType.REGISTERED_USER
                 current_session.email = data.get('user_email')
                 current_session.first_name = display_name
@@ -1650,27 +1571,26 @@ class SessionManager:
                 current_session.timeout_saved_to_crm = False  # Reset save flag
                 
                 try:
-                    # Save the updated session to DB
                     self.db.save_session(current_session)
-                    # Clear DB cache to ensure next load gets fresh data
-                    self.db.clear_cache()
-                    logger.info(f"Saved authenticated session to DB: user_type={current_session.user_type}")
-
-                    # Verify the session was correctly saved and can be loaded as registered
-                    verification_session = self.db.load_session(current_session.session_id)
-                    if verification_session and verification_session.user_type == UserType.REGISTERED_USER:
-                        # Store session ID in st.session_state for persistence across reruns
-                        st.session_state.current_session_id = current_session.session_id
-                        st.session_state.authenticated_session_id = current_session.session_id # Mark as explicitly authenticated
-                        st.success(f"Welcome back, {current_session.first_name}!")
-                        return current_session
-                    else:
-                        logger.error(f"Session verification failed: expected REGISTERED_USER, got {verification_session.user_type if verification_session else 'None'}")
-                        st.error("Authentication failed - session verification failed.")
-                        return None
+                    logger.info(f"Saved authenticated session: user_type={current_session.user_type}")
                 except Exception as e:
                     logger.error(f"Failed to save authenticated session: {e}")
                     st.error("Authentication failed - could not save session.")
+                    return None
+                
+                verification_session = self.db.load_session(current_session.session_id)
+                if verification_session:
+                    verification_session = self._validate_and_fix_session(verification_session)
+                    if verification_session.user_type == UserType.REGISTERED_USER:
+                        st.session_state.current_session_id = current_session.session_id
+                        st.success(f"Welcome back, {current_session.first_name}!")
+                        return current_session
+                    else:
+                        logger.error(f"Session verification failed: expected REGISTERED_USER, got {verification_session.user_type}")
+                        st.error("Authentication failed - session verification failed.")
+                        return None
+                else:
+                    st.error("Authentication failed - session could not be verified.")
                     return None
                 
             else:
@@ -1826,25 +1746,8 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
-        # --- DEBUG LOGGING ---
-        logger.info(f"DEBUG: Sidebar Conditional Check - Session ID: {session.session_id[:8]}")
-        logger.info(f"DEBUG: Sidebar Conditional Check - Current session.user_type (raw): {session.user_type}")
-        logger.info(f"DEBUG: Sidebar Conditional Check - Type of session.user_type: {type(session.user_type)}")
-        logger.info(f"DEBUG: Sidebar Conditional Check - Repr of session.user_type: {repr(session.user_type)}")
-        
-        # --- ROBUST USER TYPE CHECK FOR DISPLAY LOGIC ---
-        is_registered = False
-        if isinstance(session.user_type, UserType):
-            is_registered = (session.user_type == UserType.REGISTERED_USER)
-        elif isinstance(session.user_type, str):
-            # Fallback check for string value, in case enum conversion hasn't fully propagated
-            is_registered = (session.user_type.lower() == UserType.REGISTERED_USER.value.lower())
-        
-        logger.info(f"DEBUG: Sidebar Conditional Check - Result of is_registered calculation: {is_registered}")
-        # --- END ROBUST CHECK & DEBUG LOGGING ---
-
         # User status section
-        if is_registered: # Use the robust 'is_registered' flag here
+        if session.user_type == UserType.REGISTERED_USER or session.user_type.value == "registered_user":
             st.success("✅ **Authenticated User**")
             if session.first_name: 
                 st.markdown(f"**Welcome:** {session.first_name}")
@@ -1857,7 +1760,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     st.success("🔗 **CRM Linked**")
                 else: 
                     st.info("📋 **CRM Ready**")
-                if session.email: # Check for email is important for CRM auto-save eligibility
+                if session.email: 
                     if session.timeout_saved_to_crm:
                         st.caption("💾 Auto-saved to CRM")
                     else:
@@ -1902,7 +1805,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 st.rerun()
 
         # Download & save section (authenticated users)
-        if is_registered and session.messages: # Use the robust 'is_registered' flag here
+        if (session.user_type == UserType.REGISTERED_USER or session.user_type.value == "registered_user") and session.messages:
             st.divider()
             
             # PDF Download
@@ -1921,10 +1824,6 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 if st.button("💾 Save to Zoho CRM", use_container_width=True):
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat auto-saves after 2 min inactivity")
-        
-        # Debug section for troubleshooting authentication
-        if st.checkbox("🔧 Debug Mode"):
-            render_debug_session_info(session, session_manager)
 
 def render_chat_interface_with_timer(session_manager: SessionManager, session: UserSession):
     """
@@ -2039,7 +1938,7 @@ def render_session_expiry_redirect():
         # Clean up session state
         keys_to_clear = [
             'session_expired', 'expired_session_id', 'expiry_trigger', 
-            'current_session_id', 'page', 'authenticated_session_id' # Added authenticated_session_id cleanup
+            'current_session_id', 'page'
         ]
         for key in keys_to_clear:
             if key in st.session_state:
@@ -2137,43 +2036,40 @@ def handle_save_requests():
 def main():
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
 
-    # ✅ CRITICAL FIX: Ensure initialization happens first in every script run
-    if not ensure_initialization():
-        st.stop() # Stop if critical initialization fails
-
-    # These functions can now safely access st.session_state.session_manager
-    # because ensure_initialization has already run.
+    # Handle session expiry redirect first
     render_session_expiry_redirect()
-    handle_save_requests()
 
     # Clear state button
     if st.button("🔄 Fresh Start", key="emergency_clear"):
         st.session_state.clear()
         st.rerun()
 
-    # Get session manager now that it's guaranteed to be initialized
-    session_manager = st.session_state.get('session_manager')
-    if not session_manager: # Defensive check, should rarely hit if initialization passed
-        st.error("Failed to retrieve session manager. Please refresh the page.")
+    # Initialize application
+    if not ensure_initialization():
+        st.stop()
+
+    # Handle save requests (browser close, etc.)
+    handle_save_requests()
+
+    # Get session manager
+    session_manager = get_session_manager()
+    if not session_manager:
+        st.error("Failed to get session manager.")
         st.stop()
     
-    # ✅ BEST PRACTICE: Initialize page state only when missing
-    if 'page' not in st.session_state:
-        st.session_state.page = None
-    
     # Main application flow
-    current_page = st.session_state.page
+    current_page = st.session_state.get('page')
     
     if current_page != "chat":
         render_welcome_page(session_manager)
     else:
-        session = session_manager.get_session() # This loads/creates the correct session based on current state
+        session = session_manager.get_session()
         if session and session.active:
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
             render_chat_interface_with_timer(session_manager, session)
         else:
-            # ✅ BEST PRACTICE: Clean up page state when session invalid/inactive
-            st.session_state.page = None
+            if 'page' in st.session_state:
+                del st.session_state.page
             st.rerun()
 
 if __name__ == "__main__":
