@@ -2267,7 +2267,7 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
     <script>
     (function() {{
         const sessionId = '{session_id}';
-        const currentUrl = window.location.origin + window.location.pathname;
+        const currentUrl = window.parent.location.origin + window.parent.location.pathname;
         
         console.log('Auto-save component loaded for session:', sessionId);
         console.log('Auto-save will trigger in {save_trigger_seconds} seconds');
@@ -2342,12 +2342,12 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
                     console.log('Save completed. Reloading in 3 seconds...');
                     setTimeout(() => {{
                         console.log('Session timeout - reloading page.');
-                        window.location.reload();
+                        window.parent.location.reload();
                     }}, 3000);
                 }})
                 .catch(err => {{
                     console.error('Save failed for session', sessionId, ':', err);
-                    setTimeout(() => window.location.reload(), 2000);
+                    setTimeout(() => window.parent.location.reload(), 2000);
                 }});
         }}
         
@@ -2445,7 +2445,7 @@ def render_forced_reload_component():
         // Force reload after 2 seconds
         window.forceReloadTimer = setTimeout(function() {{
             console.log('🔄 Executing forced page reload...');
-            window.location.reload(true); // Force reload from server
+            window.parent.location.reload(true); // Force reload from server
         }}, 2000);
         
         // Also reload if user tries to interact
@@ -2453,14 +2453,14 @@ def render_forced_reload_component():
             e.preventDefault();
             e.stopPropagation();
             console.log('🔄 User interaction detected - forcing immediate reload');
-            window.location.reload(true);
+            window.parent.location.reload(true);
         }}, true);
         
         // Prevent form submissions
         document.addEventListener('submit', function(e) {{
             e.preventDefault();
             console.log('🔄 Form submission blocked - forcing reload');
-            window.location.reload(true);
+            window.parent.location.reload(true);
         }}, true);
         </script>
         """
