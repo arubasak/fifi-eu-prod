@@ -29,13 +29,14 @@ import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
 # =============================================================================
-# FINAL INTEGRATED VERSION - ALL FEATURES COMBINED
-# - JavaScript timer with streamlit-javascript package
+# FINAL INTEGRATED VERSION - ALL FEATURES COMBINED WITH CORRECTED TIMER
+# - JavaScript timer with corrected st_javascript patterns using IIFE
 # - Python CRM save processing
 # - window.parent.location for all reloads
 # - SQLite Cloud database integration
 # - All existing features preserved
 # - Complete error handling and validation
+# - Fixed timer return value issues
 # =============================================================================
 
 # Setup logging
@@ -955,7 +956,392 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
-# SESSION MANAGER WITH JAVASCRIPT TIMER INTEGRATION
+# CORRECTED JAVASCRIPT TIMER COMPONENTS
+# =============================================================================
+
+def render_activity_timer_component(session_id: str, session_manager) -> Optional[Dict[str, Any]]:
+    """
+    CORRECTED JavaScript timer using IIFE pattern and proper st_javascript practices
+    
+    Returns:
+    - None: No timer events triggered
+    - Dict: Timer event with 'event', 'session_id', 'inactive_time_ms', etc.
+    """
+    
+    if not session_id:
+        return None
+    
+    # JavaScript timer with IIFE pattern - CORRECTED VERSION
+    js_timer_code = f"""
+    (() => {{
+        const sessionId = "{session_id}";
+        const AUTO_SAVE_TIMEOUT = 120000;  // 2 minutes
+        const SESSION_EXPIRE_TIMEOUT = 180000;  // 3 minutes
+        
+        console.log("🕐 FiFi Timer checking session:", sessionId.substring(0, 8));
+        
+        // Initialize persistent timer state in window
+        if (!window.fifi_timer_state) {{
+            window.fifi_timer_state = {{
+                lastActivityTime: Date.now(),
+                autoSaveTriggered: false,
+                sessionExpired: false,
+                listenersInitialized: false,
+                sessionId: sessionId
+            }};
+            console.log("🆕 FiFi Timer state initialized");
+        }}
+        
+        const state = window.fifi_timer_state;
+        
+        // Reset state if session changed
+        if (state.sessionId !== sessionId) {{
+            console.log("🔄 Session changed, resetting timer state");
+            state.sessionId = sessionId;
+            state.lastActivityTime = Date.now();
+            state.autoSaveTriggered = false;
+            state.sessionExpired = false;
+            state.listenersInitialized = false;
+        }}
+        
+        // Initialize activity listeners once per session
+        if (!state.listenersInitialized) {{
+            console.log("👂 Setting up FiFi activity listeners");
+            
+            function resetActivity() {{
+                const now = Date.now();
+                state.lastActivityTime = now;
+                state.autoSaveTriggered = false;
+                state.sessionExpired = false;
+                console.log("🔄 Activity detected:", new Date(now).toLocaleTimeString());
+            }}
+            
+            // Comprehensive activity events
+            const events = [
+                'mousedown', 'mousemove', 'mouseup', 'click', 'dblclick',
+                'keydown', 'keyup', 'keypress',
+                'scroll', 'wheel',
+                'touchstart', 'touchmove', 'touchend',
+                'focus', 'blur'
+            ];
+            
+            // Add to current document
+            let listenersAdded = 0;
+            events.forEach(eventType => {{
+                document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
+                listenersAdded++;
+            }});
+            
+            // Add to parent document (Streamlit app) if accessible
+            try {{
+                if (window.parent && 
+                    window.parent.document && 
+                    window.parent.document !== document) {{
+                    
+                    events.forEach(eventType => {{
+                        window.parent.document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
+                        listenersAdded++;
+                    }});
+                    console.log("👂 Parent document listeners added");
+                }}
+            }} catch (e) {{
+                console.debug("Cannot access parent document for activity detection");
+            }}
+            
+            // Visibility change detection
+            const handleVisibilityChange = () => {{
+                if (document.visibilityState === 'visible') {{
+                    resetActivity();
+                }}
+            }};
+            
+            document.addEventListener('visibilitychange', handleVisibilityChange);
+            
+            try {{
+                if (window.parent && window.parent.document) {{
+                    window.parent.document.addEventListener('visibilitychange', handleVisibilityChange);
+                }}
+            }} catch (e) {{
+                console.debug("Cannot access parent for visibility detection");
+            }}
+            
+            state.listenersInitialized = true;
+            console.log(`✅ FiFi activity listeners initialized (${{listenersAdded}} total)`);
+        }}
+        
+        // Calculate current inactivity
+        const currentTime = Date.now();
+        const inactiveTimeMs = currentTime - state.lastActivityTime;
+        const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
+        const inactiveSeconds = Math.floor((inactiveTimeMs % 60000) / 1000);
+        
+        console.log(`⏰ Session ${{sessionId.substring(0, 8)}} inactive: ${{inactiveMinutes}}m${{inactiveSeconds}}s`);
+        
+        // Check for auto-save trigger (2 minutes)
+        if (inactiveTimeMs >= AUTO_SAVE_TIMEOUT && !state.autoSaveTriggered) {{
+            state.autoSaveTriggered = true;
+            console.log("🚨 AUTO-SAVE TRIGGER ACTIVATED");
+            
+            return {{
+                event: "auto_save_trigger",
+                session_id: sessionId,
+                inactive_time_ms: inactiveTimeMs,
+                inactive_minutes: inactiveMinutes,
+                inactive_seconds: inactiveSeconds,
+                timestamp: currentTime
+            }};
+        }}
+        
+        // Check for session expiry (3 minutes)
+        if (inactiveTimeMs >= SESSION_EXPIRE_TIMEOUT && !state.sessionExpired) {{
+            state.sessionExpired = true;
+            console.log("🚨 SESSION EXPIRED");
+            
+            return {{
+                event: "session_expired",
+                session_id: sessionId,
+                inactive_time_ms: inactiveTimeMs,
+                inactive_minutes: inactiveMinutes,
+                inactive_seconds: inactiveSeconds,
+                timestamp: currentTime
+            }};
+        }}
+        
+        // No events triggered - return null (this is important!)
+        return null;
+    }})()
+    """
+    
+    try:
+        # Use stable key per session (won't cause re-mounting)
+        stable_key = f"fifi_activity_timer_{session_id[:8]}"
+        
+        # Execute JavaScript and get result
+        timer_result = st_javascript(js_timer_code, key=stable_key)
+        
+        # Process and validate the result
+        if timer_result is not None:
+            logger.info(f"⏰ Timer result received: {timer_result}")
+            
+            # Validate result structure
+            if isinstance(timer_result, dict) and 'event' in timer_result:
+                event = timer_result.get('event')
+                received_session_id = timer_result.get('session_id')
+                
+                # Verify session ID matches
+                if received_session_id == session_id:
+                    logger.info(f"✅ Valid timer event: {event} for session {session_id[:8]}")
+                    return timer_result
+                else:
+                    logger.warning(f"⚠️ Session ID mismatch: expected {session_id[:8]}, got {received_session_id[:8] if received_session_id else 'None'}")
+                    return None
+            else:
+                logger.warning(f"⚠️ Invalid timer result structure: {timer_result}")
+                return None
+        
+        # timer_result is None - normal case (no events triggered)
+        return None
+        
+    except Exception as e:
+        logger.error(f"❌ JavaScript timer execution error: {e}")
+        # Don't show error to user unless it's critical
+        return None
+
+def handle_timer_event(timer_result: Dict[str, Any], session_manager, session) -> bool:
+    """
+    Handle timer events from JavaScript
+    
+    Returns:
+    - True: Event was processed and page should rerun
+    - False: Event was processed but no rerun needed
+    """
+    
+    if not timer_result or not isinstance(timer_result, dict):
+        return False
+    
+    event = timer_result.get('event')
+    session_id = timer_result.get('session_id')
+    inactive_minutes = timer_result.get('inactive_minutes', 0)
+    
+    logger.info(f"🎯 Processing timer event: {event} for session {session_id[:8] if session_id else 'unknown'}")
+    
+    try:
+        if event == 'auto_save_trigger':
+            # Handle auto-save
+            st.info(f"⏰ **Auto-save triggered** after {inactive_minutes} minutes of inactivity")
+            
+            # Check if session is eligible for auto-save
+            if (session.user_type == UserType.REGISTERED_USER and 
+                session.email and 
+                session.messages and
+                not session.timeout_saved_to_crm):
+                
+                with st.spinner("💾 Auto-saving chat to CRM..."):
+                    save_success = session_manager._auto_save_to_crm(session, "JavaScript Auto-Save (2min)")
+                
+                if save_success:
+                    st.success("✅ Chat automatically saved to CRM!")
+                    # Update session activity to prevent immediate re-trigger
+                    session.last_activity = datetime.now()
+                    session_manager.db.save_session(session)
+                else:
+                    st.warning("⚠️ Auto-save failed, but session continues")
+                
+                return True  # Rerun to refresh timer state
+            else:
+                st.info("ℹ️ Auto-save skipped (not eligible)")
+                return False
+                
+        elif event == 'session_expired':
+            # Handle session expiry
+            st.error(f"🔄 **Session expired** after {inactive_minutes} minutes of inactivity")
+            
+            # Emergency save if eligible
+            if (session.user_type == UserType.REGISTERED_USER and 
+                session.email and 
+                session.messages and
+                not session.timeout_saved_to_crm):
+                
+                st.info("💾 Performing emergency save before expiry...")
+                try:
+                    session_manager._auto_save_to_crm(session, "Emergency Save (JavaScript Expiry)")
+                    st.success("✅ Emergency save completed")
+                except Exception as e:
+                    st.error(f"❌ Emergency save failed: {str(e)}")
+            
+            # End the session
+            session_manager._end_session_internal(session)
+            
+            # Set expiry flags for UI
+            st.session_state.session_expired = True
+            st.session_state.expired_session_id = session_id[:8] if session_id else 'unknown'
+            st.session_state.expiry_trigger = "javascript_timer"
+            
+            st.info("⏳ Redirecting to welcome page in 3 seconds...")
+            time.sleep(3)
+            return True  # Rerun to redirect
+            
+        else:
+            logger.warning(f"⚠️ Unknown timer event: {event}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Error processing timer event {event}: {e}", exc_info=True)
+        st.error(f"⚠️ Timer event processing error: {str(e)}")
+        return False
+
+def render_browser_close_component(session_id: str):
+    """
+    Browser close detection using window.parent.location (corrected for Streamlit)
+    """
+    if not session_id:
+        return
+
+    js_code = f"""
+    <script>
+    (function() {{
+        if (window.fifi_close_listener_added) return;
+        window.fifi_close_listener_added = true;
+        
+        const sessionId = '{session_id}';
+        const parentUrl = window.parent.location.origin + window.parent.location.pathname;
+        
+        let saveTriggered = false;
+
+        function sendEmergencySave() {{
+            if (!saveTriggered) {{
+                saveTriggered = true;
+                console.log('🚨 FiFi: Browser close detected - emergency save');
+                
+                const url = `${{parentUrl}}?event=close&session_id=${{sessionId}}`; 
+                
+                if (navigator.sendBeacon) {{
+                    navigator.sendBeacon(url);
+                    console.log('📡 FiFi: Emergency save beacon sent');
+                }} else {{
+                    try {{
+                        const xhr = new XMLHttpRequest();
+                        xhr.open('GET', url, false);
+                        xhr.send();
+                    }} catch(e) {{
+                        console.error('❌ FiFi: Emergency save failed:', e);
+                    }}
+                }}
+            }}
+        }}
+        
+        // Monitor visibility changes
+        try {{
+            if (window.parent && window.parent.document) {{
+                window.parent.document.addEventListener('visibilitychange', () => {{
+                    if (window.parent.document.visibilityState === 'hidden') {{
+                        sendEmergencySave();
+                    }}
+                }});
+            }}
+        }} catch (e) {{
+            document.addEventListener('visibilitychange', () => {{
+                if (document.visibilityState === 'hidden') {{
+                    sendEmergencySave();
+                }}
+            }});
+        }}
+        
+        // Monitor page unload events
+        try {{
+            if (window.parent) {{
+                window.parent.addEventListener('beforeunload', sendEmergencySave, {{capture: true}});
+                window.parent.addEventListener('pagehide', sendEmergencySave, {{capture: true}});
+            }}
+        }} catch (e) {{
+            window.addEventListener('beforeunload', sendEmergencySave, {{capture: true}});
+            window.addEventListener('pagehide', sendEmergencySave, {{capture: true}});
+        }}
+
+        console.log('✅ FiFi: Browser close detection initialized');
+    }})();
+    </script>
+    """
+    
+    components.html(js_code, height=0, width=0)
+
+def render_activity_status_indicator(session, session_manager):
+    """
+    Show activity status for registered users
+    """
+    if (session.user_type == UserType.REGISTERED_USER and 
+        session.last_activity):
+        
+        time_since_activity = datetime.now() - session.last_activity
+        minutes_since = time_since_activity.total_seconds() / 60
+        
+        # Activity status with color-coded indicators
+        if minutes_since < 0.5:
+            st.success("🟢 **Active** - Auto-save in 2 minutes if inactive")
+        elif minutes_since < 1:
+            remaining = 2 - minutes_since
+            st.info(f"🟡 **Inactive** for {minutes_since:.1f} min - Auto-save in {remaining:.1f} min")
+        elif minutes_since < 2:
+            remaining = 2 - minutes_since
+            if remaining > 0:
+                st.warning(f"🟠 **Inactive** for {minutes_since:.1f} min - Auto-save in {remaining:.1f} min")
+            else:
+                st.warning(f"🟠 **Inactive** for {minutes_since:.1f} min - Auto-save will trigger soon")
+        elif session.timeout_saved_to_crm:
+            remaining_to_expiry = 3 - minutes_since
+            if remaining_to_expiry > 0:
+                st.success(f"💾 **Auto-saved** after {minutes_since:.1f} min - Session expires in {remaining_to_expiry:.1f} min")
+            else:
+                st.success(f"💾 **Auto-saved** after {minutes_since:.1f} min")
+        else:
+            remaining_to_expiry = 3 - minutes_since
+            if remaining_to_expiry > 0:
+                st.error(f"🔴 **Inactive** for {minutes_since:.1f} min - Session expires in {remaining_to_expiry:.1f} min")
+            else:
+                st.error(f"🔴 **Inactive** for {minutes_since:.1f} min - Session will expire soon")
+
+# =============================================================================
+# SESSION MANAGER WITH CORRECTED TIMER INTEGRATION
 # =============================================================================
 
 class SessionManager:
@@ -1084,73 +1470,6 @@ class SessionManager:
                 return False
             finally:
                 logger.info(f"=== AUTO SAVE TO CRM ENDED ===\n")
-
-    def process_javascript_timer_result(self, timer_result, current_session):
-        """Process timer result from JavaScript and handle auto-save/logout"""
-        if not timer_result:
-            return current_session
-            
-        event = timer_result.get("event")
-        session_id = timer_result.get("session_id")
-        
-        logger.info(f"JavaScript timer event received: {event} for session {session_id[:8] if session_id else 'None'}")
-        
-        if event == "auto_save_trigger" and session_id:
-            # Load fresh session data
-            session = self.db.load_session(session_id)
-            if session and session.active:
-                session = self._validate_and_fix_session(session)
-                
-                # Check if session is still eligible for auto-save
-                if (session.user_type == UserType.REGISTERED_USER and 
-                    session.email and 
-                    session.messages and
-                    not session.timeout_saved_to_crm):
-                    
-                    logger.info(f"Executing JavaScript-triggered auto-save for session {session_id[:8]}")
-                    save_success = self._auto_save_to_crm(session, "JavaScript Auto-Save (2min)")
-                    
-                    if save_success:
-                        st.success("💾 Chat automatically saved to CRM due to inactivity")
-                        return session
-                    else:
-                        st.warning("⚠️ Auto-save failed, but session continues")
-                        return session
-                else:
-                    logger.info(f"Session {session_id[:8]} not eligible for auto-save")
-                    return session
-            else:
-                logger.warning(f"Session {session_id[:8]} not found or inactive during auto-save")
-                return current_session
-                
-        elif event == "session_expired" and session_id:
-            # Handle session expiry
-            logger.info(f"JavaScript reported session {session_id[:8]} as expired")
-            
-            # Load and end the session
-            session = self.db.load_session(session_id)
-            if session:
-                session = self._validate_and_fix_session(session)
-                
-                # Emergency save if not already saved
-                if (session.user_type == UserType.REGISTERED_USER and 
-                    session.email and 
-                    session.messages and
-                    not session.timeout_saved_to_crm):
-                    
-                    logger.info("Emergency save during JavaScript-triggered expiry")
-                    self._auto_save_to_crm(session, "Emergency Save (JavaScript Expiry)")
-                
-                # End the session
-                self._end_session_internal(session)
-            
-            # Set expiry flags for UI
-            st.session_state.session_expired = True
-            st.session_state.expired_session_id = session_id[:8] if session_id else 'unknown'
-            
-            return self._create_guest_session()
-        
-        return current_session
 
     def get_session(self) -> UserSession:
         """Get session with server-side validation"""
@@ -1361,348 +1680,6 @@ class SessionManager:
             st.warning("Cannot save to CRM: Missing email or chat messages")
 
 # =============================================================================
-# JAVASCRIPT TIMER COMPONENTS
-# =============================================================================
-
-def render_activity_timer_component(session_id: str, session_manager):
-    """Complete JavaScript timer using streamlit-javascript wrapper"""
-    
-    if not session_id:
-        return None
-    
-    # JavaScript code that handles timing and activity detection
-    js_timer_code = f'''
-    const sessionId = "{session_id}";
-    const AUTO_SAVE_TIMEOUT = 120000;  // 2 minutes
-    const SESSION_EXPIRE_TIMEOUT = 180000;  // 3 minutes
-    
-    console.log("🕐 Timer initialized for session:", sessionId);
-    
-    // Timer state
-    let lastActivityTime = Date.now();
-    let autoSaveTriggered = false;
-    let sessionExpired = false;
-    
-    // Activity detection function
-    function resetActivityTimer() {{
-        const now = Date.now();
-        lastActivityTime = now;
-        autoSaveTriggered = false;
-        sessionExpired = false;
-        console.log("🔄 Activity detected - timers reset at", new Date(now).toLocaleTimeString());
-    }}
-    
-    // Comprehensive activity listener setup
-    function setupActivityListeners() {{
-        const activityEvents = [
-            'mousedown', 'mousemove', 'mouseup', 'click',
-            'keydown', 'keyup', 'keypress',
-            'scroll', 'wheel',
-            'touchstart', 'touchmove', 'touchend',
-            'focus', 'blur'
-        ];
-        
-        let listenersAdded = 0;
-        
-        // Try to listen on parent document (better coverage)
-        activityEvents.forEach(eventType => {{
-            try {{
-                if (window.parent && window.parent.document) {{
-                    window.parent.document.addEventListener(eventType, resetActivityTimer, true);
-                    listenersAdded++;
-                }}
-            }} catch (e) {{
-                console.debug("Cannot access parent for event:", eventType);
-            }}
-            
-            // Always listen on current document as fallback
-            document.addEventListener(eventType, resetActivityTimer, true);
-            listenersAdded++;
-        }});
-        
-        console.log("👂 Activity listeners added:", listenersAdded);
-        
-        // Also listen for visibility changes
-        try {{
-            document.addEventListener('visibilitychange', () => {{
-                if (document.visibilityState === 'visible') {{
-                    resetActivityTimer();
-                }}
-            }});
-            
-            if (window.parent && window.parent.document) {{
-                window.parent.document.addEventListener('visibilitychange', () => {{
-                    if (window.parent.document.visibilityState === 'visible') {{
-                        resetActivityTimer();
-                    }}
-                }});
-            }}
-        }} catch (e) {{
-            console.debug("Visibility change listener setup failed:", e);
-        }}
-    }}
-    
-    // Main timer check function
-    function checkInactivityStatus() {{
-        const currentTime = Date.now();
-        const inactiveTimeMs = currentTime - lastActivityTime;
-        const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
-        
-        // Check for auto-save trigger (2 minutes)
-        if (inactiveTimeMs >= AUTO_SAVE_TIMEOUT && !autoSaveTriggered) {{
-            autoSaveTriggered = true;
-            console.log("🚨 AUTO-SAVE TRIGGER: 2 minutes of inactivity detected");
-            
-            return {{
-                event: "auto_save_trigger",
-                session_id: sessionId,
-                inactive_time_ms: inactiveTimeMs,
-                inactive_minutes: inactiveMinutes,
-                timestamp: currentTime
-            }};
-        }}
-        
-        // Check for session expiry (3 minutes)
-        if (inactiveTimeMs >= SESSION_EXPIRE_TIMEOUT && !sessionExpired) {{
-            sessionExpired = true;
-            console.log("🚨 SESSION EXPIRED: 3 minutes of inactivity detected");
-            
-            return {{
-                event: "session_expired",
-                session_id: sessionId,
-                inactive_time_ms: inactiveTimeMs,
-                inactive_minutes: inactiveMinutes,
-                timestamp: currentTime
-            }};
-        }}
-        
-        return null;
-    }}
-    
-    // Initialize activity tracking
-    setupActivityListeners();
-    
-    // Run the check immediately and return result
-    const result = checkInactivityStatus();
-    
-    if (result) {{
-        console.log("📤 Returning timer result to Python:", result);
-        return result;
-    }}
-    
-    return null;
-    '''
-    
-    try:
-        # Execute JavaScript and get result
-        timer_result = st_javascript(js_timer_code, key=f"activity_timer_{session_id}")
-        
-        # Process timer result if received
-        if timer_result:
-            event = timer_result.get("event")
-            received_session_id = timer_result.get("session_id")
-            inactive_minutes = timer_result.get("inactive_minutes", 0)
-            
-            logger.info(f"⏰ Timer event received: {event} for session {received_session_id[:8] if received_session_id else 'unknown'}")
-            
-            # Validate session ID matches
-            if received_session_id != session_id:
-                logger.warning(f"Session ID mismatch: expected {session_id[:8]}, got {received_session_id[:8] if received_session_id else 'None'}")
-                return None
-            
-            # Process the event
-            if event == "auto_save_trigger":
-                return handle_auto_save_trigger(session_manager, session_id, timer_result)
-            elif event == "session_expired":
-                return handle_session_expiry(session_manager, session_id, timer_result)
-        
-        return None
-        
-    except Exception as e:
-        logger.error(f"JavaScript timer component error: {e}")
-        st.error(f"⚠️ Timer component error: {str(e)}")
-        return None
-
-def handle_auto_save_trigger(session_manager, session_id: str, timer_data: dict):
-    """Handle auto-save trigger from JavaScript timer"""
-    logger.info(f"🔄 Processing auto-save trigger for session {session_id[:8]}")
-    
-    try:
-        # Load fresh session data
-        session = session_manager.db.load_session(session_id)
-        if not session or not session.active:
-            logger.warning(f"Session {session_id[:8]} not found or inactive during auto-save")
-            return {"event": "auto_save_trigger", "result": "session_not_found"}
-        
-        # Validate and fix session
-        session = session_manager._validate_and_fix_session(session)
-        
-        # Check if session is eligible for auto-save
-        if (session.user_type == UserType.REGISTERED_USER and 
-            session.email and 
-            session.messages and
-            not session.timeout_saved_to_crm):
-            
-            logger.info(f"✅ Session {session_id[:8]} eligible for auto-save")
-            
-            # Perform the save
-            save_success = session_manager._auto_save_to_crm(session, "JavaScript Auto-Save (2min)")
-            
-            if save_success:
-                st.success("💾 Chat automatically saved to CRM due to inactivity")
-                logger.info(f"✅ Auto-save completed for session {session_id[:8]}")
-                
-                # Update session activity to prevent immediate re-trigger
-                session.last_activity = datetime.now()
-                session_manager.db.save_session(session)
-                
-                return {"event": "auto_save_trigger", "result": "success"}
-            else:
-                st.warning("⚠️ Auto-save failed, but session continues")
-                logger.error(f"❌ Auto-save failed for session {session_id[:8]}")
-                return {"event": "auto_save_trigger", "result": "failed"}
-        else:
-            logger.info(f"ℹ️ Session {session_id[:8]} not eligible for auto-save")
-            return {"event": "auto_save_trigger", "result": "not_eligible"}
-            
-    except Exception as e:
-        logger.error(f"❌ Auto-save trigger handling failed: {e}", exc_info=True)
-        st.error(f"⚠️ Auto-save error: {str(e)}")
-        return {"event": "auto_save_trigger", "result": "error", "error": str(e)}
-
-def handle_session_expiry(session_manager, session_id: str, timer_data: dict):
-    """Handle session expiry from JavaScript timer"""
-    logger.info(f"🚪 Processing session expiry for session {session_id[:8]}")
-    
-    try:
-        # Load session for potential emergency save
-        session = session_manager.db.load_session(session_id)
-        if session:
-            session = session_manager._validate_and_fix_session(session)
-            
-            # Emergency save if not already saved
-            if (session.user_type == UserType.REGISTERED_USER and 
-                session.email and 
-                session.messages and
-                not session.timeout_saved_to_crm):
-                
-                logger.info(f"🚨 Emergency save during expiry for session {session_id[:8]}")
-                session_manager._auto_save_to_crm(session, "Emergency Save (JavaScript Expiry)")
-            
-            # End the session
-            session_manager._end_session_internal(session)
-        
-        # Set expiry flags for UI handling
-        st.session_state.session_expired = True
-        st.session_state.expired_session_id = session_id[:8]
-        st.session_state.expiry_trigger = "javascript_timer"
-        
-        logger.info(f"✅ Session {session_id[:8]} expiry processed")
-        return {"event": "session_expired", "result": "processed"}
-        
-    except Exception as e:
-        logger.error(f"❌ Session expiry handling failed: {e}", exc_info=True)
-        st.error(f"⚠️ Session expiry error: {str(e)}")
-        return {"event": "session_expired", "result": "error", "error": str(e)}
-
-def render_browser_close_component(session_id: str):
-    """Browser close detection using window.parent.location"""
-    if not session_id:
-        return
-
-    js_code = f"""
-    <script>
-    (function() {{
-        if (window.browserCloseListenerAdded) return;
-        window.browserCloseListenerAdded = true;
-        
-        const sessionId = '{session_id}';
-        // ✅ Use window.parent.location for Streamlit apps
-        const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
-        
-        let saveHasBeenTriggered = false;
-
-        function sendBeaconRequest() {{
-            if (!saveHasBeenTriggered) {{
-                saveHasBeenTriggered = true;
-                console.log('🚨 Browser close detected - sending emergency save beacon');
-                
-                const url = `${{parentStreamlitAppUrl}}?event=close&session_id=${{sessionId}}`; 
-                
-                if (navigator.sendBeacon) {{
-                    const success = navigator.sendBeacon(url);
-                    console.log('📡 SendBeacon result:', success);
-                }} else {{
-                    const xhr = new XMLHttpRequest();
-                    xhr.open('GET', url, false);
-                    try {{
-                        xhr.send();
-                    }} catch(e) {{
-                        console.error('❌ Failed to send close event via XHR:', e);
-                    }}
-                }}
-            }}
-        }}
-        
-        // ✅ Monitor parent window visibility if accessible
-        try {{
-            if (window.parent && window.parent.document) {{
-                window.parent.document.addEventListener('visibilitychange', () => {{
-                    if (window.parent.document.visibilityState === 'hidden') {{
-                        sendBeaconRequest();
-                    }}
-                }});
-            }}
-        }} catch (e) {{
-            document.addEventListener('visibilitychange', () => {{
-                if (document.visibilityState === 'hidden') {{
-                    sendBeaconRequest();
-                }}
-            }});
-        }}
-        
-        // ✅ Listen to parent window unload events if possible
-        try {{
-            if (window.parent) {{
-                window.parent.addEventListener('pagehide', sendBeaconRequest, {{capture: true}});
-                window.parent.addEventListener('beforeunload', sendBeaconRequest, {{capture: true}});
-            }}
-        }} catch (e) {{
-            window.addEventListener('pagehide', sendBeaconRequest, {{capture: true}});
-            window.addEventListener('beforeunload', sendBeaconRequest, {{capture: true}});
-        }}
-
-    }})();
-    </script>
-    """
-    components.html(js_code, height=0, width=0)
-
-def render_session_expiry_redirect():
-    """Handle session expiry redirect using pure Python/Streamlit"""
-    if st.session_state.get('session_expired', False):
-        expired_session_id = st.session_state.get('expired_session_id', 'unknown')
-        trigger = st.session_state.get('expiry_trigger', 'unknown')
-        
-        # Show expiry message
-        st.error(f"🔄 Session {expired_session_id} expired due to inactivity")
-        
-        if trigger == "javascript_timer":
-            st.info("⏰ Detected by JavaScript inactivity timer")
-        
-        st.info("💾 Your chat has been automatically saved to CRM")
-        st.info("⏳ Redirecting to welcome page in 3 seconds...")
-        
-        # Clean up session state
-        keys_to_clear = ['session_expired', 'expired_session_id', 'expiry_trigger', 'current_session_id', 'page']
-        for key in keys_to_clear:
-            if key in st.session_state:
-                del st.session_state[key]
-        
-        # Use Python sleep + rerun (more reliable than JavaScript)
-        time.sleep(3)
-        st.rerun()
-
-# =============================================================================
 # UI COMPONENTS
 # =============================================================================
 
@@ -1849,41 +1826,30 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 st.caption("💡 Chat auto-saves after 2 min inactivity")
 
 def render_chat_interface_with_timer(session_manager: SessionManager, session: UserSession):
-    """Enhanced chat interface with JavaScript timer integration"""
+    """
+    CORRECTED chat interface with proper JavaScript timer integration
+    """
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion")
     
-    # ✅ Add the JavaScript timer component
-    timer_result = render_activity_timer_component(session.session_id, session_manager)
-    
-    # Show activity status for registered users
-    if session.user_type == UserType.REGISTERED_USER and session.last_activity:
-        time_since_activity = datetime.now() - session.last_activity
-        minutes_since = time_since_activity.total_seconds() / 60
-        
-        if minutes_since < 0.5:
-            st.success("🟢 Active - auto-save in 2 minutes if inactive")
-        elif minutes_since < 1:
-            st.info(f"🟡 Inactive for {minutes_since:.1f} minutes")
-        elif minutes_since < 2:
-            st.warning(f"🟠 Inactive for {minutes_since:.1f} minutes - auto-save will trigger soon")
-        elif session.timeout_saved_to_crm:
-            st.success(f"💾 Inactive for {minutes_since:.1f} minutes - chat auto-saved to CRM")
-        else:
-            st.error(f"🔴 Inactive for {minutes_since:.1f} minutes - session will expire soon")
-    
-    # If timer triggered an event, show the result
-    if timer_result:
-        st.info(f"⏰ Timer event processed: {timer_result.get('event')} → {timer_result.get('result')}")
-        
-        # Force rerun to refresh timer component
-        if timer_result.get('event') in ['auto_save_trigger', 'session_expired']:
-            time.sleep(1)
-            st.rerun()
-    
     # Add browser close detection
     render_browser_close_component(session.session_id)
+    
+    # Show activity status for registered users
+    render_activity_status_indicator(session, session_manager)
+    
+    # Execute the timer component and handle results
+    timer_result = render_activity_timer_component(session.session_id, session_manager)
+    
+    # Process timer events if any were triggered
+    if timer_result:
+        should_rerun = handle_timer_event(timer_result, session_manager, session)
+        
+        if should_rerun:
+            # Small delay to let user see the message, then rerun
+            time.sleep(1)
+            st.rerun()
     
     # Display chat messages
     for msg in session.messages:
@@ -1916,6 +1882,7 @@ def render_chat_interface_with_timer(session_manager: SessionManager, session: U
         with st.chat_message("user"):
             st.markdown(prompt)
         
+        # Content moderation check
         moderation_result = check_content_moderation(prompt, session_manager.ai.openai_client)
         
         if moderation_result.get("flagged"):
@@ -1928,7 +1895,6 @@ def render_chat_interface_with_timer(session_manager: SessionManager, session: U
                 "source": "Content Safety Policy",
                 "timestamp": datetime.now().isoformat()
             })
-            st.rerun()
         else:
             with st.chat_message("assistant"):
                 with st.spinner("🔍 Searching knowledge base and web..."):
@@ -1938,8 +1904,47 @@ def render_chat_interface_with_timer(session_manager: SessionManager, session: U
                     
                     if response.get("source"):
                         st.caption(f"Source: {response['source']}")
-            
-            st.rerun()
+        
+        st.rerun()
+
+# =============================================================================
+# CORRECTED SESSION EXPIRY HANDLING
+# =============================================================================
+
+def render_session_expiry_redirect():
+    """
+    CORRECTED session expiry redirect with better UX
+    """
+    if st.session_state.get('session_expired', False):
+        expired_session_id = st.session_state.get('expired_session_id', 'unknown')
+        trigger = st.session_state.get('expiry_trigger', 'unknown')
+        
+        # Show comprehensive expiry message
+        st.error(f"🔄 **Session Expired**")
+        st.info(f"Session `{expired_session_id}` was automatically ended due to 3 minutes of inactivity")
+        
+        if trigger == "javascript_timer":
+            st.success("⏰ Detected by JavaScript activity timer")
+            st.success("💾 Your chat was automatically saved to CRM")
+        
+        st.info("⏳ Redirecting to welcome page...")
+        
+        # Progress bar for better UX
+        progress_bar = st.progress(0)
+        for i in range(100):
+            time.sleep(0.03)  # 3 second total delay
+            progress_bar.progress(i + 1)
+        
+        # Clean up session state
+        keys_to_clear = [
+            'session_expired', 'expired_session_id', 'expiry_trigger', 
+            'current_session_id', 'page'
+        ]
+        for key in keys_to_clear:
+            if key in st.session_state:
+                del st.session_state[key]
+        
+        st.rerun()
 
 # =============================================================================
 # UTILITY FUNCTIONS
