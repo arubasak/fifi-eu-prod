@@ -1970,30 +1970,30 @@ class SessionManager:
             logger.info(f"  Eligible check: user_type={session.user_type}, email={bool(session.email)}, messages={len(session.messages) if session.messages else 0}")
             return False
 
-def get_session(self) -> UserSession:
+    def get_session(self) -> UserSession:
         """FIXED: Proper session retrieval with JavaScript forced reload on timeout."""
         session_id = st.session_state.get('current_session_id')
-        
+
         if session_id:
             session = self.db.load_session(session_id)
             if session and session.active:
                 # CRITICAL FIX: Validate and fix session data
                 session = self._validate_and_fix_session(session)
-                
+
                 if self._is_session_expired(session):
                     logger.info(f"Session {session_id[:8]}... expired due to inactivity.")
-                    
+
                     # Check if pre-timeout save already happened
                     already_saved = st.session_state.get('pre_timeout_saved', {}).get(session_id, False)
-                    
+
                     # CRITICAL FIX: Only attempt emergency save if not already saved AND session is eligible
-                    if (session.user_type == UserType.REGISTERED_USER and 
-                        session.email and 
+                    if (session.user_type == UserType.REGISTERED_USER and
+                        session.email and
                         session.messages and
                         not already_saved):
-                        
+
                         logger.info("Session expired without pre-timeout save. Attempting emergency save...")
-                        
+
                         try:
                             self._auto_save_to_crm(session, "Session Timeout (Emergency)")
                         except Exception as e:
@@ -2004,27 +2004,28 @@ def get_session(self) -> UserSession:
                         else:
                             logger.info("Session expired but was not eligible for saving.")
                             logger.info(f"  Eligibility: user_type={session.user_type}, email={bool(session.email)}, messages={len(session.messages) if session.messages else 0}")
-                    
+
                     # Clean up
                     if 'pre_timeout_saved' in st.session_state and session_id in st.session_state.pre_timeout_saved:
                         del st.session_state.pre_timeout_saved[session_id]
-                    
+
                     # CRITICAL FIX: End session AFTER save attempt
                     self._end_session_internal(session)
-                    
+
                     # 🚨 NEW: SET FLAG FOR FORCED RELOAD
                     st.session_state.force_reload_due_to_timeout = True
                     st.session_state.timeout_message = f"Session {session_id[:8]} expired due to inactivity."
-                    
+
                     return self._create_guest_session()
                 else:
                     # Session is active and not expired
                     self._update_activity(session)
                     return session
-        
+
         # No session or inactive
         return self._create_guest_session()
-    
+
+    # >>> THIS METHOD NEEDS TO BE INDENTED TO BE PART OF THE CLASS <<<
     def _end_session_internal(self, session: UserSession):
         """End session and clean up state."""
         session.active = False
@@ -2032,12 +2033,11 @@ def get_session(self) -> UserSession:
             self.db.save_session(session)
         except Exception as e:
             logger.error(f"Failed to mark session as inactive: {e}")
-        
+
         keys_to_clear = ['current_session_id', 'page']
         for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
-
     @handle_api_errors("Authentication", "WordPress Login")
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
         if not self.config.WORDPRESS_URL:
