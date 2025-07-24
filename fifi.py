@@ -1244,7 +1244,7 @@ def render_browser_close_component(session_id: str):
         window.fifi_close_listener_added = true;
         
         const sessionId = '{session_id}';
-        const parentUrl = window.parent.location.origin + window.parent.location.pathname;
+        const parentUrl = window.location.origin + window.location.pathname;
         
         let saveTriggered = false;
 
