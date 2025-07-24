@@ -38,6 +38,7 @@ from streamlit_javascript import st_javascript
 # - All existing features preserved
 # - Complete error handling and validation
 # - Fixed timer return value issues
+# - ADDED: Enhanced debugging for beacon CRM save failures
 # =============================================================================
 
 # Setup logging
@@ -1179,107 +1180,145 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
         logger.error(f"❌ JavaScript timer execution error: {e}")
         return None
 
-def render_browser_close_component_with_message_fix(session_id: str):
+def enhanced_browser_close_beacon(session_id: str):
     """
-    FIXED browser close detection that prevents message channel errors.
-    NOTE: This implementation already correctly uses window.parent.location for the
-    emergency save beacon and attaches listeners to the parent, aligning with
-    best practices for stability and reliability.
+    Enhanced browser close detection with better URL handling and debugging
     """
     if not session_id:
         return
 
-    # Enhanced JavaScript with message channel error prevention
     js_code = f"""
     <script>
     (function() {{
-        const sessionKey = 'fifi_close_listener_' + '{session_id}';
+        const sessionKey = 'fifi_close_enhanced_' + '{session_id}';
         if (window[sessionKey]) return;
         window[sessionKey] = true;
         
         const sessionId = '{session_id}';
-        let parentUrl = '';
+        let saveTriggered = false;
         
-        // Enhanced URL detection using window.parent.location
-        try {{
-            parentUrl = window.parent.location.origin + window.parent.location.pathname;
-        }} catch (e) {{
+        function getAppUrl() {{
+            let appUrl = '';
+            
             try {{
-                parentUrl = window.location.origin + window.location.pathname;
-            }} catch (e2) {{
-                console.warn('FiFi: Cannot determine URL for emergency save');
-                return;
+                // Try to get main Streamlit app URL
+                appUrl = window.parent.location.origin + window.parent.location.pathname;
+                console.log("✅ Using main app URL:", appUrl);
+                return appUrl;
+            }} catch (e) {{
+                console.log("⚠️ Cannot access parent URL:", e);
+            }}
+            
+            try {{
+                // Fallback to current URL
+                appUrl = window.location.origin + window.location.pathname;
+                console.log("🔄 Using current URL as fallback:", appUrl);
+                return appUrl;
+            }} catch (e) {{
+                console.error("❌ Cannot determine any URL:", e);
+                return null;
             }}
         }}
-        
-        let saveTriggered = false;
 
         function sendEmergencySave() {{
-            if (saveTriggered) return;
+            if (saveTriggered) {{
+                console.log("⚠️ Emergency save already triggered, skipping");
+                return;
+            }}
+            
             saveTriggered = true;
-            console.log('🚨 FiFi: Browser close detected - emergency save');
+            console.log('🚨 FiFi: Browser close detected - starting emergency save');
             
-            const url = `${{parentUrl}}?event=close&session_id=${{sessionId}}`; 
+            const appUrl = getAppUrl();
+            if (!appUrl) {{
+                console.error("❌ Cannot send emergency save - no valid URL");
+                return;
+            }}
             
-            Promise.resolve().then(() => {{
-                try {{
-                    if (navigator.sendBeacon) {{
-                        navigator.sendBeacon(url);
-                        console.log('📡 FiFi: Emergency save beacon sent:', url);
-                    }} else {{
-                        const xhr = new XMLHttpRequest();
-                        xhr.open('GET', url, false);
-                        xhr.send();
-                    }}
-                }} catch (e) {{
-                    console.error('❌ FiFi: Emergency save failed:', e);
-                }}
-            }}).catch(e => console.error('❌ FiFi: Emergency save promise failed:', e));
+            const saveUrl = `${{appUrl}}?event=close&session_id=${{sessionId}}`;
+            console.log("📡 Sending emergency save to:", saveUrl);
             
-            return false;
-        }}
-        
-        // Monitor parent document's visibility state
-        function setupVisibilityListeners() {{
             try {{
-                if (window.parent && window.parent.document && window.parent.document !== document) {{
-                    window.parent.document.addEventListener('visibilitychange', () => {{
-                        if (window.parent.document.visibilityState === 'hidden') {{
-                            sendEmergencySave();
-                        }}
-                        return false;
-                    }}, {{ passive: true }});
+                if (navigator.sendBeacon) {{
+                    const success = navigator.sendBeacon(saveUrl);
+                    console.log('📡 FiFi: Emergency save beacon result:', success);
+                    
+                    if (!success) {{
+                        console.warn("⚠️ Beacon failed, trying XHR fallback");
+                        // Fallback to synchronous XHR
+                        const xhr = new XMLHttpRequest();
+                        xhr.open('GET', saveUrl, false);
+                        xhr.send();
+                        console.log('📡 FiFi: Emergency save XHR sent');
+                    }}
+                }} else {{
+                    console.log("📡 Beacon not available, using XHR");
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', saveUrl, false);
+                    xhr.send();
+                    console.log('📡 FiFi: Emergency save XHR sent');
                 }}
             }} catch (e) {{
-                console.debug('FiFi: Cannot access parent for visibility detection.');
+                console.error('❌ FiFi: Emergency save completely failed:', e);
             }}
         }}
         
-        // Monitor parent window's unload events
-        function setupUnloadListeners() {{
+        // Enhanced event listeners with detailed logging
+        function setupCloseDetection() {{
             const events = ['beforeunload', 'pagehide', 'unload'];
             
             events.forEach(eventType => {{
-                const handler = (event) => {{
-                    sendEmergencySave();
-                    return false;
-                }};
-                
+                // Main app listeners
                 try {{
                     if (window.parent && window.parent !== window) {{
-                        window.parent.addEventListener(eventType, handler, {{ capture: true, passive: false }});
+                        window.parent.addEventListener(eventType, () => {{
+                            console.log(`🚨 MAIN APP ${{eventType}} detected`);
+                            sendEmergencySave();
+                        }}, {{ capture: true, passive: true }});
+                        console.log(`✅ Added main app ${{eventType}} listener`);
                     }}
                 }} catch (e) {{
-                    console.debug(`FiFi: Cannot add parent ${{eventType}} listener.`);
+                    console.log(`⚠️ Cannot add main app ${{eventType}} listener:`, e);
                 }}
                 
-                window.addEventListener(eventType, handler, {{ capture: true, passive: false }});
+                // Component listeners (fallback)
+                try {{
+                    window.addEventListener(eventType, () => {{
+                        console.log(`🚨 Component ${{eventType}} detected`);
+                        sendEmergencySave();
+                    }}, {{ capture: true, passive: true }});
+                    console.log(`✅ Added component ${{eventType}} listener`);
+                }} catch (e) {{
+                    console.log(`⚠️ Cannot add component ${{eventType}} listener:`, e);
+                }}
             }});
+            
+            // Visibility change detection
+            try {{
+                if (window.parent && window.parent.document) {{
+                    window.parent.document.addEventListener('visibilitychange', () => {{
+                        if (window.parent.document.visibilityState === 'hidden') {{
+                            console.log('🚨 Main app hidden - triggering emergency save');
+                            sendEmergencySave();
+                        }}
+                    }}, {{ passive: true }});
+                    console.log('✅ Added main app visibility listener');
+                }}
+            }} catch (e) {{
+                console.log('⚠️ Cannot add main app visibility listener:', e);
+                // Fallback to component visibility
+                document.addEventListener('visibilitychange', () => {{
+                    if (document.visibilityState === 'hidden') {{
+                        console.log('🚨 Component hidden - triggering emergency save');
+                        sendEmergencySave();
+                    }}
+                }}, {{ passive: true }});
+                console.log('✅ Added component visibility listener (fallback)');
+            }}
         }}
         
-        setupVisibilityListeners();
-        setupUnloadListeners();
-        console.log('✅ FiFi: Browser close detection initialized safely for session:', sessionId.substring(0, 8));
+        setupCloseDetection();
+        console.log('✅ Enhanced browser close detection initialized for session:', sessionId.substring(0, 8));
     }})();
     </script>
     """
@@ -1287,7 +1326,7 @@ def render_browser_close_component_with_message_fix(session_id: str):
     try:
         st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
-        logger.error(f"Failed to render browser close component: {e}")
+        logger.error(f"Failed to render enhanced browser close component: {e}")
 
 def global_message_channel_error_handler():
     """
@@ -1319,7 +1358,6 @@ def global_message_channel_error_handler():
         st.components.v1.html(js_error_handler, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to initialize global error handler: {e}")
-
 
 def handle_timer_event(timer_result: Dict[str, Any], session_manager, session) -> bool:
     """
@@ -1426,7 +1464,6 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager, session) -
         logger.error(f"❌ Error processing timer event {event}: {e}", exc_info=True)
         st.error(f"⚠️ Timer event processing error: {str(e)}")
         return False
-
 
 def render_activity_status_indicator(session, session_manager):
     """
@@ -1822,6 +1859,72 @@ class SessionManager:
             st.warning("Cannot save to CRM: Missing email or chat messages")
 
 # =============================================================================
+# DEBUGGING AND DIAGNOSTIC TOOLS
+# =============================================================================
+
+def debug_zoho_configuration():
+    """
+    Debug function to check Zoho CRM configuration
+    Add this to your sidebar to diagnose CRM issues
+    """
+    
+    st.subheader("🔧 Zoho CRM Debug Panel")
+    
+    try:
+        session_manager = get_session_manager()
+        if not session_manager:
+            st.error("❌ Session manager not available")
+            return
+        
+        zoho = session_manager.zoho
+        
+        # Check configuration
+        st.write("**Configuration Status:**")
+        st.write(f"- Zoho Enabled: {zoho.config.ZOHO_ENABLED}")
+        st.write(f"- Client ID: {'✅ Set' if zoho.config.ZOHO_CLIENT_ID else '❌ Missing'}")
+        st.write(f"- Client Secret: {'✅ Set' if zoho.config.ZOHO_CLIENT_SECRET else '❌ Missing'}")
+        st.write(f"- Refresh Token: {'✅ Set' if zoho.config.ZOHO_REFRESH_TOKEN else '❌ Missing'}")
+        
+        if not zoho.config.ZOHO_ENABLED:
+            st.error("❌ Zoho CRM is not properly configured")
+            return
+        
+        # Test token generation
+        if st.button("🔑 Test Zoho Token"):
+            with st.spinner("Testing Zoho token..."):
+                try:
+                    token = zoho._get_access_token_with_timeout(force_refresh=True, timeout=10)
+                    if token:
+                        st.success("✅ Zoho token generated successfully")
+                        st.code(f"Token: {token[:20]}...")
+                    else:
+                        st.error("❌ Failed to generate Zoho token")
+                except Exception as e:
+                    st.error(f"❌ Token generation error: {str(e)}")
+        
+        # Test CRM save with current session
+        current_session = session_manager.get_session()
+        if current_session and current_session.user_type.value == "registered_user":
+            st.write("**Current Session:**")
+            st.write(f"- Email: {current_session.email}")
+            st.write(f"- Messages: {len(current_session.messages)}")
+            st.write(f"- Already saved: {current_session.timeout_saved_to_crm}")
+            
+            if current_session.email and current_session.messages:
+                if st.button("💾 Test Manual CRM Save"):
+                    try:
+                        success = zoho.save_chat_transcript_sync(current_session, "Manual Test Save")
+                        if success:
+                            st.success("✅ Manual CRM save successful!")
+                        else:
+                            st.error("❌ Manual CRM save failed")
+                    except Exception as e:
+                        st.error(f"❌ Manual save error: {str(e)}")
+        
+    except Exception as e:
+        st.error(f"❌ Debug panel error: {str(e)}")
+
+# =============================================================================
 # UI COMPONENTS
 # =============================================================================
 
@@ -1967,6 +2070,11 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat auto-saves after 2 min inactivity")
 
+        # Add the debug panel checkbox
+        st.divider()
+        if st.checkbox("🔧 Show Debug Panel"):
+            debug_zoho_configuration()
+
 def render_chat_interface_with_timer(session_manager, session):
     """
     FIXED chat interface with improved timer integration and error handling
@@ -1975,11 +2083,11 @@ def render_chat_interface_with_timer(session_manager, session):
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion")
     
-    # Add browser close detection with message channel fix
+    # Add the ENHANCED browser close detection beacon
     try:
-        render_browser_close_component_with_message_fix(session.session_id)
+        enhanced_browser_close_beacon(session.session_id)
     except Exception as e:
-        logger.error(f"Failed to render browser close component: {e}")
+        logger.error(f"Failed to render enhanced browser close component: {e}")
     
     # Show activity status for registered users
     try:
@@ -2161,39 +2269,115 @@ def ensure_initialization():
     
     return True
 
-def handle_save_requests():
-    """Handle save requests from browser close detection"""
-    query_params = st.query_params
+def enhanced_handle_save_requests():
+    """
+    ENHANCED version of handle_save_requests with comprehensive debugging
+    to diagnose why the beacon-triggered CRM save might be failing.
+    """
     
-    if query_params.get("event") == "close":
-        session_id = query_params.get("session_id")
-        if session_id:
-            logger.info(f"🚪 BROWSER CLOSE EVENT for session {session_id[:8]}...")
+    logger.info("🔍 Checking for save requests...")
+    
+    # Check for query parameters
+    query_params = st.query_params
+    logger.info(f"📋 All query params: {dict(query_params)}")
+    
+    # Look for the close event
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    
+    logger.info(f"🎯 Event: {event}, Session ID: {session_id}")
+    
+    if event == "close" and session_id:
+        logger.info("=" * 80)
+        logger.info("🚪 BROWSER CLOSE EVENT DETECTED")
+        logger.info(f"📍 Session ID: {session_id}")
+        logger.info("=" * 80)
+        
+        # Clear query params immediately to prevent loops
+        st.query_params.clear()
+        logger.info("🧹 Query params cleared")
+        
+        try:
+            # Get session manager
+            session_manager = get_session_manager()
+            if not session_manager:
+                logger.error("❌ Session manager not found")
+                st.stop()
+                return
             
-            # Clear query params
-            st.query_params.clear()
+            logger.info("✅ Session manager found")
             
-            try:
-                session_manager = get_session_manager()
-                if session_manager:
-                    session = session_manager.db.load_session(session_id)
-                    if (session and 
-                        session.user_type == UserType.REGISTERED_USER and 
-                        session.email and 
-                        session.messages):
-                        
-                        # Extend session life during save
-                        session.last_activity = datetime.now()
-                        session_manager.db.save_session(session)
-                        
-                        # Attempt emergency save
-                        success = session_manager.zoho.save_chat_transcript_sync(session, "Browser Close")
-                        logger.info(f"Browser close save result: {success}")
-                        
-            except Exception as e:
-                logger.error(f"Browser close save error: {e}", exc_info=True)
+            # Load the session
+            session = session_manager.db.load_session(session_id)
+            if not session:
+                logger.error(f"❌ Session {session_id[:8]} not found in database")
+                st.stop()
+                return
             
-            # Return empty response for beacon requests
+            logger.info(f"✅ Session loaded: {session_id[:8]}")
+            logger.info(f"   - User type: {session.user_type}")
+            logger.info(f"   - Email: {session.email}")
+            logger.info(f"   - Messages: {len(session.messages)}")
+            logger.info(f"   - Active: {session.active}")
+            logger.info(f"   - Already saved: {session.timeout_saved_to_crm}")
+            
+            # Check if session is eligible for save
+            if session.user_type.value != "registered_user":
+                logger.info(f"❌ Save skipped: Not a registered user (type: {session.user_type.value})")
+                st.stop()
+                return
+            
+            if not session.email:
+                logger.info("❌ Save skipped: No email address")
+                st.stop()
+                return
+            
+            if not session.messages:
+                logger.info("❌ Save skipped: No messages to save")
+                st.stop()
+                return
+            
+            if session.timeout_saved_to_crm:
+                logger.info("❌ Save skipped: Already saved to CRM")
+                st.stop()
+                return
+            
+            logger.info("✅ Session is eligible for emergency save")
+            
+            # Check Zoho configuration
+            if not session_manager.zoho.config.ZOHO_ENABLED:
+                logger.error("❌ Zoho CRM is not enabled (missing configuration)")
+                st.stop()
+                return
+            
+            logger.info("✅ Zoho CRM is enabled")
+            
+            # Extend session life during save to prevent timeout
+            session.last_activity = datetime.now()
+            session_manager.db.save_session(session)
+            logger.info("🔄 Extended session life for save operation")
+            
+            # Attempt the emergency save with detailed logging
+            logger.info("🚀 Starting emergency CRM save...")
+            success = session_manager.zoho.save_chat_transcript_sync(session, "Browser Close Emergency Save")
+            
+            if success:
+                logger.info("=" * 80)
+                logger.info("✅ EMERGENCY SAVE COMPLETED SUCCESSFULLY")
+                logger.info("=" * 80)
+            else:
+                logger.error("=" * 80)
+                logger.error("❌ EMERGENCY SAVE FAILED")
+                logger.error("=" * 80)
+                
+        except Exception as e:
+            logger.error("=" * 80)
+            logger.error("💥 EMERGENCY SAVE CRASHED")
+            logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
+            logger.error("=" * 80)
+            
+        finally:
+            # Always stop to prevent normal page load
             st.stop()
             
 # =============================================================================
@@ -2257,8 +2441,8 @@ def main():
     if not ensure_initialization():
         st.stop()
 
-    # Handle save requests (browser close, etc.)
-    handle_save_requests()
+    # Handle save requests from the browser close beacon with enhanced logging
+    enhanced_handle_save_requests()
 
     # Get session manager
     session_manager = get_session_manager()
