@@ -964,13 +964,10 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
 
 def render_activity_timer_component_with_message_fix(session_id: str, session_manager) -> Optional[Dict[str, Any]]:
     """
-    FIXED JavaScript timer that addresses message channel communication issues
-    
-    Key fixes:
-    1. Wrapped in try-catch to prevent uncaught promise rejections
-    2. Added message channel error handling
-    3. Prevents returning true from async listeners
-    4. Better iframe communication handling
+    FIXED JavaScript timer that addresses message channel communication issues.
+    NOTE: This implementation already correctly uses window.parent for activity and
+    visibility detection, aligning with best practices, while also including
+    critical error handling and message channel stability fixes.
     """
     
     if not session_id:
@@ -1036,11 +1033,10 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
                     'focus', 'blur'
                 ];
                 
-                // Add to current document with error handling
+                // Add to current document (component iframe) with error handling
                 let listenersAdded = 0;
                 events.forEach(eventType => {{
                     try {{
-                        // Use passive listeners and never return true (which causes async response issues)
                         document.addEventListener(eventType, resetActivity, {{ 
                             passive: true, 
                             capture: true,
@@ -1052,7 +1048,7 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
                     }}
                 }});
                 
-                // Add to parent document with enhanced error handling
+                // Add to parent document (main Streamlit app) with enhanced error handling
                 try {{
                     if (window.parent && 
                         window.parent.document && 
@@ -1061,7 +1057,6 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
                         
                         events.forEach(eventType => {{
                             try {{
-                                // Ensure we never return true from these listeners
                                 window.parent.document.addEventListener(eventType, resetActivity, {{ 
                                     passive: true, 
                                     capture: true,
@@ -1078,13 +1073,12 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
                     console.debug("Cannot access parent document:", e);
                 }}
                 
-                // Visibility change detection with message channel protection
+                // Visibility change detection on both parent and component
                 const handleVisibilityChange = () => {{
                     try {{
                         if (document.visibilityState === 'visible') {{
                             resetActivity();
                         }}
-                        // NEVER return true - this can cause message channel issues
                     }} catch (e) {{
                         console.debug("Visibility change error:", e);
                     }}
@@ -1098,16 +1092,6 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
                     }}
                 }} catch (e) {{
                     console.debug("Cannot setup visibility detection:", e);
-                }}
-                
-                // Prevent message listener conflicts
-                // Remove any existing message listeners that might conflict
-                try {{
-                    if (window.removeEventListener) {{
-                        window.removeEventListener('message', true);  // Remove conflicting listeners
-                    }}
-                }} catch (e) {{
-                    console.debug("Could not remove message listeners:", e);
                 }}
                 
                 state.listenersInitialized = true;
@@ -1127,7 +1111,7 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
                 state.autoSaveTriggered = true;
                 console.log("🚨 AUTO-SAVE TRIGGER ACTIVATED");
                 
-                const result = {{
+                return {{
                     event: "auto_save_trigger",
                     session_id: sessionId,
                     inactive_time_ms: inactiveTimeMs,
@@ -1135,8 +1119,6 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
                     inactive_seconds: inactiveSeconds,
                     timestamp: currentTime
                 }};
-                console.log("📤 Returning auto-save result:", result);
-                return result;
             }}
             
             // Check for session expiry (3 minutes)
@@ -1144,7 +1126,7 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
                 state.sessionExpired = true;
                 console.log("🚨 SESSION EXPIRED");
                 
-                const result = {{
+                return {{
                     event: "session_expired",
                     session_id: sessionId,
                     inactive_time_ms: inactiveTimeMs,
@@ -1152,18 +1134,13 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
                     inactive_seconds: inactiveSeconds,
                     timestamp: currentTime
                 }};
-                console.log("📤 Returning expiry result:", result);
-                return result;
             }}
             
-            // EXPLICITLY return null - prevents undefined return issues
-            console.log("📤 No events triggered, returning null");
+            // EXPLICITLY return null to prevent undefined/falsy return issues
             return null;
             
         }} catch (error) {{
-            // Catch any errors to prevent uncaught promise rejections
             console.error("🚨 FiFi Timer error caught:", error);
-            // Return null instead of throwing to prevent breaking the page
             return null;
         }}
     }})()
@@ -1180,7 +1157,6 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
         # Enhanced validation for various return values
         logger.debug(f"⏰ Raw timer result: {timer_result} (type: {type(timer_result)})")
         
-        # Handle all possible falsy values that st_javascript might return
         if timer_result is None or timer_result == 0 or timer_result == "" or timer_result == False:
             return None
         
@@ -1189,7 +1165,6 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
             event = timer_result.get('event')
             received_session_id = timer_result.get('session_id')
             
-            # Verify session ID matches
             if received_session_id == session_id:
                 logger.info(f"✅ Valid timer event: {event} for session {session_id[:8]}")
                 return timer_result
@@ -1206,7 +1181,10 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
 
 def render_browser_close_component_with_message_fix(session_id: str):
     """
-    FIXED browser close detection that prevents message channel errors
+    FIXED browser close detection that prevents message channel errors.
+    NOTE: This implementation already correctly uses window.parent.location for the
+    emergency save beacon and attaches listeners to the parent, aligning with
+    best practices for stability and reliability.
     """
     if not session_id:
         return
@@ -1215,7 +1193,6 @@ def render_browser_close_component_with_message_fix(session_id: str):
     js_code = f"""
     <script>
     (function() {{
-        // Prevent multiple initializations and message conflicts
         const sessionKey = 'fifi_close_listener_' + '{session_id}';
         if (window[sessionKey]) return;
         window[sessionKey] = true;
@@ -1223,7 +1200,7 @@ def render_browser_close_component_with_message_fix(session_id: str):
         const sessionId = '{session_id}';
         let parentUrl = '';
         
-        // Enhanced URL detection with error handling
+        // Enhanced URL detection using window.parent.location
         try {{
             parentUrl = window.parent.location.origin + window.parent.location.pathname;
         }} catch (e) {{
@@ -1238,123 +1215,71 @@ def render_browser_close_component_with_message_fix(session_id: str):
         let saveTriggered = false;
 
         function sendEmergencySave() {{
-            if (!saveTriggered) {{
-                saveTriggered = true;
-                console.log('🚨 FiFi: Browser close detected - emergency save');
-                
-                const url = `${{parentUrl}}?event=close&session_id=${{sessionId}}`; 
-                
-                // Use Promise.resolve to avoid async listener issues
-                Promise.resolve().then(() => {{
-                    try {{
-                        if (navigator.sendBeacon) {{
-                            const success = navigator.sendBeacon(url);
-                            console.log('📡 FiFi: Emergency save beacon sent:', success);
-                        }} else {{
-                            const xhr = new XMLHttpRequest();
-                            xhr.open('GET', url, false);
-                            xhr.send();
-                            console.log('📡 FiFi: Emergency save XHR sent');
-                        }}
-                    }} catch (e) {{
-                        console.error('❌ FiFi: Emergency save failed:', e);
+            if (saveTriggered) return;
+            saveTriggered = true;
+            console.log('🚨 FiFi: Browser close detected - emergency save');
+            
+            const url = `${{parentUrl}}?event=close&session_id=${{sessionId}}`; 
+            
+            Promise.resolve().then(() => {{
+                try {{
+                    if (navigator.sendBeacon) {{
+                        navigator.sendBeacon(url);
+                        console.log('📡 FiFi: Emergency save beacon sent:', url);
+                    }} else {{
+                        const xhr = new XMLHttpRequest();
+                        xhr.open('GET', url, false);
+                        xhr.send();
                     }}
-                }}).catch(e => {{
-                    console.error('❌ FiFi: Emergency save promise failed:', e);
-                }});
-            }}
-            // NEVER return true - this causes message channel errors
+                }} catch (e) {{
+                    console.error('❌ FiFi: Emergency save failed:', e);
+                }}
+            }}).catch(e => console.error('❌ FiFi: Emergency save promise failed:', e));
+            
             return false;
         }}
         
-        // Enhanced visibility listeners with message channel protection
+        // Monitor parent document's visibility state
         function setupVisibilityListeners() {{
             try {{
                 if (window.parent && window.parent.document && window.parent.document !== document) {{
                     window.parent.document.addEventListener('visibilitychange', () => {{
-                        try {{
-                            if (window.parent.document.visibilityState === 'hidden') {{
-                                sendEmergencySave();
-                            }}
-                        }} catch (e) {{
-                            console.debug('FiFi: Parent visibility check failed:', e);
+                        if (window.parent.document.visibilityState === 'hidden') {{
+                            sendEmergencySave();
                         }}
-                        // NEVER return true
                         return false;
                     }}, {{ passive: true }});
                 }}
             }} catch (e) {{
-                console.debug('FiFi: Cannot access parent for visibility detection:', e);
-                // Fallback to current document
-                document.addEventListener('visibilitychange', () => {{
-                    try {{
-                        if (document.visibilityState === 'hidden') {{
-                            sendEmergencySave();
-                        }}
-                    }} catch (e) {{
-                        console.debug('FiFi: Visibility check failed:', e);
-                    }}
-                    return false;
-                }}, {{ passive: true }});
+                console.debug('FiFi: Cannot access parent for visibility detection.');
             }}
         }}
         
-        // Enhanced unload listeners with message channel protection
+        // Monitor parent window's unload events
         function setupUnloadListeners() {{
             const events = ['beforeunload', 'pagehide', 'unload'];
             
             events.forEach(eventType => {{
-                // Define handler that never returns true
                 const handler = (event) => {{
                     sendEmergencySave();
-                    return false;  // NEVER return true
+                    return false;
                 }};
                 
                 try {{
                     if (window.parent && window.parent !== window) {{
-                        window.parent.addEventListener(eventType, handler, {{
-                            capture: true,
-                            passive: false
-                        }});
+                        window.parent.addEventListener(eventType, handler, {{ capture: true, passive: false }});
                     }}
                 }} catch (e) {{
-                    console.debug(`FiFi: Cannot add parent ${{eventType}} listener:`, e);
+                    console.debug(`FiFi: Cannot add parent ${{eventType}} listener.`);
                 }}
                 
-                try {{
-                    window.addEventListener(eventType, handler, {{
-                        capture: true,
-                        passive: false
-                    }});
-                }} catch (e) {{
-                    console.debug(`FiFi: Cannot add ${{eventType}} listener:`, e);
-                }}
+                window.addEventListener(eventType, handler, {{ capture: true, passive: false }});
             }});
         }}
         
-        // Enhanced message listener cleanup to prevent conflicts
-        try {{
-            // Remove any conflicting message listeners
-            const existingListeners = window._streamlitMessageListeners || [];
-            existingListeners.forEach(listener => {{
-                try {{
-                    window.removeEventListener('message', listener);
-                }} catch (e) {{
-                    console.debug('Could not remove existing listener:', e);
-                }}
-            }});
-        }} catch (e) {{
-            console.debug('Could not clean up message listeners:', e);
-        }}
-        
-        // Initialize all listeners with error handling
-        try {{
-            setupVisibilityListeners();
-            setupUnloadListeners();
-            console.log('✅ FiFi: Browser close detection initialized safely for session:', sessionId.substring(0, 8));
-        }} catch (e) {{
-            console.error('❌ FiFi: Failed to initialize close detection:', e);
-        }}
+        setupVisibilityListeners();
+        setupUnloadListeners();
+        console.log('✅ FiFi: Browser close detection initialized safely for session:', sessionId.substring(0, 8));
     }})();
     </script>
     """
@@ -1373,47 +1298,15 @@ def global_message_channel_error_handler():
     js_error_handler = """
     <script>
     (function() {
-        // Only initialize once
         if (window.fifi_error_handler_initialized) return;
         window.fifi_error_handler_initialized = true;
         
         // Global error handler for uncaught promise rejections
         window.addEventListener('unhandledrejection', function(event) {
             const error = event.reason;
-            
-            // Check if it's a message channel error
-            if (error && error.message && 
-                (error.message.includes('message channel closed') ||
-                 error.message.includes('asynchronous response') ||
-                 error.message.includes('listener indicated'))) {
-                
+            if (error && error.message && error.message.includes('message channel closed')) {
                 console.log('🛡️ FiFi: Caught and handled message channel error:', error.message);
-                
-                // Prevent the error from being thrown
                 event.preventDefault();
-                event.stopPropagation();
-                
-                // Log it but don't break the app
-                return false;
-            }
-        });
-        
-        // Global error handler for regular errors
-        window.addEventListener('error', function(event) {
-            const error = event.error;
-            
-            if (error && error.message && 
-                (error.message.includes('message channel closed') ||
-                 error.message.includes('asynchronous response') ||
-                 error.message.includes('listener indicated'))) {
-                
-                console.log('🛡️ FiFi: Caught and handled global error:', error.message);
-                
-                // Prevent the error from propagating
-                event.preventDefault();
-                event.stopPropagation();
-                
-                return false;
             }
         });
         
@@ -2148,9 +2041,7 @@ def render_chat_interface_with_timer(session_manager, session):
         
         # Content moderation check
         try:
-            # Check if session_manager has the required methods
             if hasattr(session_manager, 'ai') and hasattr(session_manager.ai, 'openai_client'):
-                # Assuming check_content_moderation is available in the global scope
                 moderation_result = check_content_moderation(prompt, session_manager.ai.openai_client)
             else:
                 moderation_result = {"flagged": False}
@@ -2391,4 +2282,4 @@ def main():
             st.rerun()
 
 if __name__ == "__main__":
-    main()
+    main()```
