@@ -2423,6 +2423,57 @@ def render_browser_close_component(session_id: str):
     """
     components.html(js_code, height=0, width=0)
 
+def render_forced_reload_component():
+    """Render component that forces page reload when session expires server-side"""
+    if st.session_state.get('force_reload_due_to_timeout', False):
+        timeout_message = st.session_state.get('timeout_message', 'Session expired')
+        
+        # Show blocking message
+        st.error(f"🔄 {timeout_message}")
+        st.error("⏳ Page will reload automatically in 2 seconds...")
+        
+        # Force reload with JavaScript
+        js_code = f"""
+        <script>
+        console.log('🚨 FORCED RELOAD: Session expired server-side');
+        console.log('Message: {timeout_message}');
+        
+        // Clear any existing timers
+        if (window.forceReloadTimer) clearTimeout(window.forceReloadTimer);
+        
+        // Force reload after 2 seconds
+        window.forceReloadTimer = setTimeout(function() {{
+            console.log('🔄 Executing forced page reload...');
+            window.location.reload(true); // Force reload from server
+        }}, 2000);
+        
+        // Also reload if user tries to interact
+        document.addEventListener('click', function(e) {{
+            e.preventDefault();
+            e.stopPropagation();
+            console.log('🔄 User interaction detected - forcing immediate reload');
+            window.location.reload(true);
+        }}, true);
+        
+        // Prevent form submissions
+        document.addEventListener('submit', function(e) {{
+            e.preventDefault();
+            console.log('🔄 Form submission blocked - forcing reload');
+            window.location.reload(true);
+        }}, true);
+        </script>
+        """
+        
+        components.html(js_code, height=0, width=0)
+        
+        # Clear the flag after rendering (prevents infinite loops)
+        del st.session_state.force_reload_due_to_timeout
+        if 'timeout_message' in st.session_state:
+            del st.session_state.timeout_message
+        
+        # Stop execution to prevent further rendering
+        st.stop()
+
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     with st.sidebar:
         st.title("🎛️ Dashboard")
@@ -2989,6 +3040,9 @@ def main():
 
     # 🔍 Handle save requests AFTER initialization
     handle_save_requests()
+
+    # 🚨 NEW: Check for forced reload due to session timeout
+    render_forced_reload_component()
 
     # Get session manager safely
     session_manager = get_session_manager()
