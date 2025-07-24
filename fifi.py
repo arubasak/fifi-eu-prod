@@ -486,7 +486,7 @@ class DatabaseManager:
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
-        """Load session with improved row handling for all database types"""
+        """Load session with improved compatibility for SQLite Cloud and local SQLite"""
         with self.lock:
             if self.db_type == "memory":
                 session = self.local_sessions.get(session_id)
@@ -494,8 +494,8 @@ class DatabaseManager:
                     session.user_type = UserType(session.user_type)
                 return session
 
-            # Set row_factory for ALL database types, not just file
-            if hasattr(self.conn, 'row_factory'):
+            # Only set row_factory for local file databases, NOT for SQLite Cloud
+            if self.db_type == "file" and hasattr(self.conn, 'row_factory'):
                 self.conn.row_factory = sqlite3.Row
             
             try:
@@ -505,36 +505,51 @@ class DatabaseManager:
                 if not row: 
                     return None
                 
-                # Handle row conversion more robustly
-                try:
-                    # Try to convert as sqlite3.Row first
-                    if hasattr(row, 'keys'):
-                        row_dict = dict(row)
-                    else:
-                        # Fallback: manually map column names to values
-                        # Get column names from cursor description
-                        column_names = [description[0] for description in cursor.description]
-                        row_dict = dict(zip(column_names, row))
-                except (TypeError, ValueError) as e:
-                    logger.error(f"Row conversion error: {e}")
-                    logger.error(f"Row type: {type(row)}, Row content: {row}")
+                # Handle different row types based on database type
+                if self.db_type == "file" and hasattr(row, 'keys'):
+                    # Local SQLite with sqlite3.Row
+                    row_dict = dict(row)
+                else:
+                    # SQLite Cloud or raw tuple - map manually using column positions
+                    # Standard column order from CREATE TABLE statement:
+                    # session_id, user_type, email, first_name, zoho_contact_id, 
+                    # guest_email_requested, created_at, last_activity, messages, 
+                    # active, wp_token, timeout_saved_to_crm
                     
-                    # Final fallback: assume standard column order
-                    row_dict = {
-                        'session_id': row[0] if len(row) > 0 else session_id,
-                        'user_type': row[1] if len(row) > 1 else 'guest',
-                        'email': row[2] if len(row) > 2 else None,
-                        'first_name': row[3] if len(row) > 3 else None,
-                        'zoho_contact_id': row[4] if len(row) > 4 else None,
-                        'guest_email_requested': row[5] if len(row) > 5 else 0,
-                        'created_at': row[6] if len(row) > 6 else datetime.now().isoformat(),
-                        'last_activity': row[7] if len(row) > 7 else datetime.now().isoformat(),
-                        'messages': row[8] if len(row) > 8 else '[]',
-                        'active': row[9] if len(row) > 9 else 1,
-                        'wp_token': row[10] if len(row) > 10 else None,
-                        'timeout_saved_to_crm': row[11] if len(row) > 11 else 0
-                    }
+                    if len(row) >= 12:  # Ensure we have all expected columns
+                        row_dict = {
+                            'session_id': row[0],
+                            'user_type': row[1],
+                            'email': row[2],
+                            'first_name': row[3],
+                            'zoho_contact_id': row[4],
+                            'guest_email_requested': row[5],
+                            'created_at': row[6],
+                            'last_activity': row[7],
+                            'messages': row[8],
+                            'active': row[9],
+                            'wp_token': row[10],
+                            'timeout_saved_to_crm': row[11]
+                        }
+                    else:
+                        # Fallback for incomplete rows
+                        logger.warning(f"Incomplete row data for session {session_id}: {len(row)} columns")
+                        row_dict = {
+                            'session_id': row[0] if len(row) > 0 else session_id,
+                            'user_type': row[1] if len(row) > 1 else 'guest',
+                            'email': row[2] if len(row) > 2 else None,
+                            'first_name': row[3] if len(row) > 3 else None,
+                            'zoho_contact_id': row[4] if len(row) > 4 else None,
+                            'guest_email_requested': row[5] if len(row) > 5 else 0,
+                            'created_at': row[6] if len(row) > 6 else datetime.now().isoformat(),
+                            'last_activity': row[7] if len(row) > 7 else datetime.now().isoformat(),
+                            'messages': row[8] if len(row) > 8 else '[]',
+                            'active': row[9] if len(row) > 9 else 1,
+                            'wp_token': row[10] if len(row) > 10 else None,
+                            'timeout_saved_to_crm': row[11] if len(row) > 11 else 0
+                        }
                 
+                # Validate and create UserSession
                 return UserSession(
                     session_id=row_dict['session_id'], 
                     user_type=UserType(row_dict['user_type']),
@@ -551,6 +566,7 @@ class DatabaseManager:
                 )
             except Exception as e:
                 logger.error(f"Failed to load session: {e}")
+                logger.error(f"Database type: {self.db_type}, Row type: {type(row) if 'row' in locals() else 'N/A'}")
                 return None
     
     def test_connection(self) -> bool:
