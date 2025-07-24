@@ -2568,24 +2568,9 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         st.markdown(f"**Messages:** {len(fresh_session.messages)}")
         st.markdown(f"**Session:** `{fresh_session.session_id[:8]}...`")
 
-        def add_debug_section():
-    """Add this to your sidebar to test the handler."""
-    with st.expander("🔍 Auto-Save Debug", expanded=False):
-        simple_test_button()
-        
-        st.write("**Current Session Info:**")
-        if 'session_manager' in st.session_state:
-            session_manager = st.session_state.session_manager
-            session = session_manager.get_session()
-            st.write(f"- Session ID: {session.session_id[:8]}...")
-            st.write(f"- User Type: {session.user_type}")
-            st.write(f"- Email: {session.email}")
-            st.write(f"- Messages: {len(session.messages)}")
-        else:
-            st.write("- Session manager not available")
             
         st.divider()
-        add_debug_section()
+        
         st.subheader("📊 System Status")
         
         if hasattr(st.session_state, 'ai_system'):
