@@ -2561,173 +2561,214 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
-        fresh_session = session_manager.get_session()
-
-        if fresh_session.user_type == UserType.REGISTERED_USER or fresh_session.user_type.value == "registered_user":
-            st.success("✅ **Authenticated User**") 
-            if fresh_session.first_name:
-                st.markdown(f"**Welcome:** {fresh_session.first_name}")
-            if fresh_session.email:
-                st.markdown(f"**Email:** {fresh_session.email}")
-                
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                if session_manager.zoho.config.ZOHO_ENABLED:
-                    if fresh_session.zoho_contact_id:
-                        st.success("🔗 **CRM Linked**")
-                    else:
-                        st.info("📋 **CRM Ready**")
-                else:
-                    st.caption("🚫 CRM Disabled")
+        # =============================================================================
+        # USER STATUS SECTION
+        # =============================================================================
+        if session.user_type == UserType.REGISTERED_USER or session.user_type.value == "registered_user":
+            st.success("✅ **Authenticated User**")
+            if session.first_name: 
+                st.markdown(f"**Welcome:** {session.first_name}")
+            if session.email: 
+                st.markdown(f"**Email:** {session.email}")
             
-            with col2:
-                if session_manager.zoho.config.ZOHO_ENABLED and fresh_session.email:
+            # CRM Status
+            if session_manager.zoho.config.ZOHO_ENABLED:
+                if session.zoho_contact_id: 
+                    st.success("🔗 **CRM Linked**")
+                else: 
+                    st.info("📋 **CRM Ready**")
+                if session.email: 
                     st.caption("💾 Auto-save ON")
+            else: 
+                st.caption("🚫 CRM Disabled")
             
-            if fresh_session.last_activity:
-                time_since_activity = datetime.now() - fresh_session.last_activity
-                timeout_minutes = session_manager.get_session_timeout_minutes()
-                
-                total_timeout_seconds = timeout_minutes * 60
-                seconds_elapsed = time_since_activity.total_seconds()
-                seconds_remaining = total_timeout_seconds - seconds_elapsed
-                
+            # Session timeout indicator
+            if session.last_activity:
+                seconds_remaining = (session_manager.get_session_timeout_minutes() * 60) - (datetime.now() - session.last_activity).total_seconds()
                 if seconds_remaining > 0:
-                    minutes_remaining = seconds_remaining / 60
-                    st.caption(f"⏱️ Auto-save & sign out in {minutes_remaining:.1f} minutes")
-                    render_auto_logout_component(
-                        timeout_seconds=int(seconds_remaining),
-                        session_id=fresh_session.session_id,
-                        session_manager=session_manager
-                    )
+                    st.caption(f"⏱️ Auto-save & sign out in {seconds_remaining / 60:.1f} minutes")
+                    render_auto_logout_component(int(seconds_remaining), session.session_id)
                 else:
                     st.caption("⏱️ Session will timeout on next interaction")
-                    render_auto_logout_component(
-                        timeout_seconds=2,
-                        session_id=fresh_session.session_id,
-                        session_manager=session_manager
-                    )
-                    
+                    render_auto_logout_component(2, session.session_id)
         else:
             st.info("👤 **Guest User**")
             st.markdown("*Sign in for full features*")
         
         st.divider()
         
-        st.markdown(f"**Messages:** {len(fresh_session.messages)}")
-        st.markdown(f"**Session:** `{fresh_session.session_id[:8]}...`")
+        # =============================================================================
+        # SESSION INFO SECTION
+        # =============================================================================
+        st.markdown(f"**Messages:** {len(session.messages)}")
+        st.markdown(f"**Session:** `{session.session_id[:8]}...`")
         
         st.divider()
+        
+        # =============================================================================
+        # SYSTEM STATUS SECTION (Enhanced with Database Testing)
+        # =============================================================================
         st.subheader("📊 System Status")
         
+        # AI Services Status
         if hasattr(st.session_state, 'ai_system'):
             ai = st.session_state.ai_system
-            st.write(f"**Pinecone KB:** {'✅' if ai.pinecone_tool else '❌'}")
-            st.write(f"**Web Search:** {'✅' if ai.tavily_agent else '❌'}")
-            st.write(f"**OpenAI:** {'✅' if ai.openai_client else '❌'}")
+            if ai:
+                st.write(f"**Pinecone KB:** {'✅' if ai.pinecone_tool else '❌'}")
+                st.write(f"**Web Search:** {'✅' if ai.tavily_agent else '❌'}")
+                st.write(f"**OpenAI:** {'✅' if ai.openai_client else '❌'}")
         
+        # Database Status with Testing
+        st.write("**Database Connection:**")
+        
+        # Show current database type
+        if hasattr(session_manager.db, 'db_type'):
+            db_type = session_manager.db.db_type
+            db_icons = {"cloud": "☁️", "file": "📁", "memory": "🧠"}
+            db_colors = {"cloud": "success", "file": "info", "memory": "warning"}
+            icon = db_icons.get(db_type, "❓")
+            
+            if db_type == "cloud":
+                st.success(f"{icon} SQLite Cloud (persistent)")
+            elif db_type == "file":
+                st.info(f"{icon} Local file (persistent locally)")
+            elif db_type == "memory":
+                st.warning(f"{icon} Memory only (non-persistent)")
+            else:
+                st.error(f"{icon} Unknown database type")
+        
+        # SQLite Cloud Test Button
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🧪 Test Cloud", use_container_width=True):
+                connection_string = st.secrets.get("SQLITE_CLOUD_CONNECTION")
+                if connection_string:
+                    try:
+                        import sqlitecloud
+                        with st.spinner("Testing connection..."):
+                            conn = sqlitecloud.connect(connection_string)
+                            conn.execute("SELECT 1").fetchone()
+                            conn.close()
+                        st.success("✅ SQLite Cloud OK!")
+                    except ImportError:
+                        st.error("❌ sqlitecloud library not installed")
+                        st.code("pip install sqlitecloud")
+                    except Exception as e:
+                        st.error(f"❌ Connection failed:")
+                        st.code(str(e))
+                else:
+                    st.error("❌ No SQLITE_CLOUD_CONNECTION in secrets")
+        
+        with col2:
+            if st.button("🔧 Test Local", use_container_width=True):
+                try:
+                    import sqlite3
+                    test_path = "test_connection.db"
+                    conn = sqlite3.connect(test_path, check_same_thread=False)
+                    conn.execute("SELECT 1").fetchone()
+                    conn.close()
+                    import os
+                    os.remove(test_path)
+                    st.success("✅ Local DB OK!")
+                except Exception as e:
+                    st.error(f"❌ Local test failed:")
+                    st.code(str(e))
+        
+        # Enhanced System Health Expander
         with st.expander("🚨 System Health"):
-            health_summary = error_handler.get_system_health_summary()
-            health_color = {"Healthy": "🟢", "Degraded": "🟡", "Critical": "🔴"}.get(health_summary["overall_health"], "❓")
-            st.write(f"**Overall:** {health_color} {health_summary['overall_health']}")
+            health = error_handler.get_system_health_summary()
+            color_map = {"Healthy": "🟢", "Degraded": "🟡", "Critical": "🔴"}
+            color = color_map.get(health["overall_health"], "❓")
+            st.write(f"**Overall:** {color} {health['overall_health']}")
             
             if error_handler.component_status:
                 st.write("**Components:**")
-                for component, status in error_handler.component_status.items():
-                    if status == "healthy":
-                        st.write(f"✅ {component}")
-                    else:
-                        st.write(f"❌ {component}")
-        
-        # Enhanced Zoho Diagnostics
-        with st.expander("🔧 Zoho Diagnostics", expanded=False):
-            if st.button("Run Zoho Diagnostic"):
-                # Test 1: Configuration
-                st.write("**1. Configuration Check:**")
-                config = session_manager.config
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write(f"Client ID: {'✅' if config.ZOHO_CLIENT_ID else '❌'}")
-                    st.write(f"Client Secret: {'✅' if config.ZOHO_CLIENT_SECRET else '❌'}")
-                with col2:
-                    st.write(f"Refresh Token: {'✅' if config.ZOHO_REFRESH_TOKEN else '❌'}")
-                    st.write(f"Zoho Enabled: {'✅' if config.ZOHO_ENABLED else '❌'}")
+                for c, s in error_handler.component_status.items():
+                    status_icon = '✅' if s == 'healthy' else '❌'
+                    st.write(f"{status_icon} {c}")
+            
+            # Database detailed info
+            if hasattr(session_manager, 'db'):
+                st.divider()
+                st.write("**Database Details:**")
+                if hasattr(session_manager.db, 'get_connection_status'):
+                    try:
+                        db_status = session_manager.db.get_connection_status()
+                        for key, value in db_status.items():
+                            if isinstance(value, bool):
+                                icon = "✅" if value else "❌"
+                                st.write(f"• {key}: {icon}")
+                            else:
+                                st.write(f"• {key}: {value}")
+                    except Exception as e:
+                        st.write(f"• Status check failed: {e}")
                 
-                # Test 2: Token Generation
-                st.write("\n**2. Token Test:**")
-                try:
-                    zoho = session_manager.zoho
-                    with st.spinner("Getting access token..."):
-                        token = zoho._get_access_token()
-                    if token:
-                        st.success(f"✅ Token obtained: {token[:20]}...")
+                # Connection test
+                if st.button("🔄 Test DB Connection", key="health_test_db"):
+                    if session_manager.db.test_connection():
+                        st.success("✅ Database connection test passed!")
                     else:
-                        st.error("❌ Failed to get token")
-                except Exception as e:
-                    st.error(f"❌ Token error: {str(e)}")
-                
-                # Test 3: Session State
-                st.write("\n**3. Current Session:**")
-                st.write(f"Session ID: {fresh_session.session_id[:8]}...")
-                st.write(f"Type: {fresh_session.user_type}")
-                st.write(f"Email: {fresh_session.email or 'None'}")
-                st.write(f"Messages: {len(fresh_session.messages)}")
-                
-                if st.button("Test Save Now"):
-                    if fresh_session.email and fresh_session.messages:
-                        with st.spinner("Testing save..."):
-                            try:
-                                session_manager._auto_save_to_crm(fresh_session, "Manual Test")
-                            except Exception as e:
-                                st.error(f"Save test failed: {str(e)}")
-                    else:
-                        st.warning("Need email and messages to test save")
+                        st.error("❌ Database connection test failed!")
         
         st.divider()
         
+        # =============================================================================
+        # ACTION BUTTONS SECTION
+        # =============================================================================
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🗑️ Clear Chat", use_container_width=True):
-                session_manager.clear_chat_history(fresh_session)
+                session_manager.clear_chat_history(session)
                 st.rerun()
-        
         with col2:
             if st.button("🚪 Sign Out", use_container_width=True):
-                session_manager.end_session(fresh_session)
+                session_manager.end_session(session)
                 st.rerun()
 
-        if (fresh_session.user_type == UserType.REGISTERED_USER or fresh_session.user_type.value == "registered_user") and fresh_session.messages:
+        # =============================================================================
+        # DOWNLOAD & SAVE SECTION (Authenticated Users)
+        # =============================================================================
+        if (session.user_type == UserType.REGISTERED_USER or session.user_type.value == "registered_user") and session.messages:
             st.divider()
             
-            pdf_buffer = pdf_exporter.generate_chat_pdf(fresh_session)
+            # PDF Download
+            pdf_buffer = pdf_exporter.generate_chat_pdf(session)
             if pdf_buffer:
                 st.download_button(
-                    label="📄 Download PDF", 
+                    label="📄 Download PDF",
                     data=pdf_buffer,
-                    file_name=f"fifi_chat_transcript_{fresh_session.session_id[:8]}.pdf",
-                    mime="application/pdf", 
+                    file_name=f"fifi_chat_transcript_{session.session_id[:8]}.pdf",
+                    mime="application/pdf",
                     use_container_width=True
                 )
             
-            if session_manager.zoho.config.ZOHO_ENABLED and fresh_session.email:
-                if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Chat will also auto-save when you sign out or after 2 minutes of inactivity"):
-                    session_manager.manual_save_to_crm(fresh_session)
-                    
+            # CRM Save (if enabled)
+            if session_manager.zoho.config.ZOHO_ENABLED and session.email:
+                if st.button("💾 Save to Zoho CRM", use_container_width=True):
+                    session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat auto-saves to CRM on sign out or timeout")
         
-        elif (fresh_session.user_type == UserType.GUEST or fresh_session.user_type.value == "guest") and fresh_session.messages:
+        # =============================================================================
+        # GUEST USER PROMPTS
+        # =============================================================================
+        elif (session.user_type == UserType.GUEST or session.user_type.value == "guest") and session.messages:
             st.divider()
             st.info("💡 **Sign in** to save chat history and export PDF!")
             if st.button("🔑 Go to Sign In", use_container_width=True):
                 if 'page' in st.session_state:
                     del st.session_state.page
                 st.rerun()
-
+        
         st.divider()
+        
+        # =============================================================================
+        # EXAMPLE QUERIES SECTION
+        # =============================================================================
         st.subheader("💡 Try These Queries")
+        
         example_queries = [
             "Find organic vanilla extract suppliers",
-            "Latest trends in plant-based proteins",
+            "Latest trends in plant-based proteins", 
             "Current cocoa prices and suppliers",
             "Sustainable packaging suppliers in Europe",
             "Clean label ingredient alternatives"
@@ -2736,6 +2777,73 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         for query in example_queries:
             if st.button(f"💬 {query}", key=f"example_{hash(query)}", use_container_width=True):
                 st.session_state.pending_query = query
+                st.rerun()
+        
+        # =============================================================================
+        # DEBUG SECTION (Optional - only show if debug mode enabled)
+        # =============================================================================
+        if st.session_state.get('debug_mode', False):
+            st.divider()
+            st.subheader("🔧 Debug Panel")
+            
+            with st.expander("📍 Database Location", expanded=False):
+                # Show where database file is stored
+                if hasattr(session_manager.db, 'db_path'):
+                    db_path = session_manager.db.db_path
+                    st.code(f"Database path: {db_path}")
+                    
+                    # Check if file exists
+                    import os
+                    if isinstance(db_path, str) and os.path.exists(db_path):
+                        stat = os.stat(db_path)
+                        st.write(f"📊 Size: {stat.st_size:,} bytes")
+                        st.write(f"🕐 Modified: {datetime.fromtimestamp(stat.st_mtime)}")
+                    else:
+                        st.write("File does not exist (using cloud or memory)")
+                
+                # Environment info
+                st.write("**Environment:**")
+                import os
+                env_indicators = {
+                    'STREAMLIT_SHARING_MODE': 'Streamlit Cloud (Legacy)',
+                    'STREAMLIT_CLOUD': 'Streamlit Cloud',
+                    'HEROKU': 'Heroku',
+                    'RAILWAY_ENVIRONMENT': 'Railway'
+                }
+                
+                detected_env = "Local Development"
+                for env_var, env_name in env_indicators.items():
+                    if os.getenv(env_var):
+                        detected_env = env_name
+                        break
+                
+                st.write(f"• Detected: {detected_env}")
+                st.write(f"• CWD: {os.getcwd()}")
+            
+            with st.expander("🔐 Secrets Check", expanded=False):
+                # Check which secrets are configured (without revealing values)
+                secrets_to_check = [
+                    'SQLITE_CLOUD_CONNECTION',
+                    'OPENAI_API_KEY', 
+                    'TAVILY_API_KEY',
+                    'PINECONE_API_KEY',
+                    'WORDPRESS_URL',
+                    'ZOHO_CLIENT_ID'
+                ]
+                
+                for secret in secrets_to_check:
+                    value = st.secrets.get(secret)
+                    status = "✅ Set" if value else "❌ Missing"
+                    st.write(f"• {secret}: {status}")
+            
+            # Toggle debug mode off
+            if st.button("🔒 Hide Debug Panel"):
+                st.session_state.debug_mode = False
+                st.rerun()
+        else:
+            # Show debug mode toggle
+            if st.button("🔧 Show Debug Panel", key="show_debug"):
+                st.session_state.debug_mode = True
                 st.rerun()
         
         # 🔍 DEBUG SECTION - ADD THIS AT THE END
