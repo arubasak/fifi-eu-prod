@@ -1077,15 +1077,15 @@ def render_browser_close_component(session_id: str):
             console.log('🚨 Browser close detected - triggering emergency save');
             
             try {{
-                const url = window.location.origin + window.location.pathname +
+                const url = window.parent.location.origin + window.parent.location.pathname +
                     `?session_id=${{sessionId}}&event=close`;
                 console.log('📡 Navigating to:', url);
-                window.location = url;
+                window.parent.location = url;
             }} catch (e) {{
                 try {{
-                    const url = window.parent.location.origin + window.parent.location.pathname +
+                    const url = window.location.origin + window.location.pathname +
                         `?session_id=${{sessionId}}&event=close`;
-                    window.parent.location = url;
+                    window.location = url;
                 }} catch (e2) {{
                     console.error('❌ All navigation methods failed:', e, e2);
                 }}
@@ -1715,14 +1715,24 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
     with st.sidebar:
         st.title("🎛️ Dashboard")
 
-        # --- ADDED DEBUG LOGGING HERE ---
+        # --- DEBUG LOGGING ---
         logger.info(f"DEBUG: Sidebar Conditional Check - Session ID: {session.session_id[:8]}")
-        logger.info(f"DEBUG: Sidebar Conditional Check - Current session.user_type: {session.user_type}")
-        logger.info(f"DEBUG: Sidebar Conditional Check - Comparison result (session.user_type == UserType.REGISTERED_USER): {session.user_type == UserType.REGISTERED_USER}")
-        # --- END DEBUG LOGGING ---
+        logger.info(f"DEBUG: Sidebar Conditional Check - Current session.user_type (raw): {session.user_type}")
+        logger.info(f"DEBUG: Sidebar Conditional Check - Type of session.user_type: {type(session.user_type)}")
+        
+        # --- ROBUST USER TYPE CHECK ---
+        is_registered = False
+        if isinstance(session.user_type, UserType):
+            is_registered = (session.user_type == UserType.REGISTERED_USER)
+        elif isinstance(session.user_type, str):
+            # Fallback check for string value, in case enum conversion hasn't fully propagated
+            is_registered = (session.user_type.lower() == UserType.REGISTERED_USER.value.lower())
+        
+        logger.info(f"DEBUG: Sidebar Conditional Check - Result of is_registered calculation: {is_registered}")
+        # --- END ROBUST CHECK & DEBUG LOGGING ---
         
         # User status
-        if session.user_type == UserType.REGISTERED_USER:
+        if is_registered: # Use the robust 'is_registered' flag here
             st.success("✅ **Authenticated User**")
             if session.first_name: 
                 st.markdown(f"**Welcome:** {session.first_name}")
@@ -1765,7 +1775,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 st.rerun()
 
         # Download & save section
-        if session.user_type == UserType.REGISTERED_USER and session.messages:
+        if is_registered and session.messages: # Use is_registered here too
             st.divider()
             
             # PDF Download
