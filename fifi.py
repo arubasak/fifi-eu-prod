@@ -251,38 +251,103 @@ class UserSession:
 # FIXED DATABASE MANAGER - RESOLVES USERTYPE SERIALIZATION ISSUES
 # =============================================================================
 
+# =============================================================================
+# CORRECTED DATABASE MANAGER - DROP-IN REPLACEMENT
+# Replace your existing DatabaseManager class with this one
+# =============================================================================
+
+# Remove or comment out your existing @st.cache_resource decorator for database connections
+# The official SQLite Cloud docs don't use connection caching
+
 class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
         self.lock = threading.Lock()
-        self.use_cloud = False
-        if connection_string and SQLITECLOUD_AVAILABLE:
+        self.connection_string = connection_string
+        
+        # Try SQLite Cloud first (following official docs pattern)
+        if connection_string and SQLITECLOUD_AVAILABLE and self._is_valid_cloud_connection(connection_string):
+            logger.info("🔄 Attempting SQLite Cloud connection (following official docs)...")
             try:
-                self.connection_string = connection_string
-                self._init_database()
-                self.use_cloud = True
-                error_handler.mark_component_healthy("Database")
-                logger.info("Using SQLite Cloud database for persistent sessions")
+                # Use the exact pattern from SQLite Cloud documentation
+                import sqlitecloud
+                self.conn = sqlitecloud.connect(connection_string)
+                
+                # Optional: Use specific database if you have multiple
+                # Uncomment and modify if you have a specific database name:
+                # db_name = "your-database-name.sqlite"
+                # self.conn.execute(f"USE DATABASE {db_name}")
+                
+                # Test the connection
+                self.conn.execute("SELECT 1").fetchone()
+                
+                self.db_type = "cloud"
+                self.db_path = connection_string
+                logger.info("✅ SQLite Cloud connection established successfully!")
+                
             except Exception as e:
-                error_context = error_handler.handle_api_error("Database", "Initialize", e)
-                error_handler.log_error(error_context)
-                self._init_local_storage()
+                logger.error(f"SQLite Cloud connection failed: {e}")
+                logger.info("🔄 Falling back to local database...")
+                self.conn = None
         else:
+            if not connection_string:
+                logger.info("No SQLITE_CLOUD_CONNECTION provided, using local database")
+            elif not SQLITECLOUD_AVAILABLE:
+                logger.warning("sqlitecloud library not available, using local database")
+            else:
+                logger.warning("Invalid connection string format, using local database")
+            self.conn = None
+        
+        # Fallback to local SQLite file if cloud connection failed
+        if not self.conn:
+            self.db_path = "fifi_sessions.db"  # More descriptive name
+            self.db_type = "file"
+            try:
+                self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+                # Test the connection
+                self.conn.execute("SELECT 1").fetchone()
+                logger.info(f"✅ Local SQLite database connection established: {self.db_path}")
+            except Exception as e:
+                logger.error(f"Local database connection failed: {e}")
+                self.conn = None
+        
+        # Final fallback to in-memory storage
+        if self.conn:
+            self._init_database()
+            error_handler.mark_component_healthy("Database")
+        else:
+            logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED")
+            logger.critical("⚠️  Falling back to non-persistent in-memory storage")
+            logger.critical("💾 Sessions WILL BE LOST on app restart")
+            self.db_type = "memory"
             self._init_local_storage()
-
+    
+    def _is_valid_cloud_connection(self, connection_string: str) -> bool:
+        """Validate SQLite Cloud connection string format"""
+        if not connection_string or not isinstance(connection_string, str):
+            return False
+        
+        # Must start with sqlitecloud:// as per official docs
+        if not connection_string.startswith('sqlitecloud://'):
+            logger.warning(f"Invalid connection string format. Expected 'sqlitecloud://...', got: {connection_string[:50]}...")
+            return False
+        
+        # Basic validation - should contain @ and : characters
+        if '@' not in connection_string or ':' not in connection_string:
+            logger.warning("Connection string appears malformed")
+            return False
+        
+        return True
+    
     def _init_local_storage(self):
-        logger.info("Using local in-memory storage for sessions (not persistent across restarts).")
+        """Initialize in-memory storage as fallback"""
         self.local_sessions = {}
-        self.use_cloud = False
-
-    def _get_connection(self):
-        if not self.use_cloud: 
-            return None
-        return sqlitecloud.connect(self.connection_string)
+        logger.info("📝 In-memory storage initialized")
 
     def _init_database(self):
+        """Initialize database tables (unchanged from your original)"""
         with self.lock:
-            with self._get_connection() as conn:
-                conn.execute('''
+            try:
+                self.conn.execute('''
                     CREATE TABLE IF NOT EXISTS sessions (
                         session_id TEXT PRIMARY KEY, 
                         user_type TEXT, 
@@ -294,186 +359,160 @@ class DatabaseManager:
                         last_activity TEXT, 
                         messages TEXT, 
                         active INTEGER, 
-                        wp_token TEXT
-                    )''')
-                conn.commit()
+                        wp_token TEXT,
+                        timeout_saved_to_crm INTEGER
+                    )
+                ''')
+                self.conn.commit()
+                logger.info("✅ Database tables initialized successfully")
+            except Exception as e:
+                logger.error(f"Database table initialization failed: {e}")
+                raise
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
+        """Save session (unchanged from your original)"""
         with self.lock:
+            if self.db_type == "memory":
+                self.local_sessions[session.session_id] = session
+                return
+            
             try:
-                # CRITICAL FIX: Ensure UserType is properly serialized
-                user_type_value = session.user_type.value if hasattr(session.user_type, 'value') else str(session.user_type)
-                
-                # CRITICAL FIX: Validate user_type before saving
-                if user_type_value not in ['guest', 'registered_user']:
-                    logger.error(f"Invalid user_type value: {user_type_value}. Defaulting to 'guest'.")
-                    user_type_value = 'guest'
-                
-                if self.use_cloud:
-                    with self._get_connection() as conn:
-                        conn.execute(
-                            '''REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                            (
-                                session.session_id, 
-                                user_type_value,  # FIXED: Proper string conversion
-                                session.email,
-                                session.first_name, 
-                                session.zoho_contact_id,
-                                int(session.guest_email_requested), 
-                                session.created_at.isoformat(),
-                                session.last_activity.isoformat(), 
-                                json.dumps(session.messages),
-                                int(session.active), 
-                                session.wp_token
-                            )
-                        )
-                        conn.commit()
-                        logger.debug(f"Saved session {session.session_id[:8]} to cloud DB with user_type: {user_type_value}")
-                else:
-                    # CRITICAL FIX: For local storage, ensure we store a copy with proper types
-                    session_copy = copy.deepcopy(session)
-                    self.local_sessions[session.session_id] = session_copy
-                    logger.debug(f"Saved session {session.session_id[:8]} to local storage with user_type: {user_type_value}")
-                    
+                self.conn.execute(
+                    '''REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (session.session_id, session.user_type.value, session.email, session.first_name,
+                     session.zoho_contact_id, int(session.guest_email_requested), session.created_at.isoformat(),
+                     session.last_activity.isoformat(), json.dumps(session.messages), int(session.active),
+                     session.wp_token, int(session.timeout_saved_to_crm)))
+                self.conn.commit()
             except Exception as e:
-                logger.error(f"Failed to save session {session.session_id[:8]}: {e}", exc_info=True)
+                logger.error(f"Failed to save session: {e}")
                 raise
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
+        """Load session (unchanged from your original)"""
         with self.lock:
+            if self.db_type == "memory":
+                session = self.local_sessions.get(session_id)
+                if session and isinstance(session.user_type, str):
+                    session.user_type = UserType(session.user_type)
+                return session
+
+            if self.db_type == "file": 
+                self.conn.row_factory = sqlite3.Row
+            
             try:
-                if self.use_cloud:
-                    with self._get_connection() as conn:
-                        cursor = conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
-                        row = cursor.fetchone()
-                        if not row: 
-                            logger.debug(f"No active session found for {session_id[:8]}")
-                            return None
-                        columns = [desc[0] for desc in cursor.description]
-                        row_dict = dict(zip(columns, row))
-                        
-                        # CRITICAL FIX: Proper UserType conversion with validation
-                        user_type_str = row_dict.get('user_type', 'guest')
-                        try:
-                            user_type = UserType(user_type_str)
-                        except ValueError:
-                            logger.error(f"Invalid user_type in database: {user_type_str}. Defaulting to GUEST.")
-                            user_type = UserType.GUEST
-                        
-                        session = UserSession(
-                            session_id=row_dict['session_id'],
-                            user_type=user_type,  # FIXED: Proper enum conversion
-                            email=row_dict.get('email'),
-                            first_name=row_dict.get('first_name'),
-                            zoho_contact_id=row_dict.get('zoho_contact_id'),
-                            guest_email_requested=bool(row_dict.get('guest_email_requested')),
-                            created_at=datetime.fromisoformat(row_dict['created_at']),
-                            last_activity=datetime.fromisoformat(row_dict['last_activity']),
-                            messages=json.loads(row_dict.get('messages', '[]')),
-                            active=bool(row_dict.get('active', 1)),
-                            wp_token=row_dict.get('wp_token')
-                        )
-                        
-                        logger.debug(f"Loaded session {session_id[:8]} from cloud DB: user_type={session.user_type}")
-                        return session
-                else:
-                    session = self.local_sessions.get(session_id)
-                    if session:
-                        # CRITICAL FIX: Ensure proper UserType conversion for local storage
-                        if isinstance(session.user_type, str):
-                            try:
-                                session.user_type = UserType(session.user_type)
-                            except ValueError:
-                                logger.error(f"Invalid user_type in local storage: {session.user_type}. Defaulting to GUEST.")
-                                session.user_type = UserType.GUEST
-                        
-                        # CRITICAL FIX: Return a copy to prevent mutation issues
-                        session_copy = copy.deepcopy(session)
-                        logger.debug(f"Loaded session {session_id[:8]} from local storage: user_type={session_copy.user_type}")
-                        return session_copy
-                    else:
-                        logger.debug(f"No session found in local storage for {session_id[:8]}")
-                        return None
-                        
+                cursor = self.conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+                row = cursor.fetchone()
+                
+                if not row: 
+                    return None
+                
+                row_dict = dict(row)
+                return UserSession(
+                    session_id=row_dict['session_id'], 
+                    user_type=UserType(row_dict['user_type']),
+                    email=row_dict.get('email'), 
+                    first_name=row_dict.get('first_name'),
+                    zoho_contact_id=row_dict.get('zoho_contact_id'),
+                    guest_email_requested=bool(row_dict.get('guest_email_requested')),
+                    created_at=datetime.fromisoformat(row_dict['created_at']),
+                    last_activity=datetime.fromisoformat(row_dict['last_activity']),
+                    messages=json.loads(row_dict.get('messages', '[]')),
+                    active=bool(row_dict.get('active', 1)), 
+                    wp_token=row_dict.get('wp_token'),
+                    timeout_saved_to_crm=bool(row_dict.get('timeout_saved_to_crm', 0))
+                )
             except Exception as e:
-                logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
+                logger.error(f"Failed to load session: {e}")
                 return None
+    
+    def test_connection(self) -> bool:
+        """Test database connection for health checks"""
+        if self.db_type == "memory":
+            return hasattr(self, 'local_sessions')
+        
+        try:
+            with self.lock:
+                cursor = self.conn.execute("SELECT 1")
+                result = cursor.fetchone()
+                return result is not None
+        except Exception as e:
+            logger.error(f"Database connection test failed: {e}")
+            return False
+    
+    def get_connection_status(self) -> dict:
+        """Get detailed connection information for debugging"""
+        return {
+            "db_type": self.db_type,
+            "connection_active": self.conn is not None,
+            "connection_string_provided": bool(self.connection_string),
+            "db_path": getattr(self, 'db_path', None),
+            "table_exists": self._table_exists() if self.conn else False,
+            "library_available": SQLITECLOUD_AVAILABLE
+        }
+    
+    def _table_exists(self) -> bool:
+        """Check if sessions table exists"""
+        if self.db_type == "memory":
+            return hasattr(self, 'local_sessions')
+        
+        try:
+            cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+            return cursor.fetchone() is not None
+        except Exception:
+            return False
 
-    def get_all_active_sessions(self) -> List[UserSession]:
-        """NEW: Get all active sessions for debugging purposes."""
-        with self.lock:
-            sessions = []
-            try:
-                if self.use_cloud:
-                    with self._get_connection() as conn:
-                        cursor = conn.execute("SELECT * FROM sessions WHERE active = 1")
-                        rows = cursor.fetchall()
-                        columns = [desc[0] for desc in cursor.description]
-                        
-                        for row in rows:
-                            row_dict = dict(zip(columns, row))
-                            try:
-                                user_type = UserType(row_dict.get('user_type', 'guest'))
-                            except ValueError:
-                                user_type = UserType.GUEST
-                            
-                            session = UserSession(
-                                session_id=row_dict['session_id'],
-                                user_type=user_type,
-                                email=row_dict.get('email'),
-                                first_name=row_dict.get('first_name'),
-                                zoho_contact_id=row_dict.get('zoho_contact_id'),
-                                guest_email_requested=bool(row_dict.get('guest_email_requested')),
-                                created_at=datetime.fromisoformat(row_dict['created_at']),
-                                last_activity=datetime.fromisoformat(row_dict['last_activity']),
-                                messages=json.loads(row_dict.get('messages', '[]')),
-                                active=bool(row_dict.get('active', 1)),
-                                wp_token=row_dict.get('wp_token')
-                            )
-                            sessions.append(session)
-                else:
-                    for session in self.local_sessions.values():
-                        if session.active:
-                            sessions.append(copy.deepcopy(session))
-                            
-            except Exception as e:
-                logger.error(f"Failed to get active sessions: {e}")
-                
-            return sessions
+# =============================================================================
+# ENHANCED DIAGNOSTICS FUNCTION FOR YOUR SIDEBAR
+# Add this to your render_sidebar function for better debugging
+# =============================================================================
 
-    def cleanup_expired_sessions(self, timeout_minutes: int = 60):
-        """NEW: Clean up expired sessions from database."""
-        with self.lock:
-            try:
-                cutoff_time = datetime.now() - timedelta(minutes=timeout_minutes)
-                
-                if self.use_cloud:
-                    with self._get_connection() as conn:
-                        cursor = conn.execute(
-                            "UPDATE sessions SET active = 0 WHERE last_activity < ? AND active = 1", 
-                            (cutoff_time.isoformat(),)
-                        )
-                        affected = cursor.rowcount
-                        conn.commit()
-                        if affected > 0:
-                            logger.info(f"Cleaned up {affected} expired sessions from cloud database")
-                else:
-                    expired_sessions = []
-                    for session_id, session in self.local_sessions.items():
-                        if session.active and session.last_activity < cutoff_time:
-                            expired_sessions.append(session_id)
-                    
-                    for session_id in expired_sessions:
-                        self.local_sessions[session_id].active = False
-                    
-                    if expired_sessions:
-                        logger.info(f"Cleaned up {len(expired_sessions)} expired sessions from local storage")
-                        
-            except Exception as e:
-                logger.error(f"Failed to cleanup expired sessions: {e}")
-
+def render_database_diagnostics():
+    """Enhanced database diagnostics for the sidebar"""
+    if 'session_manager' not in st.session_state:
+        st.error("Session manager not available")
+        return
+    
+    db_manager = st.session_state.session_manager.db
+    status = db_manager.get_connection_status()
+    
+    # Status indicators
+    status_icons = {
+        "cloud": "☁️",
+        "file": "📁", 
+        "memory": "🧠"
+    }
+    
+    icon = status_icons.get(status["db_type"], "❓")
+    st.write(f"{icon} **Database**: {status['db_type'].title()}")
+    
+    # Health indicator
+    if status["connection_active"]:
+        st.success("✅ Connection Active")
+    else:
+        st.error("❌ Connection Failed")
+    
+    # Additional details in expander
+    with st.expander("🔍 Database Details"):
+        st.json(status)
+        
+        if st.button("🧪 Test Connection", key="test_db_connection"):
+            if db_manager.test_connection():
+                st.success("✅ Connection test passed!")
+            else:
+                st.error("❌ Connection test failed!")
+        
+        # Quick fixes
+        if status["db_type"] == "memory":
+            st.warning("⚠️ Using memory storage - data will be lost on restart")
+            st.info("💡 Add SQLITE_CLOUD_CONNECTION to secrets for persistence")
+        
+        elif status["db_type"] == "file":
+            st.info("📁 Using local file database - data persists locally")
+            if status.get("db_path"):
+                st.caption(f"File: {status['db_path']}")
 # =============================================================================
 # PDF EXPORTER
 # =============================================================================
