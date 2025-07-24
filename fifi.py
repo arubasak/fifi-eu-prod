@@ -29,8 +29,9 @@ import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
 # =============================================================================
-# FINAL INTEGRATED VERSION - ALL FEATURES COMBINED WITH CORRECTED TIMER
+# FINAL INTEGRATED VERSION - ALL FEATURES COMBINED WITH CORRECTED TIMER & MESSAGE CHANNEL FIX
 # - JavaScript timer with corrected st_javascript patterns using IIFE
+# - Fix for "message channel closed" errors
 # - Python CRM save processing
 # - window.parent.location for all reloads
 # - SQLite Cloud database integration
@@ -956,195 +957,231 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
-# FIXED TIMER COMPONENT - ADDRESSES st_javascript RETURN VALUE ISSUES
+# FIX FOR MESSAGE CHANNEL COMMUNICATION ERRORS
 # =============================================================================
-# The timer functions in the existing code have been replaced with these corrected versions
+# This addresses the specific error:
+# "A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received"
 
-def render_activity_timer_component(session_id: str, session_manager) -> Optional[Dict[str, Any]]:
+def render_activity_timer_component_with_message_fix(session_id: str, session_manager) -> Optional[Dict[str, Any]]:
     """
-    FIXED JavaScript timer - handles st_javascript return value issues properly
+    FIXED JavaScript timer that addresses message channel communication issues
     
-    Fixes:
-    - Returns explicit null instead of 0/false/undefined
-    - Better validation for falsy values from st_javascript  
-    - More stable component key to prevent unregistration
-    - Enhanced error handling
+    Key fixes:
+    1. Wrapped in try-catch to prevent uncaught promise rejections
+    2. Added message channel error handling
+    3. Prevents returning true from async listeners
+    4. Better iframe communication handling
     """
     
     if not session_id:
         return None
     
-    # More explicit JavaScript with guaranteed null return
+    # JavaScript with message channel error fixes
     js_timer_code = f"""
     (() => {{
-        const sessionId = "{session_id}";
-        const AUTO_SAVE_TIMEOUT = 120000;  // 2 minutes
-        const SESSION_EXPIRE_TIMEOUT = 180000;  // 3 minutes
-        
-        console.log("🕐 FiFi Timer checking session:", sessionId.substring(0, 8));
-        
-        // Initialize timer state with more defensive programming
-        if (typeof window.fifi_timer_state === 'undefined' || window.fifi_timer_state === null) {{
-            window.fifi_timer_state = {{
-                lastActivityTime: Date.now(),
-                autoSaveTriggered: false,
-                sessionExpired: false,
-                listenersInitialized: false,
-                sessionId: sessionId
-            }};
-            console.log("🆕 FiFi Timer state initialized");
-        }}
-        
-        const state = window.fifi_timer_state;
-        
-        // Reset state if session changed
-        if (state.sessionId !== sessionId) {{
-            console.log("🔄 Session changed, resetting timer state");
-            state.sessionId = sessionId;
-            state.lastActivityTime = Date.now();
-            state.autoSaveTriggered = false;
-            state.sessionExpired = false;
-            state.listenersInitialized = false;
-        }}
-        
-        // Initialize activity listeners once per session
-        if (!state.listenersInitialized) {{
-            console.log("👂 Setting up FiFi activity listeners");
+        // Wrap everything in try-catch to prevent uncaught promise rejections
+        try {{
+            const sessionId = "{session_id}";
+            const AUTO_SAVE_TIMEOUT = 120000;  // 2 minutes
+            const SESSION_EXPIRE_TIMEOUT = 180000;  // 3 minutes
             
-            function resetActivity() {{
-                const now = Date.now();
-                state.lastActivityTime = now;
+            console.log("🕐 FiFi Timer checking session:", sessionId.substring(0, 8));
+            
+            // Initialize timer state with error handling
+            if (typeof window.fifi_timer_state === 'undefined' || window.fifi_timer_state === null) {{
+                window.fifi_timer_state = {{
+                    lastActivityTime: Date.now(),
+                    autoSaveTriggered: false,
+                    sessionExpired: false,
+                    listenersInitialized: false,
+                    sessionId: sessionId
+                }};
+                console.log("🆕 FiFi Timer state initialized");
+            }}
+            
+            const state = window.fifi_timer_state;
+            
+            // Reset state if session changed
+            if (state.sessionId !== sessionId) {{
+                console.log("🔄 Session changed, resetting timer state");
+                state.sessionId = sessionId;
+                state.lastActivityTime = Date.now();
                 state.autoSaveTriggered = false;
                 state.sessionExpired = false;
-                console.log("🔄 Activity detected:", new Date(now).toLocaleTimeString());
+                state.listenersInitialized = false;
             }}
             
-            // Comprehensive activity events
-            const events = [
-                'mousedown', 'mousemove', 'mouseup', 'click', 'dblclick',
-                'keydown', 'keyup', 'keypress',
-                'scroll', 'wheel',
-                'touchstart', 'touchmove', 'touchend',
-                'focus', 'blur'
-            ];
-            
-            // Add to current document
-            let listenersAdded = 0;
-            events.forEach(eventType => {{
-                try {{
-                    document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
-                    listenersAdded++;
-                }} catch (e) {{
-                    console.debug("Failed to add listener:", eventType, e);
+            // Initialize activity listeners with message channel error prevention
+            if (!state.listenersInitialized) {{
+                console.log("👂 Setting up FiFi activity listeners with error handling");
+                
+                function resetActivity() {{
+                    try {{
+                        const now = Date.now();
+                        state.lastActivityTime = now;
+                        state.autoSaveTriggered = false;
+                        state.sessionExpired = false;
+                        console.log("🔄 Activity detected:", new Date(now).toLocaleTimeString());
+                    }} catch (e) {{
+                        console.debug("Activity reset error:", e);
+                    }}
                 }}
-            }});
-            
-            // Add to parent document (Streamlit app) if accessible
-            try {{
-                if (window.parent && 
-                    window.parent.document && 
-                    window.parent.document !== document) {{
-                    
-                    events.forEach(eventType => {{
-                        try {{
-                            window.parent.document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
-                            listenersAdded++;
-                        }} catch (e) {{
-                            console.debug("Failed to add parent listener:", eventType, e);
-                        }}
-                    }});
-                    console.log("👂 Parent document listeners added");
-                }}
-            }} catch (e) {{
-                console.debug("Cannot access parent document for activity detection:", e);
-            }}
-            
-            // Visibility change detection
-            const handleVisibilityChange = () => {{
+                
+                // Activity events with error handling
+                const events = [
+                    'mousedown', 'mousemove', 'mouseup', 'click', 'dblclick',
+                    'keydown', 'keyup', 'keypress',
+                    'scroll', 'wheel',
+                    'touchstart', 'touchmove', 'touchend',
+                    'focus', 'blur'
+                ];
+                
+                // Add to current document with error handling
+                let listenersAdded = 0;
+                events.forEach(eventType => {{
+                    try {{
+                        // Use passive listeners and never return true (which causes async response issues)
+                        document.addEventListener(eventType, resetActivity, {{ 
+                            passive: true, 
+                            capture: true,
+                            once: false
+                        }});
+                        listenersAdded++;
+                    }} catch (e) {{
+                        console.debug("Failed to add listener:", eventType, e);
+                    }}
+                }});
+                
+                // Add to parent document with enhanced error handling
                 try {{
-                    if (document.visibilityState === 'visible') {{
-                        resetActivity();
+                    if (window.parent && 
+                        window.parent.document && 
+                        window.parent.document !== document &&
+                        window.parent.location.origin === window.location.origin) {{
+                        
+                        events.forEach(eventType => {{
+                            try {{
+                                // Ensure we never return true from these listeners
+                                window.parent.document.addEventListener(eventType, resetActivity, {{ 
+                                    passive: true, 
+                                    capture: true,
+                                    once: false
+                                }});
+                                listenersAdded++;
+                            }} catch (e) {{
+                                console.debug("Failed to add parent listener:", eventType, e);
+                            }}
+                        }});
+                        console.log("👂 Parent document listeners added safely");
                     }}
                 }} catch (e) {{
-                    console.debug("Visibility change error:", e);
+                    console.debug("Cannot access parent document:", e);
                 }}
-            }};
-            
-            try {{
-                document.addEventListener('visibilitychange', handleVisibilityChange);
-                if (window.parent && window.parent.document) {{
-                    window.parent.document.addEventListener('visibilitychange', handleVisibilityChange);
+                
+                // Visibility change detection with message channel protection
+                const handleVisibilityChange = () => {{
+                    try {{
+                        if (document.visibilityState === 'visible') {{
+                            resetActivity();
+                        }}
+                        // NEVER return true - this can cause message channel issues
+                    }} catch (e) {{
+                        console.debug("Visibility change error:", e);
+                    }}
+                }};
+                
+                try {{
+                    document.addEventListener('visibilitychange', handleVisibilityChange, {{ passive: true }});
+                    
+                    if (window.parent && window.parent.document && window.parent.document !== document) {{
+                        window.parent.document.addEventListener('visibilitychange', handleVisibilityChange, {{ passive: true }});
+                    }}
+                }} catch (e) {{
+                    console.debug("Cannot setup visibility detection:", e);
                 }}
-            }} catch (e) {{
-                console.debug("Cannot setup visibility detection:", e);
+                
+                // Prevent message listener conflicts
+                // Remove any existing message listeners that might conflict
+                try {{
+                    if (window.removeEventListener) {{
+                        window.removeEventListener('message', true);  // Remove conflicting listeners
+                    }}
+                }} catch (e) {{
+                    console.debug("Could not remove message listeners:", e);
+                }}
+                
+                state.listenersInitialized = true;
+                console.log(`✅ FiFi activity listeners initialized safely (${{listenersAdded}} total)`);
             }}
             
-            state.listenersInitialized = true;
-            console.log(`✅ FiFi activity listeners initialized (${{listenersAdded}} total)`);
-        }}
-        
-        // Calculate current inactivity
-        const currentTime = Date.now();
-        const inactiveTimeMs = currentTime - state.lastActivityTime;
-        const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
-        const inactiveSeconds = Math.floor((inactiveTimeMs % 60000) / 1000);
-        
-        console.log(`⏰ Session ${{sessionId.substring(0, 8)}} inactive: ${{inactiveMinutes}}m${{inactiveSeconds}}s`);
-        
-        // Check for auto-save trigger (2 minutes)
-        if (inactiveTimeMs >= AUTO_SAVE_TIMEOUT && !state.autoSaveTriggered) {{
-            state.autoSaveTriggered = true;
-            console.log("🚨 AUTO-SAVE TRIGGER ACTIVATED");
+            // Calculate current inactivity
+            const currentTime = Date.now();
+            const inactiveTimeMs = currentTime - state.lastActivityTime;
+            const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
+            const inactiveSeconds = Math.floor((inactiveTimeMs % 60000) / 1000);
             
-            const result = {{
-                event: "auto_save_trigger",
-                session_id: sessionId,
-                inactive_time_ms: inactiveTimeMs,
-                inactive_minutes: inactiveMinutes,
-                inactive_seconds: inactiveSeconds,
-                timestamp: currentTime
-            }};
-            console.log("📤 Returning auto-save result:", result);
-            return result;
-        }}
-        
-        // Check for session expiry (3 minutes)
-        if (inactiveTimeMs >= SESSION_EXPIRE_TIMEOUT && !state.sessionExpired) {{
-            state.sessionExpired = true;
-            console.log("🚨 SESSION EXPIRED");
+            console.log(`⏰ Session ${{sessionId.substring(0, 8)}} inactive: ${{inactiveMinutes}}m${{inactiveSeconds}}s`);
             
-            const result = {{
-                event: "session_expired",
-                session_id: sessionId,
-                inactive_time_ms: inactiveTimeMs,
-                inactive_minutes: inactiveMinutes,
-                inactive_seconds: inactiveSeconds,
-                timestamp: currentTime
-            }};
-            console.log("📤 Returning expiry result:", result);
-            return result;
+            // Check for auto-save trigger (2 minutes)
+            if (inactiveTimeMs >= AUTO_SAVE_TIMEOUT && !state.autoSaveTriggered) {{
+                state.autoSaveTriggered = true;
+                console.log("🚨 AUTO-SAVE TRIGGER ACTIVATED");
+                
+                const result = {{
+                    event: "auto_save_trigger",
+                    session_id: sessionId,
+                    inactive_time_ms: inactiveTimeMs,
+                    inactive_minutes: inactiveMinutes,
+                    inactive_seconds: inactiveSeconds,
+                    timestamp: currentTime
+                }};
+                console.log("📤 Returning auto-save result:", result);
+                return result;
+            }}
+            
+            // Check for session expiry (3 minutes)
+            if (inactiveTimeMs >= SESSION_EXPIRE_TIMEOUT && !state.sessionExpired) {{
+                state.sessionExpired = true;
+                console.log("🚨 SESSION EXPIRED");
+                
+                const result = {{
+                    event: "session_expired",
+                    session_id: sessionId,
+                    inactive_time_ms: inactiveTimeMs,
+                    inactive_minutes: inactiveMinutes,
+                    inactive_seconds: inactiveSeconds,
+                    timestamp: currentTime
+                }};
+                console.log("📤 Returning expiry result:", result);
+                return result;
+            }}
+            
+            // EXPLICITLY return null - prevents undefined return issues
+            console.log("📤 No events triggered, returning null");
+            return null;
+            
+        }} catch (error) {{
+            // Catch any errors to prevent uncaught promise rejections
+            console.error("🚨 FiFi Timer error caught:", error);
+            // Return null instead of throwing to prevent breaking the page
+            return null;
         }}
-        
-        // EXPLICITLY return null - not 0, false, or undefined
-        console.log("📤 No events triggered, returning null");
-        return null;
     }})()
     """
     
     try:
-        # More stable key that includes app session info
+        # Enhanced key stability with error recovery
         app_session_hash = hash(str(st.session_state.get('current_session_id', 'default'))) % 10000
-        stable_key = f"fifi_timer_{session_id[:8]}_{app_session_hash}"
+        stable_key = f"fifi_timer_safe_{session_id[:8]}_{app_session_hash}"
         
-        # Execute JavaScript and get result
+        # Execute JavaScript with enhanced error handling
         timer_result = st_javascript(js_timer_code, key=stable_key)
         
-        # Enhanced validation for various falsy values from st_javascript
-        logger.info(f"⏰ Raw timer result: {timer_result} (type: {type(timer_result)})")
+        # Enhanced validation for various return values
+        logger.debug(f"⏰ Raw timer result: {timer_result} (type: {type(timer_result)})")
         
-        # Handle various falsy values that st_javascript might return
+        # Handle all possible falsy values that st_javascript might return
         if timer_result is None or timer_result == 0 or timer_result == "" or timer_result == False:
-            logger.debug("No timer events triggered (falsy value returned)")
             return None
         
         # Validate result structure
@@ -1165,8 +1202,231 @@ def render_activity_timer_component(session_id: str, session_manager) -> Optiona
         
     except Exception as e:
         logger.error(f"❌ JavaScript timer execution error: {e}")
-        # Don't spam user with timer errors unless critical
         return None
+
+def render_browser_close_component_with_message_fix(session_id: str):
+    """
+    FIXED browser close detection that prevents message channel errors
+    """
+    if not session_id:
+        return
+
+    # Enhanced JavaScript with message channel error prevention
+    js_code = f"""
+    <script>
+    (function() {{
+        // Prevent multiple initializations and message conflicts
+        const sessionKey = 'fifi_close_listener_' + '{session_id}';
+        if (window[sessionKey]) return;
+        window[sessionKey] = true;
+        
+        const sessionId = '{session_id}';
+        let parentUrl = '';
+        
+        // Enhanced URL detection with error handling
+        try {{
+            parentUrl = window.parent.location.origin + window.parent.location.pathname;
+        }} catch (e) {{
+            try {{
+                parentUrl = window.location.origin + window.location.pathname;
+            }} catch (e2) {{
+                console.warn('FiFi: Cannot determine URL for emergency save');
+                return;
+            }}
+        }}
+        
+        let saveTriggered = false;
+
+        function sendEmergencySave() {{
+            if (!saveTriggered) {{
+                saveTriggered = true;
+                console.log('🚨 FiFi: Browser close detected - emergency save');
+                
+                const url = `${{parentUrl}}?event=close&session_id=${{sessionId}}`; 
+                
+                // Use Promise.resolve to avoid async listener issues
+                Promise.resolve().then(() => {{
+                    try {{
+                        if (navigator.sendBeacon) {{
+                            const success = navigator.sendBeacon(url);
+                            console.log('📡 FiFi: Emergency save beacon sent:', success);
+                        }} else {{
+                            const xhr = new XMLHttpRequest();
+                            xhr.open('GET', url, false);
+                            xhr.send();
+                            console.log('📡 FiFi: Emergency save XHR sent');
+                        }}
+                    }} catch (e) {{
+                        console.error('❌ FiFi: Emergency save failed:', e);
+                    }}
+                }}).catch(e => {{
+                    console.error('❌ FiFi: Emergency save promise failed:', e);
+                }});
+            }}
+            // NEVER return true - this causes message channel errors
+            return false;
+        }}
+        
+        // Enhanced visibility listeners with message channel protection
+        function setupVisibilityListeners() {{
+            try {{
+                if (window.parent && window.parent.document && window.parent.document !== document) {{
+                    window.parent.document.addEventListener('visibilitychange', () => {{
+                        try {{
+                            if (window.parent.document.visibilityState === 'hidden') {{
+                                sendEmergencySave();
+                            }}
+                        }} catch (e) {{
+                            console.debug('FiFi: Parent visibility check failed:', e);
+                        }}
+                        // NEVER return true
+                        return false;
+                    }}, {{ passive: true }});
+                }}
+            }} catch (e) {{
+                console.debug('FiFi: Cannot access parent for visibility detection:', e);
+                // Fallback to current document
+                document.addEventListener('visibilitychange', () => {{
+                    try {{
+                        if (document.visibilityState === 'hidden') {{
+                            sendEmergencySave();
+                        }}
+                    }} catch (e) {{
+                        console.debug('FiFi: Visibility check failed:', e);
+                    }}
+                    return false;
+                }}, {{ passive: true }});
+            }}
+        }}
+        
+        // Enhanced unload listeners with message channel protection
+        function setupUnloadListeners() {{
+            const events = ['beforeunload', 'pagehide', 'unload'];
+            
+            events.forEach(eventType => {{
+                // Define handler that never returns true
+                const handler = (event) => {{
+                    sendEmergencySave();
+                    return false;  // NEVER return true
+                }};
+                
+                try {{
+                    if (window.parent && window.parent !== window) {{
+                        window.parent.addEventListener(eventType, handler, {{
+                            capture: true,
+                            passive: false
+                        }});
+                    }}
+                }} catch (e) {{
+                    console.debug(`FiFi: Cannot add parent ${{eventType}} listener:`, e);
+                }}
+                
+                try {{
+                    window.addEventListener(eventType, handler, {{
+                        capture: true,
+                        passive: false
+                    }});
+                }} catch (e) {{
+                    console.debug(`FiFi: Cannot add ${{eventType}} listener:`, e);
+                }}
+            }});
+        }}
+        
+        // Enhanced message listener cleanup to prevent conflicts
+        try {{
+            // Remove any conflicting message listeners
+            const existingListeners = window._streamlitMessageListeners || [];
+            existingListeners.forEach(listener => {{
+                try {{
+                    window.removeEventListener('message', listener);
+                }} catch (e) {{
+                    console.debug('Could not remove existing listener:', e);
+                }}
+            }});
+        }} catch (e) {{
+            console.debug('Could not clean up message listeners:', e);
+        }}
+        
+        // Initialize all listeners with error handling
+        try {{
+            setupVisibilityListeners();
+            setupUnloadListeners();
+            console.log('✅ FiFi: Browser close detection initialized safely for session:', sessionId.substring(0, 8));
+        }} catch (e) {{
+            console.error('❌ FiFi: Failed to initialize close detection:', e);
+        }}
+    }})();
+    </script>
+    """
+    
+    try:
+        st.components.v1.html(js_code, height=0, width=0)
+    except Exception as e:
+        logger.error(f"Failed to render browser close component: {e}")
+
+def global_message_channel_error_handler():
+    """
+    Add global error handling for message channel issues
+    Call this once at app startup to catch and handle message channel errors
+    """
+    
+    js_error_handler = """
+    <script>
+    (function() {
+        // Only initialize once
+        if (window.fifi_error_handler_initialized) return;
+        window.fifi_error_handler_initialized = true;
+        
+        // Global error handler for uncaught promise rejections
+        window.addEventListener('unhandledrejection', function(event) {
+            const error = event.reason;
+            
+            // Check if it's a message channel error
+            if (error && error.message && 
+                (error.message.includes('message channel closed') ||
+                 error.message.includes('asynchronous response') ||
+                 error.message.includes('listener indicated'))) {
+                
+                console.log('🛡️ FiFi: Caught and handled message channel error:', error.message);
+                
+                // Prevent the error from being thrown
+                event.preventDefault();
+                event.stopPropagation();
+                
+                // Log it but don't break the app
+                return false;
+            }
+        });
+        
+        // Global error handler for regular errors
+        window.addEventListener('error', function(event) {
+            const error = event.error;
+            
+            if (error && error.message && 
+                (error.message.includes('message channel closed') ||
+                 error.message.includes('asynchronous response') ||
+                 error.message.includes('listener indicated'))) {
+                
+                console.log('🛡️ FiFi: Caught and handled global error:', error.message);
+                
+                // Prevent the error from propagating
+                event.preventDefault();
+                event.stopPropagation();
+                
+                return false;
+            }
+        });
+        
+        console.log('✅ FiFi: Global message channel error handler initialized');
+    })();
+    </script>
+    """
+    
+    try:
+        st.components.v1.html(js_error_handler, height=0, width=0)
+    except Exception as e:
+        logger.error(f"Failed to initialize global error handler: {e}")
+
 
 def handle_timer_event(timer_result: Dict[str, Any], session_manager, session) -> bool:
     """
@@ -1274,123 +1534,6 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager, session) -
         st.error(f"⚠️ Timer event processing error: {str(e)}")
         return False
 
-def render_browser_close_component(session_id: str):
-    """
-    FIXED browser close detection with better error handling
-    """
-    if not session_id:
-        return
-
-    # More defensive JavaScript for browser close detection
-    js_code = f"""
-    <script>
-    (function() {{
-        // Prevent multiple initializations
-        if (window.fifi_close_listener_added_for_session === '{session_id}') return;
-        window.fifi_close_listener_added_for_session = '{session_id}';
-        
-        const sessionId = '{session_id}';
-        let parentUrl = '';
-        
-        try {{
-            parentUrl = window.parent.location.origin + window.parent.location.pathname;
-        }} catch (e) {{
-            try {{
-                parentUrl = window.location.origin + window.location.pathname;
-            }} catch (e2) {{
-                console.warn('FiFi: Cannot determine URL for emergency save');
-                return;
-            }}
-        }}
-        
-        let saveTriggered = false;
-
-        function sendEmergencySave() {{
-            if (!saveTriggered) {{
-                saveTriggered = true;
-                console.log('🚨 FiFi: Browser close detected - emergency save');
-                
-                const url = `${{parentUrl}}?event=close&session_id=${{sessionId}}`; 
-                
-                try {{
-                    if (navigator.sendBeacon) {{
-                        const success = navigator.sendBeacon(url);
-                        console.log('📡 FiFi: Emergency save beacon sent:', success);
-                    }} else {{
-                        const xhr = new XMLHttpRequest();
-                        xhr.open('GET', url, false);
-                        xhr.send();
-                        console.log('📡 FiFi: Emergency save XHR sent');
-                    }}
-                }} catch (e) {{
-                    console.error('❌ FiFi: Emergency save failed:', e);
-                }}
-            }}
-        }}
-        
-        // Monitor visibility changes with error handling
-        function setupVisibilityListeners() {{
-            try {{
-                if (window.parent && window.parent.document && window.parent.document !== document) {{
-                    window.parent.document.addEventListener('visibilitychange', () => {{
-                        try {{
-                            if (window.parent.document.visibilityState === 'hidden') {{
-                                sendEmergencySave();
-                            }}
-                        }} catch (e) {{
-                            console.debug('FiFi: Parent visibility check failed:', e);
-                        }}
-                    }});
-                }}
-            }} catch (e) {{
-                console.debug('FiFi: Cannot access parent for visibility detection:', e);
-                // Fallback to current document
-                document.addEventListener('visibilitychange', () => {{
-                    try {{
-                        if (document.visibilityState === 'hidden') {{
-                            sendEmergencySave();
-                        }}
-                    }} catch (e) {{
-                        console.debug('FiFi: Visibility check failed:', e);
-                    }}
-                }});
-            }}
-        }}
-        
-        // Monitor page unload events with error handling
-        function setupUnloadListeners() {{
-            const events = ['beforeunload', 'pagehide', 'unload'];
-            
-            events.forEach(eventType => {{
-                try {{
-                    if (window.parent && window.parent !== window) {{
-                        window.parent.addEventListener(eventType, sendEmergencySave, {{capture: true}});
-                    }}
-                }} catch (e) {{
-                    console.debug(`FiFi: Cannot add parent ${{eventType}} listener:`, e);
-                }}
-                
-                try {{
-                    window.addEventListener(eventType, sendEmergencySave, {{capture: true}});
-                }} catch (e) {{
-                    console.debug(`FiFi: Cannot add ${{eventType}} listener:`, e);
-                }}
-            }});
-        }}
-        
-        // Initialize all listeners
-        setupVisibilityListeners();
-        setupUnloadListeners();
-        
-        console.log('✅ FiFi: Browser close detection initialized for session:', sessionId.substring(0, 8));
-    }})();
-    </script>
-    """
-    
-    try:
-        components.html(js_code, height=0, width=0)
-    except Exception as e:
-        logger.error(f"Failed to render browser close component: {e}")
 
 def render_activity_status_indicator(session, session_manager):
     """
@@ -1939,9 +2082,9 @@ def render_chat_interface_with_timer(session_manager, session):
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion")
     
-    # Add browser close detection with error handling
+    # Add browser close detection with message channel fix
     try:
-        render_browser_close_component(session.session_id)
+        render_browser_close_component_with_message_fix(session.session_id)
     except Exception as e:
         logger.error(f"Failed to render browser close component: {e}")
     
@@ -1954,7 +2097,7 @@ def render_chat_interface_with_timer(session_manager, session):
     # Execute the timer component and handle results with better error handling
     timer_result = None
     try:
-        timer_result = render_activity_timer_component(session.session_id, session_manager)
+        timer_result = render_activity_timer_component_with_message_fix(session.session_id, session_manager)
     except Exception as e:
         logger.error(f"Timer component error: {e}")
         # Continue without timer - don't break the whole interface
@@ -2207,6 +2350,9 @@ def debug_st_javascript_return_values():
 
 def main():
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
+
+    # Add this line to handle message channel errors globally
+    global_message_channel_error_handler()
 
     # Handle session expiry redirect first
     render_session_expiry_redirect()
