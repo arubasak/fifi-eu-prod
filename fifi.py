@@ -2845,10 +2845,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
             if st.button("🔧 Show Debug Panel", key="show_debug"):
                 st.session_state.debug_mode = True
                 st.rerun()
-        
-        # 🔍 DEBUG SECTION - ADD THIS AT THE END
-        st.divider()
-        add_debug_section()
+
         
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
     st.title("🤖 FiFi AI Assistant")
