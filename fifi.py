@@ -2267,102 +2267,68 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
     <script>
     (function() {{
         const sessionId = '{session_id}';
-        const currentUrl = window.location.origin + window.location.pathname;
-        
-        console.log('Auto-save component loaded for session:', sessionId);
-        console.log('Auto-save will trigger in {save_trigger_seconds} seconds');
-        
-        // Clear any existing timers
+        // --- CRITICAL CHANGE ---
+        // Get the main Streamlit app's URL from the parent window.
+        // This is the URL of 'fifi-eu.streamlit.app'.
+        const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
+        // --- END CRITICAL CHANGE ---
+
+        // Clear any existing timers to prevent duplicates
         if (window.streamlitAutoSaveTimer) clearTimeout(window.streamlitAutoSaveTimer);
         if (window.streamlitAutoLogoutTimer) clearTimeout(window.streamlitAutoLogoutTimer);
-        
-        function keepSessionAlive() {{
-            console.log('Keeping session alive...');
-            const keepAliveUrl = `${{currentUrl}}?event=keep_alive&session_id=${{sessionId}}`;
-            
-            return fetch(keepAliveUrl, {{
-                method: 'GET',
-                cache: 'no-cache'
-            }}).catch(err => console.warn('Keep-alive failed:', err));
-        }}
-        
-        function triggerPreTimeoutSave() {{
-            console.log('=== TRIGGERING AUTO-SAVE ===');
-            console.log('Session ID:', sessionId);
-            
-            return keepSessionAlive().then(() => {{
-                const saveUrl = `${{currentUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
-                console.log('Save URL:', saveUrl);
-                
-                // Show saving indicator
-                const savingDiv = document.createElement('div');
-                savingDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #4CAF50; color: white; padding: 10px 20px; border-radius: 5px; z-index: 9999; font-family: sans-serif;';
-                savingDiv.innerHTML = '💾 Auto-saving session ' + sessionId.substring(0, 8) + '...';
-                document.body.appendChild(savingDiv);
 
-                return fetch(saveUrl, {{
-                    method: 'GET',
-                    cache: 'no-cache'
-                }})
-                .then(response => {{
-                    console.log('Save response:', response.status);
-                    if (response.ok) {{
-                        savingDiv.innerHTML = '✅ Session ' + sessionId.substring(0, 8) + ' saved!';
-                        savingDiv.style.background = '#4CAF50';
-                    }} else {{
-                        savingDiv.innerHTML = '❌ Save failed for ' + sessionId.substring(0, 8);
-                        savingDiv.style.background = '#f44336';
-                    }}
-                    
-                    setTimeout(() => {{
-                        if (savingDiv.parentNode) {{
-                            savingDiv.parentNode.removeChild(savingDiv);
-                        }}
-                    }}, 3000);
-                    
-                    return response;
-                }})
-                .catch(error => {{
-                    console.error('Save error:', error);
-                    savingDiv.innerHTML = '❌ Save error for ' + sessionId.substring(0, 8);
-                    savingDiv.style.background = '#f44336';
-                    setTimeout(() => {{
-                        if (savingDiv.parentNode) {{
-                            savingDiv.parentNode.removeChild(savingDiv);
-                        }}
-                    }}, 3000);
-                }});
+        // Function to trigger the save using fetch
+        function triggerPreTimeoutSave() {{
+            console.log('Triggering pre-timeout save with GET fetch to parent Streamlit app URL...');
+            const saveUrl = `${{parentStreamlitAppUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
+
+            // Show saving indicator
+            const savingDiv = document.createElement('div');
+            savingDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #ff6b6b; color: white; padding: 10px 20px; border-radius: 5px; z-index: 9999;';
+            savingDiv.textContent = 'Auto-saving session...';
+            document.body.appendChild(savingDiv);
+
+            // Send the request as GET, with keepalive for reliability on unload
+            return fetch(saveUrl, {{
+                method: 'GET', // Keep as GET for Streamlit query param handling
+                keepalive: true, // Ensures request is sent even if page unloads
+                // No 'mode' specified, defaults to 'cors' which is appropriate for cross-origin iframes
+                // fetching to their parent (assuming parent allows it, which Streamlit generally does for GET).
+            }})
+            .then(response => {{
+                if (!response.ok) {{
+                    console.error('Pre-timeout save fetch failed with status:', response.status, response.statusText);
+                    return response.text().then(text => Promise.reject(new Error(text)));
+                }}
+                console.log('Pre-timeout save fetch successful:', response.status);
+                return response.text(); // Or response.json() if you expect a response
+            }})
+            .catch(error => {{
+                console.error('Pre-timeout save fetch error:', error);
+                throw error; // Re-throw to be caught by the .finally block
             }});
         }}
-        
+
+        // This function orchestrates the save and then the reload
         function executeLogoutSequence() {{
-            console.log('Starting logout sequence for session:', sessionId);
+            console.log('Starting logout sequence...');
             triggerPreTimeoutSave()
-                .then(() => {{
-                    console.log('Save completed. Reloading in 3 seconds...');
+                .catch(err => console.error('Pre-timeout save fetch failed:', err))
+                .finally(() => {{
+                    // This block runs whether the save succeeded or failed.
+                    console.log('Save request sent. Preparing to reload parent page in 500ms...');
+                    // Give a small grace period for the keepalive request to be fully sent
                     setTimeout(() => {{
-                        console.log('Session timeout - reloading page.');
-                        window.location.reload();
-                    }}, 3000);
-                }})
-                .catch(err => {{
-                    console.error('Save failed for session', sessionId, ':', err);
-                    setTimeout(() => window.location.reload(), 2000);
+                        console.log('Session timeout - reloading parent page now.');
+                        window.parent.location.reload(); // Reload the entire parent page
+                    }}, 500);
                 }});
         }}
-        
-        // Schedule the auto-save
+
+        // Schedule the auto-save and logout
         window.streamlitAutoLogoutTimer = setTimeout(executeLogoutSequence, {save_trigger_seconds * 1000});
-        console.log(`Auto-save scheduled for session ${{sessionId}} in {save_trigger_seconds} seconds`);
-        
-        // Keep session alive every 30 seconds
-        let keepAliveInterval = setInterval(() => {{
-            console.log('Periodic keep-alive for session:', sessionId);
-            keepSessionAlive();
-        }}, 30000);
-        
-        setTimeout(() => clearInterval(keepAliveInterval), {save_trigger_seconds * 1000});
-        
+
+        console.log(`Auto-save and logout scheduled in {save_trigger_seconds} seconds.`);
     }})();
     </script>
     """
