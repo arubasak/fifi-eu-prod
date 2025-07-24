@@ -1970,8 +1970,8 @@ class SessionManager:
             logger.info(f"  Eligible check: user_type={session.user_type}, email={bool(session.email)}, messages={len(session.messages) if session.messages else 0}")
             return False
 
-    def get_session(self) -> UserSession:
-        """FIXED: Proper session retrieval with corrected timeout handling."""
+def get_session(self) -> UserSession:
+        """FIXED: Proper session retrieval with JavaScript forced reload on timeout."""
         session_id = st.session_state.get('current_session_id')
         
         if session_id:
@@ -1994,7 +1994,6 @@ class SessionManager:
                         
                         logger.info("Session expired without pre-timeout save. Attempting emergency save...")
                         
-                        # CRITICAL FIX: Don't use deepcopy, use the original session
                         try:
                             self._auto_save_to_crm(session, "Session Timeout (Emergency)")
                         except Exception as e:
@@ -2012,6 +2011,11 @@ class SessionManager:
                     
                     # CRITICAL FIX: End session AFTER save attempt
                     self._end_session_internal(session)
+                    
+                    # 🚨 NEW: SET FLAG FOR FORCED RELOAD
+                    st.session_state.force_reload_due_to_timeout = True
+                    st.session_state.timeout_message = f"Session {session_id[:8]} expired due to inactivity."
+                    
                     return self._create_guest_session()
                 else:
                     # Session is active and not expired
@@ -2020,7 +2024,6 @@ class SessionManager:
         
         # No session or inactive
         return self._create_guest_session()
-
     def _end_session_internal(self, session: UserSession):
         """End session and clean up state."""
         session.active = False
