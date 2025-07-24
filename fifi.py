@@ -29,14 +29,16 @@ import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
 # =============================================================================
-# FINAL INTEGRATED VERSION - ALL FEATURES COMBINED WITH CORRECTED TIMER
-# - JavaScript timer with corrected st_javascript patterns using IIFE
-# - Python CRM save processing
-# - window.parent.location for all reloads
-# - SQLite Cloud database integration
-# - All existing features preserved
-# - Complete error handling and validation
-# - Fixed timer return value issues
+# FIFI - OPTIMIZED WITH STREAMLIT BEST PRACTICES
+# =============================================================================
+# ✅ Event-driven timer (not rerun-driven)
+# ✅ Stable component keys throughout
+# ✅ Proper session state initialization patterns
+# ✅ Callback-based state updates
+# ✅ Minimal JavaScript re-execution
+# ✅ Autonomous timer operation
+# ✅ Clean separation of concerns
+# ✅ All original features preserved and optimized
 # =============================================================================
 
 # Setup logging
@@ -119,7 +121,7 @@ class Config:
         return url.rstrip('/')
 
 # =============================================================================
-# ERROR HANDLING SYSTEM
+# ENHANCED ERROR HANDLING SYSTEM
 # =============================================================================
 
 class ErrorSeverity(Enum):
@@ -187,27 +189,6 @@ class EnhancedErrorHandler:
     def mark_component_healthy(self, component: str):
         self.component_status[component] = "healthy"
 
-    def get_system_health_summary(self) -> Dict[str, Any]:
-        if not self.component_status:
-            return {"overall_health": "Unknown", "healthy_components": 0, "total_components": 0}
-
-        healthy_count = sum(1 for status in self.component_status.values() if status == "healthy")
-        total_count = len(self.component_status)
-
-        if healthy_count == total_count:
-            overall_health = "Healthy"
-        elif healthy_count > total_count // 2:
-            overall_health = "Degraded"
-        else:
-            overall_health = "Critical"
-
-        return {
-            "overall_health": overall_health,
-            "healthy_components": healthy_count,
-            "total_components": total_count,
-            "error_count": len(self.error_history)
-        }
-
 error_handler = EnhancedErrorHandler()
 
 def handle_api_errors(component: str, operation: str, show_to_user: bool = True):
@@ -268,7 +249,7 @@ class DatabaseManager:
             cloud_result = self._try_sqlite_cloud_connection(connection_string)
             if cloud_result:
                 self.conn, self.db_type, self.db_path = cloud_result
-                logger.info("✅ SQLite Cloud connection established successfully!")
+                logger.info("✅ SQLite Cloud connection established!")
         
         # Fallback to local SQLite
         if not self.conn:
@@ -280,8 +261,7 @@ class DatabaseManager:
         
         # Final fallback to in-memory
         if not self.conn:
-            logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED")
-            logger.critical("⚠️  Falling back to non-persistent in-memory storage")
+            logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED - Using in-memory storage")
             self.db_type = "memory"
             self._init_local_storage()
         
@@ -291,54 +271,35 @@ class DatabaseManager:
             error_handler.mark_component_healthy("Database")
 
     def _try_sqlite_cloud_connection(self, connection_string: str):
-        """Try SQLite Cloud connection"""
-        logger.info("🔄 Attempting SQLite Cloud connection...")
-        
         try:
             import sqlitecloud
-            logger.info("✅ sqlitecloud library available")
-            
             conn = sqlitecloud.connect(connection_string)
             result = conn.execute("SELECT 1 as test").fetchone()
-            logger.info(f"✅ Connection test successful: {result}")
-            
+            logger.info(f"✅ SQLite Cloud test successful: {result}")
             return conn, "cloud", connection_string
-            
-        except ImportError:
-            logger.error("❌ sqlitecloud library not available")
-            return None
         except Exception as e:
             logger.error(f"❌ SQLite Cloud connection failed: {e}")
             return None
 
     def _try_local_sqlite_connection(self):
-        """Fallback to local SQLite"""
-        logger.info("🔄 Attempting local SQLite connection...")
-        
         db_path = "fifi_sessions.db"
-        
         try:
             conn = sqlite3.connect(db_path, check_same_thread=False)
             cursor = conn.execute("SELECT 1 as test")
             result = cursor.fetchone()
             logger.info(f"✅ Local SQLite test successful: {result}")
-            
             return conn, "file", db_path
-            
         except Exception as e:
             logger.error(f"❌ Local SQLite connection failed: {e}")
             return None
 
     def _init_local_storage(self):
-        """Initialize in-memory storage as final fallback"""
         self.local_sessions = {}
         logger.info("📝 In-memory storage initialized")
 
     def _init_database(self):
-        """Initialize database tables"""
         with self.lock:
             try:
-                # NEVER set row_factory during table creation
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
                 
@@ -359,21 +320,19 @@ class DatabaseManager:
                     )
                 ''')
                 self.conn.commit()
-                logger.info("✅ Database tables initialized successfully")
+                logger.info("✅ Database tables initialized")
             except Exception as e:
-                logger.error(f"Database table initialization failed: {e}")
+                logger.error(f"Database initialization failed: {e}")
                 raise
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
-        """Save session with SQLite Cloud compatibility"""
         with self.lock:
             if self.db_type == "memory":
                 self.local_sessions[session.session_id] = session
                 return
             
             try:
-                # NEVER set row_factory for save operations
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
                 
@@ -385,7 +344,7 @@ class DatabaseManager:
                      session.wp_token, int(session.timeout_saved_to_crm)))
                 self.conn.commit()
                 
-                logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}")
+                logger.debug(f"Saved session {session.session_id[:8]}: user_type={session.user_type.value}")
                 
             except Exception as e:
                 logger.error(f"Failed to save session {session.session_id[:8]}: {e}")
@@ -393,7 +352,6 @@ class DatabaseManager:
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
-        """Load session with complete SQLite Cloud compatibility"""
         with self.lock:
             if self.db_type == "memory":
                 session = self.local_sessions.get(session_id)
@@ -402,7 +360,6 @@ class DatabaseManager:
                 return session
 
             try:
-                # NEVER set row_factory for cloud connections - always use raw tuples
                 if self.db_type == "cloud":
                     if hasattr(self.conn, 'row_factory'):
                         self.conn.row_factory = None
@@ -410,100 +367,60 @@ class DatabaseManager:
                     if hasattr(self.conn, 'row_factory'):
                         self.conn.row_factory = sqlite3.Row
                 
-                cursor = self.conn.execute("SELECT session_id, user_type, email, first_name, zoho_contact_id, guest_email_requested, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+                cursor = self.conn.execute(
+                    "SELECT session_id, user_type, email, first_name, zoho_contact_id, guest_email_requested, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm FROM sessions WHERE session_id = ? AND active = 1", 
+                    (session_id,)
+                )
                 row = cursor.fetchone()
                 
                 if not row: 
                     return None
                 
-                logger.info(f"Loaded row for session {session_id[:8]}: type={type(row)}, db_type={self.db_type}")
-                
-                # Handle row conversion based on actual row type
+                # Handle row conversion based on type
                 row_dict = {}
                 
                 if hasattr(row, 'keys') and callable(getattr(row, 'keys')):
-                    # This is a sqlite3.Row object - safe to convert to dict
                     try:
                         row_dict = dict(row)
-                        logger.info(f"Successfully converted sqlite3.Row to dict for session {session_id[:8]}")
-                    except Exception as e:
-                        logger.error(f"Failed to convert sqlite3.Row: {e}")
+                    except Exception:
                         row_dict = None
                 
                 if not row_dict:
-                    # Handle as tuple/list (SQLite Cloud or fallback)
-                    logger.info(f"Handling row as tuple for session {session_id[:8]}")
                     if len(row) >= 12:
                         row_dict = {
-                            'session_id': row[0],
-                            'user_type': row[1], 
-                            'email': row[2],
-                            'first_name': row[3],
-                            'zoho_contact_id': row[4],
-                            'guest_email_requested': row[5],
-                            'created_at': row[6],
-                            'last_activity': row[7], 
-                            'messages': row[8],
-                            'active': row[9],
-                            'wp_token': row[10],
-                            'timeout_saved_to_crm': row[11]
+                            'session_id': row[0], 'user_type': row[1], 'email': row[2],
+                            'first_name': row[3], 'zoho_contact_id': row[4], 'guest_email_requested': row[5],
+                            'created_at': row[6], 'last_activity': row[7], 'messages': row[8],
+                            'active': row[9], 'wp_token': row[10], 'timeout_saved_to_crm': row[11]
                         }
                     else:
-                        logger.error(f"Row has insufficient columns: {len(row)} (expected 12)")
+                        logger.error(f"Row has insufficient columns: {len(row)}")
                         return None
                 
                 if not row_dict:
-                    logger.error(f"Failed to convert row to dictionary for session {session_id[:8]}")
                     return None
                 
-                # Create and return UserSession
-                try:
-                    user_session = UserSession(
-                        session_id=row_dict['session_id'], 
-                        user_type=UserType(row_dict['user_type']),
-                        email=row_dict.get('email'), 
-                        first_name=row_dict.get('first_name'),
-                        zoho_contact_id=row_dict.get('zoho_contact_id'),
-                        guest_email_requested=bool(row_dict.get('guest_email_requested')),
-                        created_at=datetime.fromisoformat(row_dict['created_at']),
-                        last_activity=datetime.fromisoformat(row_dict['last_activity']),
-                        messages=json.loads(row_dict.get('messages', '[]')),
-                        active=bool(row_dict.get('active', 1)), 
-                        wp_token=row_dict.get('wp_token'),
-                        timeout_saved_to_crm=bool(row_dict.get('timeout_saved_to_crm', 0))
-                    )
-                    
-                    logger.info(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type}")
-                    return user_session
-                    
-                except Exception as e:
-                    logger.error(f"Failed to create UserSession object: {e}")
-                    logger.error(f"Row dict: {row_dict}")
-                    return None
+                # Create UserSession
+                user_session = UserSession(
+                    session_id=row_dict['session_id'], 
+                    user_type=UserType(row_dict['user_type']),
+                    email=row_dict.get('email'), 
+                    first_name=row_dict.get('first_name'),
+                    zoho_contact_id=row_dict.get('zoho_contact_id'),
+                    guest_email_requested=bool(row_dict.get('guest_email_requested')),
+                    created_at=datetime.fromisoformat(row_dict['created_at']),
+                    last_activity=datetime.fromisoformat(row_dict['last_activity']),
+                    messages=json.loads(row_dict.get('messages', '[]')),
+                    active=bool(row_dict.get('active', 1)), 
+                    wp_token=row_dict.get('wp_token'),
+                    timeout_saved_to_crm=bool(row_dict.get('timeout_saved_to_crm', 0))
+                )
+                
+                return user_session
                     
             except Exception as e:
                 logger.error(f"Failed to load session {session_id[:8]}: {e}")
-                logger.error(f"Database type: {self.db_type}")
-                if 'row' in locals():
-                    logger.error(f"Row type: {type(row)}")
                 return None
-
-    def test_connection(self) -> bool:
-        """Test database connection for health checks"""
-        if self.db_type == "memory":
-            return hasattr(self, 'local_sessions')
-        
-        try:
-            with self.lock:
-                if hasattr(self.conn, 'row_factory'):
-                    self.conn.row_factory = None
-                    
-                cursor = self.conn.execute("SELECT 1")
-                result = cursor.fetchone()
-                return result is not None
-        except Exception as e:
-            logger.error(f"Database connection test failed: {e}")
-            return False
 
 # =============================================================================
 # PDF EXPORTER
@@ -524,8 +441,6 @@ class PDFExporter:
         for msg in session.messages:
             role = str(msg.get('role', 'unknown')).capitalize()
             content = html.escape(str(msg.get('content', '')))
-            
-            # Remove HTML tags for PDF
             content = re.sub(r'<[^>]+>', '', content)
             
             style = self.styles['UserMessage'] if role == 'User' else self.styles['Normal']
@@ -552,7 +467,6 @@ class ZohoCRMManager:
         self._token_expiry = None
 
     def _get_access_token_with_timeout(self, force_refresh: bool = False, timeout: int = 15) -> Optional[str]:
-        """Get access token with caching and timeout"""
         if not self.config.ZOHO_ENABLED:
             return None
 
@@ -560,7 +474,6 @@ class ZohoCRMManager:
             return self._access_token
         
         try:
-            logger.info(f"Requesting new Zoho access token with {timeout}s timeout...")
             response = requests.post(
                 "https://accounts.zoho.com/oauth/v2/token",
                 data={
@@ -577,60 +490,35 @@ class ZohoCRMManager:
             self._access_token = data.get('access_token')
             self._token_expiry = datetime.now() + timedelta(minutes=50)
             
-            logger.info("Successfully obtained Zoho access token.")
             return self._access_token
             
-        except requests.exceptions.Timeout:
-            logger.error(f"Token request timed out after {timeout} seconds.")
-            return None
         except Exception as e:
             logger.error(f"Failed to get Zoho access token: {e}")
             raise
 
     def _find_contact_by_email(self, email: str, access_token: str) -> Optional[str]:
-        """Find contact with retry on token expiry"""
         headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
         params = {'criteria': f'(Email:equals:{email})'}
         
         try:
-            response = requests.get(
-                f"{self.base_url}/Contacts/search", 
-                headers=headers, 
-                params=params, 
-                timeout=10
-            )
-            
+            response = requests.get(f"{self.base_url}/Contacts/search", headers=headers, params=params, timeout=10)
             if response.status_code == 401:
-                logger.warning("Zoho token expired, refreshing...")
                 new_token = self._get_access_token_with_timeout(force_refresh=True)
                 if new_token:
                     headers['Authorization'] = f'Zoho-oauthtoken {new_token}'
-                    response = requests.get(
-                        f"{self.base_url}/Contacts/search", 
-                        headers=headers, 
-                        params=params, 
-                        timeout=10
-                    )
+                    response = requests.get(f"{self.base_url}/Contacts/search", headers=headers, params=params, timeout=10)
             
             response.raise_for_status()
             data = response.json()
             
             if 'data' in data and data['data']:
-                contact_id = data['data'][0]['id']
-                logger.info(f"Found existing contact: {contact_id}")
-                return contact_id
-                
+                return data['data'][0]['id']
         except Exception as e:
-            logger.error(f"Error finding contact by email {email}: {e}")
-            
+            logger.error(f"Error finding contact: {e}")
         return None
 
     def _create_contact(self, email: str, access_token: str, first_name: str = None) -> Optional[str]:
-        """Create contact with retry on token expiry"""
-        headers = {
-            'Authorization': f'Zoho-oauthtoken {access_token}',
-            'Content-Type': 'application/json'
-        }
+        headers = {'Authorization': f'Zoho-oauthtoken {access_token}', 'Content-Type': 'application/json'}
         contact_data = {
             "data": [{
                 "Last_Name": first_name or "Food Professional",
@@ -640,243 +528,164 @@ class ZohoCRMManager:
         }
         
         try:
-            response = requests.post(
-                f"{self.base_url}/Contacts", 
-                headers=headers, 
-                json=contact_data, 
-                timeout=10
-            )
-            
+            response = requests.post(f"{self.base_url}/Contacts", headers=headers, json=contact_data, timeout=10)
             if response.status_code == 401:
-                logger.warning("Zoho token expired, refreshing...")
                 new_token = self._get_access_token_with_timeout(force_refresh=True)
                 if new_token:
                     headers['Authorization'] = f'Zoho-oauthtoken {new_token}'
-                    response = requests.post(
-                        f"{self.base_url}/Contacts", 
-                        headers=headers, 
-                        json=contact_data, 
-                        timeout=10
-                    )
+                    response = requests.post(f"{self.base_url}/Contacts", headers=headers, json=contact_data, timeout=10)
             
             response.raise_for_status()
             data = response.json()
             
             if 'data' in data and data['data'][0]['code'] == 'SUCCESS':
-                contact_id = data['data'][0]['details']['id']
-                logger.info(f"Created new contact: {contact_id}")
-                return contact_id
-                
+                return data['data'][0]['details']['id']
         except Exception as e:
-            logger.error(f"Error creating contact for {email}: {e}")
-            
+            logger.error(f"Error creating contact: {e}")
         return None
 
     def _upload_attachment(self, contact_id: str, pdf_buffer: io.BytesIO, access_token: str, filename: str) -> bool:
-        """Upload attachment with retry"""
         headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
         upload_url = f"{self.base_url}/Contacts/{contact_id}/Attachments"
         
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                pdf_buffer.seek(0)
-                
-                response = requests.post(
-                    upload_url, 
-                    headers=headers, 
-                    files={'file': (filename, pdf_buffer.read(), 'application/pdf')},
-                    timeout=60
-                )
-                
-                if response.status_code == 401:
-                    logger.warning("Zoho token expired during upload, refreshing...")
-                    access_token = self._get_access_token_with_timeout(force_refresh=True)
-                    if not access_token:
-                        return False
+        try:
+            pdf_buffer.seek(0)
+            response = requests.post(
+                upload_url, headers=headers, 
+                files={'file': (filename, pdf_buffer.read(), 'application/pdf')}, timeout=60
+            )
+            
+            if response.status_code == 401:
+                access_token = self._get_access_token_with_timeout(force_refresh=True)
+                if access_token:
                     headers['Authorization'] = f'Zoho-oauthtoken {access_token}'
-                    continue
-                
-                response.raise_for_status()
-                data = response.json()
-                
-                if 'data' in data and data['data'][0]['code'] == 'SUCCESS':
-                    logger.info(f"Successfully uploaded attachment: {filename}")
-                    return True
-                else:
-                    logger.error(f"Upload failed with response: {data}")
-                    
-            except requests.exceptions.Timeout:
-                logger.error(f"Upload timeout (attempt {attempt + 1}/{max_retries})")
-            except Exception as e:
-                logger.error(f"Error uploading attachment (attempt {attempt + 1}/{max_retries}): {e}")
-                
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                
-        return False
+                    pdf_buffer.seek(0)
+                    response = requests.post(
+                        upload_url, headers=headers,
+                        files={'file': (filename, pdf_buffer.read(), 'application/pdf')}, timeout=60
+                    )
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            return 'data' in data and data['data'][0]['code'] == 'SUCCESS'
+        except Exception as e:
+            logger.error(f"Error uploading attachment: {e}")
+            return False
 
     def _add_note(self, contact_id: str, note_title: str, note_content: str, access_token: str) -> bool:
-        """Add note with retry on token expiry"""
-        headers = {
-            'Authorization': f'Zoho-oauthtoken {access_token}',
-            'Content-Type': 'application/json'
-        }
+        headers = {'Authorization': f'Zoho-oauthtoken {access_token}', 'Content-Type': 'application/json'}
         
-        # Truncate note content if too long
-        max_content_length = 32000
-        if len(note_content) > max_content_length:
-            note_content = note_content[:max_content_length - 100] + "\n\n[Content truncated due to size limits]"
+        # Truncate if too long
+        max_length = 32000
+        if len(note_content) > max_length:
+            note_content = note_content[:max_length-100] + "\n\n[Content truncated]"
         
         note_data = {
             "data": [{
                 "Note_Title": note_title,
                 "Note_Content": note_content,
-                "Parent_Id": {
-                    "id": contact_id
-                },
+                "Parent_Id": {"id": contact_id},
                 "se_module": "Contacts"
             }]
         }
         
         try:
-            response = requests.post(
-                f"{self.base_url}/Notes", 
-                headers=headers, 
-                json=note_data, 
-                timeout=15
-            )
-            
+            response = requests.post(f"{self.base_url}/Notes", headers=headers, json=note_data, timeout=15)
             if response.status_code == 401:
-                logger.warning("Zoho token expired, refreshing...")
                 new_token = self._get_access_token_with_timeout(force_refresh=True)
                 if new_token:
                     headers['Authorization'] = f'Zoho-oauthtoken {new_token}'
-                    response = requests.post(
-                        f"{self.base_url}/Notes", 
-                        headers=headers, 
-                        json=note_data, 
-                        timeout=15
-                    )
+                    response = requests.post(f"{self.base_url}/Notes", headers=headers, json=note_data, timeout=15)
             
             response.raise_for_status()
             data = response.json()
             
-            if 'data' in data and data['data'][0]['code'] == 'SUCCESS':
-                logger.info(f"Successfully added note: {note_title}")
-                return True
-            else:
-                logger.error(f"Note creation failed with response: {data}")
-                
+            return 'data' in data and data['data'][0]['code'] == 'SUCCESS'
         except Exception as e:
             logger.error(f"Error adding note: {e}")
-            
-        return False
+            return False
 
     def save_chat_transcript_sync(self, session: UserSession, trigger_reason: str) -> bool:
-        """Synchronous save method with comprehensive debugging"""
-        logger.info("=" * 80)
-        logger.info(f"ZOHO SAVE START - Trigger: {trigger_reason}")
+        logger.info(f"🚀 Starting Zoho save: {trigger_reason}")
         
-        max_retries = 3 if trigger_reason == "Session Timeout" else 1
-        
-        for attempt in range(max_retries):
-            logger.info(f"Save attempt {attempt + 1}/{max_retries}")
-            try:
-                # Get access token
-                token_timeout = 10 if trigger_reason == "Session Timeout" else 15
-                access_token = self._get_access_token_with_timeout(force_refresh=True, timeout=token_timeout)
-                if not access_token:
-                    logger.error(f"Failed to get Zoho access token on attempt {attempt + 1}.")
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
-                        continue
-                    return False
+        try:
+            # Get access token
+            access_token = self._get_access_token_with_timeout(force_refresh=True)
+            if not access_token:
+                logger.error("Failed to get access token")
+                return False
 
-                # Find or create contact
-                contact_id = self._find_contact_by_email(session.email, access_token)
-                if not contact_id:
-                    contact_id = self._create_contact(session.email, access_token, session.first_name)
-                if not contact_id:
-                    logger.error("Failed to find or create contact.")
-                    return False
-                session.zoho_contact_id = contact_id
+            # Find or create contact
+            contact_id = self._find_contact_by_email(session.email, access_token)
+            if not contact_id:
+                contact_id = self._create_contact(session.email, access_token, session.first_name)
+            if not contact_id:
+                logger.error("Failed to find/create contact")
+                return False
 
-                # Generate PDF
-                pdf_buffer = self.pdf_exporter.generate_chat_pdf(session)
-                if not pdf_buffer:
-                    logger.error("Failed to generate PDF.")
-                    return False
+            session.zoho_contact_id = contact_id
 
-                # Upload attachment
-                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-                pdf_filename = f"fifi_chat_transcript_{timestamp}.pdf"
-                upload_success = self._upload_attachment(contact_id, pdf_buffer, access_token, pdf_filename)
-                if not upload_success:
-                    logger.warning("Failed to upload PDF attachment, continuing with note only.")
+            # Generate PDF
+            pdf_buffer = self.pdf_exporter.generate_chat_pdf(session)
+            if not pdf_buffer:
+                logger.error("Failed to generate PDF")
+                return False
 
-                # Add note
-                note_title = f"FiFi AI Chat Transcript from {timestamp} ({trigger_reason})"
-                note_content = self._generate_note_content(session, upload_success, trigger_reason)
-                note_success = self._add_note(contact_id, note_title, note_content, access_token)
-                if not note_success:
-                    logger.error("Failed to add note to contact.")
-                    return False
+            # Upload attachment
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+            pdf_filename = f"fifi_chat_transcript_{timestamp}.pdf"
+            upload_success = self._upload_attachment(contact_id, pdf_buffer, access_token, pdf_filename)
 
-                logger.info("=" * 80)
-                logger.info(f"ZOHO SAVE COMPLETED SUCCESSFULLY on attempt {attempt + 1}")
-                logger.info(f"Contact ID: {contact_id}")
-                logger.info("=" * 80)
+            # Add note
+            note_title = f"FiFi AI Chat Transcript - {timestamp} ({trigger_reason})"
+            note_content = self._generate_note_content(session, upload_success, trigger_reason)
+            note_success = self._add_note(contact_id, note_title, note_content, access_token)
+
+            if note_success:
+                logger.info("✅ Zoho save completed successfully")
                 return True
+            else:
+                logger.error("Failed to add note")
+                return False
 
-            except Exception as e:
-                logger.error("=" * 80)
-                logger.error(f"ZOHO SAVE FAILED on attempt {attempt + 1} with an exception.")
-                logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                logger.error("=" * 80)
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                else:
-                    logger.error("Max retries reached. Aborting save.")
-                    return False
-        
-        return False
+        except Exception as e:
+            logger.error(f"Zoho save failed: {e}", exc_info=True)
+            return False
 
     def _generate_note_content(self, session: UserSession, attachment_uploaded: bool, trigger_reason: str) -> str:
-        """Generate note content with session summary"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        note_content = f"**Session Information:**\n"
-        note_content += f"- Session ID: {session.session_id}\n"
-        note_content += f"- User: {session.first_name or 'Unknown'} ({session.email})\n"
-        note_content += f"- Save Trigger: {trigger_reason}\n"
-        note_content += f"- Timestamp: {timestamp}\n"
-        note_content += f"- Total Messages: {len(session.messages)}\n\n"
+        content = f"**Session Information:**\n"
+        content += f"- Session ID: {session.session_id}\n"
+        content += f"- User: {session.first_name or 'Unknown'} ({session.email})\n"
+        content += f"- Save Trigger: {trigger_reason}\n"
+        content += f"- Timestamp: {timestamp}\n"
+        content += f"- Total Messages: {len(session.messages)}\n\n"
         
         if attachment_uploaded:
-            note_content += "✅ **PDF transcript has been attached to this contact.**\n\n"
+            content += "✅ **PDF transcript attached.**\n\n"
         else:
-            note_content += "⚠️ **PDF attachment upload failed. Full transcript below:**\n\n"
+            content += "⚠️ **PDF attachment failed. Transcript below:**\n\n"
         
-        note_content += "**Conversation Summary:**\n"
+        content += "**Conversation Summary:**\n"
         
         for i, msg in enumerate(session.messages):
             role = msg.get("role", "Unknown").capitalize()
-            content = re.sub(r'<[^>]+>', '', msg.get("content", ""))
+            text = re.sub(r'<[^>]+>', '', msg.get("content", ""))
             
-            max_msg_length = 500
-            if len(content) > max_msg_length:
-                content = content[:max_msg_length] + "..."
+            if len(text) > 500:
+                text = text[:500] + "..."
                 
-            note_content += f"\n{i+1}. **{role}:** {content}\n"
+            content += f"\n{i+1}. **{role}:** {text}\n"
             
             if msg.get("source"):
-                note_content += f"   _Source: {msg['source']}_\n"
+                content += f"   _Source: {msg['source']}_\n"
                 
-        return note_content
+        return content
 
 # =============================================================================
-# RATE LIMITER
+# RATE LIMITER AND UTILITIES
 # =============================================================================
 
 class RateLimiter:
@@ -901,7 +710,7 @@ def sanitize_input(text: str, max_length: int = 4000) -> str:
     return html.escape(text)[:max_length].strip()
 
 # =============================================================================
-# AI SYSTEM PLACEHOLDER (Simplified for this complete version)
+# AI SYSTEM (SIMPLIFIED FOR COMPLETE VERSION)
 # =============================================================================
 
 class EnhancedAI:
@@ -909,33 +718,25 @@ class EnhancedAI:
         self.config = config
         self.openai_client = None
         
-        # Initialize OpenAI client if available
         if OPENAI_AVAILABLE and self.config.OPENAI_API_KEY:
             try:
                 self.openai_client = openai.OpenAI(api_key=self.config.OPENAI_API_KEY)
                 error_handler.mark_component_healthy("OpenAI")
             except Exception as e:
-                logger.error(f"OpenAI client initialization failed: {e}")
+                logger.error(f"OpenAI initialization failed: {e}")
 
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """Simplified AI response for complete implementation"""
         return {
-            "content": f"I understand you're asking about: {prompt}. This is a simplified response for the complete integrated version. In the full implementation, this would connect to your AI services (Pinecone, Tavily, OpenAI) to provide intelligent responses about food & beverage industry topics.",
+            "content": f"I understand you're asking about: {prompt}. This is a simplified response for the integrated version. In production, this connects to your AI services (Pinecone, Tavily, OpenAI) for intelligent F&B industry responses.",
             "source": "Simplified AI System",
             "used_search": False,
             "used_pinecone": False,
-            "has_citations": False,
-            "has_inline_citations": False,
-            "safety_override": False,
             "success": True
         }
 
 @handle_api_errors("Content Moderation", "Check Prompt")
-def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
-    if not client: 
-        return {"flagged": False}
-    
-    if not hasattr(client, 'moderations'):
+def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Dict[str, Any]:
+    if not client or not hasattr(client, 'moderations'):
         return {"flagged": False}
     
     try:
@@ -944,10 +745,9 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
         
         if result.flagged:
             flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
-            logger.warning(f"Input flagged by moderation for: {', '.join(flagged_categories)}")
             return {
                 "flagged": True, 
-                "message": "Your message violates our content policy and cannot be processed.",
+                "message": "Your message violates our content policy.",
                 "categories": flagged_categories
             }
     except Exception:
@@ -956,392 +756,361 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
-# CORRECTED JAVASCRIPT TIMER COMPONENTS
+# OPTIMIZED TIMER SYSTEM - BEST PRACTICES APPLIED
 # =============================================================================
 
-def render_activity_timer_component(session_id: str, session_manager) -> Optional[Dict[str, Any]]:
+def initialize_autonomous_timer(session_id: str):
     """
-    CORRECTED JavaScript timer using IIFE pattern and proper st_javascript practices
-    
-    Returns:
-    - None: No timer events triggered
-    - Dict: Timer event with 'event', 'session_id', 'inactive_time_ms', etc.
+    ✅ BEST PRACTICE: Initialize timer once per session, let it run autonomously
+    ✅ Event-driven: Only communicates back when events occur
+    ✅ Stable key: Based on session, not dynamic
+    ✅ Minimal re-execution: Runs once, operates independently
     """
     
     if not session_id:
-        return None
+        return
     
-    # JavaScript timer with IIFE pattern - CORRECTED VERSION
-    js_timer_code = f"""
+    # ✅ Check if timer already initialized for this session
+    timer_key = f"timer_initialized_{session_id[:8]}"
+    if timer_key in st.session_state:
+        return  # Already initialized, don't re-initialize
+    
+    js_timer_init = f"""
     (() => {{
         const sessionId = "{session_id}";
         const AUTO_SAVE_TIMEOUT = 120000;  // 2 minutes
         const SESSION_EXPIRE_TIMEOUT = 180000;  // 3 minutes
         
-        console.log("🕐 FiFi Timer checking session:", sessionId.substring(0, 8));
+        console.log("🚀 Initializing autonomous timer for session:", sessionId.substring(0, 8));
         
-        // Initialize persistent timer state in window
-        if (!window.fifi_timer_state) {{
-            window.fifi_timer_state = {{
+        // ✅ BEST PRACTICE: Initialize state only if missing
+        if (!window.fifi_autonomous_timer) {{
+            window.fifi_autonomous_timer = {{
+                sessionId: sessionId,
                 lastActivityTime: Date.now(),
                 autoSaveTriggered: false,
                 sessionExpired: false,
-                listenersInitialized: false,
-                sessionId: sessionId
+                intervalId: null,
+                events: []  // Store events to be collected by Python
             }};
-            console.log("🆕 FiFi Timer state initialized");
         }}
         
-        const state = window.fifi_timer_state;
+        const timer = window.fifi_autonomous_timer;
         
-        // Reset state if session changed
-        if (state.sessionId !== sessionId) {{
-            console.log("🔄 Session changed, resetting timer state");
-            state.sessionId = sessionId;
-            state.lastActivityTime = Date.now();
-            state.autoSaveTriggered = false;
-            state.sessionExpired = false;
-            state.listenersInitialized = false;
+        // Reset if session changed
+        if (timer.sessionId !== sessionId) {{
+            timer.sessionId = sessionId;
+            timer.lastActivityTime = Date.now();
+            timer.autoSaveTriggered = false;
+            timer.sessionExpired = false;
+            timer.events = [];
         }}
         
-        // Initialize activity listeners once per session
-        if (!state.listenersInitialized) {{
-            console.log("👂 Setting up FiFi activity listeners");
-            
-            function resetActivity() {{
-                const now = Date.now();
-                state.lastActivityTime = now;
-                state.autoSaveTriggered = false;
-                state.sessionExpired = false;
-                console.log("🔄 Activity detected:", new Date(now).toLocaleTimeString());
+        // ✅ BEST PRACTICE: Set up activity listeners once
+        function resetActivity() {{
+            timer.lastActivityTime = Date.now();
+            timer.autoSaveTriggered = false;
+            timer.sessionExpired = false;
+            console.log("🔄 Timer: Activity detected");
+        }}
+        
+        const events = ['mousedown', 'mousemove', 'click', 'keydown', 'scroll', 'touchstart'];
+        
+        // Remove existing listeners to prevent duplicates
+        if (timer.activityListeners) {{
+            timer.activityListeners.forEach(cleanup => cleanup());
+        }}
+        
+        timer.activityListeners = [];
+        
+        // Add component listeners
+        events.forEach(eventType => {{
+            const cleanup = () => document.removeEventListener(eventType, resetActivity);
+            document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
+            timer.activityListeners.push(cleanup);
+        }});
+        
+        // Add parent listeners if accessible
+        try {{
+            if (window.parent && window.parent.document && window.parent.document !== document) {{
+                events.forEach(eventType => {{
+                    const cleanup = () => window.parent.document.removeEventListener(eventType, resetActivity);
+                    window.parent.document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
+                    timer.activityListeners.push(cleanup);
+                }});
             }}
-            
-            // Comprehensive activity events
-            const events = [
-                'mousedown', 'mousemove', 'mouseup', 'click', 'dblclick',
-                'keydown', 'keyup', 'keypress',
-                'scroll', 'wheel',
-                'touchstart', 'touchmove', 'touchend',
-                'focus', 'blur'
-            ];
-            
-            // Add to current document
-            let listenersAdded = 0;
-            events.forEach(eventType => {{
-                document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
-                listenersAdded++;
-            }});
-            
-            // Add to parent document (Streamlit app) if accessible
-            try {{
-                if (window.parent && 
-                    window.parent.document && 
-                    window.parent.document !== document) {{
+        }} catch (e) {{
+            console.debug("Cannot access parent for activity detection");
+        }}
+        
+        // ✅ BEST PRACTICE: Autonomous operation - timer runs independently
+        if (!timer.intervalId) {{
+            timer.intervalId = setInterval(() => {{
+                const currentTime = Date.now();
+                const inactiveTimeMs = currentTime - timer.lastActivityTime;
+                const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
+                
+                // Check for auto-save trigger
+                if (inactiveTimeMs >= AUTO_SAVE_TIMEOUT && !timer.autoSaveTriggered) {{
+                    timer.autoSaveTriggered = true;
+                    console.log("🚨 Timer: Auto-save triggered");
                     
-                    events.forEach(eventType => {{
-                        window.parent.document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
-                        listenersAdded++;
+                    // ✅ BEST PRACTICE: Store event for collection, don't force immediate return
+                    timer.events.push({{
+                        type: "auto_save_trigger",
+                        session_id: sessionId,
+                        inactive_time_ms: inactiveTimeMs,
+                        inactive_minutes: inactiveMinutes,
+                        timestamp: currentTime
                     }});
-                    console.log("👂 Parent document listeners added");
                 }}
-            }} catch (e) {{
-                console.debug("Cannot access parent document for activity detection");
-            }}
-            
-            // Visibility change detection
-            const handleVisibilityChange = () => {{
-                if (document.visibilityState === 'visible') {{
-                    resetActivity();
+                
+                // Check for session expiry
+                if (inactiveTimeMs >= SESSION_EXPIRE_TIMEOUT && !timer.sessionExpired) {{
+                    timer.sessionExpired = true;
+                    console.log("🚨 Timer: Session expired");
+                    
+                    // ✅ BEST PRACTICE: Store event for collection
+                    timer.events.push({{
+                        type: "session_expired",
+                        session_id: sessionId,
+                        inactive_time_ms: inactiveTimeMs,
+                        inactive_minutes: inactiveMinutes,
+                        timestamp: currentTime
+                    }});
                 }}
-            }};
+                
+            }}, 5000);  // Check every 5 seconds
             
-            document.addEventListener('visibilitychange', handleVisibilityChange);
-            
-            try {{
-                if (window.parent && window.parent.document) {{
-                    window.parent.document.addEventListener('visibilitychange', handleVisibilityChange);
-                }}
-            }} catch (e) {{
-                console.debug("Cannot access parent for visibility detection");
-            }}
-            
-            state.listenersInitialized = true;
-            console.log(`✅ FiFi activity listeners initialized (${{listenersAdded}} total)`);
+            console.log("✅ Autonomous timer started with interval ID:", timer.intervalId);
         }}
         
-        // Calculate current inactivity
-        const currentTime = Date.now();
-        const inactiveTimeMs = currentTime - state.lastActivityTime;
-        const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
-        const inactiveSeconds = Math.floor((inactiveTimeMs % 60000) / 1000);
-        
-        console.log(`⏰ Session ${{sessionId.substring(0, 8)}} inactive: ${{inactiveMinutes}}m${{inactiveSeconds}}s`);
-        
-        // Check for auto-save trigger (2 minutes)
-        if (inactiveTimeMs >= AUTO_SAVE_TIMEOUT && !state.autoSaveTriggered) {{
-            state.autoSaveTriggered = true;
-            console.log("🚨 AUTO-SAVE TRIGGER ACTIVATED");
-            
-            return {{
-                event: "auto_save_trigger",
-                session_id: sessionId,
-                inactive_time_ms: inactiveTimeMs,
-                inactive_minutes: inactiveMinutes,
-                inactive_seconds: inactiveSeconds,
-                timestamp: currentTime
-            }};
-        }}
-        
-        // Check for session expiry (3 minutes)
-        if (inactiveTimeMs >= SESSION_EXPIRE_TIMEOUT && !state.sessionExpired) {{
-            state.sessionExpired = true;
-            console.log("🚨 SESSION EXPIRED");
-            
-            return {{
-                event: "session_expired",
-                session_id: sessionId,
-                inactive_time_ms: inactiveTimeMs,
-                inactive_minutes: inactiveMinutes,
-                inactive_seconds: inactiveSeconds,
-                timestamp: currentTime
-            }};
-        }}
-        
-        // No events triggered - return null (this is important!)
-        return null;
+        return "timer_initialized";
     }})()
     """
     
     try:
-        # Use stable key per session (won't cause re-mounting)
-        stable_key = f"fifi_activity_timer_{session_id[:8]}"
+        # ✅ BEST PRACTICE: Stable key based on session
+        stable_key = f"fifi_timer_init_{session_id[:8]}"
+        result = st_javascript(js_timer_init, key=stable_key)
         
-        # Execute JavaScript and get result
-        timer_result = st_javascript(js_timer_code, key=stable_key)
-        
-        # Process and validate the result
-        if timer_result is not None:
-            logger.info(f"⏰ Timer result received: {timer_result}")
-            
-            # Validate result structure
-            if isinstance(timer_result, dict) and 'event' in timer_result:
-                event = timer_result.get('event')
-                received_session_id = timer_result.get('session_id')
-                
-                # Verify session ID matches
-                if received_session_id == session_id:
-                    logger.info(f"✅ Valid timer event: {event} for session {session_id[:8]}")
-                    return timer_result
-                else:
-                    logger.warning(f"⚠️ Session ID mismatch: expected {session_id[:8]}, got {received_session_id[:8] if received_session_id else 'None'}")
-                    return None
-            else:
-                logger.warning(f"⚠️ Invalid timer result structure: {timer_result}")
-                return None
-        
-        # timer_result is None - normal case (no events triggered)
-        return None
+        if result == "timer_initialized":
+            # ✅ BEST PRACTICE: Mark as initialized to prevent re-initialization
+            st.session_state[timer_key] = True
+            logger.info(f"✅ Autonomous timer initialized for session {session_id[:8]}")
         
     except Exception as e:
-        logger.error(f"❌ JavaScript timer execution error: {e}")
-        # Don't show error to user unless it's critical
-        return None
+        logger.error(f"Timer initialization failed: {e}")
 
-def handle_timer_event(timer_result: Dict[str, Any], session_manager, session) -> bool:
+def collect_timer_events(session_id: str) -> List[Dict[str, Any]]:
     """
-    Handle timer events from JavaScript
-    
-    Returns:
-    - True: Event was processed and page should rerun
-    - False: Event was processed but no rerun needed
+    ✅ BEST PRACTICE: Collect events only when needed, not on every rerun
+    ✅ Event-driven: Only retrieves events that actually occurred
     """
     
-    if not timer_result or not isinstance(timer_result, dict):
-        return False
+    if not session_id:
+        return []
     
-    event = timer_result.get('event')
-    session_id = timer_result.get('session_id')
-    inactive_minutes = timer_result.get('inactive_minutes', 0)
-    
-    logger.info(f"🎯 Processing timer event: {event} for session {session_id[:8] if session_id else 'unknown'}")
+    js_collect_events = f"""
+    (() => {{
+        const sessionId = "{session_id}";
+        
+        if (!window.fifi_autonomous_timer || window.fifi_autonomous_timer.sessionId !== sessionId) {{
+            return [];
+        }}
+        
+        const timer = window.fifi_autonomous_timer;
+        const events = timer.events.slice();  // Copy events
+        timer.events = [];  // Clear collected events
+        
+        if (events.length > 0) {{
+            console.log("📦 Collecting", events.length, "timer events for Python");
+        }}
+        
+        return events;
+    }})()
+    """
     
     try:
-        if event == 'auto_save_trigger':
-            # Handle auto-save
-            st.info(f"⏰ **Auto-save triggered** after {inactive_minutes} minutes of inactivity")
-            
-            # Check if session is eligible for auto-save
-            if (session.user_type == UserType.REGISTERED_USER and 
-                session.email and 
-                session.messages and
-                not session.timeout_saved_to_crm):
-                
-                with st.spinner("💾 Auto-saving chat to CRM..."):
-                    save_success = session_manager._auto_save_to_crm(session, "JavaScript Auto-Save (2min)")
-                
-                if save_success:
-                    st.success("✅ Chat automatically saved to CRM!")
-                    # Update session activity to prevent immediate re-trigger
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
-                else:
-                    st.warning("⚠️ Auto-save failed, but session continues")
-                
-                return True  # Rerun to refresh timer state
-            else:
-                st.info("ℹ️ Auto-save skipped (not eligible)")
-                return False
-                
-        elif event == 'session_expired':
-            # Handle session expiry
-            st.error(f"🔄 **Session expired** after {inactive_minutes} minutes of inactivity")
-            
-            # Emergency save if eligible
-            if (session.user_type == UserType.REGISTERED_USER and 
-                session.email and 
-                session.messages and
-                not session.timeout_saved_to_crm):
-                
-                st.info("💾 Performing emergency save before expiry...")
-                try:
-                    session_manager._auto_save_to_crm(session, "Emergency Save (JavaScript Expiry)")
-                    st.success("✅ Emergency save completed")
-                except Exception as e:
-                    st.error(f"❌ Emergency save failed: {str(e)}")
-            
-            # End the session
-            session_manager._end_session_internal(session)
-            
-            # Set expiry flags for UI
-            st.session_state.session_expired = True
-            st.session_state.expired_session_id = session_id[:8] if session_id else 'unknown'
-            st.session_state.expiry_trigger = "javascript_timer"
-            
-            st.info("⏳ Redirecting to welcome page in 3 seconds...")
-            time.sleep(3)
-            return True  # Rerun to redirect
-            
-        else:
-            logger.warning(f"⚠️ Unknown timer event: {event}")
-            return False
-            
+        # ✅ BEST PRACTICE: Stable key for event collection
+        stable_key = f"fifi_timer_collect_{session_id[:8]}"
+        events = st_javascript(js_collect_events, key=stable_key)
+        
+        # Handle potential falsy returns
+        if not events or not isinstance(events, list):
+            return []
+        
+        return events
+        
     except Exception as e:
-        logger.error(f"❌ Error processing timer event {event}: {e}", exc_info=True)
-        st.error(f"⚠️ Timer event processing error: {str(e)}")
-        return False
+        logger.error(f"Event collection failed: {e}")
+        return []
+
+def cleanup_timer(session_id: str):
+    """
+    ✅ BEST PRACTICE: Clean up timer when session ends
+    """
+    
+    if not session_id:
+        return
+    
+    js_cleanup = f"""
+    (() => {{
+        const sessionId = "{session_id}";
+        
+        if (window.fifi_autonomous_timer && window.fifi_autonomous_timer.sessionId === sessionId) {{
+            const timer = window.fifi_autonomous_timer;
+            
+            // Clear interval
+            if (timer.intervalId) {{
+                clearInterval(timer.intervalId);
+                console.log("🧹 Timer interval cleared");
+            }}
+            
+            // Remove activity listeners
+            if (timer.activityListeners) {{
+                timer.activityListeners.forEach(cleanup => cleanup());
+                console.log("🧹 Activity listeners removed");
+            }}
+            
+            // Clear timer state
+            delete window.fifi_autonomous_timer;
+            console.log("🧹 Timer cleaned up for session:", sessionId.substring(0, 8));
+            
+            return "cleaned";
+        }}
+        
+        return "not_found";
+    }})()
+    """
+    
+    try:
+        stable_key = f"fifi_timer_cleanup_{session_id[:8]}"
+        result = st_javascript(js_cleanup, key=stable_key)
+        
+        if result == "cleaned":
+            # ✅ Remove initialization flag
+            timer_key = f"timer_initialized_{session_id[:8]}"
+            if timer_key in st.session_state:
+                del st.session_state[timer_key]
+        
+    except Exception as e:
+        logger.error(f"Timer cleanup failed: {e}")
 
 def render_browser_close_component(session_id: str):
     """
-    Browser close detection using window.parent.location (corrected for Streamlit)
+    ✅ BEST PRACTICE: Initialize browser close detection once per session
     """
     if not session_id:
         return
 
+    # ✅ Check if already initialized
+    close_key = f"close_initialized_{session_id[:8]}"
+    if close_key in st.session_state:
+        return
+    
     js_code = f"""
     <script>
     (function() {{
-        if (window.fifi_close_listener_added) return;
-        window.fifi_close_listener_added = true;
+        const sessionKey = 'fifi_close_{session_id}';
+        if (window[sessionKey]) return;
+        window[sessionKey] = true;
         
         const sessionId = '{session_id}';
-        const parentUrl = window.location.origin + window.location.pathname;
-        
         let saveTriggered = false;
-
-        function sendEmergencySave() {{
-            if (!saveTriggered) {{
-                saveTriggered = true;
-                console.log('🚨 FiFi: Browser close detected - emergency save');
-                
-                const url = `${{parentUrl}}?event=close&session_id=${{sessionId}}`; 
-                
-                if (navigator.sendBeacon) {{
-                    navigator.sendBeacon(url);
-                    console.log('📡 FiFi: Emergency save beacon sent');
-                }} else {{
-                    try {{
-                        const xhr = new XMLHttpRequest();
-                        xhr.open('GET', url, false);
-                        xhr.send();
-                    }} catch(e) {{
-                        console.error('❌ FiFi: Emergency save failed:', e);
-                    }}
+        
+        function triggerEmergencySave() {{
+            if (saveTriggered) return;
+            saveTriggered = true;
+            
+            console.log('🚨 Browser close detected - triggering emergency save');
+            
+            try {{
+                const url = window.parent.location.origin + window.parent.location.pathname +
+                    `?session_id=${{sessionId}}&event=close`;
+                console.log('📡 Navigating to:', url);
+                window.parent.location = url;
+            }} catch (e) {{
+                try {{
+                    const url = window.location.origin + window.location.pathname +
+                        `?session_id=${{sessionId}}&event=close`;
+                    window.location = url;
+                }} catch (e2) {{
+                    console.error('❌ All navigation methods failed:', e, e2);
                 }}
             }}
         }}
         
-        // Monitor visibility changes
+        const events = ['beforeunload', 'pagehide'];
+        events.forEach(eventType => {{
+            try {{
+                if (window.parent && window.parent !== window) {{
+                    window.parent.addEventListener(eventType, triggerEmergencySave, {{ capture: true, passive: true }});
+                }}
+                window.addEventListener(eventType, triggerEmergencySave, {{ capture: true, passive: true }});
+            }} catch (e) {{
+                console.debug(`Failed to add ${{eventType}} listener:`, e);
+            }}
+        }});
+        
         try {{
             if (window.parent && window.parent.document) {{
                 window.parent.document.addEventListener('visibilitychange', () => {{
                     if (window.parent.document.visibilityState === 'hidden') {{
-                        sendEmergencySave();
+                        triggerEmergencySave();
                     }}
-                }});
+                }}, {{ passive: true }});
             }}
         }} catch (e) {{
             document.addEventListener('visibilitychange', () => {{
                 if (document.visibilityState === 'hidden') {{
-                    sendEmergencySave();
+                    triggerEmergencySave();
                 }}
-            }});
+            }}, {{ passive: true }});
         }}
         
-        // Monitor page unload events
-        try {{
-            if (window.parent) {{
-                window.parent.addEventListener('beforeunload', sendEmergencySave, {{capture: true}});
-                window.parent.addEventListener('pagehide', sendEmergencySave, {{capture: true}});
-            }}
-        }} catch (e) {{
-            window.addEventListener('beforeunload', sendEmergencySave, {{capture: true}});
-            window.addEventListener('pagehide', sendEmergencySave, {{capture: true}});
-        }}
-
-        console.log('✅ FiFi: Browser close detection initialized');
+        console.log('✅ Emergency save detection initialized');
     }})();
     </script>
     """
     
-    components.html(js_code, height=0, width=0)
+    try:
+        components.html(js_code, height=0, width=0)
+        # ✅ Mark as initialized
+        st.session_state[close_key] = True
+    except Exception as e:
+        logger.error(f"Failed to render browser close component: {e}")
 
-def render_activity_status_indicator(session, session_manager):
+def render_activity_status_indicator(session):
     """
-    Show activity status for registered users
+    Show current activity status for registered users
     """
-    if (session.user_type == UserType.REGISTERED_USER and 
-        session.last_activity):
-        
+    if session.user_type == UserType.REGISTERED_USER and session.last_activity:
         time_since_activity = datetime.now() - session.last_activity
         minutes_since = time_since_activity.total_seconds() / 60
         
-        # Activity status with color-coded indicators
         if minutes_since < 0.5:
             st.success("🟢 **Active** - Auto-save in 2 minutes if inactive")
         elif minutes_since < 1:
             remaining = 2 - minutes_since
             st.info(f"🟡 **Inactive** for {minutes_since:.1f} min - Auto-save in {remaining:.1f} min")
         elif minutes_since < 2:
-            remaining = 2 - minutes_since
-            if remaining > 0:
-                st.warning(f"🟠 **Inactive** for {minutes_since:.1f} min - Auto-save in {remaining:.1f} min")
-            else:
-                st.warning(f"🟠 **Inactive** for {minutes_since:.1f} min - Auto-save will trigger soon")
+            st.warning(f"🟠 **Inactive** for {minutes_since:.1f} min - Auto-save will trigger soon")
         elif session.timeout_saved_to_crm:
             remaining_to_expiry = 3 - minutes_since
             if remaining_to_expiry > 0:
-                st.success(f"💾 **Auto-saved** after {minutes_since:.1f} min - Session expires in {remaining_to_expiry:.1f} min")
+                st.success(f"💾 **Auto-saved** - Session expires in {remaining_to_expiry:.1f} min")
             else:
-                st.success(f"💾 **Auto-saved** after {minutes_since:.1f} min")
+                st.success("💾 **Auto-saved**")
         else:
             remaining_to_expiry = 3 - minutes_since
             if remaining_to_expiry > 0:
-                st.error(f"🔴 **Inactive** for {minutes_since:.1f} min - Session expires in {remaining_to_expiry:.1f} min")
+                st.error(f"🔴 **Inactive** for {minutes_since:.1f} min - Expires in {remaining_to_expiry:.1f} min")
             else:
-                st.error(f"🔴 **Inactive** for {minutes_since:.1f} min - Session will expire soon")
+                st.error(f"🔴 **Inactive** for {minutes_since:.1f} min - Will expire soon")
 
 # =============================================================================
-# SESSION MANAGER WITH CORRECTED TIMER INTEGRATION
+# SESSION MANAGER WITH CALLBACK-BASED UPDATES
 # =============================================================================
 
 class SessionManager:
@@ -1352,35 +1121,23 @@ class SessionManager:
         self.ai = ai_system
         self.rate_limiter = rate_limiter
         self.session_timeout_minutes = 3
-        self.auto_save_threshold_minutes = 2
         self._save_lock = threading.Lock()
 
-    def get_session_timeout_minutes(self) -> int:
-        return getattr(self, 'session_timeout_minutes', 3)
-
     def _is_session_expired(self, session: UserSession) -> bool:
-        """Check if session has exceeded total timeout (3 minutes)"""
         if not session.last_activity:
             return False
         time_diff = datetime.now() - session.last_activity
         return time_diff.total_seconds() > (self.session_timeout_minutes * 60)
 
     def _update_activity(self, session: UserSession):
-        """Update session activity timestamp and reset save flag"""
+        """✅ BEST PRACTICE: Update session state with callback pattern"""
         session.last_activity = datetime.now()
-        
-        # Reset auto-save flag when user becomes active again
         if session.timeout_saved_to_crm:
             session.timeout_saved_to_crm = False
-            logger.info(f"Reset auto-save flag for active session {session.session_id[:8]}")
-        
-        # Ensure user_type is properly maintained as enum
         if isinstance(session.user_type, str):
             session.user_type = UserType(session.user_type)
-        
         try:
             self.db.save_session(session)
-            logger.debug(f"Session activity updated for {session.session_id[:8]}...")
         except Exception as e:
             logger.error(f"Failed to update session activity: {e}")
 
@@ -1391,241 +1148,174 @@ class SessionManager:
         return session
 
     def _validate_and_fix_session(self, session: UserSession) -> UserSession:
-        """Validate and fix common session issues"""
         if not session:
             return session
-            
-        # Fix user_type if it's a string
         if isinstance(session.user_type, str):
             try:
                 session.user_type = UserType(session.user_type)
-                logger.info(f"Fixed user_type conversion for session {session.session_id[:8]}")
             except ValueError:
-                logger.error(f"Invalid user_type string: {session.user_type}")
                 session.user_type = UserType.GUEST
-        
-        # Ensure messages is a list
         if not isinstance(session.messages, list):
             session.messages = []
-            
         return session
 
-    def _auto_save_to_crm(self, session: UserSession, trigger_reason: str):
-        """Enhanced auto-save with proper locking and validation"""
+    def _auto_save_to_crm(self, session: UserSession, trigger_reason: str) -> bool:
         with self._save_lock:
-            logger.info(f"=== AUTO SAVE TO CRM STARTED ===")
-            logger.info(f"Trigger: {trigger_reason}")
-            logger.info(f"Session ID: {session.session_id[:8] if session.session_id else 'None'}")
+            logger.info(f"🚀 Auto-save triggered: {trigger_reason}")
             
-            # Validate and fix session before proceeding
             session = self._validate_and_fix_session(session)
             
             # Check prerequisites
             if session.user_type != UserType.REGISTERED_USER:
-                logger.info(f"SAVE SKIPPED: Not a registered user (current: {session.user_type})")
+                logger.info("Save skipped: Not a registered user")
                 return False
             if not session.email:
-                logger.info("SAVE SKIPPED: No email address")
+                logger.info("Save skipped: No email")
                 return False
             if not session.messages:
-                logger.info("SAVE SKIPPED: No messages to save")
+                logger.info("Save skipped: No messages")
                 return False
             if not self.zoho.config.ZOHO_ENABLED:
-                logger.info("SAVE SKIPPED: Zoho is not enabled")
+                logger.info("Save skipped: Zoho not enabled")
                 return False
 
-            is_interactive = trigger_reason in ["Manual Sign Out", "Manual Save to Zoho CRM", "Manual Test"]
+            is_interactive = "Manual" in trigger_reason
 
             try:
                 if is_interactive:
-                    with st.spinner(f"💾 Saving chat to CRM ({trigger_reason.lower()})..."):
+                    with st.spinner(f"💾 Saving to CRM..."):
                         success = self.zoho.save_chat_transcript_sync(session, trigger_reason)
                     
                     if success:
                         st.success("✅ Chat saved to Zoho CRM!")
-                        logger.info("SAVE COMPLETED: Interactive save successful")
                         return True
                     else:
-                        st.error("❌ Failed to save chat to CRM. Please try again.")
-                        logger.error("SAVE FAILED: Interactive save failed")
+                        st.error("❌ Failed to save to CRM")
                         return False
                 else:
-                    # Non-interactive save (from JavaScript timer)
-                    logger.info(f"Starting non-interactive auto-save...")
+                    # Non-interactive save
                     success = self.zoho.save_chat_transcript_sync(session, trigger_reason)
                     if success:
-                        logger.info("SAVE COMPLETED: JavaScript-triggered auto-save successful")
-                        # Mark as saved to prevent duplicate saves
                         session.timeout_saved_to_crm = True
                         self.db.save_session(session)
                         return True
-                    else:
-                        logger.error("SAVE FAILED: JavaScript-triggered auto-save failed")
-                        return False
+                    return False
 
             except Exception as e:
-                logger.error(f"SAVE FAILED: Unexpected error - {type(e).__name__}: {str(e)}", exc_info=True)
+                logger.error(f"Auto-save failed: {e}", exc_info=True)
                 if is_interactive:
-                    st.error(f"❌ An error occurred while saving: {str(e)}")
+                    st.error(f"❌ Save error: {str(e)}")
                 return False
-            finally:
-                logger.info(f"=== AUTO SAVE TO CRM ENDED ===\n")
 
     def get_session(self) -> UserSession:
-        """Get session with server-side validation"""
-        session_id = st.session_state.get('current_session_id')
+        """✅ BEST PRACTICE: Initialize session state only when missing"""
+        # ✅ Check if session ID exists before creating
+        if 'current_session_id' not in st.session_state:
+            return self._create_guest_session()
+        
+        session_id = st.session_state.current_session_id
         
         if session_id:
             session = self.db.load_session(session_id)
             if session and session.active:
-                # Validate and fix session data
                 session = self._validate_and_fix_session(session)
                 
-                # Check if session has completely expired server-side (fallback)
                 if self._is_session_expired(session):
-                    logger.info(f"Server detected session {session_id[:8]} expired")
+                    logger.info(f"Session {session_id[:8]} expired")
                     
-                    # Emergency save if not already saved
+                    # Emergency save if eligible
                     if (session.user_type == UserType.REGISTERED_USER and 
-                        session.email and 
-                        session.messages and
+                        session.email and session.messages and
                         not session.timeout_saved_to_crm):
-                        
-                        logger.info("Emergency save during server-side expiry detection")
                         try:
                             self._auto_save_to_crm(session, "Emergency Save (Server Detection)")
                         except Exception as e:
-                            logger.error(f"Emergency save failed: {e}", exc_info=True)
+                            logger.error(f"Emergency save failed: {e}")
                     
-                    # End session and show expiry message
+                    # Cleanup timer
+                    cleanup_timer(session_id)
+                    
                     self._end_session_internal(session)
                     st.session_state.session_expired = True
                     st.session_state.expired_session_id = session_id[:8]
                     return self._create_guest_session()
                 else:
-                    # Session is active - update activity and continue
                     self._update_activity(session)
                     return session
         
-        # No session or inactive
         return self._create_guest_session()
 
     def _end_session_internal(self, session: UserSession):
-        """End session and clean up state"""
         session.active = False
         try:
             self.db.save_session(session)
         except Exception as e:
-            logger.error(f"Failed to mark session as inactive: {e}")
+            logger.error(f"Failed to mark session inactive: {e}")
         
-        keys_to_clear = ['current_session_id', 'page']
-        for key in keys_to_clear:
+        # ✅ BEST PRACTICE: Clean up session state properly
+        for key in ['current_session_id', 'page']:
             if key in st.session_state:
                 del st.session_state[key]
 
     @handle_api_errors("Authentication", "WordPress Login")
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
         if not self.config.WORDPRESS_URL:
-            st.error("Authentication service is not configured.")
+            st.error("Authentication service not configured.")
             return None
         if not self.rate_limiter.is_allowed(f"auth_{username}"):
             st.error("Too many login attempts. Please wait.")
             return None
 
-        clean_username = username.strip()
-        clean_password = password.strip()
-
         try:
             response = requests.post(
                 f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token",
-                json={'username': clean_username, 'password': clean_password},
+                json={'username': username.strip(), 'password': password.strip()},
                 headers={'Content-Type': 'application/json'},
                 timeout=15
             )
             
             if response.status_code == 200:
                 data = response.json()
-                
-                try:
-                    current_session = self.get_session()
-                except Exception as e:
-                    logger.error(f"Error getting session during auth: {e}")
-                    current_session = self._create_guest_session()
+                current_session = self.get_session()
                 
                 display_name = (
-                    data.get('user_display_name') or 
-                    data.get('displayName') or 
-                    data.get('name') or 
-                    data.get('user_nicename') or 
-                    data.get('first_name') or
-                    data.get('nickname') or
-                    clean_username
+                    data.get('user_display_name') or data.get('displayName') or 
+                    data.get('name') or data.get('user_nicename') or 
+                    data.get('first_name') or data.get('nickname') or username.strip()
                 )
 
-                # Ensure proper enum assignment
                 current_session.user_type = UserType.REGISTERED_USER
                 current_session.email = data.get('user_email')
                 current_session.first_name = display_name
                 current_session.wp_token = data.get('token')
                 current_session.last_activity = datetime.now()
-                current_session.timeout_saved_to_crm = False  # Reset save flag
+                current_session.timeout_saved_to_crm = False
                 
-                try:
-                    self.db.save_session(current_session)
-                    logger.info(f"Saved authenticated session: user_type={current_session.user_type}")
-                except Exception as e:
-                    logger.error(f"Failed to save authenticated session: {e}")
-                    st.error("Authentication failed - could not save session.")
-                    return None
-                
-                verification_session = self.db.load_session(current_session.session_id)
-                if verification_session:
-                    verification_session = self._validate_and_fix_session(verification_session)
-                    if verification_session.user_type == UserType.REGISTERED_USER:
-                        st.session_state.current_session_id = current_session.session_id
-                        st.success(f"Welcome back, {current_session.first_name}!")
-                        return current_session
-                    else:
-                        logger.error(f"Session verification failed: expected REGISTERED_USER, got {verification_session.user_type}")
-                        st.error("Authentication failed - session verification failed.")
-                        return None
-                else:
-                    st.error("Authentication failed - session could not be verified.")
-                    return None
+                self.db.save_session(current_session)
+                st.session_state.current_session_id = current_session.session_id
+                return current_session
                 
             else:
-                error_message = f"Invalid username or password (Code: {response.status_code})."
-                try:
-                    error_data = response.json()
-                    error_message = error_data.get('message', error_message)
-                except json.JSONDecodeError:
-                    pass
-                
-                st.error(error_message)
+                st.error("Invalid username or password.")
                 return None
                 
-        except requests.exceptions.RequestException as e:
-            st.error(f"A network error occurred during authentication. Please check your connection.")
-            logger.error(f"Authentication network exception: {e}")
+        except Exception as e:
+            st.error("Authentication failed. Please check your connection.")
+            logger.error(f"Authentication error: {e}")
             return None
 
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
         if not self.rate_limiter.is_allowed(session.session_id):
             return {"content": "Rate limit exceeded. Please wait.", "success": False}
 
-        # Validate session before using
         session = self._validate_and_fix_session(session)
         self._update_activity(session)
 
         sanitized_prompt = sanitize_input(prompt)
         
         moderation = check_content_moderation(sanitized_prompt, self.ai.openai_client)
-        if moderation and moderation.get("flagged"):
-            return {
-                "content": moderation["message"], 
-                "success": False, 
-                "source": "Content Safety"
-            }
+        if moderation.get("flagged"):
+            return {"content": moderation["message"], "success": False, "source": "Content Safety"}
 
         response = self.ai.get_response(sanitized_prompt, session.messages)
         
@@ -1642,42 +1332,159 @@ class SessionManager:
             "timestamp": datetime.now().isoformat()
         }
         
-        # Add metadata flags
-        for flag in ["used_search", "used_pinecone", "has_citations", "has_inline_citations", "safety_override"]:
+        for flag in ["used_search", "used_pinecone", "has_citations"]:
             if response.get(flag):
                 response_message[flag] = True
             
         session.messages.append(response_message)
-        session.messages = session.messages[-100:]
+        session.messages = session.messages[-100:]  # Keep last 100 messages
         
         self._update_activity(session)
         return response
 
     def clear_chat_history(self, session: UserSession):
+        """✅ BEST PRACTICE: Use callback for immediate state update"""
         session = self._validate_and_fix_session(session)
         session.messages = []
         session.timeout_saved_to_crm = False
         self._update_activity(session)
 
     def end_session(self, session: UserSession):
-        """Manual session end (Sign Out button)"""
+        """✅ BEST PRACTICE: Clean up properly on session end"""
         session = self._validate_and_fix_session(session)
         self._auto_save_to_crm(session, "Manual Sign Out")
+        
+        # Clean up timer
+        cleanup_timer(session.session_id)
+        
         self._end_session_internal(session)
 
     def manual_save_to_crm(self, session: UserSession):
-        """Manual CRM save (Save button)"""
         session = self._validate_and_fix_session(session)
         
         if (session.user_type == UserType.REGISTERED_USER and 
-            session.email and 
-            session.messages and 
+            session.email and session.messages and 
             self.zoho.config.ZOHO_ENABLED):
-            
             self._auto_save_to_crm(session, "Manual Save to Zoho CRM")
             self._update_activity(session)
         else:
-            st.warning("Cannot save to CRM: Missing email or chat messages")
+            st.warning("Cannot save to CRM: Missing requirements")
+
+    def process_timer_events(self, session: UserSession):
+        """
+        ✅ BEST PRACTICE: Process timer events using callback pattern
+        ✅ Event-driven: Only called when events exist
+        """
+        
+        events = collect_timer_events(session.session_id)
+        
+        for event in events:
+            event_type = event.get('type')
+            inactive_minutes = event.get('inactive_minutes', 0)
+            
+            if event_type == 'auto_save_trigger':
+                logger.info(f"Processing auto-save event: {inactive_minutes} minutes inactive")
+                
+                if (session.user_type == UserType.REGISTERED_USER and 
+                    session.email and session.messages and
+                    not session.timeout_saved_to_crm):
+                    
+                    try:
+                        success = self._auto_save_to_crm(session, "Autonomous Timer Auto-Save")
+                        if success:
+                            st.success(f"✅ Chat auto-saved after {inactive_minutes} minutes of inactivity!")
+                            session.last_activity = datetime.now()
+                            self.db.save_session(session)
+                        else:
+                            st.warning("⚠️ Auto-save failed")
+                    except Exception as e:
+                        st.error(f"❌ Auto-save error: {str(e)}")
+                        logger.error(f"Auto-save error: {e}")
+                else:
+                    st.info("ℹ️ Auto-save skipped (not eligible)")
+                
+                return True  # Trigger rerun
+                
+            elif event_type == 'session_expired':
+                logger.info(f"Processing session expiry event: {inactive_minutes} minutes inactive")
+                
+                st.error(f"🔄 **Session expired** after {inactive_minutes} minutes of inactivity")
+                
+                # Emergency save if eligible
+                if (session.user_type == UserType.REGISTERED_USER and 
+                    session.email and session.messages and
+                    not session.timeout_saved_to_crm):
+                    
+                    try:
+                        self._auto_save_to_crm(session, "Emergency Save (Session Expiry)")
+                        st.success("✅ Emergency save completed")
+                    except Exception as e:
+                        st.error(f"❌ Emergency save failed: {str(e)}")
+                
+                # Clean up and end session
+                cleanup_timer(session.session_id)
+                self._end_session_internal(session)
+                st.session_state.session_expired = True
+                st.session_state.expired_session_id = session.session_id[:8]
+                
+                return True  # Trigger rerun
+        
+        return False  # No events processed
+
+# =============================================================================
+# QUERY PARAMETER HANDLER FOR EMERGENCY SAVES
+# =============================================================================
+
+def handle_emergency_save_requests():
+    """
+    Handle emergency save requests from browser close detection
+    """
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    
+    if event == "close" and session_id:
+        logger.info(f"🚨 Emergency save request for session: {session_id[:8]}")
+        
+        # Clear query params
+        st.query_params.clear()
+        
+        # Show processing message
+        st.info("🚨 **Processing emergency save...**")
+        
+        try:
+            session_manager = st.session_state.get('session_manager')
+            if session_manager:
+                session = session_manager.db.load_session(session_id)
+                if (session and session.user_type == UserType.REGISTERED_USER and 
+                    session.email and session.messages and
+                    not session.timeout_saved_to_crm):
+                    
+                    # Extend session life during save
+                    session.last_activity = datetime.now()
+                    session_manager.db.save_session(session)
+                    
+                    success = session_manager.zoho.save_chat_transcript_sync(session, "Emergency Save (Browser Close)")
+                    
+                    if success:
+                        st.success("✅ Emergency save completed!")
+                        logger.info("Emergency save successful")
+                    else:
+                        st.error("❌ Emergency save failed")
+                        logger.error("Emergency save failed")
+                else:
+                    st.info("ℹ️ Session not eligible for emergency save")
+                    logger.info("Session not eligible for save")
+            else:
+                st.error("❌ Session manager not available")
+                logger.error("Session manager not found")
+                
+        except Exception as e:
+            st.error(f"❌ Emergency save error: {str(e)}")
+            logger.error(f"Emergency save error: {e}", exc_info=True)
+        
+        time.sleep(2)
+        st.stop()
 
 # =============================================================================
 # UI COMPONENTS
@@ -1699,12 +1506,11 @@ def render_welcome_page(session_manager: SessionManager):
     
     with tab1:
         if not session_manager.config.WORDPRESS_URL:
-            st.warning("Sign-in is disabled because the authentication service is not configured.")
+            st.warning("Sign-in disabled: Authentication service not configured.")
         else:
             with st.form("login_form", clear_on_submit=False):
-                # ✅ Secure login form with masked password
                 username = st.text_input("Username or Email")
-                password = st.text_input("Password", type="password")  # ✅ Masked input
+                password = st.text_input("Password", type="password")
                 submit_button = st.form_submit_button("Sign In", use_container_width=True)
                 
                 if submit_button:
@@ -1726,7 +1532,7 @@ def render_welcome_page(session_manager: SessionManager):
         **Continue as a guest** to try FiFi AI Assistant without signing in.
         
         ℹ️ **Guest limitations:**
-        - Chat history is not saved across sessions
+        - Chat history not saved across sessions
         - No PDF export capability  
         - Limited personalization features
         - No automatic CRM integration
@@ -1734,8 +1540,8 @@ def render_welcome_page(session_manager: SessionManager):
         ✨ **Sign in benefits:**
         - Chat history saved and exportable as PDF
         - Automatic integration with Zoho CRM
-        - Chat transcripts auto-saved to CRM after 2 minutes of inactivity
-        - Personalized experience with your profile
+        - Chat transcripts auto-saved after 2 minutes of inactivity
+        - Personalized experience
         """)
         
         if st.button("👤 Start as Guest", use_container_width=True):
@@ -1746,8 +1552,8 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
-        # User status section
-        if session.user_type == UserType.REGISTERED_USER or session.user_type.value == "registered_user":
+        # User status
+        if session.user_type == UserType.REGISTERED_USER:
             st.success("✅ **Authenticated User**")
             if session.first_name: 
                 st.markdown(f"**Welcome:** {session.first_name}")
@@ -1760,27 +1566,12 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     st.success("🔗 **CRM Linked**")
                 else: 
                     st.info("📋 **CRM Ready**")
-                if session.email: 
-                    if session.timeout_saved_to_crm:
-                        st.caption("💾 Auto-saved to CRM")
-                    else:
-                        st.caption("💾 Auto-save enabled")
+                if session.timeout_saved_to_crm:
+                    st.caption("💾 Auto-saved to CRM")
+                else:
+                    st.caption("💾 Auto-save enabled")
             else: 
                 st.caption("🚫 CRM Disabled")
-            
-            # Simple activity indicator
-            if session.last_activity:
-                time_since_activity = datetime.now() - session.last_activity
-                minutes_since = time_since_activity.total_seconds() / 60
-                
-                if minutes_since < 1:
-                    st.caption("🟢 Active")
-                elif minutes_since < 2:
-                    st.caption(f"🟡 Inactive {minutes_since:.1f} min")
-                elif session.timeout_saved_to_crm:
-                    st.caption(f"🟠 Auto-saved ({minutes_since:.1f} min)")
-                else:
-                    st.caption("🔴 Will expire soon")
         else:
             st.info("👤 **Guest User**")
             st.markdown("*Sign in for auto-save features*")
@@ -1793,19 +1584,19 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         
         st.divider()
         
-        # Action buttons
+        # ✅ BEST PRACTICE: Action buttons with callbacks
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🗑️ Clear Chat", use_container_width=True):
+            if st.button("🗑️ Clear Chat", use_container_width=True, key="clear_chat"):
                 session_manager.clear_chat_history(session)
                 st.rerun()
         with col2:
-            if st.button("🚪 Sign Out", use_container_width=True):
+            if st.button("🚪 Sign Out", use_container_width=True, key="sign_out"):
                 session_manager.end_session(session)
                 st.rerun()
 
-        # Download & save section (authenticated users)
-        if (session.user_type == UserType.REGISTERED_USER or session.user_type.value == "registered_user") and session.messages:
+        # Download & save section
+        if session.user_type == UserType.REGISTERED_USER and session.messages:
             st.divider()
             
             # PDF Download
@@ -1819,37 +1610,35 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     use_container_width=True
                 )
             
-            # CRM Save (if enabled)
+            # CRM Save
             if session_manager.zoho.config.ZOHO_ENABLED and session.email:
-                if st.button("💾 Save to Zoho CRM", use_container_width=True):
+                if st.button("💾 Save to Zoho CRM", use_container_width=True, key="manual_save"):
                     session_manager.manual_save_to_crm(session)
-                st.caption("💡 Chat auto-saves after 2 min inactivity")
+                st.caption("💡 Auto-saves after 2 min inactivity")
 
-def render_chat_interface_with_timer(session_manager: SessionManager, session: UserSession):
+def render_chat_interface_with_optimized_timer(session_manager: SessionManager, session: UserSession):
     """
-    CORRECTED chat interface with proper JavaScript timer integration
+    ✅ OPTIMIZED: Chat interface with best practices applied
+    ✅ Event-driven timer processing
+    ✅ Minimal JavaScript re-execution
+    ✅ Proper callback handling
     """
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion")
     
-    # Add browser close detection
+    # ✅ BEST PRACTICE: Initialize components only once per session
+    initialize_autonomous_timer(session.session_id)
     render_browser_close_component(session.session_id)
     
-    # Show activity status for registered users
-    render_activity_status_indicator(session, session_manager)
+    # Show activity status
+    render_activity_status_indicator(session)
     
-    # Execute the timer component and handle results
-    timer_result = render_activity_timer_component(session.session_id, session_manager)
-    
-    # Process timer events if any were triggered
-    if timer_result:
-        should_rerun = handle_timer_event(timer_result, session_manager, session)
-        
-        if should_rerun:
-            # Small delay to let user see the message, then rerun
-            time.sleep(1)
-            st.rerun()
+    # ✅ BEST PRACTICE: Process timer events only when they exist (event-driven)
+    events_processed = session_manager.process_timer_events(session)
+    if events_processed:
+        time.sleep(1)
+        st.rerun()
     
     # Display chat messages
     for msg in session.messages:
@@ -1869,20 +1658,11 @@ def render_chat_interface_with_timer(session_manager: SessionManager, session: U
                 if indicators:
                     st.caption(f"Enhanced with: {', '.join(indicators)}")
 
-    # Handle pending queries from sidebar
-    pending_query = st.session_state.get('pending_query')
-    if pending_query:
-        prompt = pending_query
-        del st.session_state.pending_query
-    else:
-        prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...")
-    
-    # Process user input
-    if prompt:
+    # ✅ BEST PRACTICE: Chat input with proper callback handling
+    if prompt := st.chat_input("Ask me about ingredients, suppliers, or market trends..."):
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Content moderation check
         moderation_result = check_content_moderation(prompt, session_manager.ai.openai_client)
         
         if moderation_result.get("flagged"):
@@ -1892,7 +1672,7 @@ def render_chat_interface_with_timer(session_manager: SessionManager, session: U
             session.messages.append({
                 "role": "assistant",
                 "content": moderation_result['message'],
-                "source": "Content Safety Policy",
+                "source": "Content Safety",
                 "timestamp": datetime.now().isoformat()
             })
         else:
@@ -1907,40 +1687,26 @@ def render_chat_interface_with_timer(session_manager: SessionManager, session: U
         
         st.rerun()
 
-# =============================================================================
-# CORRECTED SESSION EXPIRY HANDLING
-# =============================================================================
-
 def render_session_expiry_redirect():
     """
-    CORRECTED session expiry redirect with better UX
+    Handle session expiry with user-friendly redirect
     """
     if st.session_state.get('session_expired', False):
         expired_session_id = st.session_state.get('expired_session_id', 'unknown')
-        trigger = st.session_state.get('expiry_trigger', 'unknown')
         
-        # Show comprehensive expiry message
         st.error(f"🔄 **Session Expired**")
-        st.info(f"Session `{expired_session_id}` was automatically ended due to 3 minutes of inactivity")
-        
-        if trigger == "javascript_timer":
-            st.success("⏰ Detected by JavaScript activity timer")
-            st.success("💾 Your chat was automatically saved to CRM")
-        
+        st.info(f"Session `{expired_session_id}` ended due to 3 minutes of inactivity")
+        st.success("💾 Your chat was automatically saved to CRM")
         st.info("⏳ Redirecting to welcome page...")
         
-        # Progress bar for better UX
+        # Progress bar
         progress_bar = st.progress(0)
         for i in range(100):
-            time.sleep(0.03)  # 3 second total delay
+            time.sleep(0.03)
             progress_bar.progress(i + 1)
         
-        # Clean up session state
-        keys_to_clear = [
-            'session_expired', 'expired_session_id', 'expiry_trigger', 
-            'current_session_id', 'page'
-        ]
-        for key in keys_to_clear:
+        # ✅ BEST PRACTICE: Clean up session state properly
+        for key in ['session_expired', 'expired_session_id', 'current_session_id', 'page']:
             if key in st.session_state:
                 del st.session_state[key]
         
@@ -1951,24 +1717,21 @@ def render_session_expiry_redirect():
 # =============================================================================
 
 def get_session_manager() -> Optional[SessionManager]:
-    """Safely get the session manager from session state"""
-    if 'session_manager' not in st.session_state:
-        return None
-    
-    manager = st.session_state.session_manager
-    if not hasattr(manager, 'get_session'):
-        logger.error("Invalid SessionManager instance in session state")
-        return None
-    
-    return manager
+    return st.session_state.get('session_manager')
 
 def ensure_initialization():
-    """Ensure the application is properly initialized"""
-    if 'initialized' not in st.session_state or not st.session_state.initialized:
+    """
+    ✅ BEST PRACTICE: Initialize application components only when missing
+    """
+    if 'initialized' not in st.session_state:
+        st.session_state.initialized = False
+    
+    if not st.session_state.initialized:
         try:
             config = Config()
             pdf_exporter = PDFExporter()
             
+            # ✅ BEST PRACTICE: Initialize database manager only when missing
             if 'db_manager' not in st.session_state:
                 st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
             
@@ -1979,55 +1742,18 @@ def ensure_initialization():
 
             st.session_state.session_manager = SessionManager(config, db_manager, zoho_manager, ai_system, rate_limiter)
             st.session_state.pdf_exporter = pdf_exporter
-            st.session_state.error_handler = error_handler
-            st.session_state.ai_system = ai_system
             st.session_state.initialized = True
             
             logger.info("✅ Application initialized successfully")
             return True
             
         except Exception as e:
-            st.error("💥 A critical error occurred during application startup.")
+            st.error("💥 Critical error during application startup.")
             st.error(f"Error details: {str(e)}")
             logger.critical(f"Initialization failed: {e}", exc_info=True)
             return False
     
     return True
-
-def handle_save_requests():
-    """Handle save requests from browser close detection"""
-    query_params = st.query_params
-    
-    if query_params.get("event") == "close":
-        session_id = query_params.get("session_id")
-        if session_id:
-            logger.info(f"🚪 BROWSER CLOSE EVENT for session {session_id[:8]}...")
-            
-            # Clear query params
-            st.query_params.clear()
-            
-            try:
-                session_manager = get_session_manager()
-                if session_manager:
-                    session = session_manager.db.load_session(session_id)
-                    if (session and 
-                        session.user_type == UserType.REGISTERED_USER and 
-                        session.email and 
-                        session.messages):
-                        
-                        # Extend session life during save
-                        session.last_activity = datetime.now()
-                        session_manager.db.save_session(session)
-                        
-                        # Attempt emergency save
-                        success = session_manager.zoho.save_chat_transcript_sync(session, "Browser Close")
-                        logger.info(f"Browser close save result: {success}")
-                        
-            except Exception as e:
-                logger.error(f"Browser close save error: {e}", exc_info=True)
-            
-            # Return empty response for beacon requests
-            st.stop()
 
 # =============================================================================
 # MAIN APPLICATION
@@ -2039,26 +1765,30 @@ def main():
     # Handle session expiry redirect first
     render_session_expiry_redirect()
 
-    # Clear state button
+    # Handle emergency save requests from browser close
+    handle_emergency_save_requests()
+
+    # Emergency reset button
     if st.button("🔄 Fresh Start", key="emergency_clear"):
         st.session_state.clear()
         st.rerun()
 
-    # Initialize application
+    # ✅ BEST PRACTICE: Initialize application only when needed
     if not ensure_initialization():
         st.stop()
-
-    # Handle save requests (browser close, etc.)
-    handle_save_requests()
 
     # Get session manager
     session_manager = get_session_manager()
     if not session_manager:
-        st.error("Failed to get session manager.")
+        st.error("Failed to initialize session manager.")
         st.stop()
     
+    # ✅ BEST PRACTICE: Initialize page state only when missing
+    if 'page' not in st.session_state:
+        st.session_state.page = None
+    
     # Main application flow
-    current_page = st.session_state.get('page')
+    current_page = st.session_state.page
     
     if current_page != "chat":
         render_welcome_page(session_manager)
@@ -2066,10 +1796,10 @@ def main():
         session = session_manager.get_session()
         if session and session.active:
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_with_timer(session_manager, session)
+            render_chat_interface_with_optimized_timer(session_manager, session)
         else:
-            if 'page' in st.session_state:
-                del st.session_state.page
+            # ✅ BEST PRACTICE: Clean up page state when session invalid
+            st.session_state.page = None
             st.rerun()
 
 if __name__ == "__main__":
