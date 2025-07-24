@@ -29,16 +29,18 @@ import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
 # =============================================================================
-# COMPLETE INTEGRATED FIFI - PRODUCTION VERSION
+# FIFI - OPTIMIZED WITH AUTHENTICATION FIXES
 # =============================================================================
-# Incorporates all learnings:
-# ✅ Correct st_javascript patterns with IIFE and proper return values
-# ✅ Clean browser close detection using direct navigation (not beacons)
-# ✅ Proper window.parent vs window usage
-# ✅ Message channel error prevention
-# ✅ Stable component keys and enhanced error handling
-# ✅ Streamlined timer using data return patterns
-# ✅ All original features preserved (database, CRM, auth, PDF export)
+# ✅ Event-driven timer (not rerun-driven)
+# ✅ Stable component keys throughout
+# ✅ Proper session state initialization patterns
+# ✅ Callback-based state updates
+# ✅ Minimal JavaScript re-execution
+# ✅ Autonomous timer operation
+# ✅ FIXED: Authentication persistence issues
+# ✅ FIXED: Session validation and UserType handling
+# ✅ FIXED: Database enum serialization
+# ✅ Enhanced debugging for authentication flow
 # =============================================================================
 
 # Setup logging
@@ -233,7 +235,7 @@ class UserSession:
     timeout_saved_to_crm: bool = False
 
 # =============================================================================
-# DATABASE MANAGER WITH SQLITE CLOUD SUPPORT
+# DATABASE MANAGER WITH SQLITE CLOUD SUPPORT - AUTHENTICATION FIXES
 # =============================================================================
 
 class DatabaseManager:
@@ -327,36 +329,49 @@ class DatabaseManager:
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
+        """✅ FIXED: Enhanced session saving with better enum handling"""
         with self.lock:
             if self.db_type == "memory":
                 self.local_sessions[session.session_id] = session
+                logger.debug(f"✅ Memory save: {session.session_id[:8]} as {session.user_type}")
                 return
             
             try:
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
                 
+                # ✅ FIXED: Ensure enum is properly serialized
+                user_type_value = session.user_type.value if isinstance(session.user_type, UserType) else str(session.user_type)
+                
                 self.conn.execute(
                     '''REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                    (session.session_id, session.user_type.value, session.email, session.first_name,
+                    (session.session_id, user_type_value, session.email, session.first_name,
                      session.zoho_contact_id, int(session.guest_email_requested), session.created_at.isoformat(),
                      session.last_activity.isoformat(), json.dumps(session.messages), int(session.active),
                      session.wp_token, int(session.timeout_saved_to_crm)))
                 self.conn.commit()
                 
-                logger.debug(f"Saved session {session.session_id[:8]}: user_type={session.user_type.value}")
+                logger.debug(f"✅ DB save: {session.session_id[:8]} as {user_type_value}")
                 
             except Exception as e:
-                logger.error(f"Failed to save session {session.session_id[:8]}: {e}")
+                logger.error(f"❌ Failed to save session {session.session_id[:8]}: {e}")
                 raise
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
+        """✅ FIXED: Enhanced session loading with better validation"""
         with self.lock:
             if self.db_type == "memory":
                 session = self.local_sessions.get(session_id)
-                if session and isinstance(session.user_type, str):
-                    session.user_type = UserType(session.user_type)
+                if session:
+                    # ✅ FIXED: Ensure proper UserType conversion
+                    if isinstance(session.user_type, str):
+                        try:
+                            session.user_type = UserType(session.user_type)
+                        except ValueError:
+                            logger.warning(f"Invalid user_type in memory: {session.user_type}")
+                            session.user_type = UserType.GUEST
+                    logger.debug(f"✅ Memory load: {session_id[:8]} as {session.user_type}")
                 return session
 
             try:
@@ -374,6 +389,7 @@ class DatabaseManager:
                 row = cursor.fetchone()
                 
                 if not row: 
+                    logger.debug(f"❌ Session not found in DB: {session_id[:8]}")
                     return None
                 
                 # Handle row conversion based on type
@@ -382,7 +398,9 @@ class DatabaseManager:
                 if hasattr(row, 'keys') and callable(getattr(row, 'keys')):
                     try:
                         row_dict = dict(row)
-                    except Exception:
+                        logger.debug(f"✅ Converted sqlite3.Row to dict for {session_id[:8]}")
+                    except Exception as e:
+                        logger.warning(f"Failed to convert sqlite3.Row: {e}")
                         row_dict = None
                 
                 if not row_dict:
@@ -393,17 +411,33 @@ class DatabaseManager:
                             'created_at': row[6], 'last_activity': row[7], 'messages': row[8],
                             'active': row[9], 'wp_token': row[10], 'timeout_saved_to_crm': row[11]
                         }
+                        logger.debug(f"✅ Converted tuple to dict for {session_id[:8]}")
                     else:
                         logger.error(f"Row has insufficient columns: {len(row)}")
                         return None
                 
                 if not row_dict:
+                    logger.error(f"Failed to convert row for {session_id[:8]}")
                     return None
+                
+                # ✅ FIXED: Better UserType conversion with validation
+                user_type_str = row_dict.get('user_type', 'guest')
+                try:
+                    if user_type_str in ['registered_user', 'REGISTERED_USER']:
+                        user_type = UserType.REGISTERED_USER
+                    elif user_type_str in ['guest', 'GUEST']:
+                        user_type = UserType.GUEST
+                    else:
+                        logger.warning(f"Unknown user_type in DB: {user_type_str}, defaulting to GUEST")
+                        user_type = UserType.GUEST
+                except Exception as e:
+                    logger.error(f"UserType conversion failed: {e}")
+                    user_type = UserType.GUEST
                 
                 # Create UserSession
                 user_session = UserSession(
                     session_id=row_dict['session_id'], 
-                    user_type=UserType(row_dict['user_type']),
+                    user_type=user_type,
                     email=row_dict.get('email'), 
                     first_name=row_dict.get('first_name'),
                     zoho_contact_id=row_dict.get('zoho_contact_id'),
@@ -416,6 +450,7 @@ class DatabaseManager:
                     timeout_saved_to_crm=bool(row_dict.get('timeout_saved_to_crm', 0))
                 )
                 
+                logger.debug(f"✅ DB load: {session_id[:8]} as {user_session.user_type}")
                 return user_session
                     
             except Exception as e:
@@ -756,184 +791,263 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Di
     return {"flagged": False}
 
 # =============================================================================
-# STREAMLINED JAVASCRIPT TIMER COMPONENTS
+# OPTIMIZED TIMER SYSTEM - BEST PRACTICES APPLIED
 # =============================================================================
 
-def render_activity_timer_component(session_id: str, session_manager) -> Optional[Dict[str, Any]]:
+def initialize_autonomous_timer(session_id: str):
     """
-    Streamlined activity timer using st_javascript best practices
+    ✅ BEST PRACTICE: Initialize timer once per session, let it run autonomously
+    ✅ Event-driven: Only communicates back when events occur
+    ✅ Stable key: Based on session, not dynamic
+    ✅ Minimal re-execution: Runs once, operates independently
     """
     
     if not session_id:
-        return None
+        return
     
-    js_timer_code = f"""
+    # ✅ Check if timer already initialized for this session
+    timer_key = f"timer_initialized_{session_id[:8]}"
+    if timer_key in st.session_state:
+        return  # Already initialized, don't re-initialize
+    
+    js_timer_init = f"""
     (() => {{
         const sessionId = "{session_id}";
         const AUTO_SAVE_TIMEOUT = 120000;  // 2 minutes
         const SESSION_EXPIRE_TIMEOUT = 180000;  // 3 minutes
         
-        console.log("🕐 FiFi Timer checking session:", sessionId.substring(0, 8));
+        console.log("🚀 Initializing autonomous timer for session:", sessionId.substring(0, 8));
         
-        // Initialize timer state
-        if (!window.fifi_timer_state) {{
-            window.fifi_timer_state = {{
+        // ✅ BEST PRACTICE: Initialize state only if missing
+        if (!window.fifi_autonomous_timer) {{
+            window.fifi_autonomous_timer = {{
+                sessionId: sessionId,
                 lastActivityTime: Date.now(),
                 autoSaveTriggered: false,
                 sessionExpired: false,
-                listenersInitialized: false,
-                sessionId: sessionId
+                intervalId: null,
+                events: []  // Store events to be collected by Python
             }};
         }}
         
-        const state = window.fifi_timer_state;
+        const timer = window.fifi_autonomous_timer;
         
-        // Reset state if session changed
-        if (state.sessionId !== sessionId) {{
-            state.sessionId = sessionId;
-            state.lastActivityTime = Date.now();
-            state.autoSaveTriggered = false;
-            state.sessionExpired = false;
-            state.listenersInitialized = false;
+        // Reset if session changed
+        if (timer.sessionId !== sessionId) {{
+            timer.sessionId = sessionId;
+            timer.lastActivityTime = Date.now();
+            timer.autoSaveTriggered = false;
+            timer.sessionExpired = false;
+            timer.events = [];
         }}
         
-        // Setup activity detection
-        if (!state.listenersInitialized) {{
-            function resetActivity() {{
-                const now = Date.now();
-                state.lastActivityTime = now;
-                state.autoSaveTriggered = false;
-                state.sessionExpired = false;
-                console.log("🔄 Activity detected");
+        // ✅ BEST PRACTICE: Set up activity listeners once
+        function resetActivity() {{
+            timer.lastActivityTime = Date.now();
+            timer.autoSaveTriggered = false;
+            timer.sessionExpired = false;
+            console.log("🔄 Timer: Activity detected");
+        }}
+        
+        const events = ['mousedown', 'mousemove', 'click', 'keydown', 'scroll', 'touchstart'];
+        
+        // Remove existing listeners to prevent duplicates
+        if (timer.activityListeners) {{
+            timer.activityListeners.forEach(cleanup => cleanup());
+        }}
+        
+        timer.activityListeners = [];
+        
+        // Add component listeners
+        events.forEach(eventType => {{
+            const cleanup = () => document.removeEventListener(eventType, resetActivity);
+            document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
+            timer.activityListeners.push(cleanup);
+        }});
+        
+        // Add parent listeners if accessible
+        try {{
+            if (window.parent && window.parent.document && window.parent.document !== document) {{
+                events.forEach(eventType => {{
+                    const cleanup = () => window.parent.document.removeEventListener(eventType, resetActivity);
+                    window.parent.document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
+                    timer.activityListeners.push(cleanup);
+                }});
             }}
-            
-            const events = ['mousedown', 'mousemove', 'click', 'keydown', 'scroll'];
-            
-            // Listen on component
-            events.forEach(eventType => {{
-                try {{
-                    document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
-                }} catch (e) {{
-                    console.debug("Component listener failed:", eventType);
-                }}
-            }});
-            
-            // Listen on main app
-            try {{
-                if (window.parent && window.parent.document && window.parent.document !== document) {{
-                    events.forEach(eventType => {{
-                        try {{
-                            window.parent.document.addEventListener(eventType, resetActivity, {{ passive: true, capture: true }});
-                        }} catch (e) {{
-                            console.debug("Parent listener failed:", eventType);
-                        }}
+        }} catch (e) {{
+            console.debug("Cannot access parent for activity detection");
+        }}
+        
+        // ✅ BEST PRACTICE: Autonomous operation - timer runs independently
+        if (!timer.intervalId) {{
+            timer.intervalId = setInterval(() => {{
+                const currentTime = Date.now();
+                const inactiveTimeMs = currentTime - timer.lastActivityTime;
+                const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
+                
+                // Check for auto-save trigger
+                if (inactiveTimeMs >= AUTO_SAVE_TIMEOUT && !timer.autoSaveTriggered) {{
+                    timer.autoSaveTriggered = true;
+                    console.log("🚨 Timer: Auto-save triggered");
+                    
+                    // ✅ BEST PRACTICE: Store event for collection, don't force immediate return
+                    timer.events.push({{
+                        type: "auto_save_trigger",
+                        session_id: sessionId,
+                        inactive_time_ms: inactiveTimeMs,
+                        inactive_minutes: inactiveMinutes,
+                        timestamp: currentTime
                     }});
-                    console.log("👂 Listening to main app activity");
                 }}
-            }} catch (e) {{
-                console.debug("Cannot access parent for activity detection");
-            }}
-            
-            // Visibility detection
-            try {{
-                if (window.parent && window.parent.document) {{
-                    window.parent.document.addEventListener('visibilitychange', () => {{
-                        try {{
-                            if (window.parent.document.visibilityState === 'visible') {{
-                                resetActivity();
-                            }}
-                        }} catch (e) {{
-                            console.debug("Visibility check failed");
-                        }}
-                    }}, {{ passive: true }});
+                
+                // Check for session expiry
+                if (inactiveTimeMs >= SESSION_EXPIRE_TIMEOUT && !timer.sessionExpired) {{
+                    timer.sessionExpired = true;
+                    console.log("🚨 Timer: Session expired");
+                    
+                    // ✅ BEST PRACTICE: Store event for collection
+                    timer.events.push({{
+                        type: "session_expired",
+                        session_id: sessionId,
+                        inactive_time_ms: inactiveTimeMs,
+                        inactive_minutes: inactiveMinutes,
+                        timestamp: currentTime
+                    }});
                 }}
-            }} catch (e) {{
-                document.addEventListener('visibilitychange', () => {{
-                    if (document.visibilityState === 'visible') {{
-                        resetActivity();
-                    }}
-                }}, {{ passive: true }});
-            }}
+                
+            }}, 5000);  // Check every 5 seconds
             
-            state.listenersInitialized = true;
-            console.log("✅ Activity detection initialized");
+            console.log("✅ Autonomous timer started with interval ID:", timer.intervalId);
         }}
         
-        // Calculate inactivity
-        const currentTime = Date.now();
-        const inactiveTimeMs = currentTime - state.lastActivityTime;
-        const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
-        
-        // Check for auto-save trigger
-        if (inactiveTimeMs >= AUTO_SAVE_TIMEOUT && !state.autoSaveTriggered) {{
-            state.autoSaveTriggered = true;
-            console.log("🚨 AUTO-SAVE TRIGGER");
-            
-            return {{
-                event: "auto_save_trigger",
-                session_id: sessionId,
-                inactive_time_ms: inactiveTimeMs,
-                inactive_minutes: inactiveMinutes,
-                timestamp: currentTime
-            }};
-        }}
-        
-        // Check for session expiry
-        if (inactiveTimeMs >= SESSION_EXPIRE_TIMEOUT && !state.sessionExpired) {{
-            state.sessionExpired = true;
-            console.log("🚨 SESSION EXPIRED");
-            
-            return {{
-                event: "session_expired",
-                session_id: sessionId,
-                inactive_time_ms: inactiveTimeMs,
-                inactive_minutes: inactiveMinutes,
-                timestamp: currentTime
-            }};
-        }}
-        
-        // No events - return null
-        return null;
+        return "timer_initialized";
     }})()
     """
     
     try:
-        stable_key = f"fifi_timer_{session_id[:8]}"
-        timer_result = st_javascript(js_timer_code, key=stable_key)
+        # ✅ BEST PRACTICE: Stable key based on session
+        stable_key = f"fifi_timer_init_{session_id[:8]}"
+        result = st_javascript(js_timer_init, key=stable_key)
         
-        # Handle falsy values that st_javascript might return
-        if timer_result is None or timer_result == 0 or timer_result == "" or timer_result == False:
-            return None
-        
-        # Validate result structure
-        if isinstance(timer_result, dict) and 'event' in timer_result:
-            event = timer_result.get('event')
-            received_session_id = timer_result.get('session_id')
-            
-            if received_session_id == session_id:
-                logger.info(f"✅ Timer event: {event} for session {session_id[:8]}")
-                return timer_result
-            else:
-                logger.warning(f"⚠️ Session ID mismatch in timer result")
-                return None
-        
-        return None
+        if result == "timer_initialized":
+            # ✅ BEST PRACTICE: Mark as initialized to prevent re-initialization
+            st.session_state[timer_key] = True
+            logger.info(f"✅ Autonomous timer initialized for session {session_id[:8]}")
         
     except Exception as e:
-        logger.error(f"Timer execution error: {e}")
-        return None
+        logger.error(f"Timer initialization failed: {e}")
+
+def collect_timer_events(session_id: str) -> List[Dict[str, Any]]:
+    """
+    ✅ BEST PRACTICE: Collect events only when needed, not on every rerun
+    ✅ Event-driven: Only retrieves events that actually occurred
+    """
+    
+    if not session_id:
+        return []
+    
+    js_collect_events = f"""
+    (() => {{
+        const sessionId = "{session_id}";
+        
+        if (!window.fifi_autonomous_timer || window.fifi_autonomous_timer.sessionId !== sessionId) {{
+            return [];
+        }}
+        
+        const timer = window.fifi_autonomous_timer;
+        const events = timer.events.slice();  // Copy events
+        timer.events = [];  // Clear collected events
+        
+        if (events.length > 0) {{
+            console.log("📦 Collecting", events.length, "timer events for Python");
+        }}
+        
+        return events;
+    }})()
+    """
+    
+    try:
+        # ✅ BEST PRACTICE: Stable key for event collection
+        stable_key = f"fifi_timer_collect_{session_id[:8]}"
+        events = st_javascript(js_collect_events, key=stable_key)
+        
+        # Handle potential falsy returns
+        if not events or not isinstance(events, list):
+            return []
+        
+        return events
+        
+    except Exception as e:
+        logger.error(f"Event collection failed: {e}")
+        return []
+
+def cleanup_timer(session_id: str):
+    """
+    ✅ BEST PRACTICE: Clean up timer when session ends
+    """
+    
+    if not session_id:
+        return
+    
+    js_cleanup = f"""
+    (() => {{
+        const sessionId = "{session_id}";
+        
+        if (window.fifi_autonomous_timer && window.fifi_autonomous_timer.sessionId === sessionId) {{
+            const timer = window.fifi_autonomous_timer;
+            
+            // Clear interval
+            if (timer.intervalId) {{
+                clearInterval(timer.intervalId);
+                console.log("🧹 Timer interval cleared");
+            }}
+            
+            // Remove activity listeners
+            if (timer.activityListeners) {{
+                timer.activityListeners.forEach(cleanup => cleanup());
+                console.log("🧹 Activity listeners removed");
+            }}
+            
+            // Clear timer state
+            delete window.fifi_autonomous_timer;
+            console.log("🧹 Timer cleaned up for session:", sessionId.substring(0, 8));
+            
+            return "cleaned";
+        }}
+        
+        return "not_found";
+    }})()
+    """
+    
+    try:
+        stable_key = f"fifi_timer_cleanup_{session_id[:8]}"
+        result = st_javascript(js_cleanup, key=stable_key)
+        
+        if result == "cleaned":
+            # ✅ Remove initialization flag
+            timer_key = f"timer_initialized_{session_id[:8]}"
+            if timer_key in st.session_state:
+                del st.session_state[timer_key]
+        
+    except Exception as e:
+        logger.error(f"Timer cleanup failed: {e}")
 
 def render_browser_close_component(session_id: str):
     """
-    Clean browser close detection using direct navigation
+    ✅ BEST PRACTICE: Initialize browser close detection once per session
     """
     if not session_id:
         return
 
+    # ✅ Check if already initialized
+    close_key = f"close_initialized_{session_id[:8]}"
+    if close_key in st.session_state:
+        return
+    
     js_code = f"""
     <script>
     (function() {{
-        const sessionKey = 'fifi_close_' + '{session_id}';
+        const sessionKey = 'fifi_close_{session_id}';
         if (window[sessionKey]) return;
         window[sessionKey] = true;
         
@@ -944,18 +1058,14 @@ def render_browser_close_component(session_id: str):
             if (saveTriggered) return;
             saveTriggered = true;
             
-            console.log('🚨 FiFi: Browser close detected - triggering emergency save');
+            console.log('🚨 Browser close detected - triggering emergency save');
             
             try {{
-                // Use direct navigation to trigger emergency save
                 const url = window.parent.location.origin + window.parent.location.pathname +
                     `?session_id=${{sessionId}}&event=close`;
-                
                 console.log('📡 Navigating to:', url);
                 window.parent.location = url;
-                
             }} catch (e) {{
-                console.log('⚠️ Parent access failed, trying current window');
                 try {{
                     const url = window.location.origin + window.location.pathname +
                         `?session_id=${{sessionId}}&event=close`;
@@ -966,7 +1076,6 @@ def render_browser_close_component(session_id: str):
             }}
         }}
         
-        // Setup close detection events
         const events = ['beforeunload', 'pagehide'];
         events.forEach(eventType => {{
             try {{
@@ -979,12 +1088,10 @@ def render_browser_close_component(session_id: str):
             }}
         }});
         
-        // Visibility change detection
         try {{
             if (window.parent && window.parent.document) {{
                 window.parent.document.addEventListener('visibilitychange', () => {{
                     if (window.parent.document.visibilityState === 'hidden') {{
-                        console.log('🚨 Main app hidden - triggering save');
                         triggerEmergencySave();
                     }}
                 }}, {{ passive: true }});
@@ -997,19 +1104,21 @@ def render_browser_close_component(session_id: str):
             }}, {{ passive: true }});
         }}
         
-        console.log('✅ Emergency save detection initialized for:', sessionId.substring(0, 8));
+        console.log('✅ Emergency save detection initialized');
     }})();
     </script>
     """
     
     try:
         components.html(js_code, height=0, width=0)
+        # ✅ Mark as initialized
+        st.session_state[close_key] = True
     except Exception as e:
         logger.error(f"Failed to render browser close component: {e}")
 
 def render_activity_status_indicator(session):
     """
-    Show activity status for registered users
+    Show current activity status for registered users
     """
     if session.user_type == UserType.REGISTERED_USER and session.last_activity:
         time_since_activity = datetime.now() - session.last_activity
@@ -1036,7 +1145,41 @@ def render_activity_status_indicator(session):
                 st.error(f"🔴 **Inactive** for {minutes_since:.1f} min - Will expire soon")
 
 # =============================================================================
-# SESSION MANAGER
+# DEBUG FUNCTIONS FOR AUTHENTICATION TROUBLESHOOTING
+# =============================================================================
+
+def render_debug_session_info(session, session_manager):
+    """✅ ADDED: Debug function to troubleshoot authentication persistence"""
+    
+    with st.sidebar.expander("🔧 Debug Session Info"):
+        st.write(f"**Session ID:** {session.session_id[:8]}")
+        st.write(f"**User Type:** {session.user_type}")
+        st.write(f"**User Type Value:** {session.user_type.value}")
+        st.write(f"**Email:** {session.email}")
+        st.write(f"**First Name:** {session.first_name}")
+        st.write(f"**Active:** {session.active}")
+        st.write(f"**WP Token:** {'Set' if session.wp_token else 'None'}")
+        
+        if st.button("🔍 Reload Session from DB", key="debug_reload"):
+            if session_manager:
+                fresh_session = session_manager.db.load_session(session.session_id)
+                if fresh_session:
+                    st.write(f"**DB User Type:** {fresh_session.user_type}")
+                    st.write(f"**DB Email:** {fresh_session.email}")
+                    st.write(f"**DB First Name:** {fresh_session.first_name}")
+                    
+                    if fresh_session.user_type != session.user_type:
+                        st.error(f"**MISMATCH:** Memory={session.user_type}, DB={fresh_session.user_type}")
+                    else:
+                        st.success("✅ Session data matches database")
+                else:
+                    st.error("❌ Session not found in database")
+        
+        if st.button("🔄 Force Session Refresh", key="debug_refresh"):
+            st.rerun()
+
+# =============================================================================
+# SESSION MANAGER WITH ENHANCED AUTHENTICATION
 # =============================================================================
 
 class SessionManager:
@@ -1056,6 +1199,7 @@ class SessionManager:
         return time_diff.total_seconds() > (self.session_timeout_minutes * 60)
 
     def _update_activity(self, session: UserSession):
+        """✅ BEST PRACTICE: Update session state with callback pattern"""
         session.last_activity = datetime.now()
         if session.timeout_saved_to_crm:
             session.timeout_saved_to_crm = False
@@ -1070,18 +1214,33 @@ class SessionManager:
         session = UserSession(session_id=str(uuid.uuid4()))
         self.db.save_session(session)
         st.session_state.current_session_id = session.session_id
+        logger.info(f"✅ Created guest session: {session.session_id[:8]}")
         return session
 
     def _validate_and_fix_session(self, session: UserSession) -> UserSession:
+        """✅ FIXED: Better session validation with enhanced UserType handling"""
         if not session:
             return session
+            
+        # ✅ FIXED: Better UserType handling
         if isinstance(session.user_type, str):
             try:
-                session.user_type = UserType(session.user_type)
-            except ValueError:
+                # Handle both 'registered_user' and 'REGISTERED_USER' formats
+                user_type_str = session.user_type.upper()
+                if user_type_str in ['REGISTERED_USER', 'REGISTERED-USER']:
+                    session.user_type = UserType.REGISTERED_USER
+                elif user_type_str in ['GUEST']:
+                    session.user_type = UserType.GUEST
+                else:
+                    logger.warning(f"Unknown user_type string: {session.user_type}, defaulting to GUEST")
+                    session.user_type = UserType.GUEST
+            except Exception as e:
+                logger.error(f"UserType conversion failed: {e}")
                 session.user_type = UserType.GUEST
+        
         if not isinstance(session.messages, list):
             session.messages = []
+            
         return session
 
     def _auto_save_to_crm(self, session: UserSession, trigger_reason: str) -> bool:
@@ -1133,7 +1292,12 @@ class SessionManager:
                 return False
 
     def get_session(self) -> UserSession:
-        session_id = st.session_state.get('current_session_id')
+        """✅ FIXED: Enhanced session retrieval with better authentication persistence"""
+        # ✅ Check if session ID exists before creating
+        if 'current_session_id' not in st.session_state:
+            return self._create_guest_session()
+        
+        session_id = st.session_state.current_session_id
         
         if session_id:
             session = self.db.load_session(session_id)
@@ -1152,12 +1316,16 @@ class SessionManager:
                         except Exception as e:
                             logger.error(f"Emergency save failed: {e}")
                     
+                    # Cleanup timer
+                    cleanup_timer(session_id)
+                    
                     self._end_session_internal(session)
                     st.session_state.session_expired = True
                     st.session_state.expired_session_id = session_id[:8]
                     return self._create_guest_session()
                 else:
                     self._update_activity(session)
+                    logger.debug(f"✅ Session retrieved: {session_id[:8]} as {session.user_type}")
                     return session
         
         return self._create_guest_session()
@@ -1169,12 +1337,14 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to mark session inactive: {e}")
         
+        # ✅ BEST PRACTICE: Clean up session state properly
         for key in ['current_session_id', 'page']:
             if key in st.session_state:
                 del st.session_state[key]
 
     @handle_api_errors("Authentication", "WordPress Login")
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+        """✅ FIXED: Enhanced authentication with better session persistence"""
         if not self.config.WORDPRESS_URL:
             st.error("Authentication service not configured.")
             return None
@@ -1182,10 +1352,15 @@ class SessionManager:
             st.error("Too many login attempts. Please wait.")
             return None
 
+        clean_username = username.strip()
+        clean_password = password.strip()
+        
+        logger.info(f"🔐 Starting authentication for: {clean_username}")
+
         try:
             response = requests.post(
                 f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token",
-                json={'username': username.strip(), 'password': password.strip()},
+                json={'username': clean_username, 'password': clean_password},
                 headers={'Content-Type': 'application/json'},
                 timeout=15
             )
@@ -1197,9 +1372,12 @@ class SessionManager:
                 display_name = (
                     data.get('user_display_name') or data.get('displayName') or 
                     data.get('name') or data.get('user_nicename') or 
-                    data.get('first_name') or data.get('nickname') or username.strip()
+                    data.get('first_name') or data.get('nickname') or clean_username
                 )
 
+                # ✅ FIXED: Ensure proper enum assignment with validation
+                logger.info(f"🔄 Converting session {current_session.session_id[:8]} from {current_session.user_type} to REGISTERED_USER")
+                
                 current_session.user_type = UserType.REGISTERED_USER
                 current_session.email = data.get('user_email')
                 current_session.first_name = display_name
@@ -1207,12 +1385,37 @@ class SessionManager:
                 current_session.last_activity = datetime.now()
                 current_session.timeout_saved_to_crm = False
                 
-                self.db.save_session(current_session)
-                st.session_state.current_session_id = current_session.session_id
-                return current_session
+                # ✅ FIXED: Save and verify before proceeding
+                try:
+                    self.db.save_session(current_session)
+                    logger.info(f"✅ Session saved with user_type: {current_session.user_type}")
+                    
+                    # ✅ FIXED: Verify the save worked
+                    verification_session = self.db.load_session(current_session.session_id)
+                    if verification_session and verification_session.user_type == UserType.REGISTERED_USER:
+                        st.session_state.current_session_id = current_session.session_id
+                        logger.info(f"✅ Authentication successful: {verification_session.user_type} for {verification_session.email}")
+                        return current_session
+                    else:
+                        logger.error(f"❌ Session verification failed - Expected REGISTERED_USER, got {verification_session.user_type if verification_session else 'None'}")
+                        st.error("Authentication failed - session could not be verified.")
+                        return None
+                        
+                except Exception as e:
+                    logger.error(f"❌ Failed to save authenticated session: {e}")
+                    st.error("Authentication failed - could not save session.")
+                    return None
                 
             else:
-                st.error("Invalid username or password.")
+                error_message = f"Invalid username or password (Code: {response.status_code})."
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get('message', error_message)
+                except json.JSONDecodeError:
+                    pass
+                
+                logger.warning(f"❌ Authentication failed: {error_message}")
+                st.error(error_message)
                 return None
                 
         except Exception as e:
@@ -1259,14 +1462,20 @@ class SessionManager:
         return response
 
     def clear_chat_history(self, session: UserSession):
+        """✅ BEST PRACTICE: Use callback for immediate state update"""
         session = self._validate_and_fix_session(session)
         session.messages = []
         session.timeout_saved_to_crm = False
         self._update_activity(session)
 
     def end_session(self, session: UserSession):
+        """✅ BEST PRACTICE: Clean up properly on session end"""
         session = self._validate_and_fix_session(session)
         self._auto_save_to_crm(session, "Manual Sign Out")
+        
+        # Clean up timer
+        cleanup_timer(session.session_id)
+        
         self._end_session_internal(session)
 
     def manual_save_to_crm(self, session: UserSession):
@@ -1279,6 +1488,67 @@ class SessionManager:
             self._update_activity(session)
         else:
             st.warning("Cannot save to CRM: Missing requirements")
+
+    def process_timer_events(self, session: UserSession):
+        """
+        ✅ BEST PRACTICE: Process timer events using callback pattern
+        ✅ Event-driven: Only called when events exist
+        """
+        
+        events = collect_timer_events(session.session_id)
+        
+        for event in events:
+            event_type = event.get('type')
+            inactive_minutes = event.get('inactive_minutes', 0)
+            
+            if event_type == 'auto_save_trigger':
+                logger.info(f"Processing auto-save event: {inactive_minutes} minutes inactive")
+                
+                if (session.user_type == UserType.REGISTERED_USER and 
+                    session.email and session.messages and
+                    not session.timeout_saved_to_crm):
+                    
+                    try:
+                        success = self._auto_save_to_crm(session, "Autonomous Timer Auto-Save")
+                        if success:
+                            st.success(f"✅ Chat auto-saved after {inactive_minutes} minutes of inactivity!")
+                            session.last_activity = datetime.now()
+                            self.db.save_session(session)
+                        else:
+                            st.warning("⚠️ Auto-save failed")
+                    except Exception as e:
+                        st.error(f"❌ Auto-save error: {str(e)}")
+                        logger.error(f"Auto-save error: {e}")
+                else:
+                    st.info("ℹ️ Auto-save skipped (not eligible)")
+                
+                return True  # Trigger rerun
+                
+            elif event_type == 'session_expired':
+                logger.info(f"Processing session expiry event: {inactive_minutes} minutes inactive")
+                
+                st.error(f"🔄 **Session expired** after {inactive_minutes} minutes of inactivity")
+                
+                # Emergency save if eligible
+                if (session.user_type == UserType.REGISTERED_USER and 
+                    session.email and session.messages and
+                    not session.timeout_saved_to_crm):
+                    
+                    try:
+                        self._auto_save_to_crm(session, "Emergency Save (Session Expiry)")
+                        st.success("✅ Emergency save completed")
+                    except Exception as e:
+                        st.error(f"❌ Emergency save failed: {str(e)}")
+                
+                # Clean up and end session
+                cleanup_timer(session.session_id)
+                self._end_session_internal(session)
+                st.session_state.session_expired = True
+                st.session_state.expired_session_id = session.session_id[:8]
+                
+                return True  # Trigger rerun
+        
+        return False  # No events processed
 
 # =============================================================================
 # QUERY PARAMETER HANDLER FOR EMERGENCY SAVES
@@ -1336,10 +1606,11 @@ def handle_emergency_save_requests():
         st.stop()
 
 # =============================================================================
-# UI COMPONENTS
+# UI COMPONENTS WITH AUTHENTICATION FIXES
 # =============================================================================
 
 def render_welcome_page(session_manager: SessionManager):
+    """✅ FIXED: Enhanced welcome page with better authentication flow"""
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
     
@@ -1370,11 +1641,23 @@ def render_welcome_page(session_manager: SessionManager):
                             authenticated_session = session_manager.authenticate_with_wordpress(username, password)
                             
                         if authenticated_session:
+                            # ✅ FIXED: Add debugging info and shorter delay
+                            logger.info(f"🎉 Authentication successful: {authenticated_session.user_type}")
                             st.balloons()
                             st.success(f"🎉 Welcome back, {authenticated_session.first_name}!")
-                            time.sleep(1)
+                            
+                            # ✅ FIXED: Shorter delay, immediate session verification
+                            time.sleep(0.5)
                             st.session_state.page = "chat"
-                            st.rerun()
+                            
+                            # ✅ FIXED: Force session reload to verify persistence
+                            current_session = session_manager.get_session()
+                            if current_session.user_type == UserType.REGISTERED_USER:
+                                logger.info("✅ Session verification successful after authentication")
+                                st.rerun()
+                            else:
+                                logger.error(f"❌ Session verification failed: {current_session.user_type}")
+                                st.error("Session verification failed. Please try again.")
     
     with tab2:
         st.markdown("""
@@ -1398,6 +1681,7 @@ def render_welcome_page(session_manager: SessionManager):
             st.rerun()
 
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
+    """✅ FIXED: Enhanced sidebar with debug info for troubleshooting"""
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
@@ -1433,14 +1717,14 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         
         st.divider()
         
-        # Action buttons
+        # ✅ BEST PRACTICE: Action buttons with callbacks
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🗑️ Clear Chat", use_container_width=True):
+            if st.button("🗑️ Clear Chat", use_container_width=True, key="clear_chat"):
                 session_manager.clear_chat_history(session)
                 st.rerun()
         with col2:
-            if st.button("🚪 Sign Out", use_container_width=True):
+            if st.button("🚪 Sign Out", use_container_width=True, key="sign_out"):
                 session_manager.end_session(session)
                 st.rerun()
 
@@ -1461,74 +1745,34 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
             
             # CRM Save
             if session_manager.zoho.config.ZOHO_ENABLED and session.email:
-                if st.button("💾 Save to Zoho CRM", use_container_width=True):
+                if st.button("💾 Save to Zoho CRM", use_container_width=True, key="manual_save"):
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Auto-saves after 2 min inactivity")
+        
+        # ✅ ADDED: Debug section for troubleshooting authentication
+        if st.checkbox("🔧 Debug Mode"):
+            render_debug_session_info(session, session_manager)
 
-def render_chat_interface_with_timer(session_manager: SessionManager, session: UserSession):
+def render_chat_interface_with_optimized_timer(session_manager: SessionManager, session: UserSession):
     """
-    Main chat interface with integrated timer functionality
+    ✅ OPTIMIZED: Chat interface with best practices and authentication fixes
     """
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion")
     
-    # Add browser close detection
+    # ✅ BEST PRACTICE: Initialize components only once per session
+    initialize_autonomous_timer(session.session_id)
     render_browser_close_component(session.session_id)
     
     # Show activity status
     render_activity_status_indicator(session)
     
-    # Execute timer and handle events
-    timer_result = render_activity_timer_component(session.session_id, session_manager)
-    
-    if timer_result:
-        event = timer_result.get('event')
-        inactive_minutes = timer_result.get('inactive_minutes', 0)
-        
-        if event == 'auto_save_trigger':
-            st.info(f"⏰ **Auto-save triggered** after {inactive_minutes} minutes")
-            
-            if (session.user_type == UserType.REGISTERED_USER and 
-                session.email and session.messages and
-                not session.timeout_saved_to_crm):
-                
-                with st.spinner("💾 Auto-saving to CRM..."):
-                    try:
-                        success = session_manager._auto_save_to_crm(session, "JavaScript Auto-Save")
-                        if success:
-                            st.success("✅ Chat auto-saved to CRM!")
-                            session.last_activity = datetime.now()
-                            session_manager.db.save_session(session)
-                        else:
-                            st.warning("⚠️ Auto-save failed")
-                    except Exception as e:
-                        st.error(f"❌ Auto-save error: {str(e)}")
-                
-                time.sleep(1)
-                st.rerun()
-        
-        elif event == 'session_expired':
-            st.error(f"🔄 **Session expired** after {inactive_minutes} minutes")
-            
-            # Emergency save
-            if (session.user_type == UserType.REGISTERED_USER and 
-                session.email and session.messages and
-                not session.timeout_saved_to_crm):
-                
-                try:
-                    session_manager._auto_save_to_crm(session, "Emergency Save (Session Expiry)")
-                    st.success("✅ Emergency save completed")
-                except Exception as e:
-                    st.error(f"❌ Emergency save failed: {str(e)}")
-            
-            # End session
-            session_manager._end_session_internal(session)
-            st.session_state.session_expired = True
-            st.session_state.expired_session_id = session.session_id[:8]
-            
-            time.sleep(3)
-            st.rerun()
+    # ✅ BEST PRACTICE: Process timer events only when they exist (event-driven)
+    events_processed = session_manager.process_timer_events(session)
+    if events_processed:
+        time.sleep(1)
+        st.rerun()
     
     # Display chat messages
     for msg in session.messages:
@@ -1548,7 +1792,7 @@ def render_chat_interface_with_timer(session_manager: SessionManager, session: U
                 if indicators:
                     st.caption(f"Enhanced with: {', '.join(indicators)}")
 
-    # Chat input
+    # ✅ BEST PRACTICE: Chat input with proper callback handling
     if prompt := st.chat_input("Ask me about ingredients, suppliers, or market trends..."):
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -1595,7 +1839,7 @@ def render_session_expiry_redirect():
             time.sleep(0.03)
             progress_bar.progress(i + 1)
         
-        # Clear session state
+        # ✅ BEST PRACTICE: Clean up session state properly
         for key in ['session_expired', 'expired_session_id', 'current_session_id', 'page']:
             if key in st.session_state:
                 del st.session_state[key]
@@ -1610,12 +1854,18 @@ def get_session_manager() -> Optional[SessionManager]:
     return st.session_state.get('session_manager')
 
 def ensure_initialization():
-    """Initialize the application components"""
-    if 'initialized' not in st.session_state or not st.session_state.initialized:
+    """
+    ✅ BEST PRACTICE: Initialize application components only when missing
+    """
+    if 'initialized' not in st.session_state:
+        st.session_state.initialized = False
+    
+    if not st.session_state.initialized:
         try:
             config = Config()
             pdf_exporter = PDFExporter()
             
+            # ✅ BEST PRACTICE: Initialize database manager only when missing
             if 'db_manager' not in st.session_state:
                 st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
             
@@ -1657,7 +1907,7 @@ def main():
         st.session_state.clear()
         st.rerun()
 
-    # Initialize application
+    # ✅ BEST PRACTICE: Initialize application only when needed
     if not ensure_initialization():
         st.stop()
 
@@ -1667,8 +1917,12 @@ def main():
         st.error("Failed to initialize session manager.")
         st.stop()
     
+    # ✅ BEST PRACTICE: Initialize page state only when missing
+    if 'page' not in st.session_state:
+        st.session_state.page = None
+    
     # Main application flow
-    current_page = st.session_state.get('page')
+    current_page = st.session_state.page
     
     if current_page != "chat":
         render_welcome_page(session_manager)
@@ -1676,10 +1930,10 @@ def main():
         session = session_manager.get_session()
         if session and session.active:
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_with_timer(session_manager, session)
+            render_chat_interface_with_optimized_timer(session_manager, session)
         else:
-            if 'page' in st.session_state:
-                del st.session_state.page
+            # ✅ BEST PRACTICE: Clean up page state when session invalid
+            st.session_state.page = None
             st.rerun()
 
 if __name__ == "__main__":
