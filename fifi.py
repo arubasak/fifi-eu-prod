@@ -1077,15 +1077,15 @@ def render_browser_close_component(session_id: str):
             console.log('🚨 Browser close detected - triggering emergency save');
             
             try {{
-                const url = window.parent.location.origin + window.parent.location.pathname +
+                const url = window.location.origin + window.location.pathname +
                     `?session_id=${{sessionId}}&event=close`;
                 console.log('📡 Navigating to:', url);
-                window.parent.location = url;
+                window.location = url;
             }} catch (e) {{
                 try {{
-                    const url = window.location.origin + window.location.pathname +
+                    const url = window.parent.location.origin + window.parent.location.pathname +
                         `?session_id=${{sessionId}}&event=close`;
-                    window.location = url;
+                    window.parent.location = url;
                 }} catch (e2) {{
                     console.error('❌ All navigation methods failed:', e, e2);
                 }}
