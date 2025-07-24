@@ -2024,6 +2024,7 @@ def get_session(self) -> UserSession:
         
         # No session or inactive
         return self._create_guest_session()
+    
     def _end_session_internal(self, session: UserSession):
         """End session and clean up state."""
         session.active = False
