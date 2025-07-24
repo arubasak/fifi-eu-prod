@@ -2540,12 +2540,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 
                 if seconds_remaining > 0:
                     minutes_remaining = seconds_remaining / 60
-                    # CRITICAL FIX: Better messaging about when save happens
-                    if minutes_remaining > 1:
-                        st.caption(f"⏱️ Auto-save in {minutes_remaining - 1:.1f} min, timeout in {minutes_remaining:.1f} min")
-                    else:
-                        st.caption(f"⏱️ Auto-saving soon... timeout in {minutes_remaining:.1f} min")
-                    
+                    st.caption(f"⏱️ Auto-save & sign out in {minutes_remaining:.1f} minutes")
                     render_auto_logout_component(
                         timeout_seconds=int(seconds_remaining),
                         session_id=fresh_session.session_id,
@@ -2554,23 +2549,21 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 else:
                     st.caption("⏱️ Session will timeout on next interaction")
                     render_auto_logout_component(
-                        timeout_seconds=10,
+                        timeout_seconds=2,
                         session_id=fresh_session.session_id,
                         session_manager=session_manager
                     )
+                    
         else:
             st.info("👤 **Guest User**")
             st.markdown("*Sign in for full features*")
-
         
         st.divider()
         
         st.markdown(f"**Messages:** {len(fresh_session.messages)}")
         st.markdown(f"**Session:** `{fresh_session.session_id[:8]}...`")
-
-            
-        st.divider()
         
+        st.divider()
         st.subheader("📊 System Status")
         
         if hasattr(st.session_state, 'ai_system'):
@@ -2636,10 +2629,6 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     else:
                         st.warning("Need email and messages to test save")
         
-        # Add debugging tools
-        add_session_debug_panel(session_manager, fresh_session)
-        add_session_health_monitor()
-        
         st.divider()
         
         col1, col2 = st.columns(2)
@@ -2694,7 +2683,11 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
             if st.button(f"💬 {query}", key=f"example_{hash(query)}", use_container_width=True):
                 st.session_state.pending_query = query
                 st.rerun()
-
+        
+        # 🔍 DEBUG SECTION - ADD THIS AT THE END
+        st.divider()
+        add_debug_section()
+        
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion with knowledge base and web search")
