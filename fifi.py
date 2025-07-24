@@ -11,6 +11,7 @@ import html
 import jwt
 import threading
 import copy
+import sqlite3  # ✅ CRITICAL FIX: Added missing import
 from enum import Enum
 from urllib.parse import urlparse
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -31,6 +32,8 @@ import streamlit.components.v1 as components
 # - FIXED: Race conditions between timeout and pre-timeout saves
 # - FIXED: UserType enum serialization issues
 # - FIXED: Session state synchronization problems
+# - FIXED: Missing imports (sqlite3, copy)
+# - FIXED: Missing timeout_saved_to_crm attribute
 # - ENHANCED: Thread-safe operations with proper locking
 # - ENHANCED: Comprehensive session validation and debugging
 # - ENHANCED: Bulletproof error handling and recovery
@@ -246,18 +249,11 @@ class UserSession:
     messages: List[Dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     last_activity: datetime = field(default_factory=datetime.now)
+    timeout_saved_to_crm: bool = False  # ✅ CRITICAL FIX: Added missing attribute
 
 # =============================================================================
 # FIXED DATABASE MANAGER - RESOLVES USERTYPE SERIALIZATION ISSUES
 # =============================================================================
-
-# =============================================================================
-# CORRECTED DATABASE MANAGER - DROP-IN REPLACEMENT
-# Replace your existing DatabaseManager class with this one
-# =============================================================================
-
-# Remove or comment out your existing @st.cache_resource decorator for database connections
-# The official SQLite Cloud docs don't use connection caching
 
 class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
@@ -344,7 +340,7 @@ class DatabaseManager:
         logger.info("📝 In-memory storage initialized")
 
     def _init_database(self):
-        """Initialize database tables (unchanged from your original)"""
+        """Initialize database tables"""
         with self.lock:
             try:
                 self.conn.execute('''
@@ -371,7 +367,7 @@ class DatabaseManager:
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
-        """Save session (unchanged from your original)"""
+        """Save session"""
         with self.lock:
             if self.db_type == "memory":
                 self.local_sessions[session.session_id] = session
@@ -391,7 +387,7 @@ class DatabaseManager:
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
-        """Load session (unchanged from your original)"""
+        """Load session"""
         with self.lock:
             if self.db_type == "memory":
                 session = self.local_sessions.get(session_id)
@@ -464,55 +460,6 @@ class DatabaseManager:
         except Exception:
             return False
 
-# =============================================================================
-# ENHANCED DIAGNOSTICS FUNCTION FOR YOUR SIDEBAR
-# Add this to your render_sidebar function for better debugging
-# =============================================================================
-
-def render_database_diagnostics():
-    """Enhanced database diagnostics for the sidebar"""
-    if 'session_manager' not in st.session_state:
-        st.error("Session manager not available")
-        return
-    
-    db_manager = st.session_state.session_manager.db
-    status = db_manager.get_connection_status()
-    
-    # Status indicators
-    status_icons = {
-        "cloud": "☁️",
-        "file": "📁", 
-        "memory": "🧠"
-    }
-    
-    icon = status_icons.get(status["db_type"], "❓")
-    st.write(f"{icon} **Database**: {status['db_type'].title()}")
-    
-    # Health indicator
-    if status["connection_active"]:
-        st.success("✅ Connection Active")
-    else:
-        st.error("❌ Connection Failed")
-    
-    # Additional details in expander
-    with st.expander("🔍 Database Details"):
-        st.json(status)
-        
-        if st.button("🧪 Test Connection", key="test_db_connection"):
-            if db_manager.test_connection():
-                st.success("✅ Connection test passed!")
-            else:
-                st.error("❌ Connection test failed!")
-        
-        # Quick fixes
-        if status["db_type"] == "memory":
-            st.warning("⚠️ Using memory storage - data will be lost on restart")
-            st.info("💡 Add SQLITE_CLOUD_CONNECTION to secrets for persistence")
-        
-        elif status["db_type"] == "file":
-            st.info("📁 Using local file database - data persists locally")
-            if status.get("db_path"):
-                st.caption(f"File: {status['db_path']}")
 # =============================================================================
 # PDF EXPORTER
 # =============================================================================
@@ -2105,234 +2052,6 @@ class SessionManager:
             logger.warning(f"Manual save failed - user_type: {session.user_type}, email: {bool(session.email)}, messages: {len(session.messages) if session.messages else 0}")
 
 # =============================================================================
-# DEBUGGING TOOLS FOR SESSION ISSUES
-# =============================================================================
-
-def add_session_debug_panel(session_manager: SessionManager, session: UserSession):
-    """Add this to your sidebar for real-time debugging."""
-    
-    with st.expander("🔍 Session Debug Panel", expanded=False):
-        st.write("**Real-time Session State:**")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"**ID:** `{session.session_id[:8]}...`")
-            st.write(f"**Type:** {session.user_type}")
-            st.write(f"**Type Class:** {type(session.user_type)}")
-            st.write(f"**Email:** {session.email}")
-            st.write(f"**Active:** {session.active}")
-        
-        with col2:
-            st.write(f"**Messages:** {len(session.messages)}")
-            st.write(f"**First Name:** {session.first_name}")
-            st.write(f"**Zoho ID:** {session.zoho_contact_id}")
-            st.write(f"**Last Activity:** {session.last_activity}")
-        
-        if st.button("🔄 Reload Session from DB"):
-            fresh_session = session_manager.db.load_session(session.session_id)
-            if fresh_session:
-                st.success("✅ Session reloaded from database")
-                st.json({
-                    "session_id": fresh_session.session_id[:8] + "...",
-                    "user_type": str(fresh_session.user_type),
-                    "user_type_class": str(type(fresh_session.user_type)),
-                    "email": fresh_session.email,
-                    "active": fresh_session.active,
-                    "messages_count": len(fresh_session.messages),
-                    "first_name": fresh_session.first_name
-                })
-            else:
-                st.error("❌ Could not reload session from database")
-        
-        if st.button("🧪 Test Session Validation"):
-            is_valid = session_manager.zoho._validate_session_data(session)
-            if is_valid:
-                st.success("✅ Session validation passed")
-            else:
-                st.error("❌ Session validation failed - check logs")
-        
-        if st.button("💾 Test Zoho Save (Dry Run)"):
-            try:
-                # Create a test session copy
-                test_session = copy.deepcopy(session)
-                
-                # Test validation
-                is_valid = session_manager.zoho._validate_session_data(test_session)
-                st.write(f"**Validation:** {'✅ Pass' if is_valid else '❌ Fail'}")
-                
-                if is_valid:
-                    # Test token
-                    token = session_manager.zoho._get_access_token()
-                    st.write(f"**Token:** {'✅ Success' if token else '❌ Failed'}")
-                    
-                    if token:
-                        st.success("🎉 All systems ready for save!")
-                        if st.button("💾 Execute Real Save"):
-                            session_manager._auto_save_to_crm(test_session, "Manual Debug Test")
-                else:
-                    st.error("❌ Session not eligible for save")
-                    
-            except Exception as e:
-                st.error(f"❌ Test failed: {str(e)}")
-
-def add_enhanced_main_query_param_handler():
-    """FIXED: Enhanced query parameter handler with keep-alive support."""
-    
-    query_params = st.query_params
-    
-    # Handle keep-alive requests
-    if query_params.get("event") == "keep_alive":
-        session_id = query_params.get("session_id")
-        if session_id:
-            logger.info(f"🔄 KEEP-ALIVE REQUEST for session {session_id[:8]}...")
-            
-            # Clear query params immediately
-            st.query_params.clear()
-            
-            try:
-                session_manager = get_session_manager()
-                if session_manager:
-                    session = session_manager.db.load_session(session_id)
-                    if session:
-                        # CRITICAL FIX: Extend session activity
-                        session.last_activity = datetime.now()
-                        session_manager.db.save_session(session)
-                        logger.info(f"✅ Session {session_id[:8]} kept alive")
-                    else:
-                        logger.warning(f"❌ Session {session_id[:8]} not found for keep-alive")
-                else:
-                    logger.error("❌ Session manager not available for keep-alive")
-                    
-            except Exception as e:
-                logger.error(f"Keep-alive error: {e}", exc_info=True)
-            
-            # Return minimal response
-            st.write("Session kept alive")
-            st.stop()
-    
-    # Handle pre-timeout save requests
-    if query_params.get("event") == "pre_timeout_save":
-        session_id = query_params.get("session_id")
-        if session_id:
-            logger.info(f"🚨 PRE-TIMEOUT SAVE REQUEST for session {session_id[:8]}...")
-            
-            # Clear query params immediately
-            st.query_params.clear()
-            
-            # Show processing status
-            st.info(f"⏰ Processing auto-save for session {session_id[:8]}...")
-            
-            try:
-                session_manager = get_session_manager()
-                if session_manager:
-                    # CRITICAL FIX: Load session and extend its life during save
-                    session = session_manager.db.load_session(session_id)
-                    if session:
-                        # Extend session life during save
-                        session.last_activity = datetime.now()
-                        session_manager.db.save_session(session)
-                        
-                        st.write("**Session Found:**")
-                        st.json({
-                            "session_id": session_id[:8] + "...",
-                            "user_type": str(session.user_type),
-                            "email": session.email,
-                            "messages": len(session.messages),
-                            "active": session.active
-                        })
-                        
-                        # Attempt save
-                        success = session_manager.trigger_pre_timeout_save(session_id)
-                        if success:
-                            st.success("✅ Pre-timeout save completed successfully!")
-                            logger.info("✅ PRE-TIMEOUT SAVE COMPLETED")
-                        else:
-                            st.error("❌ Pre-timeout save failed - check logs")
-                            logger.error("❌ PRE-TIMEOUT SAVE FAILED")
-                    else:
-                        st.error("❌ Session not found in database")
-                        logger.warning(f"❌ Session {session_id[:8]} not found")
-                else:
-                    st.error("❌ Session manager not available")
-                    logger.error("❌ Session manager not available")
-                    
-            except Exception as e:
-                st.error(f"❌ Pre-timeout save error: {str(e)}")
-                logger.error(f"Pre-timeout save exception: {e}", exc_info=True)
-            
-            # Stop processing to show debug info
-            st.stop()
-    
-    # Handle browser close events  
-    elif query_params.get("event") == "close":
-        session_id = query_params.get("session_id")
-        if session_id:
-            logger.info(f"🚪 BROWSER CLOSE EVENT for session {session_id[:8]}...")
-            
-            # Clear query params
-            st.query_params.clear()
-            
-            try:
-                session_manager = get_session_manager()
-                if session_manager:
-                    session = session_manager.db.load_session(session_id)
-                    if (session and 
-                        session.user_type == UserType.REGISTERED_USER and 
-                        session.email and 
-                        session.messages):
-                        
-                        # Extend session life during save
-                        session.last_activity = datetime.now()
-                        session_manager.db.save_session(session)
-                        
-                        # Attempt emergency save
-                        success = session_manager.zoho.save_chat_transcript_sync(session, "Browser Close")
-                        logger.info(f"Browser close save result: {success}")
-                        
-            except Exception as e:
-                logger.error(f"Browser close save error: {e}", exc_info=True)
-            
-            # Return empty response for beacon requests
-            st.stop()
-def add_session_health_monitor():
-    """Add this to monitor session health in real-time."""
-    
-    if 'session_health_monitor' not in st.session_state:
-        st.session_state.session_health_monitor = {
-            'save_attempts': 0,
-            'save_successes': 0,
-            'save_failures': 0,
-            'last_save_attempt': None,
-            'last_save_result': None
-        }
-    
-    monitor = st.session_state.session_health_monitor
-    
-    with st.expander("📈 Session Health Monitor"):
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Save Attempts", monitor['save_attempts'])
-        with col2:
-            st.metric("Successes", monitor['save_successes'])
-        with col3:
-            st.metric("Failures", monitor['save_failures'])
-        
-        if monitor['last_save_attempt']:
-            st.write(f"**Last Attempt:** {monitor['last_save_attempt']}")
-            st.write(f"**Result:** {'✅ Success' if monitor['last_save_result'] else '❌ Failed'}")
-        
-        if st.button("🧹 Clear Monitor"):
-            st.session_state.session_health_monitor = {
-                'save_attempts': 0,
-                'save_successes': 0,
-                'save_failures': 0,
-                'last_save_attempt': None,
-                'last_save_result': None
-            }
-            st.rerun()
-
-# =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
 
@@ -2499,6 +2218,7 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
     </script>
     """
     components.html(js_code, height=0, width=0)
+
 def render_browser_close_component(session_id: str):
     """
     Enhanced browser close detection that avoids redundant saves.
@@ -2555,8 +2275,6 @@ def render_browser_close_component(session_id: str):
     """
     components.html(js_code, height=0, width=0)
 
-# CRITICAL FIX: Updated SessionManager with extended timeout handling
-
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     with st.sidebar:
         st.title("🎛️ Dashboard")
@@ -2587,10 +2305,10 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 seconds_remaining = (session_manager.get_session_timeout_minutes() * 60) - (datetime.now() - session.last_activity).total_seconds()
                 if seconds_remaining > 0:
                     st.caption(f"⏱️ Auto-save & sign out in {seconds_remaining / 60:.1f} minutes")
-                    render_auto_logout_component(int(seconds_remaining), session.session_id)
+                    render_auto_logout_component(int(seconds_remaining), session.session_id, session_manager)
                 else:
                     st.caption("⏱️ Session will timeout on next interaction")
-                    render_auto_logout_component(2, session.session_id)
+                    render_auto_logout_component(2, session.session_id, session_manager)
         else:
             st.info("👤 **Guest User**")
             st.markdown("*Sign in for full features*")
@@ -2846,7 +2564,6 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 st.session_state.debug_mode = True
                 st.rerun()
 
-        
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion with knowledge base and web search")
@@ -2995,185 +2712,8 @@ def render_welcome_page(session_manager: SessionManager):
             st.rerun()
 
 # =============================================================================
-# SYSTEMATIC DEBUGGING FOR AUTO-SAVE ISSUE
+# QUERY PARAMETER AND AUTO-SAVE HANDLERS
 # =============================================================================
-
-def comprehensive_debug_handler():
-    """This will tell us exactly what's happening with query parameters."""
-    
-    # Log EVERYTHING about the current request
-    logger.info("=" * 60)
-    logger.info("🔍 COMPREHENSIVE DEBUG HANDLER STARTED")
-    logger.info(f"🌐 URL: {st.query_params}")
-    logger.info(f"📋 Query params: {dict(st.query_params)}")
-    logger.info(f"🔑 Session state keys: {list(st.session_state.keys())}")
-    logger.info(f"⏰ Current time: {datetime.now()}")
-    
-    # Check if we have any query parameters at all
-    if st.query_params:
-        logger.info("✅ Query parameters found!")
-        for key, value in st.query_params.items():
-            logger.info(f"   {key} = '{value}'")
-    else:
-        logger.info("❌ No query parameters found")
-        logger.info("=" * 60)
-        return
-    
-    # Check specifically for our events
-    event = st.query_params.get("event")
-    session_id = st.query_params.get("session_id")
-    
-    logger.info(f"🎯 Event: '{event}'")
-    logger.info(f"🆔 Session ID: '{session_id}'")
-    
-    if event == "pre_timeout_save":
-        logger.info("🚨 AUTO-SAVE REQUEST DETECTED!")
-        logger.info(f"🚨 Processing save for session: {session_id}")
-        
-        # Clear params to prevent loops
-        st.query_params.clear()
-        
-        # Show debug page
-        st.title("🔍 Auto-Save Debug Page")
-        st.success("✅ Auto-save request received!")
-        st.write(f"**Session ID:** {session_id}")
-        st.write(f"**Time:** {datetime.now()}")
-        
-        # Check session manager
-        if 'session_manager' in st.session_state:
-            st.write("✅ Session manager found")
-            session_manager = st.session_state.session_manager
-            
-            # Try to load session
-            try:
-                session = session_manager.db.load_session(session_id)
-                if session:
-                    st.write("✅ Session loaded from database")
-                    st.json({
-                        "user_type": str(session.user_type),
-                        "email": session.email,
-                        "messages": len(session.messages) if session.messages else 0,
-                        "active": session.active,
-                        "last_activity": str(session.last_activity)
-                    })
-                    
-                    # Try the save
-                    if (session.user_type == UserType.REGISTERED_USER and 
-                        session.email and 
-                        session.messages and
-                        session_manager.zoho.config.ZOHO_ENABLED):
-                        
-                        st.write("✅ Session eligible for save")
-                        with st.spinner("Attempting save..."):
-                            try:
-                                success = session_manager.zoho.save_chat_transcript_sync(session, "Debug Auto-Save")
-                                if success:
-                                    st.success("🎉 Save successful!")
-                                    logger.info("🎉 DEBUG SAVE SUCCESSFUL!")
-                                else:
-                                    st.error("❌ Save failed")
-                                    logger.error("❌ DEBUG SAVE FAILED!")
-                            except Exception as save_error:
-                                st.error(f"❌ Save exception: {save_error}")
-                                logger.error(f"Save exception: {save_error}", exc_info=True)
-                    else:
-                        st.warning("⚠️ Session not eligible for save")
-                        st.write("Eligibility check:")
-                        st.write(f"- User type: {session.user_type}")
-                        st.write(f"- Has email: {bool(session.email)}")
-                        st.write(f"- Has messages: {bool(session.messages)}")
-                        st.write(f"- Zoho enabled: {session_manager.zoho.config.ZOHO_ENABLED}")
-                        
-                else:
-                    st.error("❌ Session not found in database")
-                    logger.error(f"Session {session_id} not found")
-                    
-            except Exception as e:
-                st.error(f"❌ Error loading session: {e}")
-                logger.error(f"Error loading session: {e}", exc_info=True)
-        else:
-            st.error("❌ Session manager not found")
-            logger.error("Session manager not in session state")
-        
-        logger.info("=" * 60)
-        st.stop()
-    
-    elif event == "keep_alive":
-        logger.info("🔄 KEEP-ALIVE REQUEST DETECTED!")
-        st.query_params.clear()
-        st.write("Keep alive processed")
-        st.stop()
-    
-    else:
-        logger.info(f"🤷 Unknown or no event: '{event}'")
-        logger.info("=" * 60)
-
-def simple_test_button():
-    """Add this to test if the handler works at all."""
-    if st.button("🧪 Test Auto-Save Handler Right Now"):
-        # Get current session
-        session_manager = get_session_manager()
-        if session_manager:
-            session = session_manager.get_session()
-            
-            # Create a test URL that should trigger our handler
-            test_url = f"?event=pre_timeout_save&session_id={session.session_id}"
-            
-            st.info("Testing auto-save handler...")
-            st.markdown(f"**Test URL:** `{test_url}`")
-            
-            # Create a clickable link
-            st.markdown(f'<a href="{test_url}" target="_self">🔗 Click here to test auto-save handler</a>', 
-                       unsafe_allow_html=True)
-            
-            st.warning("👆 Click the link above to see if the handler works")
-
-def debug_javascript_target():
-    """Add this to see what URL JavaScript is actually targeting."""
-    js_debug = """
-    <script>
-    console.log("=== JAVASCRIPT DEBUG ===");
-    console.log("Current URL:", window.location.href);
-    console.log("Origin:", window.location.origin);
-    console.log("Pathname:", window.location.pathname);
-    console.log("Parent URL:", window.parent.location.href);
-    console.log("Parent Origin:", window.parent.location.origin);
-    console.log("Parent Pathname:", window.parent.location.pathname);
-    
-    // Test what URL we would actually use
-    const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
-    console.log("Target URL would be:", parentStreamlitAppUrl);
-    
-    // Test if we can actually reach it
-    const testUrl = parentStreamlitAppUrl + "?test=true";
-    console.log("Testing URL:", testUrl);
-    
-    fetch(testUrl, {method: 'GET'})
-        .then(response => {
-            console.log("Test fetch response:", response.status);
-        })
-        .catch(error => {
-            console.error("Test fetch error:", error);
-        });
-    </script>
-    """
-    components.html(js_debug, height=0)
-
-def add_debug_section():
-    """Add this to your sidebar to test the handler."""
-    with st.expander("🔍 Auto-Save Debug", expanded=False):
-        simple_test_button()
-        
-        st.write("**Current Session Info:**")
-        if 'session_manager' in st.session_state:
-            session_manager = st.session_state.session_manager
-            session = session_manager.get_session()
-            st.write(f"- Session ID: {session.session_id[:8]}...")
-            st.write(f"- User Type: {session.user_type}")
-            st.write(f"- Email: {session.email}")
-            st.write(f"- Messages: {len(session.messages)}")
-        else:
-            st.write("- Session manager not available")
 
 def handle_save_requests():
     """Handle auto-save requests with session ID tracking."""
@@ -3250,6 +2790,38 @@ def handle_save_requests():
             
             st.write("OK")
             st.stop()
+    
+    elif query_params.get("event") == "close":
+        session_id = query_params.get("session_id")
+        if session_id:
+            logger.info(f"🚪 BROWSER CLOSE EVENT for session {session_id[:8]}...")
+            
+            # Clear query params
+            st.query_params.clear()
+            
+            try:
+                session_manager = get_session_manager()
+                if session_manager:
+                    session = session_manager.db.load_session(session_id)
+                    if (session and 
+                        session.user_type == UserType.REGISTERED_USER and 
+                        session.email and 
+                        session.messages):
+                        
+                        # Extend session life during save
+                        session.last_activity = datetime.now()
+                        session_manager.db.save_session(session)
+                        
+                        # Attempt emergency save
+                        success = session_manager.zoho.save_chat_transcript_sync(session, "Browser Close")
+                        logger.info(f"Browser close save result: {success}")
+                        
+            except Exception as e:
+                logger.error(f"Browser close save error: {e}", exc_info=True)
+            
+            # Return empty response for beacon requests
+            st.stop()
+
 # =============================================================================
 # MAIN APPLICATION
 # =============================================================================
