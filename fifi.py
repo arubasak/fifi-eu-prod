@@ -2319,45 +2319,42 @@ def ensure_initialization():
 # =============================================================================
 
 def render_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
-    """
-    CRITICAL FIX: Trigger save much earlier and extend session while saving.
-    """
+    """Fixed auto-logout with correct URL targeting."""
     if timeout_seconds <= 0:
         return
 
-    # CRITICAL FIX: Save 60 seconds before timeout (not 30)
-    save_trigger_seconds = max(timeout_seconds - 60, 10)
+    # Calculate when to trigger the save (30 seconds before timeout)
+    save_trigger_seconds = max(timeout_seconds - 30, 1)
     
     js_code = f"""
     <script>
     (function() {{
         const sessionId = '{session_id}';
-        const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
         
-        // Clear any existing timers to prevent duplicates
+        // 🚨 CRITICAL FIX: Use current window URL, not parent
+        const currentUrl = window.location.origin + window.location.pathname;
+        console.log('Auto-save targeting URL:', currentUrl);
+        
+        // Clear any existing timers
         if (window.streamlitAutoSaveTimer) clearTimeout(window.streamlitAutoSaveTimer);
         if (window.streamlitAutoLogoutTimer) clearTimeout(window.streamlitAutoLogoutTimer);
         
-        // CRITICAL FIX: Keep session alive during save process
         function keepSessionAlive() {{
-            console.log('Keeping session alive during save...');
-            const keepAliveUrl = `${{parentStreamlitAppUrl}}?event=keep_alive&session_id=${{sessionId}}`;
+            console.log('Keeping session alive...');
+            const keepAliveUrl = `${{currentUrl}}?event=keep_alive&session_id=${{sessionId}}`;
             
             return fetch(keepAliveUrl, {{
                 method: 'GET',
-                keepalive: true
-            }}).catch(err => {{
-                console.warn('Keep-alive failed:', err);
-            }});
+                cache: 'no-cache'
+            }}).catch(err => console.warn('Keep-alive failed:', err));
         }}
         
-        // Function to trigger the save using fetch
         function triggerPreTimeoutSave() {{
-            console.log('Triggering pre-timeout save with GET fetch to parent Streamlit app URL...');
+            console.log('=== TRIGGERING AUTO-SAVE ===');
             
-            // CRITICAL FIX: Keep session alive first
             return keepSessionAlive().then(() => {{
-                const saveUrl = `${{parentStreamlitAppUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
+                const saveUrl = `${{currentUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
+                console.log('Save URL:', saveUrl);
                 
                 // Show saving indicator
                 const savingDiv = document.createElement('div');
@@ -2365,85 +2362,69 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
                 savingDiv.innerHTML = '💾 Auto-saving chat to CRM...';
                 document.body.appendChild(savingDiv);
 
-                // Send the save request
                 return fetch(saveUrl, {{
                     method: 'GET',
-                    keepalive: true
+                    cache: 'no-cache'
                 }})
                 .then(response => {{
-                    if (!response.ok) {{
-                        console.error('Pre-timeout save fetch failed with status:', response.status, response.statusText);
+                    console.log('Save response:', response.status);
+                    if (response.ok) {{
+                        savingDiv.innerHTML = '✅ Chat saved successfully!';
+                        savingDiv.style.background = '#4CAF50';
+                    }} else {{
                         savingDiv.innerHTML = '❌ Auto-save failed';
                         savingDiv.style.background = '#f44336';
-                        return Promise.reject(new Error(`HTTP ${{response.status}}`));
                     }}
-                    console.log('Pre-timeout save fetch successful:', response.status);
-                    savingDiv.innerHTML = '✅ Chat saved successfully!';
-                    savingDiv.style.background = '#4CAF50';
                     
-                    // Keep indicator visible for 2 seconds
                     setTimeout(() => {{
                         if (savingDiv.parentNode) {{
                             savingDiv.parentNode.removeChild(savingDiv);
                         }}
                     }}, 2000);
                     
-                    return response.text();
+                    return response;
                 }})
                 .catch(error => {{
-                    console.error('Pre-timeout save fetch error:', error);
-                    savingDiv.innerHTML = '❌ Auto-save error';
+                    console.error('Save error:', error);
+                    savingDiv.innerHTML = '❌ Save error';
                     savingDiv.style.background = '#f44336';
                     setTimeout(() => {{
                         if (savingDiv.parentNode) {{
                             savingDiv.parentNode.removeChild(savingDiv);
                         }}
                     }}, 3000);
-                    throw error;
                 }});
             }});
         }}
         
-        // This function orchestrates the save and then the reload
         function executeLogoutSequence() {{
             console.log('Starting logout sequence...');
             triggerPreTimeoutSave()
                 .then(() => {{
-                    console.log('Save completed successfully. Reloading in 3 seconds...');
+                    console.log('Save completed. Reloading in 3 seconds...');
                     setTimeout(() => {{
-                        console.log('Session timeout - reloading parent page now.');
-                        window.parent.location.reload();
-                    }}, 3000); // Give more time for save to complete
+                        console.log('Session timeout - reloading page.');
+                        window.location.reload();
+                    }}, 3000);
                 }})
                 .catch(err => {{
-                    console.error('Save failed, reloading anyway:', err);
-                    setTimeout(() => {{
-                        console.log('Session timeout - reloading parent page after save failure.');
-                        window.parent.location.reload();
-                    }}, 2000);
+                    console.error('Save failed:', err);
+                    setTimeout(() => window.location.reload(), 2000);
                 }});
         }}
         
-        // Schedule the auto-save and logout
+        // Schedule the auto-save
         window.streamlitAutoLogoutTimer = setTimeout(executeLogoutSequence, {save_trigger_seconds * 1000});
+        console.log(`Auto-save scheduled in {save_trigger_seconds} seconds`);
         
-        console.log(`Auto-save and logout scheduled in {save_trigger_seconds} seconds.`);
-        
-        // CRITICAL FIX: Add periodic keep-alive while waiting
-        let keepAliveInterval = setInterval(() => {{
-            keepSessionAlive();
-        }}, 30000); // Every 30 seconds
-        
-        // Clear keep-alive when logout sequence starts
-        setTimeout(() => {{
-            clearInterval(keepAliveInterval);
-        }}, {save_trigger_seconds * 1000});
+        // Keep session alive periodically
+        let keepAliveInterval = setInterval(keepSessionAlive, 30000);
+        setTimeout(() => clearInterval(keepAliveInterval), {save_trigger_seconds * 1000});
         
     }})();
     </script>
     """
     components.html(js_code, height=0, width=0)
-
 
 def render_browser_close_component(session_id: str):
     """
@@ -3015,6 +2996,76 @@ def add_debug_section():
             st.write(f"- Messages: {len(session.messages)}")
         else:
             st.write("- Session manager not available")
+
+def handle_save_requests():
+    """Handle auto-save requests from JavaScript."""
+    query_params = st.query_params
+    
+    if query_params.get("event") == "pre_timeout_save":
+        session_id = query_params.get("session_id")
+        if session_id:
+            logger.info(f"🚨 AUTO-SAVE REQUEST RECEIVED for session {session_id[:8]}...")
+            
+            # Clear query params
+            st.query_params.clear()
+            
+            try:
+                session_manager = get_session_manager()
+                if not session_manager:
+                    st.error("❌ Session manager not available")
+                    st.stop()
+                
+                session = session_manager.db.load_session(session_id)
+                if not session:
+                    st.error(f"❌ Session {session_id[:8]} not found")
+                    st.stop()
+                
+                # Validate session for save
+                if (session.user_type == UserType.REGISTERED_USER and 
+                    session.email and 
+                    session.messages and
+                    session_manager.zoho.config.ZOHO_ENABLED):
+                    
+                    logger.info("✅ Session eligible for save. Attempting save...")
+                    
+                    # Attempt the save
+                    success = session_manager.zoho.save_chat_transcript_sync(session, "Auto-Save Before Timeout")
+                    
+                    if success:
+                        st.success("✅ Auto-save completed successfully!")
+                        logger.info(f"✅ AUTO-SAVE SUCCESS for session {session_id[:8]}")
+                    else:
+                        st.error("❌ Auto-save failed")
+                        logger.error(f"❌ AUTO-SAVE FAILED for session {session_id[:8]}")
+                else:
+                    st.warning("⚠️ Session not eligible for auto-save")
+                    logger.info(f"Session {session_id[:8]} not eligible")
+                
+            except Exception as e:
+                st.error(f"❌ Auto-save error: {str(e)}")
+                logger.error(f"Auto-save exception: {e}", exc_info=True)
+            
+            st.stop()
+    
+    elif query_params.get("event") == "keep_alive":
+        session_id = query_params.get("session_id")
+        if session_id:
+            logger.info(f"🔄 KEEP-ALIVE REQUEST for session {session_id[:8]}")
+            st.query_params.clear()
+            
+            try:
+                session_manager = get_session_manager()
+                if session_manager:
+                    session = session_manager.db.load_session(session_id)
+                    if session:
+                        session.last_activity = datetime.now()
+                        session_manager.db.save_session(session)
+                        logger.info(f"✅ Session {session_id[:8]} kept alive")
+            except Exception as e:
+                logger.error(f"Keep-alive error: {e}")
+            
+            st.write("Session alive")
+            st.stop()
 # =============================================================================
 # MAIN APPLICATION
 # =============================================================================
@@ -3022,21 +3073,18 @@ def add_debug_section():
 def main():
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
 
-    # 🔍 STEP 1: Comprehensive debugging FIRST
-    comprehensive_debug_handler()
-
-    # Add JavaScript debugging
-    debug_javascript_target()
-
     # Clear any problematic session state first
     if st.button("🔄 Fresh Start (Clear All State)", key="emergency_clear"):
         st.session_state.clear()
         st.success("✅ All state cleared. Refreshing...")
         st.rerun()
 
-    # Ensure initialization
+    # 🚨 CRITICAL: Initialize FIRST
     if not ensure_initialization():
         st.stop()
+
+    # 🔍 Handle save requests AFTER initialization
+    handle_save_requests()
 
     # Get session manager safely
     session_manager = get_session_manager()
@@ -3068,6 +3116,6 @@ def main():
             if st.button("🔄 Refresh", key="error_refresh"):
                 st.session_state.clear()
                 st.rerun()
-                
+
 if __name__ == "__main__":
     main()
