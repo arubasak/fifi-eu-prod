@@ -317,7 +317,7 @@ class DatabaseManager:
             logger.info("🔗 Connecting to SQLite Cloud...")
             logger.info(f"   Host: csqqfgp8hk.g4.sqlite.cloud")
             logger.info(f"   Port: 8860") 
-            logger.info(f"   Database: chinook.sqlite")
+            logger.info(f"   Database: fifi.sqlite")
             logger.info(f"   Auth: API Key")
             
             conn = sqlitecloud.connect(connection_string)
@@ -331,7 +331,7 @@ class DatabaseManager:
             try:
                 logger.info("📊 Getting database information...")
                 tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-                logger.info(f"✅ Found {len(tables)} tables in chinook.sqlite")
+                logger.info(f"✅ Found {len(tables)} tables in fifi.sqlite")
                 for table in tables[:5]:  # Show first 5 tables
                     logger.info(f"   - Table: {table}")
             except Exception as e:
@@ -354,7 +354,7 @@ class DatabaseManager:
             elif "timeout" in error_str or "connection refused" in error_str:
                 logger.error("🌐 Network issue - check internet connection")
             elif "database" in error_str:
-                logger.error("🗄️ Database issue - check database name 'chinook.sqlite'")
+                logger.error("🗄️ Database issue - check database name 'fifi.sqlite'")
             
             return None
 
