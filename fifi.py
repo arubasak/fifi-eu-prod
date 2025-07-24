@@ -1645,7 +1645,7 @@ class SessionManager:
         self.zoho = zoho_manager
         self.ai = ai_system
         self.rate_limiter = rate_limiter
-        self.session_timeout_minutes = 3  # CRITICAL FIX: Extended from 2 to 3 minutes
+        self.session_timeout_minutes = 3  # 🔧 Extended from 2 to 3 minutes
         self._save_lock = threading.Lock()
 
     def get_session_timeout_minutes(self) -> int:
@@ -1655,9 +1655,36 @@ class SessionManager:
         if not session.last_activity:
             return False
         time_diff = datetime.now() - session.last_activity
-        # CRITICAL FIX: Add 30-second grace period during save operations
-        grace_period = 30 if self._is_save_in_progress(session.session_id) else 0
-        return time_diff.total_seconds() > ((self.session_timeout_minutes * 60) + grace_period)
+        
+        # 🔧 CRITICAL FIX: Add grace period for sessions with auto-save pending
+        base_timeout_seconds = self.session_timeout_minutes * 60
+        
+        # Check if this session has auto-save scheduled (extend timeout)
+        if self._has_auto_save_pending(session.session_id):
+            grace_period_seconds = 90  # Extra 90 seconds for auto-save
+            logger.info(f"Extending timeout for session {session.session_id[:8]} due to pending auto-save")
+            return time_diff.total_seconds() > (base_timeout_seconds + grace_period_seconds)
+        
+        return time_diff.total_seconds() > base_timeout_seconds
+
+    def _has_auto_save_pending(self, session_id: str) -> bool:
+        """Check if a session has auto-save scheduled."""
+        # Check session state for auto-save markers
+        auto_save_sessions = st.session_state.get('auto_save_sessions', set())
+        return session_id in auto_save_sessions
+
+    def _mark_auto_save_scheduled(self, session_id: str):
+        """Mark that auto-save is scheduled for this session."""
+        if 'auto_save_sessions' not in st.session_state:
+            st.session_state.auto_save_sessions = set()
+        st.session_state.auto_save_sessions.add(session_id)
+        logger.info(f"Marked session {session_id[:8]} as having auto-save scheduled")
+
+    def _unmark_auto_save_scheduled(self, session_id: str):
+        """Remove auto-save scheduling marker."""
+        if 'auto_save_sessions' in st.session_state:
+            st.session_state.auto_save_sessions.discard(session_id)
+        logger.info(f"Unmarked session {session_id[:8]} auto-save scheduling")
 
     def _is_save_in_progress(self, session_id: str) -> bool:
         """Check if a save operation is in progress for this session."""
@@ -2319,9 +2346,12 @@ def ensure_initialization():
 # =============================================================================
 
 def render_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
-    """Fixed auto-logout with correct URL targeting."""
+    """Fixed auto-logout with session preservation."""
     if timeout_seconds <= 0:
         return
+
+    # 🔧 CRITICAL: Mark this session as having auto-save scheduled
+    session_manager._mark_auto_save_scheduled(session_id)
 
     # Calculate when to trigger the save (30 seconds before timeout)
     save_trigger_seconds = max(timeout_seconds - 30, 1)
@@ -2330,10 +2360,10 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
     <script>
     (function() {{
         const sessionId = '{session_id}';
-        
-        // 🚨 CRITICAL FIX: Use current window URL, not parent
         const currentUrl = window.location.origin + window.location.pathname;
-        console.log('Auto-save targeting URL:', currentUrl);
+        
+        console.log('Auto-save component loaded for session:', sessionId);
+        console.log('Auto-save will trigger in {save_trigger_seconds} seconds');
         
         // Clear any existing timers
         if (window.streamlitAutoSaveTimer) clearTimeout(window.streamlitAutoSaveTimer);
@@ -2351,6 +2381,7 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
         
         function triggerPreTimeoutSave() {{
             console.log('=== TRIGGERING AUTO-SAVE ===');
+            console.log('Session ID:', sessionId);
             
             return keepSessionAlive().then(() => {{
                 const saveUrl = `${{currentUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
@@ -2359,7 +2390,7 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
                 // Show saving indicator
                 const savingDiv = document.createElement('div');
                 savingDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #4CAF50; color: white; padding: 10px 20px; border-radius: 5px; z-index: 9999; font-family: sans-serif;';
-                savingDiv.innerHTML = '💾 Auto-saving chat to CRM...';
+                savingDiv.innerHTML = '💾 Auto-saving session ' + sessionId.substring(0, 8) + '...';
                 document.body.appendChild(savingDiv);
 
                 return fetch(saveUrl, {{
@@ -2369,10 +2400,10 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
                 .then(response => {{
                     console.log('Save response:', response.status);
                     if (response.ok) {{
-                        savingDiv.innerHTML = '✅ Chat saved successfully!';
+                        savingDiv.innerHTML = '✅ Session ' + sessionId.substring(0, 8) + ' saved!';
                         savingDiv.style.background = '#4CAF50';
                     }} else {{
-                        savingDiv.innerHTML = '❌ Auto-save failed';
+                        savingDiv.innerHTML = '❌ Save failed for ' + sessionId.substring(0, 8);
                         savingDiv.style.background = '#f44336';
                     }}
                     
@@ -2380,13 +2411,13 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
                         if (savingDiv.parentNode) {{
                             savingDiv.parentNode.removeChild(savingDiv);
                         }}
-                    }}, 2000);
+                    }}, 3000);
                     
                     return response;
                 }})
                 .catch(error => {{
                     console.error('Save error:', error);
-                    savingDiv.innerHTML = '❌ Save error';
+                    savingDiv.innerHTML = '❌ Save error for ' + sessionId.substring(0, 8);
                     savingDiv.style.background = '#f44336';
                     setTimeout(() => {{
                         if (savingDiv.parentNode) {{
@@ -2398,7 +2429,7 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
         }}
         
         function executeLogoutSequence() {{
-            console.log('Starting logout sequence...');
+            console.log('Starting logout sequence for session:', sessionId);
             triggerPreTimeoutSave()
                 .then(() => {{
                     console.log('Save completed. Reloading in 3 seconds...');
@@ -2408,24 +2439,27 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
                     }}, 3000);
                 }})
                 .catch(err => {{
-                    console.error('Save failed:', err);
+                    console.error('Save failed for session', sessionId, ':', err);
                     setTimeout(() => window.location.reload(), 2000);
                 }});
         }}
         
         // Schedule the auto-save
         window.streamlitAutoLogoutTimer = setTimeout(executeLogoutSequence, {save_trigger_seconds * 1000});
-        console.log(`Auto-save scheduled in {save_trigger_seconds} seconds`);
+        console.log(`Auto-save scheduled for session ${{sessionId}} in {save_trigger_seconds} seconds`);
         
-        // Keep session alive periodically
-        let keepAliveInterval = setInterval(keepSessionAlive, 30000);
+        // Keep session alive every 30 seconds
+        let keepAliveInterval = setInterval(() => {{
+            console.log('Periodic keep-alive for session:', sessionId);
+            keepSessionAlive();
+        }}, 30000);
+        
         setTimeout(() => clearInterval(keepAliveInterval), {save_trigger_seconds * 1000});
         
     }})();
     </script>
     """
     components.html(js_code, height=0, width=0)
-
 def render_browser_close_component(session_id: str):
     """
     Enhanced browser close detection that avoids redundant saves.
@@ -2998,13 +3032,13 @@ def add_debug_section():
             st.write("- Session manager not available")
 
 def handle_save_requests():
-    """Handle auto-save requests from JavaScript."""
+    """Handle auto-save requests with session ID tracking."""
     query_params = st.query_params
     
     if query_params.get("event") == "pre_timeout_save":
         session_id = query_params.get("session_id")
         if session_id:
-            logger.info(f"🚨 AUTO-SAVE REQUEST RECEIVED for session {session_id[:8]}...")
+            logger.info(f"🚨 AUTO-SAVE REQUEST for session {session_id[:8]}...")
             
             # Clear query params
             st.query_params.clear()
@@ -3015,31 +3049,35 @@ def handle_save_requests():
                     st.error("❌ Session manager not available")
                     st.stop()
                 
+                # 🔧 CRITICAL: Unmark auto-save scheduling
+                session_manager._unmark_auto_save_scheduled(session_id)
+                
                 session = session_manager.db.load_session(session_id)
                 if not session:
                     st.error(f"❌ Session {session_id[:8]} not found")
+                    logger.error(f"Session {session_id} not found in database")
                     st.stop()
                 
-                # Validate session for save
+                logger.info(f"✅ Found session {session_id[:8]}: user_type={session.user_type}, email={session.email}")
+                
+                # Validate and attempt save
                 if (session.user_type == UserType.REGISTERED_USER and 
                     session.email and 
                     session.messages and
                     session_manager.zoho.config.ZOHO_ENABLED):
                     
                     logger.info("✅ Session eligible for save. Attempting save...")
-                    
-                    # Attempt the save
                     success = session_manager.zoho.save_chat_transcript_sync(session, "Auto-Save Before Timeout")
                     
                     if success:
-                        st.success("✅ Auto-save completed successfully!")
+                        st.success(f"✅ Auto-save completed for session {session_id[:8]}!")
                         logger.info(f"✅ AUTO-SAVE SUCCESS for session {session_id[:8]}")
                     else:
-                        st.error("❌ Auto-save failed")
+                        st.error(f"❌ Auto-save failed for session {session_id[:8]}")
                         logger.error(f"❌ AUTO-SAVE FAILED for session {session_id[:8]}")
                 else:
-                    st.warning("⚠️ Session not eligible for auto-save")
-                    logger.info(f"Session {session_id[:8]} not eligible")
+                    st.warning(f"⚠️ Session {session_id[:8]} not eligible for auto-save")
+                    logger.info(f"Session {session_id[:8]} not eligible: user_type={session.user_type}, email={bool(session.email)}, messages={len(session.messages) if session.messages else 0}")
                 
             except Exception as e:
                 st.error(f"❌ Auto-save error: {str(e)}")
@@ -3050,7 +3088,7 @@ def handle_save_requests():
     elif query_params.get("event") == "keep_alive":
         session_id = query_params.get("session_id")
         if session_id:
-            logger.info(f"🔄 KEEP-ALIVE REQUEST for session {session_id[:8]}")
+            logger.info(f"🔄 KEEP-ALIVE for session {session_id[:8]}")
             st.query_params.clear()
             
             try:
@@ -3061,10 +3099,12 @@ def handle_save_requests():
                         session.last_activity = datetime.now()
                         session_manager.db.save_session(session)
                         logger.info(f"✅ Session {session_id[:8]} kept alive")
+                    else:
+                        logger.warning(f"Keep-alive: Session {session_id[:8]} not found")
             except Exception as e:
                 logger.error(f"Keep-alive error: {e}")
             
-            st.write("Session alive")
+            st.write("OK")
             st.stop()
 # =============================================================================
 # MAIN APPLICATION
