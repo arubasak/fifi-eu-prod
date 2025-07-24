@@ -2561,13 +2561,31 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         else:
             st.info("👤 **Guest User**")
             st.markdown("*Sign in for full features*")
+
         
         st.divider()
         
         st.markdown(f"**Messages:** {len(fresh_session.messages)}")
         st.markdown(f"**Session:** `{fresh_session.session_id[:8]}...`")
+
+        def add_debug_section():
+    """Add this to your sidebar to test the handler."""
+    with st.expander("🔍 Auto-Save Debug", expanded=False):
+        simple_test_button()
         
+        st.write("**Current Session Info:**")
+        if 'session_manager' in st.session_state:
+            session_manager = st.session_state.session_manager
+            session = session_manager.get_session()
+            st.write(f"- Session ID: {session.session_id[:8]}...")
+            st.write(f"- User Type: {session.user_type}")
+            st.write(f"- Email: {session.email}")
+            st.write(f"- Messages: {len(session.messages)}")
+        else:
+            st.write("- Session manager not available")
+            
         st.divider()
+        add_debug_section()
         st.subheader("📊 System Status")
         
         if hasattr(st.session_state, 'ai_system'):
@@ -2840,14 +2858,183 @@ def render_welcome_page(session_manager: SessionManager):
             st.rerun()
 
 # =============================================================================
+# SYSTEMATIC DEBUGGING FOR AUTO-SAVE ISSUE
+# =============================================================================
+
+def comprehensive_debug_handler():
+    """This will tell us exactly what's happening with query parameters."""
+    
+    # Log EVERYTHING about the current request
+    logger.info("=" * 60)
+    logger.info("🔍 COMPREHENSIVE DEBUG HANDLER STARTED")
+    logger.info(f"🌐 URL: {st.query_params}")
+    logger.info(f"📋 Query params: {dict(st.query_params)}")
+    logger.info(f"🔑 Session state keys: {list(st.session_state.keys())}")
+    logger.info(f"⏰ Current time: {datetime.now()}")
+    
+    # Check if we have any query parameters at all
+    if st.query_params:
+        logger.info("✅ Query parameters found!")
+        for key, value in st.query_params.items():
+            logger.info(f"   {key} = '{value}'")
+    else:
+        logger.info("❌ No query parameters found")
+        logger.info("=" * 60)
+        return
+    
+    # Check specifically for our events
+    event = st.query_params.get("event")
+    session_id = st.query_params.get("session_id")
+    
+    logger.info(f"🎯 Event: '{event}'")
+    logger.info(f"🆔 Session ID: '{session_id}'")
+    
+    if event == "pre_timeout_save":
+        logger.info("🚨 AUTO-SAVE REQUEST DETECTED!")
+        logger.info(f"🚨 Processing save for session: {session_id}")
+        
+        # Clear params to prevent loops
+        st.query_params.clear()
+        
+        # Show debug page
+        st.title("🔍 Auto-Save Debug Page")
+        st.success("✅ Auto-save request received!")
+        st.write(f"**Session ID:** {session_id}")
+        st.write(f"**Time:** {datetime.now()}")
+        
+        # Check session manager
+        if 'session_manager' in st.session_state:
+            st.write("✅ Session manager found")
+            session_manager = st.session_state.session_manager
+            
+            # Try to load session
+            try:
+                session = session_manager.db.load_session(session_id)
+                if session:
+                    st.write("✅ Session loaded from database")
+                    st.json({
+                        "user_type": str(session.user_type),
+                        "email": session.email,
+                        "messages": len(session.messages) if session.messages else 0,
+                        "active": session.active,
+                        "last_activity": str(session.last_activity)
+                    })
+                    
+                    # Try the save
+                    if (session.user_type == UserType.REGISTERED_USER and 
+                        session.email and 
+                        session.messages and
+                        session_manager.zoho.config.ZOHO_ENABLED):
+                        
+                        st.write("✅ Session eligible for save")
+                        with st.spinner("Attempting save..."):
+                            try:
+                                success = session_manager.zoho.save_chat_transcript_sync(session, "Debug Auto-Save")
+                                if success:
+                                    st.success("🎉 Save successful!")
+                                    logger.info("🎉 DEBUG SAVE SUCCESSFUL!")
+                                else:
+                                    st.error("❌ Save failed")
+                                    logger.error("❌ DEBUG SAVE FAILED!")
+                            except Exception as save_error:
+                                st.error(f"❌ Save exception: {save_error}")
+                                logger.error(f"Save exception: {save_error}", exc_info=True)
+                    else:
+                        st.warning("⚠️ Session not eligible for save")
+                        st.write("Eligibility check:")
+                        st.write(f"- User type: {session.user_type}")
+                        st.write(f"- Has email: {bool(session.email)}")
+                        st.write(f"- Has messages: {bool(session.messages)}")
+                        st.write(f"- Zoho enabled: {session_manager.zoho.config.ZOHO_ENABLED}")
+                        
+                else:
+                    st.error("❌ Session not found in database")
+                    logger.error(f"Session {session_id} not found")
+                    
+            except Exception as e:
+                st.error(f"❌ Error loading session: {e}")
+                logger.error(f"Error loading session: {e}", exc_info=True)
+        else:
+            st.error("❌ Session manager not found")
+            logger.error("Session manager not in session state")
+        
+        logger.info("=" * 60)
+        st.stop()
+    
+    elif event == "keep_alive":
+        logger.info("🔄 KEEP-ALIVE REQUEST DETECTED!")
+        st.query_params.clear()
+        st.write("Keep alive processed")
+        st.stop()
+    
+    else:
+        logger.info(f"🤷 Unknown or no event: '{event}'")
+        logger.info("=" * 60)
+
+def simple_test_button():
+    """Add this to test if the handler works at all."""
+    if st.button("🧪 Test Auto-Save Handler Right Now"):
+        # Get current session
+        session_manager = get_session_manager()
+        if session_manager:
+            session = session_manager.get_session()
+            
+            # Create a test URL that should trigger our handler
+            test_url = f"?event=pre_timeout_save&session_id={session.session_id}"
+            
+            st.info("Testing auto-save handler...")
+            st.markdown(f"**Test URL:** `{test_url}`")
+            
+            # Create a clickable link
+            st.markdown(f'<a href="{test_url}" target="_self">🔗 Click here to test auto-save handler</a>', 
+                       unsafe_allow_html=True)
+            
+            st.warning("👆 Click the link above to see if the handler works")
+
+def debug_javascript_target():
+    """Add this to see what URL JavaScript is actually targeting."""
+    js_debug = """
+    <script>
+    console.log("=== JAVASCRIPT DEBUG ===");
+    console.log("Current URL:", window.location.href);
+    console.log("Origin:", window.location.origin);
+    console.log("Pathname:", window.location.pathname);
+    console.log("Parent URL:", window.parent.location.href);
+    console.log("Parent Origin:", window.parent.location.origin);
+    console.log("Parent Pathname:", window.parent.location.pathname);
+    
+    // Test what URL we would actually use
+    const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
+    console.log("Target URL would be:", parentStreamlitAppUrl);
+    
+    // Test if we can actually reach it
+    const testUrl = parentStreamlitAppUrl + "?test=true";
+    console.log("Testing URL:", testUrl);
+    
+    fetch(testUrl, {method: 'GET'})
+        .then(response => {
+            console.log("Test fetch response:", response.status);
+        })
+        .catch(error => {
+            console.error("Test fetch error:", error);
+        });
+    </script>
+    """
+    components.html(js_debug, height=0)
+
+
+# =============================================================================
 # MAIN APPLICATION
 # =============================================================================
 
 def main():
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
 
-    # SOLUTION: Enhanced query parameter handling
-    add_enhanced_main_query_param_handler()
+    # 🔍 STEP 1: Comprehensive debugging FIRST
+    comprehensive_debug_handler()
+
+    # Add JavaScript debugging
+    debug_javascript_target()
 
     # Clear any problematic session state first
     if st.button("🔄 Fresh Start (Clear All State)", key="emergency_clear"):
@@ -2889,6 +3076,6 @@ def main():
             if st.button("🔄 Refresh", key="error_refresh"):
                 st.session_state.clear()
                 st.rerun()
-
+                
 if __name__ == "__main__":
     main()
