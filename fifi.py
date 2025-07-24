@@ -2778,7 +2778,7 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
         minutes_remaining = timeout_minutes - (time_since_activity.total_seconds() / 60)
         
         if 0 < minutes_remaining <= 1:
-            st.warning(f"⏱️ Session will auto-save and timeout in {minutes_remaining:.1f} minutes due to inactivity")
+            st.warning(f"⏱️ Session will auto-save and timeout in {minutes_remaining:.1f} minutes due to in-activity")
         elif minutes_remaining <= 0:
             st.error("⏱️ Session expired due to inactivity. Please sign in again.")
     
