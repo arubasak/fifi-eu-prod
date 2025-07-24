@@ -316,26 +316,26 @@ class DatabaseManager:
             logger.critical("💾 Sessions WILL BE LOST on app restart")
             self.db_type = "memory"
             self._init_local_storage()
-    
+            
     def _is_valid_cloud_connection(self, connection_string: str) -> bool:
-    """Validate SQLite Cloud connection string format (now supports both types)"""
-    if not connection_string or not isinstance(connection_string, str):
-        return False
+        """Validate SQLite Cloud connection string format (now supports both types)"""
+        if not connection_string or not isinstance(connection_string, str):
+            return False
 
-    # All valid connection strings must start with this prefix
-    if not connection_string.startswith('sqlitecloud://'):
-        logger.warning(f"Invalid connection string format. Expected 'sqlitecloud://...', got: {connection_string[:50]}...")
-        return False
+        # All valid connection strings must start with this prefix
+        if not connection_string.startswith('sqlitecloud://'):
+            logger.warning(f"Invalid connection string format. Expected 'sqlitecloud://...', got: {connection_string[:50]}...")
+            return False
 
-    # Check for presence of a host part after the prefix. A '/' character
-    # is a reliable indicator that a host is present in both formats.
-    # e.g., sqlitecloud://user:pass@HOST/...
-    # e.g., sqlitecloud://HOST/db?apikey=...
-    if '/' not in connection_string.replace('sqlitecloud://', ''):
-        logger.warning("Connection string appears malformed (missing host part).")
-        return False
+        # Check for presence of a host part after the prefix. A '/' character
+        # is a reliable indicator that a host is present in both formats.
+        # e.g., sqlitecloud://user:pass@HOST/...
+        # e.g., sqlitecloud://HOST/db?apikey=...
+        if '/' not in connection_string.replace('sqlitecloud://', ''):
+            logger.warning("Connection string appears malformed (missing host part).")
+            return False
 
-    return True
+        return True
     
     def _init_local_storage(self):
         """Initialize in-memory storage as fallback"""
