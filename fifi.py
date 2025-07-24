@@ -1320,10 +1320,12 @@ class SessionManager:
                 self._update_activity(session)
                 return session
             else:
-                # Authenticated session no longer valid
+                # Authenticated session no longer valid (e.g., deleted from DB, or user_type changed)
+                logger.info(f"Authenticated session {session_id[:8]} found in st.session_state but invalid in DB. Resetting.")
                 del st.session_state['authenticated_session_id']
+                # Fall through to check current_session_id or create guest
         
-        # ✅ Check if session ID exists before creating
+        # ✅ Check if session ID exists before creating a new guest one
         if 'current_session_id' not in st.session_state:
             return self._create_guest_session()
         
@@ -1352,12 +1354,14 @@ class SessionManager:
                     self._end_session_internal(session)
                     st.session_state.session_expired = True
                     st.session_state.expired_session_id = session_id[:8]
-                    return self._create_guest_session()
+                    return self._create_guest_session() # Redirect to new guest session
                 else:
                     self._update_activity(session)
                     logger.debug(f"✅ Session retrieved: {session_id[:8]} as {session.user_type}")
                     return session
         
+        # Fallback: if current_session_id points to an inactive or non-existent session
+        logger.info(f"Current session_id ({st.session_state.get('current_session_id', 'N/A')[:8]}) invalid/inactive. Creating new guest session.")
         return self._create_guest_session()
 
     def _end_session_internal(self, session: UserSession):
@@ -1397,7 +1401,7 @@ class SessionManager:
             
             if response.status_code == 200:
                 data = response.json()
-                current_session = self.get_session()
+                current_session = self.get_session() # Get the current session (might be guest)
                 
                 display_name = (
                     data.get('user_display_name') or data.get('displayName') or 
@@ -1426,7 +1430,7 @@ class SessionManager:
                     if verification_session and verification_session.user_type == UserType.REGISTERED_USER:
                         # ✅ FIXED: Store authenticated session ID
                         st.session_state.authenticated_session_id = current_session.session_id
-                        st.session_state.current_session_id = current_session.session_id
+                        st.session_state.current_session_id = current_session.session_id # Ensure current_session_id is also set
                         logger.info(f"✅ Authentication successful: {verification_session.user_type} for {verification_session.email}")
                         return current_session
                     else:
@@ -1598,10 +1602,10 @@ def handle_emergency_save_requests():
     if event == "close" and session_id:
         logger.info(f"🚨 Emergency save request for session: {session_id[:8]}")
         
-        # Clear query params
+        # Clear query params so they don't trigger reruns on subsequent refreshes
         st.query_params.clear()
         
-        # Show processing message
+        # Show processing message (only visible if the browser tab stays open long enough)
         st.info("🚨 **Processing emergency save...**")
         
         try:
@@ -1612,9 +1616,9 @@ def handle_emergency_save_requests():
                     session.email and session.messages and
                     not session.timeout_saved_to_crm):
                     
-                    # Extend session life during save
+                    # Extend session life during save to prevent immediate expiry from server-side checks
                     session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
+                    session_manager.db.save_session(session) # Save updated activity
                     
                     success = session_manager.zoho.save_chat_transcript_sync(session, "Emergency Save (Browser Close)")
                     
@@ -1625,18 +1629,19 @@ def handle_emergency_save_requests():
                         st.error("❌ Emergency save failed")
                         logger.error("Emergency save failed")
                 else:
-                    st.info("ℹ️ Session not eligible for emergency save")
-                    logger.info("Session not eligible for save")
+                    st.info("ℹ️ Session not eligible for emergency save (guest, no email, no messages, or already saved)")
+                    logger.info("Session not eligible for save or already saved via timeout")
             else:
-                st.error("❌ Session manager not available")
-                logger.error("Session manager not found")
+                st.error("❌ Session manager not available. Cannot process emergency save.")
+                logger.error("Session manager not found during emergency save request (should be initialized by main).")
                 
         except Exception as e:
             st.error(f"❌ Emergency save error: {str(e)}")
             logger.error(f"Emergency save error: {e}", exc_info=True)
         
+        # Short sleep to allow message to render (if possible) before Streamlit closes the script
         time.sleep(2)
-        st.stop()
+        st.stop() # Stop further execution of this ephemeral script
 
 # =============================================================================
 # UI COMPONENTS WITH AUTHENTICATION FIXES
@@ -1709,6 +1714,12 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
     """✅ FIXED: Enhanced sidebar with debug info for troubleshooting"""
     with st.sidebar:
         st.title("🎛️ Dashboard")
+
+        # --- ADDED DEBUG LOGGING HERE ---
+        logger.info(f"DEBUG: Sidebar Conditional Check - Session ID: {session.session_id[:8]}")
+        logger.info(f"DEBUG: Sidebar Conditional Check - Current session.user_type: {session.user_type}")
+        logger.info(f"DEBUG: Sidebar Conditional Check - Comparison result (session.user_type == UserType.REGISTERED_USER): {session.user_type == UserType.REGISTERED_USER}")
+        # --- END DEBUG LOGGING ---
         
         # User status
         if session.user_type == UserType.REGISTERED_USER:
@@ -1876,6 +1887,8 @@ def render_session_expiry_redirect():
 # =============================================================================
 
 def get_session_manager() -> Optional[SessionManager]:
+    # This function is retained for clarity, but its direct use might be less frequent
+    # if `session_manager` is always accessed via st.session_state directly where needed
     return st.session_state.get('session_manager')
 
 def ensure_initialization():
@@ -1921,10 +1934,13 @@ def ensure_initialization():
 def main():
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
 
-    # Handle session expiry redirect first
-    render_session_expiry_redirect()
+    # ✅ CRITICAL FIX: Ensure initialization happens first in every script run
+    if not ensure_initialization():
+        st.stop() # Stop if critical initialization fails
 
-    # Handle emergency save requests from browser close
+    # These functions can now safely access st.session_state.session_manager
+    # because ensure_initialization has already run.
+    render_session_expiry_redirect()
     handle_emergency_save_requests()
 
     # Emergency reset button
@@ -1932,14 +1948,10 @@ def main():
         st.session_state.clear()
         st.rerun()
 
-    # ✅ BEST PRACTICE: Initialize application only when needed
-    if not ensure_initialization():
-        st.stop()
-
-    # Get session manager
-    session_manager = get_session_manager()
-    if not session_manager:
-        st.error("Failed to initialize session manager.")
+    # Get session manager now that it's guaranteed to be initialized
+    session_manager = st.session_state.get('session_manager')
+    if not session_manager: # Defensive check, should rarely hit if initialization passed
+        st.error("Failed to retrieve session manager. Please refresh the page.")
         st.stop()
     
     # ✅ BEST PRACTICE: Initialize page state only when missing
@@ -1952,12 +1964,12 @@ def main():
     if current_page != "chat":
         render_welcome_page(session_manager)
     else:
-        session = session_manager.get_session()
+        session = session_manager.get_session() # This loads/creates the correct session based on current state
         if session and session.active:
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
             render_chat_interface_with_optimized_timer(session_manager, session)
         else:
-            # ✅ BEST PRACTICE: Clean up page state when session invalid
+            # ✅ BEST PRACTICE: Clean up page state when session invalid/inactive
             st.session_state.page = None
             st.rerun()
 
