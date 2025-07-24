@@ -38,6 +38,7 @@ from streamlit_javascript import st_javascript
 # ✅ ADDED: Session caching for better performance
 # ✅ ADDED: Explicit authentication state tracking
 # ✅ FIXED: Robust UserType check in sidebar display
+# ✅ ADDED: More granular debug logging for UserType
 # =============================================================================
 
 # Setup logging
@@ -896,7 +897,7 @@ class ZohoCRMManager:
             
             max_msg_length = 500
             if len(content) > max_msg_length:
-                content = content[:max_msg_length] + "..."
+                content = content[:500] + "..."
                 
             note_content += f"\n{i+1}. **{role}:** {content}\n"
             
@@ -1339,9 +1340,18 @@ def render_activity_status_indicator(session, session_manager):
     """
     Show activity status for registered users
     """
-    if (session.user_type == UserType.REGISTERED_USER and 
-        session.last_activity):
+    # Defensive check: ensure session is not None and user_type exists
+    if session is None or not hasattr(session, 'user_type') or session.last_activity is None:
+        return
         
+    # Robust check for user_type value
+    is_registered = False
+    if isinstance(session.user_type, UserType):
+        is_registered = (session.user_type == UserType.REGISTERED_USER)
+    elif isinstance(session.user_type, str):
+        is_registered = (session.user_type.lower() == UserType.REGISTERED_USER.value.lower())
+
+    if is_registered: # Only show this indicator for registered users
         time_since_activity = datetime.now() - session.last_activity
         minutes_since = time_since_activity.total_seconds() / 60
         
@@ -1405,10 +1415,13 @@ class SessionManager:
             logger.info(f"Reset auto-save flag for active session {session.session_id[:8]}")
         
         # Ensure user_type is properly maintained as enum
-        if isinstance(session.user_type, str):
-            session.user_type = UserType(session.user_type) # This might raise ValueError if not a valid enum member
+        # This is already handled robustly by _validate_and_fix_session,
+        # but a direct cast can be dangerous here if the type is unexpected.
+        # Instead, we rely on _validate_and_fix_session for proper type conversion.
         
         try:
+            # Ensure the session object is valid before saving
+            session = self._validate_and_fix_session(session) 
             self.db.save_session(session)
             logger.debug(f"Session activity updated for {session.session_id[:8]}...")
         except Exception as e:
@@ -1423,21 +1436,29 @@ class SessionManager:
     def _validate_and_fix_session(self, session: UserSession) -> UserSession:
         """Validate and fix common session issues, especially UserType conversion."""
         if not session:
-            return session
+            # This should ideally not happen if called correctly, but defensive.
+            return UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST)
             
         # Fix user_type if it's a string, or ensure it's a valid Enum member
         if isinstance(session.user_type, str):
             try:
                 # Attempt to convert to Enum member
-                session.user_type = UserType(session.user_type)
-                logger.debug(f"Validated/fixed UserType: {session.user_type}")
-            except ValueError:
-                # If string is not a valid enum member, default to GUEST and log
-                logger.warning(f"Invalid user_type string found: {session.user_type}. Defaulting to GUEST.")
+                # Case-insensitive comparison for common string values
+                user_type_str_lower = session.user_type.lower()
+                if user_type_str_lower == UserType.REGISTERED_USER.value:
+                    session.user_type = UserType.REGISTERED_USER
+                elif user_type_str_lower == UserType.GUEST.value:
+                    session.user_type = UserType.GUEST
+                else:
+                    # If string is not a valid known enum member, default to GUEST and log
+                    logger.warning(f"Invalid user_type string found during validation: '{session.user_type}'. Defaulting to GUEST.")
+                    session.user_type = UserType.GUEST
+            except ValueError: # Catch potential errors if string is truly unparseable
+                logger.error(f"Error converting user_type string '{session.user_type}' to Enum: {e}. Defaulting to GUEST.")
                 session.user_type = UserType.GUEST
         elif not isinstance(session.user_type, UserType):
-             # If it's neither string nor a valid Enum, something is very wrong, default
-            logger.warning(f"Unexpected type for session.user_type: {type(session.user_type)}. Defaulting to GUEST.")
+             # If it's neither string nor a valid Enum (e.g., None, int, etc.), default to GUEST and log
+            logger.warning(f"Unexpected type for session.user_type during validation: {type(session.user_type)}. Value: {session.user_type}. Defaulting to GUEST.")
             session.user_type = UserType.GUEST
 
         # Ensure messages is a list
@@ -1515,15 +1536,23 @@ class SessionManager:
         # Prioritize authenticated session if set
         if authenticated_session_id:
             session = self.db.load_session(authenticated_session_id)
-            if session and session.active and session.user_type == UserType.REGISTERED_USER:
-                # Valid authenticated session, ensure current_session_id matches
-                st.session_state.current_session_id = authenticated_session_id
-                self._update_activity(session)
-                logger.debug(f"Retrieved authenticated session: {authenticated_session_id[:8]}")
-                return session
+            if session and session.active: # Removed `session.user_type == UserType.REGISTERED_USER` here
+                                          # because _validate_and_fix_session will handle enum consistency.
+                                          # We just need to load *any* session associated with the authenticated_session_id.
+                session = self._validate_and_fix_session(session) # Ensure type is Enum here
+                if session.user_type == UserType.REGISTERED_USER: # Now check after validation
+                    st.session_state.current_session_id = authenticated_session_id
+                    self._update_activity(session)
+                    logger.debug(f"Retrieved authenticated session: {authenticated_session_id[:8]}")
+                    return session
+                else:
+                    # Session loaded by authenticated_session_id is not actually registered (e.g., manually changed in DB)
+                    logger.info(f"Session {authenticated_session_id[:8]} loaded by authenticated_id is not REGISTERED_USER. Resetting auth state.")
+                    del st.session_state['authenticated_session_id']
+                    # Fall through to check current_session_id or create guest
             else:
                 # Authenticated session ID in state is stale or invalid in DB
-                logger.info(f"Authenticated session {authenticated_session_id[:8]} found in st.session_state but invalid in DB. Resetting auth state.")
+                logger.info(f"Authenticated session {authenticated_session_id[:8]} found in st.session_state but invalid/inactive in DB. Resetting auth state.")
                 del st.session_state['authenticated_session_id']
                 # Fall through to check current_session_id (if it existed before auth) or create guest
         
@@ -1801,8 +1830,9 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         logger.info(f"DEBUG: Sidebar Conditional Check - Session ID: {session.session_id[:8]}")
         logger.info(f"DEBUG: Sidebar Conditional Check - Current session.user_type (raw): {session.user_type}")
         logger.info(f"DEBUG: Sidebar Conditional Check - Type of session.user_type: {type(session.user_type)}")
+        logger.info(f"DEBUG: Sidebar Conditional Check - Repr of session.user_type: {repr(session.user_type)}")
         
-        # --- ROBUST USER TYPE CHECK ---
+        # --- ROBUST USER TYPE CHECK FOR DISPLAY LOGIC ---
         is_registered = False
         if isinstance(session.user_type, UserType):
             is_registered = (session.user_type == UserType.REGISTERED_USER)
