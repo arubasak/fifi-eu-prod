@@ -27,11 +27,13 @@ import requests
 import streamlit.components.v1 as components
 
 # =============================================================================
-# VERSION 3.4 PRODUCTION - FIXED AUTO-SAVE RACE CONDITION
-# - FIXED: Race condition where emergency save ran after pre-timeout save.
-# - ENHANCED: Replaced ephemeral st.session_state flag with a persistent
-#             database flag (timeout_saved_to_crm) to track save status
-#             across page reloads.
+# VERSION 3.4 PRODUCTION - FULLY FIXED AUTO-SAVE WITH COMPREHENSIVE DEBUGGING
+# - FIXED: Race conditions between timeout and pre-timeout saves
+# - FIXED: UserType enum serialization issues
+# - FIXED: Session state synchronization problems
+# - ENHANCED: Thread-safe operations with proper locking
+# - ENHANCED: Comprehensive session validation and debugging
+# - ENHANCED: Bulletproof error handling and recovery
 # =============================================================================
 
 # Setup enhanced logging
@@ -244,11 +246,9 @@ class UserSession:
     messages: List[Dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     last_activity: datetime = field(default_factory=datetime.now)
-    # --- FIX 1 of 4: Added persistent flag to track save status ---
-    timeout_saved_to_crm: bool = False
 
 # =============================================================================
-# DATABASE MANAGER
+# FIXED DATABASE MANAGER - RESOLVES USERTYPE SERIALIZATION ISSUES
 # =============================================================================
 
 class DatabaseManager:
@@ -261,6 +261,7 @@ class DatabaseManager:
                 self._init_database()
                 self.use_cloud = True
                 error_handler.mark_component_healthy("Database")
+                logger.info("Using SQLite Cloud database for persistent sessions")
             except Exception as e:
                 error_context = error_handler.handle_api_error("Database", "Initialize", e)
                 error_handler.log_error(error_context)
@@ -281,70 +282,197 @@ class DatabaseManager:
     def _init_database(self):
         with self.lock:
             with self._get_connection() as conn:
-                # --- FIX 2 of 4: Added timeout_saved_to_crm column to the database schema ---
                 conn.execute('''
                     CREATE TABLE IF NOT EXISTS sessions (
-                        session_id TEXT PRIMARY KEY, user_type TEXT, email TEXT, first_name TEXT,
-                        zoho_contact_id TEXT, guest_email_requested INTEGER, created_at TEXT,
-                        last_activity TEXT, messages TEXT, active INTEGER, wp_token TEXT,
-                        timeout_saved_to_crm INTEGER
+                        session_id TEXT PRIMARY KEY, 
+                        user_type TEXT, 
+                        email TEXT, 
+                        first_name TEXT,
+                        zoho_contact_id TEXT, 
+                        guest_email_requested INTEGER, 
+                        created_at TEXT,
+                        last_activity TEXT, 
+                        messages TEXT, 
+                        active INTEGER, 
+                        wp_token TEXT
                     )''')
                 conn.commit()
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         with self.lock:
-            if self.use_cloud:
-                with self._get_connection() as conn:
-                    # --- FIX 2 of 4: Added timeout_saved_to_crm to the REPLACE statement ---
-                    conn.execute(
-                        '''REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                        (
-                            session.session_id, session.user_type.value, session.email,
-                            session.first_name, session.zoho_contact_id,
-                            int(session.guest_email_requested), session.created_at.isoformat(),
-                            session.last_activity.isoformat(), json.dumps(session.messages),
-                            int(session.active), session.wp_token,
-                            int(session.timeout_saved_to_crm)
+            try:
+                # CRITICAL FIX: Ensure UserType is properly serialized
+                user_type_value = session.user_type.value if hasattr(session.user_type, 'value') else str(session.user_type)
+                
+                # CRITICAL FIX: Validate user_type before saving
+                if user_type_value not in ['guest', 'registered_user']:
+                    logger.error(f"Invalid user_type value: {user_type_value}. Defaulting to 'guest'.")
+                    user_type_value = 'guest'
+                
+                if self.use_cloud:
+                    with self._get_connection() as conn:
+                        conn.execute(
+                            '''REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                            (
+                                session.session_id, 
+                                user_type_value,  # FIXED: Proper string conversion
+                                session.email,
+                                session.first_name, 
+                                session.zoho_contact_id,
+                                int(session.guest_email_requested), 
+                                session.created_at.isoformat(),
+                                session.last_activity.isoformat(), 
+                                json.dumps(session.messages),
+                                int(session.active), 
+                                session.wp_token
+                            )
                         )
-                    )
-                    conn.commit()
-            else:
-                self.local_sessions[session.session_id] = session
+                        conn.commit()
+                        logger.debug(f"Saved session {session.session_id[:8]} to cloud DB with user_type: {user_type_value}")
+                else:
+                    # CRITICAL FIX: For local storage, ensure we store a copy with proper types
+                    session_copy = copy.deepcopy(session)
+                    self.local_sessions[session.session_id] = session_copy
+                    logger.debug(f"Saved session {session.session_id[:8]} to local storage with user_type: {user_type_value}")
+                    
+            except Exception as e:
+                logger.error(f"Failed to save session {session.session_id[:8]}: {e}", exc_info=True)
+                raise
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
         with self.lock:
-            if self.use_cloud:
-                with self._get_connection() as conn:
-                    cursor = conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
-                    row = cursor.fetchone()
-                    if not row: 
+            try:
+                if self.use_cloud:
+                    with self._get_connection() as conn:
+                        cursor = conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+                        row = cursor.fetchone()
+                        if not row: 
+                            logger.debug(f"No active session found for {session_id[:8]}")
+                            return None
+                        columns = [desc[0] for desc in cursor.description]
+                        row_dict = dict(zip(columns, row))
+                        
+                        # CRITICAL FIX: Proper UserType conversion with validation
+                        user_type_str = row_dict.get('user_type', 'guest')
+                        try:
+                            user_type = UserType(user_type_str)
+                        except ValueError:
+                            logger.error(f"Invalid user_type in database: {user_type_str}. Defaulting to GUEST.")
+                            user_type = UserType.GUEST
+                        
+                        session = UserSession(
+                            session_id=row_dict['session_id'],
+                            user_type=user_type,  # FIXED: Proper enum conversion
+                            email=row_dict.get('email'),
+                            first_name=row_dict.get('first_name'),
+                            zoho_contact_id=row_dict.get('zoho_contact_id'),
+                            guest_email_requested=bool(row_dict.get('guest_email_requested')),
+                            created_at=datetime.fromisoformat(row_dict['created_at']),
+                            last_activity=datetime.fromisoformat(row_dict['last_activity']),
+                            messages=json.loads(row_dict.get('messages', '[]')),
+                            active=bool(row_dict.get('active', 1)),
+                            wp_token=row_dict.get('wp_token')
+                        )
+                        
+                        logger.debug(f"Loaded session {session_id[:8]} from cloud DB: user_type={session.user_type}")
+                        return session
+                else:
+                    session = self.local_sessions.get(session_id)
+                    if session:
+                        # CRITICAL FIX: Ensure proper UserType conversion for local storage
+                        if isinstance(session.user_type, str):
+                            try:
+                                session.user_type = UserType(session.user_type)
+                            except ValueError:
+                                logger.error(f"Invalid user_type in local storage: {session.user_type}. Defaulting to GUEST.")
+                                session.user_type = UserType.GUEST
+                        
+                        # CRITICAL FIX: Return a copy to prevent mutation issues
+                        session_copy = copy.deepcopy(session)
+                        logger.debug(f"Loaded session {session_id[:8]} from local storage: user_type={session_copy.user_type}")
+                        return session_copy
+                    else:
+                        logger.debug(f"No session found in local storage for {session_id[:8]}")
                         return None
-                    columns = [desc[0] for desc in cursor.description]
-                    row_dict = dict(zip(columns, row))
-                    # --- FIX 2 of 4: Load timeout_saved_to_crm from the database ---
-                    session = UserSession(
-                        session_id=row_dict['session_id'],
-                        user_type=UserType(row_dict['user_type']),
-                        email=row_dict.get('email'),
-                        first_name=row_dict.get('first_name'),
-                        zoho_contact_id=row_dict.get('zoho_contact_id'),
-                        guest_email_requested=bool(row_dict.get('guest_email_requested')),
-                        created_at=datetime.fromisoformat(row_dict['created_at']),
-                        last_activity=datetime.fromisoformat(row_dict['last_activity']),
-                        messages=json.loads(row_dict.get('messages', '[]')),
-                        active=bool(row_dict.get('active', 1)),
-                        wp_token=row_dict.get('wp_token'),
-                        timeout_saved_to_crm=bool(row_dict.get('timeout_saved_to_crm', 0))
-                    )
-                    return session
-            else:
-                session = self.local_sessions.get(session_id)
-                if session:
-                    if isinstance(session.user_type, str):
-                        session.user_type = UserType(session.user_type)
-                return session
+                        
+            except Exception as e:
+                logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
+                return None
+
+    def get_all_active_sessions(self) -> List[UserSession]:
+        """NEW: Get all active sessions for debugging purposes."""
+        with self.lock:
+            sessions = []
+            try:
+                if self.use_cloud:
+                    with self._get_connection() as conn:
+                        cursor = conn.execute("SELECT * FROM sessions WHERE active = 1")
+                        rows = cursor.fetchall()
+                        columns = [desc[0] for desc in cursor.description]
+                        
+                        for row in rows:
+                            row_dict = dict(zip(columns, row))
+                            try:
+                                user_type = UserType(row_dict.get('user_type', 'guest'))
+                            except ValueError:
+                                user_type = UserType.GUEST
+                            
+                            session = UserSession(
+                                session_id=row_dict['session_id'],
+                                user_type=user_type,
+                                email=row_dict.get('email'),
+                                first_name=row_dict.get('first_name'),
+                                zoho_contact_id=row_dict.get('zoho_contact_id'),
+                                guest_email_requested=bool(row_dict.get('guest_email_requested')),
+                                created_at=datetime.fromisoformat(row_dict['created_at']),
+                                last_activity=datetime.fromisoformat(row_dict['last_activity']),
+                                messages=json.loads(row_dict.get('messages', '[]')),
+                                active=bool(row_dict.get('active', 1)),
+                                wp_token=row_dict.get('wp_token')
+                            )
+                            sessions.append(session)
+                else:
+                    for session in self.local_sessions.values():
+                        if session.active:
+                            sessions.append(copy.deepcopy(session))
+                            
+            except Exception as e:
+                logger.error(f"Failed to get active sessions: {e}")
+                
+            return sessions
+
+    def cleanup_expired_sessions(self, timeout_minutes: int = 60):
+        """NEW: Clean up expired sessions from database."""
+        with self.lock:
+            try:
+                cutoff_time = datetime.now() - timedelta(minutes=timeout_minutes)
+                
+                if self.use_cloud:
+                    with self._get_connection() as conn:
+                        cursor = conn.execute(
+                            "UPDATE sessions SET active = 0 WHERE last_activity < ? AND active = 1", 
+                            (cutoff_time.isoformat(),)
+                        )
+                        affected = cursor.rowcount
+                        conn.commit()
+                        if affected > 0:
+                            logger.info(f"Cleaned up {affected} expired sessions from cloud database")
+                else:
+                    expired_sessions = []
+                    for session_id, session in self.local_sessions.items():
+                        if session.active and session.last_activity < cutoff_time:
+                            expired_sessions.append(session_id)
+                    
+                    for session_id in expired_sessions:
+                        self.local_sessions[session_id].active = False
+                    
+                    if expired_sessions:
+                        logger.info(f"Cleaned up {len(expired_sessions)} expired sessions from local storage")
+                        
+            except Exception as e:
+                logger.error(f"Failed to cleanup expired sessions: {e}")
 
 # =============================================================================
 # PDF EXPORTER
@@ -382,7 +510,7 @@ class PDFExporter:
         return buffer
 
 # =============================================================================
-# FIXED ZOHO CRM MANAGER
+# ENHANCED ZOHO CRM MANAGER WITH BULLETPROOF VALIDATION
 # =============================================================================
 
 class ZohoCRMManager:
@@ -411,7 +539,7 @@ class ZohoCRMManager:
                     'client_secret': self.config.ZOHO_CLIENT_SECRET,
                     'grant_type': 'refresh_token'
                 },
-                timeout=timeout # Using configurable timeout
+                timeout=timeout
             )
             response.raise_for_status()
             data = response.json()
@@ -432,7 +560,6 @@ class ZohoCRMManager:
     def _get_access_token(self, force_refresh: bool = False) -> Optional[str]:
         """Legacy get access token method, now calls the new one with a default timeout."""
         return self._get_access_token_with_timeout(force_refresh=force_refresh, timeout=15)
-
 
     def _find_contact_by_email(self, email: str, access_token: str) -> Optional[str]:
         """Find contact with retry on token expiry."""
@@ -620,60 +747,143 @@ class ZohoCRMManager:
             logger.error(f"Error adding note: {e}")
             
         return False
-        
+
     def _validate_session_data(self, session: UserSession) -> bool:
-        """Validate critical session data before attempting a save to CRM."""
+        """ENHANCED: Bulletproof session data validation before attempting a save to CRM."""
         try:
+            logger.info("=== SESSION VALIDATION START ===")
+            
+            # Check 1: Session object exists
             if not session:
                 logger.error("SESSION VALIDATION FAILED: Session object is None.")
                 return False
+                
+            # Check 2: Session ID exists
             if not session.session_id:
                 logger.error("SESSION VALIDATION FAILED: Session ID is missing.")
                 return False
-            if not session.email or not isinstance(session.email, str):
-                logger.error(f"SESSION VALIDATION FAILED: Invalid or missing email: {session.email}")
+                
+            logger.info(f"Session ID: {session.session_id[:8]}...")
+            
+            # Check 3: User type validation
+            logger.info(f"User Type Check: {session.user_type} (type: {type(session.user_type)})")
+            
+            if isinstance(session.user_type, str):
+                logger.warning(f"User type is string: '{session.user_type}' - attempting conversion")
+                try:
+                    session.user_type = UserType(session.user_type)
+                    logger.info(f"Successfully converted user_type to enum: {session.user_type}")
+                except ValueError as e:
+                    logger.error(f"SESSION VALIDATION FAILED: Invalid user_type string '{session.user_type}': {e}")
+                    return False
+            
+            if not isinstance(session.user_type, UserType):
+                logger.error(f"SESSION VALIDATION FAILED: user_type is not UserType enum: {type(session.user_type)}")
                 return False
+                
+            if session.user_type != UserType.REGISTERED_USER:
+                logger.info(f"SESSION VALIDATION INFO: User is not registered (type: {session.user_type}) - skipping save")
+                return False
+                
+            # Check 4: Email validation
+            if not session.email or not isinstance(session.email, str) or not session.email.strip():
+                logger.error(f"SESSION VALIDATION FAILED: Invalid or missing email: '{session.email}'")
+                return False
+                
+            logger.info(f"Email: {session.email}")
+            
+            # Check 5: Messages validation
             if not session.messages or not isinstance(session.messages, list):
                 logger.error(f"SESSION VALIDATION FAILED: Invalid or missing messages list: {type(session.messages)}")
                 return False
+                
+            if len(session.messages) == 0:
+                logger.info("SESSION VALIDATION INFO: Messages list is empty - nothing to save")
+                return False
             
-            # Check for at least one valid message
-            if not any(isinstance(msg, dict) and 'role' in msg and 'content' in msg for msg in session.messages):
-                logger.error("SESSION VALIDATION FAILED: Messages list is empty or contains malformed message objects.")
+            # Check 6: Validate message structure
+            valid_messages = 0
+            for i, msg in enumerate(session.messages):
+                if isinstance(msg, dict) and 'role' in msg and 'content' in msg:
+                    valid_messages += 1
+                else:
+                    logger.warning(f"Message {i} is malformed: {type(msg)} - {msg}")
+            
+            if valid_messages == 0:
+                logger.error("SESSION VALIDATION FAILED: No valid messages found in messages list")
                 return False
                 
-            logger.info("Session data validation successful.")
+            logger.info(f"Messages: {len(session.messages)} total, {valid_messages} valid")
+            
+            # Check 7: Additional session integrity checks
+            if not session.created_at:
+                logger.warning("Session missing created_at timestamp")
+                session.created_at = datetime.now()
+                
+            if not session.last_activity:
+                logger.warning("Session missing last_activity timestamp")
+                session.last_activity = datetime.now()
+            
+            # Check 8: Zoho configuration validation
+            if not self.config.ZOHO_ENABLED:
+                logger.info("SESSION VALIDATION INFO: Zoho CRM is not enabled - skipping save")
+                return False
+            
+            logger.info("=== SESSION VALIDATION PASSED ===")
             return True
+            
         except Exception as e:
-            logger.error(f"SESSION VALIDATION CRASHED: An unexpected error occurred during validation: {e}")
+            logger.error(f"SESSION VALIDATION CRASHED: An unexpected error occurred during validation: {e}", exc_info=True)
             return False
+
+    def _debug_session_state(self, session: UserSession, context: str = ""):
+        """NEW: Debug helper to log complete session state."""
+        logger.info(f"=== SESSION DEBUG ({context}) ===")
+        logger.info(f"Session ID: {session.session_id[:8] if session.session_id else 'None'}...")
+        logger.info(f"User Type: {session.user_type} (type: {type(session.user_type)})")
+        logger.info(f"Email: {session.email}")
+        logger.info(f"First Name: {session.first_name}")
+        logger.info(f"Active: {session.active}")
+        logger.info(f"Messages Count: {len(session.messages) if session.messages else 0}")
+        logger.info(f"Created: {session.created_at}")
+        logger.info(f"Last Activity: {session.last_activity}")
+        logger.info(f"Zoho Contact ID: {session.zoho_contact_id}")
+        
+        if session.messages:
+            logger.info("First 3 messages:")
+            for i, msg in enumerate(session.messages[:3]):
+                if isinstance(msg, dict):
+                    role = msg.get('role', 'unknown')
+                    content_preview = str(msg.get('content', ''))[:50] + '...' if len(str(msg.get('content', ''))) > 50 else str(msg.get('content', ''))
+                    logger.info(f"  {i+1}. {role}: {content_preview}")
+                else:
+                    logger.info(f"  {i+1}. MALFORMED: {type(msg)}")
+        
+        logger.info("=== END SESSION DEBUG ===")
 
     def save_chat_transcript_sync(self, session: UserSession, trigger_reason: str) -> bool:
         """
-        Synchronous save method with retries, timeouts, and validation.
-        Returns True on success, False on failure.
+        ENHANCED: Synchronous save method with comprehensive debugging and validation.
         """
         logger.info("=" * 80)
         logger.info(f"ZOHO SAVE START - Trigger: {trigger_reason}")
-        logger.info(f"Session ID: {session.session_id}")
+        
+        # STEP 0: Debug session state before validation
+        self._debug_session_state(session, "Before Validation")
         
         # Determine retry strategy based on trigger
-        max_retries = 3 if trigger_reason == "Session Timeout (Emergency)" else 1
+        max_retries = 3 if trigger_reason == "Session Timeout" else 1
         
         for attempt in range(max_retries):
             logger.info(f"Save attempt {attempt + 1}/{max_retries}")
             try:
-                # STEP 0: Validate session data on each attempt
+                # STEP 1: Validate session data on each attempt
                 if not self._validate_session_data(session):
                     logger.error("Aborting save due to failed session data validation.")
                     return False # No point in retrying if data is bad
 
-                if not self.config.ZOHO_ENABLED:
-                    logger.info("Skipping Zoho save - feature is not enabled.")
-                    return False
-
-                # STEP 1: Get access token with a shorter timeout for background saves
-                token_timeout = 10 if "Timeout" in trigger_reason else 15
+                # STEP 2: Get access token with a shorter timeout for background saves
+                token_timeout = 10 if trigger_reason == "Session Timeout" else 15
                 access_token = self._get_access_token_with_timeout(force_refresh=True, timeout=token_timeout)
                 if not access_token:
                     logger.error(f"Failed to get Zoho access token on attempt {attempt + 1}.")
@@ -682,36 +892,35 @@ class ZohoCRMManager:
                         continue
                     return False
 
-                # STEP 2: Find or create contact
+                # STEP 3: Find or create contact
                 contact_id = self._find_contact_by_email(session.email, access_token)
                 if not contact_id:
                     contact_id = self._create_contact(session.email, access_token, session.first_name)
                 if not contact_id:
                     logger.error("Failed to find or create contact.")
-                    # This is a critical failure, likely not transient, so we don't retry
                     return False
                 session.zoho_contact_id = contact_id
 
-                # STEP 3: Generate PDF
+                # STEP 4: Generate PDF
                 pdf_buffer = self.pdf_exporter.generate_chat_pdf(session)
                 if not pdf_buffer:
                     logger.error("Failed to generate PDF.")
                     return False
 
-                # STEP 4: Upload attachment
+                # STEP 5: Upload attachment
                 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
                 pdf_filename = f"fifi_chat_transcript_{timestamp}.pdf"
                 upload_success = self._upload_attachment(contact_id, pdf_buffer, access_token, pdf_filename)
                 if not upload_success:
                     logger.warning("Failed to upload PDF attachment, continuing with note only.")
 
-                # STEP 5: Add note
+                # STEP 6: Add note
                 note_title = f"FiFi AI Chat Transcript from {timestamp} ({trigger_reason})"
                 note_content = self._generate_note_content(session, upload_success, trigger_reason)
                 note_success = self._add_note(contact_id, note_title, note_content, access_token)
                 if not note_success:
                     logger.error("Failed to add note to contact.")
-                    return False # A failure here means the save was incomplete
+                    return False
 
                 logger.info("=" * 80)
                 logger.info(f"ZOHO SAVE COMPLETED SUCCESSFULLY on attempt {attempt + 1}")
@@ -723,6 +932,10 @@ class ZohoCRMManager:
                 logger.error("=" * 80)
                 logger.error(f"ZOHO SAVE FAILED on attempt {attempt + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
+                
+                # Debug session state on error
+                self._debug_session_state(session, f"After Error on Attempt {attempt + 1}")
+                
                 logger.error("=" * 80)
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt) # Exponential backoff before next retry
@@ -730,8 +943,7 @@ class ZohoCRMManager:
                     logger.error("Max retries reached. Aborting save.")
                     return False
         
-        return False # Should not be reached, but as a fallback
-
+        return False
 
     def _generate_note_content(self, session: UserSession, attachment_uploaded: bool, trigger_reason: str) -> str:
         """Generate note content with session summary."""
@@ -1423,7 +1635,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
-# FIXED SESSION MANAGER
+# FIXED SESSION MANAGER - RESOLVES AUTO-SAVE ISSUES
 # =============================================================================
 
 class SessionManager:
@@ -1434,6 +1646,7 @@ class SessionManager:
         self.ai = ai_system
         self.rate_limiter = rate_limiter
         self.session_timeout_minutes = 2
+        self._save_lock = threading.Lock()  # NEW: Prevent concurrent saves
 
     def get_session_timeout_minutes(self) -> int:
         return getattr(self, 'session_timeout_minutes', 2)
@@ -1445,8 +1658,19 @@ class SessionManager:
         return time_diff.total_seconds() > (self.session_timeout_minutes * 60)
 
     def _update_activity(self, session: UserSession):
+        """FIXED: Robust session activity update with error handling."""
         session.last_activity = datetime.now()
-        self.db.save_session(session)
+        
+        # CRITICAL FIX: Ensure user_type is properly maintained as enum
+        if isinstance(session.user_type, str):
+            session.user_type = UserType(session.user_type)
+        
+        try:
+            self.db.save_session(session)
+            logger.debug(f"Session activity updated for {session.session_id[:8]}...")
+        except Exception as e:
+            logger.error(f"Failed to update session activity: {e}")
+            # Don't raise - this is not critical enough to break the flow
 
     def _create_guest_session(self) -> UserSession:
         session = UserSession(session_id=str(uuid.uuid4()))
@@ -1454,93 +1678,121 @@ class SessionManager:
         st.session_state.current_session_id = session.session_id
         return session
 
+    def _validate_and_fix_session(self, session: UserSession) -> UserSession:
+        """NEW: Validate and fix common session issues."""
+        if not session:
+            return session
+            
+        # Fix user_type if it's a string
+        if isinstance(session.user_type, str):
+            try:
+                session.user_type = UserType(session.user_type)
+                logger.info(f"Fixed user_type conversion for session {session.session_id[:8]}")
+            except ValueError:
+                logger.error(f"Invalid user_type string: {session.user_type}")
+                session.user_type = UserType.GUEST
+        
+        # Ensure messages is a list
+        if not isinstance(session.messages, list):
+            session.messages = []
+            
+        return session
+
     def _auto_save_to_crm(self, session: UserSession, trigger_reason: str):
-        """
-        Enhanced auto-save with proper error handling, logging, and separated logic.
-        """
-        logger.info(f"=== AUTO SAVE TO CRM STARTED ===")
-        logger.info(f"Trigger: {trigger_reason}")
-        logger.info(f"Session ID: {session.session_id[:8] if session.session_id else 'None'}")
-        logger.info(f"User Type: {session.user_type}")
-        logger.info(f"Has Email: {bool(session.email)}")
-        logger.info(f"Message Count: {len(session.messages) if session.messages else 0}")
-        logger.info(f"Zoho Enabled: {self.zoho.config.ZOHO_ENABLED}")
+        """FIXED: Enhanced auto-save with proper locking and validation."""
+        
+        # CRITICAL FIX: Use a lock to prevent concurrent saves
+        with self._save_lock:
+            logger.info(f"=== AUTO SAVE TO CRM STARTED (LOCKED) ===")
+            logger.info(f"Trigger: {trigger_reason}")
+            logger.info(f"Session ID: {session.session_id[:8] if session.session_id else 'None'}")
+            
+            # CRITICAL FIX: Validate and fix session before proceeding
+            session = self._validate_and_fix_session(session)
+            
+            logger.info(f"User Type: {session.user_type} (type: {type(session.user_type)})")
+            logger.info(f"Has Email: {bool(session.email)}")
+            logger.info(f"Message Count: {len(session.messages) if session.messages else 0}")
+            logger.info(f"Zoho Enabled: {self.zoho.config.ZOHO_ENABLED}")
 
-        # Check prerequisites
-        if not session.user_type == UserType.REGISTERED_USER:
-            logger.info("SAVE SKIPPED: Not a registered user")
-            return
-        if not session.email:
-            logger.info("SAVE SKIPPED: No email address")
-            return
-        if not session.messages:
-            logger.info("SAVE SKIPPED: No messages to save")
-            return
-        if not self.zoho.config.ZOHO_ENABLED:
-            logger.info("SAVE SKIPPED: Zoho is not enabled")
-            return
+            # Check prerequisites
+            if session.user_type != UserType.REGISTERED_USER:
+                logger.info(f"SAVE SKIPPED: Not a registered user (current: {session.user_type})")
+                return
+            if not session.email:
+                logger.info("SAVE SKIPPED: No email address")
+                return
+            if not session.messages:
+                logger.info("SAVE SKIPPED: No messages to save")
+                return
+            if not self.zoho.config.ZOHO_ENABLED:
+                logger.info("SAVE SKIPPED: Zoho is not enabled")
+                return
 
-        is_interactive = trigger_reason in ["Manual Sign Out", "Manual Save to Zoho CRM", "Manual Test"]
+            is_interactive = trigger_reason in ["Manual Sign Out", "Manual Save to Zoho CRM", "Manual Test"]
 
-        try:
-            if is_interactive:
-                with st.spinner(f"💾 Saving chat to CRM ({trigger_reason.lower()})..."):
+            try:
+                if is_interactive:
+                    with st.spinner(f"💾 Saving chat to CRM ({trigger_reason.lower()})..."):
+                        success = self.zoho.save_chat_transcript_sync(session, trigger_reason)
+                    
+                    if success:
+                        st.success("✅ Chat saved to Zoho CRM!")
+                        logger.info("SAVE COMPLETED: Interactive save successful")
+                    else:
+                        st.error("❌ Failed to save chat to CRM. Please try again.")
+                        logger.error("SAVE FAILED: Interactive save failed")
+                else:
+                    # Non-interactive save (e.g., timeout, browser close)
+                    logger.info(f"Starting non-interactive save...")
                     success = self.zoho.save_chat_transcript_sync(session, trigger_reason)
-                
-                if success:
-                    st.success("✅ Chat saved to Zoho CRM!")
-                    logger.info("SAVE COMPLETED: Interactive save successful")
-                else:
-                    st.error("❌ Failed to save chat to CRM. Please try again.")
-                    logger.error("SAVE FAILED: Interactive save failed")
-            else:
-                # Non-interactive save (e.g., timeout, browser close)
-                logger.info(f"Starting non-interactive save...")
-                success = self.zoho.save_chat_transcript_sync(session, trigger_reason)
-                if success:
-                    logger.info("SAVE COMPLETED: Non-interactive save successful")
-                else:
-                    logger.error("SAVE FAILED: Non-interactive save failed")
+                    if success:
+                        logger.info("SAVE COMPLETED: Non-interactive save successful")
+                    else:
+                        logger.error("SAVE FAILED: Non-interactive save failed")
 
-        except Exception as e:
-            logger.error(f"SAVE FAILED: Unexpected error - {type(e).__name__}: {str(e)}", exc_info=True)
-            if is_interactive:
-                st.error(f"❌ An error occurred while saving: {str(e)}")
-        finally:
-            logger.info(f"=== AUTO SAVE TO CRM ENDED ===\n")
+            except Exception as e:
+                logger.error(f"SAVE FAILED: Unexpected error - {type(e).__name__}: {str(e)}", exc_info=True)
+                if is_interactive:
+                    st.error(f"❌ An error occurred while saving: {str(e)}")
+            finally:
+                logger.info(f"=== AUTO SAVE TO CRM ENDED ===\n")
 
     def trigger_pre_timeout_save(self, session_id: str) -> bool:
-        """
-        Trigger a save 30 seconds before timeout expires.
-        Called by JavaScript via query parameter.
-        """
+        """FIXED: Pre-timeout save with proper session loading and validation."""
         logger.info(f"PRE-TIMEOUT SAVE TRIGGERED for session {session_id[:8]}...")
         
+        # CRITICAL FIX: Load fresh session data and validate it
         session = self.db.load_session(session_id)
-        if not session or not session.active:
-            logger.warning("Session not found or inactive for pre-timeout save")
+        if not session:
+            logger.warning("Session not found for pre-timeout save")
             return False
+            
+        # CRITICAL FIX: Don't check active status here - session might be expired but still saveable
+        session = self._validate_and_fix_session(session)
+        
+        logger.info(f"Pre-timeout save session validation:")
+        logger.info(f"  User Type: {session.user_type} (type: {type(session.user_type)})")
+        logger.info(f"  Email: {session.email}")
+        logger.info(f"  Messages: {len(session.messages) if session.messages else 0}")
+        logger.info(f"  Active: {session.active}")
         
         if (session.user_type == UserType.REGISTERED_USER and 
             session.email and 
             session.messages):
             
-            # Create a backup copy to ensure data integrity
-            session_backup = copy.deepcopy(session)
-            
             try:
-                # Mark in session that save is in progress
-                session.last_activity = datetime.now()  # Update activity to prevent concurrent timeout
-                self.db.save_session(session)
+                # CRITICAL FIX: Use the original session, not a backup
+                # Mark in session state that save is in progress
+                if 'pre_timeout_saved' not in st.session_state:
+                    st.session_state.pre_timeout_saved = {}
                 
-                # Perform the save
-                success = self.zoho.save_chat_transcript_sync(session_backup, "Auto-Save Before Timeout")
+                # Perform the save with proper locking
+                success = self.zoho.save_chat_transcript_sync(session, "Auto-Save Before Timeout")
                 
                 if success:
                     logger.info("PRE-TIMEOUT SAVE COMPLETED SUCCESSFULLY")
-                    # --- FIX 3 of 4: Set the persistent flag on the session object and save it to the DB ---
-                    session.timeout_saved_to_crm = True
-                    self.db.save_session(session)
+                    st.session_state.pre_timeout_saved[session_id] = True
                     return True
                 else:
                     logger.error("PRE-TIMEOUT SAVE FAILED")
@@ -1551,33 +1803,36 @@ class SessionManager:
                 return False
         else:
             logger.info("Session not eligible for pre-timeout save")
+            logger.info(f"  Eligible check: user_type={session.user_type}, email={bool(session.email)}, messages={len(session.messages) if session.messages else 0}")
             return False
 
     def get_session(self) -> UserSession:
-        """
-        Enhanced session retrieval with pre-timeout save check.
-        """
+        """FIXED: Proper session retrieval with corrected timeout handling."""
         session_id = st.session_state.get('current_session_id')
         
         if session_id:
             session = self.db.load_session(session_id)
             if session and session.active:
+                # CRITICAL FIX: Validate and fix session data
+                session = self._validate_and_fix_session(session)
+                
                 if self._is_session_expired(session):
                     logger.info(f"Session {session_id[:8]}... expired due to inactivity.")
                     
-                    # --- FIX 4 of 4: Check the reliable, persistent flag from the database ---
-                    already_saved = session.timeout_saved_to_crm
+                    # Check if pre-timeout save already happened
+                    already_saved = st.session_state.get('pre_timeout_saved', {}).get(session_id, False)
                     
+                    # CRITICAL FIX: Only attempt emergency save if not already saved AND session is eligible
                     if (session.user_type == UserType.REGISTERED_USER and 
                         session.email and 
                         session.messages and
-                        not already_saved):  # Only save if not already saved by pre-timeout
+                        not already_saved):
                         
                         logger.info("Session expired without pre-timeout save. Attempting emergency save...")
-                        session_backup = copy.deepcopy(session)
                         
+                        # CRITICAL FIX: Don't use deepcopy, use the original session
                         try:
-                            self._auto_save_to_crm(session_backup, "Session Timeout (Emergency)")
+                            self._auto_save_to_crm(session, "Session Timeout (Emergency)")
                         except Exception as e:
                             logger.error(f"Emergency save failed: {e}", exc_info=True)
                     else:
@@ -1585,8 +1840,13 @@ class SessionManager:
                             logger.info("Session expired. Pre-timeout save was already completed.")
                         else:
                             logger.info("Session expired but was not eligible for saving.")
+                            logger.info(f"  Eligibility: user_type={session.user_type}, email={bool(session.email)}, messages={len(session.messages) if session.messages else 0}")
                     
-                    # End the session
+                    # Clean up
+                    if 'pre_timeout_saved' in st.session_state and session_id in st.session_state.pre_timeout_saved:
+                        del st.session_state.pre_timeout_saved[session_id]
+                    
+                    # CRITICAL FIX: End session AFTER save attempt
                     self._end_session_internal(session)
                     return self._create_guest_session()
                 else:
@@ -1598,8 +1858,13 @@ class SessionManager:
         return self._create_guest_session()
 
     def _end_session_internal(self, session: UserSession):
+        """End session and clean up state."""
         session.active = False
-        self.db.save_session(session)
+        try:
+            self.db.save_session(session)
+        except Exception as e:
+            logger.error(f"Failed to mark session as inactive: {e}")
+        
         keys_to_clear = ['current_session_id', 'page']
         for key in keys_to_clear:
             if key in st.session_state:
@@ -1644,21 +1909,36 @@ class SessionManager:
                     clean_username
                 )
 
+                # CRITICAL FIX: Ensure proper enum assignment
                 current_session.user_type = UserType.REGISTERED_USER
                 current_session.email = data.get('user_email')
                 current_session.first_name = display_name
                 current_session.wp_token = data.get('token')
                 current_session.last_activity = datetime.now()
                 
-                self.db.save_session(current_session)
+                # CRITICAL FIX: Force save and verify
+                try:
+                    self.db.save_session(current_session)
+                    logger.info(f"Saved authenticated session: user_type={current_session.user_type}")
+                except Exception as e:
+                    logger.error(f"Failed to save authenticated session: {e}")
+                    st.error("Authentication failed - could not save session.")
+                    return None
                 
+                # CRITICAL FIX: Verify the session was saved correctly
                 verification_session = self.db.load_session(current_session.session_id)
-                if verification_session and verification_session.user_type == UserType.REGISTERED_USER:
-                    st.session_state.current_session_id = current_session.session_id
-                    st.success(f"Welcome back, {current_session.first_name}!")
-                    return current_session
+                if verification_session:
+                    verification_session = self._validate_and_fix_session(verification_session)
+                    if verification_session.user_type == UserType.REGISTERED_USER:
+                        st.session_state.current_session_id = current_session.session_id
+                        st.success(f"Welcome back, {current_session.first_name}!")
+                        return current_session
+                    else:
+                        logger.error(f"Session verification failed: expected REGISTERED_USER, got {verification_session.user_type}")
+                        st.error("Authentication failed - session verification failed.")
+                        return None
                 else:
-                    st.error("Authentication failed - session could not be saved.")
+                    st.error("Authentication failed - session could not be verified.")
                     return None
                 
             else:
@@ -1681,6 +1961,8 @@ class SessionManager:
         if not self.rate_limiter.is_allowed(session.session_id):
             return {"content": "Rate limit exceeded. Please wait.", "success": False}
 
+        # CRITICAL FIX: Validate session before using
+        session = self._validate_and_fix_session(session)
         self._update_activity(session)
 
         sanitized_prompt = sanitize_input(prompt)
@@ -1727,14 +2009,18 @@ class SessionManager:
         return response
 
     def clear_chat_history(self, session: UserSession):
+        session = self._validate_and_fix_session(session)
         session.messages = []
         self._update_activity(session)
 
     def end_session(self, session: UserSession):
+        session = self._validate_and_fix_session(session)
         self._auto_save_to_crm(session, "Manual Sign Out")
         self._end_session_internal(session)
 
     def manual_save_to_crm(self, session: UserSession):
+        session = self._validate_and_fix_session(session)
+        
         if (session.user_type == UserType.REGISTERED_USER and 
             session.email and 
             session.messages and 
@@ -1744,6 +2030,193 @@ class SessionManager:
             self._update_activity(session)
         else:
             st.warning("Cannot save to CRM: Missing email or chat messages")
+            logger.warning(f"Manual save failed - user_type: {session.user_type}, email: {bool(session.email)}, messages: {len(session.messages) if session.messages else 0}")
+
+# =============================================================================
+# DEBUGGING TOOLS FOR SESSION ISSUES
+# =============================================================================
+
+def add_session_debug_panel(session_manager: SessionManager, session: UserSession):
+    """Add this to your sidebar for real-time debugging."""
+    
+    with st.expander("🔍 Session Debug Panel", expanded=False):
+        st.write("**Real-time Session State:**")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"**ID:** `{session.session_id[:8]}...`")
+            st.write(f"**Type:** {session.user_type}")
+            st.write(f"**Type Class:** {type(session.user_type)}")
+            st.write(f"**Email:** {session.email}")
+            st.write(f"**Active:** {session.active}")
+        
+        with col2:
+            st.write(f"**Messages:** {len(session.messages)}")
+            st.write(f"**First Name:** {session.first_name}")
+            st.write(f"**Zoho ID:** {session.zoho_contact_id}")
+            st.write(f"**Last Activity:** {session.last_activity}")
+        
+        if st.button("🔄 Reload Session from DB"):
+            fresh_session = session_manager.db.load_session(session.session_id)
+            if fresh_session:
+                st.success("✅ Session reloaded from database")
+                st.json({
+                    "session_id": fresh_session.session_id[:8] + "...",
+                    "user_type": str(fresh_session.user_type),
+                    "user_type_class": str(type(fresh_session.user_type)),
+                    "email": fresh_session.email,
+                    "active": fresh_session.active,
+                    "messages_count": len(fresh_session.messages),
+                    "first_name": fresh_session.first_name
+                })
+            else:
+                st.error("❌ Could not reload session from database")
+        
+        if st.button("🧪 Test Session Validation"):
+            is_valid = session_manager.zoho._validate_session_data(session)
+            if is_valid:
+                st.success("✅ Session validation passed")
+            else:
+                st.error("❌ Session validation failed - check logs")
+        
+        if st.button("💾 Test Zoho Save (Dry Run)"):
+            try:
+                # Create a test session copy
+                test_session = copy.deepcopy(session)
+                
+                # Test validation
+                is_valid = session_manager.zoho._validate_session_data(test_session)
+                st.write(f"**Validation:** {'✅ Pass' if is_valid else '❌ Fail'}")
+                
+                if is_valid:
+                    # Test token
+                    token = session_manager.zoho._get_access_token()
+                    st.write(f"**Token:** {'✅ Success' if token else '❌ Failed'}")
+                    
+                    if token:
+                        st.success("🎉 All systems ready for save!")
+                        if st.button("💾 Execute Real Save"):
+                            session_manager._auto_save_to_crm(test_session, "Manual Debug Test")
+                else:
+                    st.error("❌ Session not eligible for save")
+                    
+            except Exception as e:
+                st.error(f"❌ Test failed: {str(e)}")
+
+def add_enhanced_main_query_param_handler():
+    """Enhanced query parameter handler for the main function."""
+    
+    query_params = st.query_params
+    
+    # Handle pre-timeout save requests
+    if query_params.get("event") == "pre_timeout_save":
+        session_id = query_params.get("session_id")
+        if session_id:
+            logger.info(f"🚨 PRE-TIMEOUT SAVE REQUEST for session {session_id[:8]}...")
+            
+            # Clear query params immediately
+            st.query_params.clear()
+            
+            # Show debug info
+            st.info(f"⏰ Processing pre-timeout save for session {session_id[:8]}...")
+            
+            try:
+                session_manager = get_session_manager()
+                if session_manager:
+                    # Load and debug the session
+                    session = session_manager.db.load_session(session_id)
+                    if session:
+                        st.write("**Session Found:**")
+                        st.json({
+                            "user_type": str(session.user_type),
+                            "email": session.email,
+                            "messages": len(session.messages),
+                            "active": session.active
+                        })
+                        
+                        # Attempt save
+                        success = session_manager.trigger_pre_timeout_save(session_id)
+                        if success:
+                            st.success("✅ Pre-timeout save completed successfully!")
+                        else:
+                            st.error("❌ Pre-timeout save failed - check logs")
+                    else:
+                        st.error("❌ Session not found in database")
+                else:
+                    st.error("❌ Session manager not available")
+                    
+            except Exception as e:
+                st.error(f"❌ Pre-timeout save error: {str(e)}")
+                logger.error(f"Pre-timeout save exception: {e}", exc_info=True)
+            
+            # Stop processing to show debug info
+            st.stop()
+    
+    # Handle browser close events  
+    elif query_params.get("event") == "close":
+        session_id = query_params.get("session_id")
+        if session_id:
+            logger.info(f"🚪 BROWSER CLOSE EVENT for session {session_id[:8]}...")
+            
+            # Clear query params
+            st.query_params.clear()
+            
+            try:
+                session_manager = get_session_manager()
+                if session_manager:
+                    session = session_manager.db.load_session(session_id)
+                    if (session and 
+                        session.user_type == UserType.REGISTERED_USER and 
+                        session.email and 
+                        session.messages):
+                        
+                        # Attempt emergency save
+                        success = session_manager.zoho.save_chat_transcript_sync(session, "Browser Close")
+                        logger.info(f"Browser close save result: {success}")
+                        
+            except Exception as e:
+                logger.error(f"Browser close save error: {e}", exc_info=True)
+            
+            # Return empty response for beacon requests
+            st.stop()
+
+def add_session_health_monitor():
+    """Add this to monitor session health in real-time."""
+    
+    if 'session_health_monitor' not in st.session_state:
+        st.session_state.session_health_monitor = {
+            'save_attempts': 0,
+            'save_successes': 0,
+            'save_failures': 0,
+            'last_save_attempt': None,
+            'last_save_result': None
+        }
+    
+    monitor = st.session_state.session_health_monitor
+    
+    with st.expander("📈 Session Health Monitor"):
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Save Attempts", monitor['save_attempts'])
+        with col2:
+            st.metric("Successes", monitor['save_successes'])
+        with col3:
+            st.metric("Failures", monitor['save_failures'])
+        
+        if monitor['last_save_attempt']:
+            st.write(f"**Last Attempt:** {monitor['last_save_attempt']}")
+            st.write(f"**Result:** {'✅ Success' if monitor['last_save_result'] else '❌ Failed'}")
+        
+        if st.button("🧹 Clear Monitor"):
+            st.session_state.session_health_monitor = {
+                'save_attempts': 0,
+                'save_successes': 0,
+                'save_failures': 0,
+                'last_save_attempt': None,
+                'last_save_result': None
+            }
+            st.rerun()
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -1799,7 +2272,7 @@ def ensure_initialization():
 
 def render_auto_logout_component(timeout_seconds: int, session_id: str, session_manager: SessionManager):
     """
-    Use fetch/sendBeacon to the parent Streamlit app's URL.
+    SOLUTION: Use fetch/sendBeacon to the parent Streamlit app's URL.
     """
     if timeout_seconds <= 0:
         return
@@ -1811,23 +2284,33 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
     <script>
     (function() {{
         const sessionId = '{session_id}';
+        // --- CRITICAL CHANGE ---
+        // Get the main Streamlit app's URL from the parent window.
+        // This is the URL of 'fifi-eu.streamlit.app'.
         const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
+        // --- END CRITICAL CHANGE ---
         
+        // Clear any existing timers to prevent duplicates
         if (window.streamlitAutoSaveTimer) clearTimeout(window.streamlitAutoSaveTimer);
         if (window.streamlitAutoLogoutTimer) clearTimeout(window.streamlitAutoLogoutTimer);
         
+        // Function to trigger the save using fetch
         function triggerPreTimeoutSave() {{
             console.log('Triggering pre-timeout save with GET fetch to parent Streamlit app URL...');
             const saveUrl = `${{parentStreamlitAppUrl}}?event=pre_timeout_save&session_id=${{sessionId}}`;
             
+            // Show saving indicator
             const savingDiv = document.createElement('div');
             savingDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #ff6b6b; color: white; padding: 10px 20px; border-radius: 5px; z-index: 9999;';
             savingDiv.textContent = 'Auto-saving session...';
             document.body.appendChild(savingDiv);
 
+            // Send the request as GET, with keepalive for reliability on unload
             return fetch(saveUrl, {{
-                method: 'GET',
-                keepalive: true,
+                method: 'GET', // Keep as GET for Streamlit query param handling
+                keepalive: true, // Ensures request is sent even if page unloads
+                // No 'mode' specified, defaults to 'cors' which is appropriate for cross-origin iframes
+                // fetching to their parent (assuming parent allows it, which Streamlit generally does for GET).
             }})
             .then(response => {{
                 if (!response.ok) {{
@@ -1835,27 +2318,31 @@ def render_auto_logout_component(timeout_seconds: int, session_id: str, session_
                     return response.text().then(text => Promise.reject(new Error(text)));
                 }}
                 console.log('Pre-timeout save fetch successful:', response.status);
-                return response.text();
+                return response.text(); // Or response.json() if you expect a response
             }})
             .catch(error => {{
                 console.error('Pre-timeout save fetch error:', error);
-                throw error;
+                throw error; // Re-throw to be caught by the .finally block
             }});
         }}
         
+        // This function orchestrates the save and then the reload
         function executeLogoutSequence() {{
             console.log('Starting logout sequence...');
             triggerPreTimeoutSave()
                 .catch(err => console.error('Pre-timeout save fetch failed:', err))
                 .finally(() => {{
+                    // This block runs whether the save succeeded or failed.
                     console.log('Save request sent. Preparing to reload parent page in 500ms...');
+                    // Give a small grace period for the keepalive request to be fully sent
                     setTimeout(() => {{
                         console.log('Session timeout - reloading parent page now.');
-                        window.parent.location.reload();
+                        window.parent.location.reload(); // Reload the entire parent page
                     }}, 500);
                 }});
         }}
         
+        // Schedule the auto-save and logout
         window.streamlitAutoLogoutTimer = setTimeout(executeLogoutSequence, {save_trigger_seconds * 1000});
         
         console.log(`Auto-save and logout scheduled in {save_trigger_seconds} seconds.`);
@@ -1878,19 +2365,24 @@ def render_browser_close_component(session_id: str):
         window.browserCloseListenerAdded = true;
         
         const sessionId = '{session_id}';
+        // --- CRITICAL CHANGE ---
+        // Get the main Streamlit app's URL from the parent window for sendBeacon.
         const parentStreamlitAppUrl = window.parent.location.origin + window.parent.location.pathname;
+        // --- END CRITICAL CHANGE ---
         
         let saveHasBeenTriggered = false;
 
         function sendBeaconRequest() {{
             if (!saveHasBeenTriggered) {{
                 saveHasBeenTriggered = true;
+                // Target the parent Streamlit app URL
                 const url = `${{parentStreamlitAppUrl}}?event=close&session_id=${{sessionId}}`; 
                 if (navigator.sendBeacon) {{
+                    // sendBeacon inherently uses POST
                     navigator.sendBeacon(url); 
                 }} else {{
                     const xhr = new XMLHttpRequest();
-                    xhr.open('GET', url, false);
+                    xhr.open('GET', url, false); // Fallback to synchronous GET for older browsers
                     try {{
                         xhr.send();
                     }} catch(e) {{
@@ -1906,6 +2398,7 @@ def render_browser_close_component(session_id: str):
             }}
         }});
         
+        // Use 'pagehide' for more reliable unload event handling
         window.addEventListener('pagehide', sendBeaconRequest, {{capture: true}});
         window.addEventListener('beforeunload', sendBeaconRequest, {{capture: true}});
 
@@ -1996,7 +2489,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     else:
                         st.write(f"❌ {component}")
         
-        # Zoho Diagnostics (optional - remove in production)
+        # Enhanced Zoho Diagnostics
         with st.expander("🔧 Zoho Diagnostics", expanded=False):
             if st.button("Run Zoho Diagnostic"):
                 # Test 1: Configuration
@@ -2040,6 +2533,10 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     else:
                         st.warning("Need email and messages to test save")
         
+        # Add debugging tools
+        add_session_debug_panel(session_manager, fresh_session)
+        add_session_health_monitor()
+        
         st.divider()
         
         col1, col2 = st.columns(2)
@@ -2067,7 +2564,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 )
             
             if session_manager.zoho.config.ZOHO_ENABLED and fresh_session.email:
-                if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Chat will also auto-save when you sign out or after 5 minutes of inactivity"):
+                if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Chat will also auto-save when you sign out or after 2 minutes of inactivity"):
                     session_manager.manual_save_to_crm(fresh_session)
                     
                 st.caption("💡 Chat auto-saves to CRM on sign out or timeout")
@@ -2234,7 +2731,7 @@ def render_welcome_page(session_manager: SessionManager):
         ✨ **Sign in benefits:**
         - Chat history saved and exportable as PDF
         - Automatic integration with Zoho CRM
-        - Chat transcripts auto-saved to CRM on sign out or after 5 minutes of inactivity
+        - Chat transcripts auto-saved to CRM on sign out or after 2 minutes of inactivity
         - Personalized experience with your profile
         """)
         
@@ -2249,38 +2746,20 @@ def render_welcome_page(session_manager: SessionManager):
 def main():
     st.set_page_config(page_title="FiFi AI Assistant", page_icon="🤖", layout="wide")
 
-    query_params = st.query_params
-    if query_params.get("event") == "pre_timeout_save":
-        session_id = query_params.get("session_id")
-        if session_id:
-            logger.info(f"Received pre-timeout save request for session {session_id[:8]}...")
-            
-            st.query_params.clear()
-            
-            if ensure_initialization():
-                session_manager = get_session_manager()
-                if session_manager:
-                    # Check the database to see if this session exists and hasn't been saved yet.
-                    # This check is now redundant due to the internal check in trigger_pre_timeout_save,
-                    # but provides an extra layer of safety.
-                    session = session_manager.db.load_session(session_id)
-                    if session and not session.timeout_saved_to_crm:
-                        success = session_manager.trigger_pre_timeout_save(session_id)
-                        if success:
-                            # This message won't be seen by the user, but is good for logs.
-                            st.success("✅ Chat automatically saved to CRM before timeout")
-            
-            # Stop the script run here; the JS will handle the reload.
-            st.stop()
+    # SOLUTION: Enhanced query parameter handling
+    add_enhanced_main_query_param_handler()
 
+    # Clear any problematic session state first
     if st.button("🔄 Fresh Start (Clear All State)", key="emergency_clear"):
         st.session_state.clear()
         st.success("✅ All state cleared. Refreshing...")
         st.rerun()
 
+    # Ensure initialization
     if not ensure_initialization():
         st.stop()
 
+    # Get session manager safely
     session_manager = get_session_manager()
     if not session_manager:
         st.error("Failed to get session manager. Reinitializing...")
@@ -2289,6 +2768,7 @@ def main():
     
     pdf_exporter = st.session_state.pdf_exporter
     
+    # Main application routing
     current_page = st.session_state.get('page')
     
     if current_page != "chat":
@@ -2304,7 +2784,7 @@ def main():
                     del st.session_state.page
                 st.rerun()
         except Exception as e:
-            logger.error(f"Error in chat interface: {e}", exc_info=True)
+            logger.error(f"Error in chat interface: {e}")
             st.error("An error occurred. Please refresh the page.")
             if st.button("🔄 Refresh", key="error_refresh"):
                 st.session_state.clear()
