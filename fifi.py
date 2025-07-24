@@ -29,18 +29,14 @@ import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
 # =============================================================================
-# FIFI - OPTIMIZED WITH AUTHENTICATION FIXES
+# FIFI - FIXED AUTHENTICATION VERSION
 # =============================================================================
-# ✅ Event-driven timer (not rerun-driven)
-# ✅ Stable component keys throughout
-# ✅ Proper session state initialization patterns
-# ✅ Callback-based state updates
-# ✅ Minimal JavaScript re-execution
-# ✅ Autonomous timer operation
 # ✅ FIXED: Authentication persistence issues
-# ✅ FIXED: Session validation and UserType handling
-# ✅ FIXED: Database enum serialization
-# ✅ Enhanced debugging for authentication flow
+# ✅ FIXED: Session state management between reruns
+# ✅ FIXED: UserType enum handling
+# ✅ FIXED: Database synchronization timing
+# ✅ ADDED: Session caching for better performance
+# ✅ ADDED: Explicit authentication state tracking
 # =============================================================================
 
 # Setup logging
@@ -235,7 +231,7 @@ class UserSession:
     timeout_saved_to_crm: bool = False
 
 # =============================================================================
-# DATABASE MANAGER WITH SQLITE CLOUD SUPPORT - AUTHENTICATION FIXES
+# DATABASE MANAGER WITH SQLITE CLOUD SUPPORT - FIXED AUTHENTICATION
 # =============================================================================
 
 class DatabaseManager:
@@ -243,6 +239,7 @@ class DatabaseManager:
         self.lock = threading.Lock()
         self.connection_string = connection_string
         self.conn = None
+        self.session_cache = {}  # ✅ ADDED: In-memory cache for better performance
         
         logger.info("🔄 INITIALIZING DATABASE MANAGER")
         
@@ -329,8 +326,11 @@ class DatabaseManager:
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
-        """✅ FIXED: Enhanced session saving with better enum handling"""
+        """✅ FIXED: Enhanced session saving with caching"""
         with self.lock:
+            # ✅ ADDED: Update cache
+            self.session_cache[session.session_id] = copy.deepcopy(session)
+            
             if self.db_type == "memory":
                 self.local_sessions[session.session_id] = session
                 logger.debug(f"✅ Memory save: {session.session_id[:8]} as {session.user_type}")
@@ -359,8 +359,13 @@ class DatabaseManager:
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
-        """✅ FIXED: Enhanced session loading with better validation"""
+        """✅ FIXED: Enhanced session loading with caching"""
         with self.lock:
+            # ✅ ADDED: Check cache first
+            if session_id in self.session_cache:
+                logger.debug(f"✅ Cache hit: {session_id[:8]}")
+                return copy.deepcopy(self.session_cache[session_id])
+            
             if self.db_type == "memory":
                 session = self.local_sessions.get(session_id)
                 if session:
@@ -372,6 +377,8 @@ class DatabaseManager:
                             logger.warning(f"Invalid user_type in memory: {session.user_type}")
                             session.user_type = UserType.GUEST
                     logger.debug(f"✅ Memory load: {session_id[:8]} as {session.user_type}")
+                    # ✅ ADDED: Update cache
+                    self.session_cache[session_id] = copy.deepcopy(session)
                 return session
 
             try:
@@ -450,12 +457,21 @@ class DatabaseManager:
                     timeout_saved_to_crm=bool(row_dict.get('timeout_saved_to_crm', 0))
                 )
                 
+                # ✅ ADDED: Update cache
+                self.session_cache[session_id] = copy.deepcopy(user_session)
+                
                 logger.debug(f"✅ DB load: {session_id[:8]} as {user_session.user_type}")
                 return user_session
                     
             except Exception as e:
                 logger.error(f"Failed to load session {session_id[:8]}: {e}")
                 return None
+
+    def clear_cache(self):
+        """✅ ADDED: Clear session cache"""
+        with self.lock:
+            self.session_cache.clear()
+            logger.debug("Session cache cleared")
 
 # =============================================================================
 # PDF EXPORTER
@@ -1179,7 +1195,7 @@ def render_debug_session_info(session, session_manager):
             st.rerun()
 
 # =============================================================================
-# SESSION MANAGER WITH ENHANCED AUTHENTICATION
+# SESSION MANAGER WITH ENHANCED AUTHENTICATION - FIXED VERSION
 # =============================================================================
 
 class SessionManager:
@@ -1293,6 +1309,20 @@ class SessionManager:
 
     def get_session(self) -> UserSession:
         """✅ FIXED: Enhanced session retrieval with better authentication persistence"""
+        # ✅ FIXED: Check authentication state first
+        if 'authenticated_session_id' in st.session_state:
+            # We have an authenticated session, use it
+            session_id = st.session_state.authenticated_session_id
+            session = self.db.load_session(session_id)
+            if session and session.active and session.user_type == UserType.REGISTERED_USER:
+                # Valid authenticated session
+                st.session_state.current_session_id = session_id
+                self._update_activity(session)
+                return session
+            else:
+                # Authenticated session no longer valid
+                del st.session_state['authenticated_session_id']
+        
         # ✅ Check if session ID exists before creating
         if 'current_session_id' not in st.session_state:
             return self._create_guest_session()
@@ -1338,11 +1368,11 @@ class SessionManager:
             logger.error(f"Failed to mark session inactive: {e}")
         
         # ✅ BEST PRACTICE: Clean up session state properly
-        for key in ['current_session_id', 'page']:
+        for key in ['current_session_id', 'authenticated_session_id', 'page']:
             if key in st.session_state:
                 del st.session_state[key]
 
-    @handle_api_errors("Authentication", "WordPress Login")
+    @handle_api_errors("Authentication", "WordPress Login", show_to_user=False)
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
         """✅ FIXED: Enhanced authentication with better session persistence"""
         if not self.config.WORDPRESS_URL:
@@ -1385,14 +1415,17 @@ class SessionManager:
                 current_session.last_activity = datetime.now()
                 current_session.timeout_saved_to_crm = False
                 
-                # ✅ FIXED: Save and verify before proceeding
+                # ✅ FIXED: Force immediate save with cache clear
                 try:
                     self.db.save_session(current_session)
+                    self.db.clear_cache()  # ✅ ADDED: Clear cache to force fresh load
                     logger.info(f"✅ Session saved with user_type: {current_session.user_type}")
                     
-                    # ✅ FIXED: Verify the save worked
+                    # ✅ FIXED: Verify the save worked with fresh load
                     verification_session = self.db.load_session(current_session.session_id)
                     if verification_session and verification_session.user_type == UserType.REGISTERED_USER:
+                        # ✅ FIXED: Store authenticated session ID
+                        st.session_state.authenticated_session_id = current_session.session_id
                         st.session_state.current_session_id = current_session.session_id
                         logger.info(f"✅ Authentication successful: {verification_session.user_type} for {verification_session.email}")
                         return current_session
@@ -1641,23 +1674,15 @@ def render_welcome_page(session_manager: SessionManager):
                             authenticated_session = session_manager.authenticate_with_wordpress(username, password)
                             
                         if authenticated_session:
-                            # ✅ FIXED: Add debugging info and shorter delay
+                            # ✅ FIXED: Better authentication flow
                             logger.info(f"🎉 Authentication successful: {authenticated_session.user_type}")
                             st.balloons()
                             st.success(f"🎉 Welcome back, {authenticated_session.first_name}!")
                             
-                            # ✅ FIXED: Shorter delay, immediate session verification
-                            time.sleep(0.5)
+                            # ✅ FIXED: Immediate navigation with session state
                             st.session_state.page = "chat"
-                            
-                            # ✅ FIXED: Force session reload to verify persistence
-                            current_session = session_manager.get_session()
-                            if current_session.user_type == UserType.REGISTERED_USER:
-                                logger.info("✅ Session verification successful after authentication")
-                                st.rerun()
-                            else:
-                                logger.error(f"❌ Session verification failed: {current_session.user_type}")
-                                st.error("Session verification failed. Please try again.")
+                            time.sleep(0.5)
+                            st.rerun()
     
     with tab2:
         st.markdown("""
@@ -1840,7 +1865,7 @@ def render_session_expiry_redirect():
             progress_bar.progress(i + 1)
         
         # ✅ BEST PRACTICE: Clean up session state properly
-        for key in ['session_expired', 'expired_session_id', 'current_session_id', 'page']:
+        for key in ['session_expired', 'expired_session_id', 'current_session_id', 'authenticated_session_id', 'page']:
             if key in st.session_state:
                 del st.session_state[key]
         
