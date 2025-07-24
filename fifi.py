@@ -259,91 +259,187 @@ class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
         self.lock = threading.Lock()
         self.connection_string = connection_string
+        self.conn = None
         
-        # Try SQLite Cloud first (following official docs pattern)
-        if connection_string and SQLITECLOUD_AVAILABLE and self._is_valid_cloud_connection(connection_string):
-            logger.info("🔄 Attempting SQLite Cloud connection (following official docs)...")
-            try:
-                # Use the exact pattern from SQLite Cloud documentation
-                import sqlitecloud
-                self.conn = sqlitecloud.connect(connection_string)
-                
-                # Optional: Use specific database if you have multiple
-                # Uncomment and modify if you have a specific database name:
-                # db_name = "your-database-name.sqlite"
-                # self.conn.execute(f"USE DATABASE {db_name}")
-                
-                # Test the connection
-                self.conn.execute("SELECT 1").fetchone()
-                
-                self.db_type = "cloud"
-                self.db_path = connection_string
+        logger.info("🔄 INITIALIZING DATABASE MANAGER")
+        logger.info(f"Connection string provided: {bool(connection_string)}")
+        
+        if connection_string:
+            logger.info(f"Connection string format: {connection_string[:50]}...")
+        
+        # Try SQLite Cloud first with corrected validation
+        if connection_string and SQLITECLOUD_AVAILABLE:
+            cloud_result = self._try_sqlite_cloud_connection(connection_string)
+            if cloud_result:
+                self.conn, self.db_type, self.db_path = cloud_result
                 logger.info("✅ SQLite Cloud connection established successfully!")
-                
-            except Exception as e:
-                logger.error(f"SQLite Cloud connection failed: {e}")
-                logger.info("🔄 Falling back to local database...")
-                self.conn = None
-        else:
-            if not connection_string:
-                logger.info("No SQLITE_CLOUD_CONNECTION provided, using local database")
-            elif not SQLITECLOUD_AVAILABLE:
-                logger.warning("sqlitecloud library not available, using local database")
-            else:
-                logger.warning("Invalid connection string format, using local database")
-            self.conn = None
         
         # Fallback to local SQLite file if cloud connection failed
         if not self.conn:
-            self.db_path = "fifi_sessions.db"  # More descriptive name
-            self.db_type = "file"
-            try:
-                self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-                # Test the connection
-                self.conn.execute("SELECT 1").fetchone()
-                logger.info(f"✅ Local SQLite database connection established: {self.db_path}")
-            except Exception as e:
-                logger.error(f"Local database connection failed: {e}")
-                self.conn = None
+            logger.info("🔄 Falling back to local database...")
+            local_result = self._try_local_sqlite_connection()
+            if local_result:
+                self.conn, self.db_type, self.db_path = local_result
+                logger.info("✅ Local SQLite connection established!")
         
         # Final fallback to in-memory storage
-        if self.conn:
-            self._init_database()
-            error_handler.mark_component_healthy("Database")
-        else:
+        if not self.conn:
             logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED")
             logger.critical("⚠️  Falling back to non-persistent in-memory storage")
             logger.critical("💾 Sessions WILL BE LOST on app restart")
             self.db_type = "memory"
             self._init_local_storage()
+        
+        # Initialize database tables
+        if self.conn:
+            self._init_database()
+            error_handler.mark_component_healthy("Database")
+
+    def _try_sqlite_cloud_connection(self, connection_string: str):
+        """Try SQLite Cloud connection with corrected validation."""
+        logger.info("🔄 Attempting SQLite Cloud connection...")
+        
+        # Use corrected validation
+        validation_result = self._validate_cloud_connection_string(connection_string)
+        logger.info(f"Validation result: {validation_result}")
+        
+        if not validation_result['valid']:
+            logger.error(f"❌ Validation failed: {validation_result['reason']}")
+            return None
+        
+        logger.info(f"✅ Validation passed: {validation_result['reason']}")
+        
+        try:
+            import sqlitecloud
+            logger.info("✅ sqlitecloud library available")
             
-    def _is_valid_cloud_connection(self, connection_string: str) -> bool:
-        """Validate SQLite Cloud connection string format (now supports both types)"""
+            # Attempt connection with your specific string
+            logger.info("🔗 Connecting to SQLite Cloud...")
+            logger.info(f"   Host: csqqfgp8hk.g4.sqlite.cloud")
+            logger.info(f"   Port: 8860") 
+            logger.info(f"   Database: chinook.sqlite")
+            logger.info(f"   Auth: API Key")
+            
+            conn = sqlitecloud.connect(connection_string)
+            
+            # Test the connection
+            logger.info("🧪 Testing connection with SELECT query...")
+            result = conn.execute("SELECT 1 as test").fetchone()
+            logger.info(f"✅ Connection test successful: {result}")
+            
+            # Try to get database info
+            try:
+                logger.info("📊 Getting database information...")
+                tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                logger.info(f"✅ Found {len(tables)} tables in chinook.sqlite")
+                for table in tables[:5]:  # Show first 5 tables
+                    logger.info(f"   - Table: {table}")
+            except Exception as e:
+                logger.info(f"ℹ️ Could not list tables: {e}")
+            
+            return conn, "cloud", connection_string
+            
+        except ImportError:
+            logger.error("❌ sqlitecloud library not available")
+            logger.error("💡 Install with: pip install sqlitecloud")
+            return None
+        except Exception as e:
+            logger.error(f"❌ SQLite Cloud connection failed: {e}")
+            logger.error(f"   Error type: {type(e).__name__}")
+            
+            # Provide specific error guidance
+            error_str = str(e).lower()
+            if "authentication" in error_str or "unauthorized" in error_str:
+                logger.error("🔑 Authentication failed - check your API key")
+            elif "timeout" in error_str or "connection refused" in error_str:
+                logger.error("🌐 Network issue - check internet connection")
+            elif "database" in error_str:
+                logger.error("🗄️ Database issue - check database name 'chinook.sqlite'")
+            
+            return None
+
+    def _validate_cloud_connection_string(self, connection_string: str) -> dict:
+        """CORRECTED: Validation supporting both auth formats."""
         if not connection_string or not isinstance(connection_string, str):
-            return False
+            return {'valid': False, 'reason': 'Connection string is empty or not a string'}
+        
+        connection_string = connection_string.strip()
+        
+        # Check for valid prefixes
+        valid_prefixes = ['sqlitecloud://', 'https://']
+        has_valid_prefix = any(connection_string.startswith(prefix) for prefix in valid_prefixes)
+        
+        if not has_valid_prefix:
+            return {
+                'valid': False, 
+                'reason': f'Expected prefix sqlitecloud:// or https://, got: {connection_string[:30]}...'
+            }
+        
+        # Basic checks
+        if len(connection_string) < 20:
+            return {'valid': False, 'reason': 'Connection string appears too short'}
+        
+        if ' ' in connection_string:
+            return {'valid': False, 'reason': 'Connection string contains spaces'}
+        
+        # Format-specific validation
+        if connection_string.startswith('sqlitecloud://'):
+            # Check for API key format (your format)
+            if '?apikey=' in connection_string:
+                if ':' not in connection_string:
+                    return {'valid': False, 'reason': 'Missing port separator (:)'}
+                if 'sqlite.cloud' not in connection_string:
+                    return {'valid': False, 'reason': 'Missing sqlite.cloud domain'}
+                return {'valid': True, 'reason': 'Valid SQLite Cloud API key format'}
+            
+            # Check for username/password format
+            elif '@' in connection_string:
+                if ':' not in connection_string.split('@')[0]:
+                    return {'valid': False, 'reason': 'Username/password format missing : separator'}
+                return {'valid': True, 'reason': 'Valid SQLite Cloud username/password format'}
+            
+            # Check for simple hostname format
+            elif 'sqlite.cloud' in connection_string:
+                return {'valid': True, 'reason': 'Valid SQLite Cloud hostname format'}
+            
+            else:
+                return {'valid': False, 'reason': 'Unrecognized SQLite Cloud format'}
+        
+        elif connection_string.startswith('https://'):
+            if 'sqlite.cloud' in connection_string:
+                return {'valid': True, 'reason': 'Valid HTTPS format'}
+            else:
+                return {'valid': False, 'reason': 'HTTPS format must contain sqlite.cloud domain'}
+        
+        return {'valid': True, 'reason': 'Connection string format appears valid'}
 
-        # All valid connection strings must start with this prefix
-        if not connection_string.startswith('sqlitecloud://'):
-            logger.warning(f"Invalid connection string format. Expected 'sqlitecloud://...', got: {connection_string[:50]}...")
-            return False
+    def _try_local_sqlite_connection(self):
+        """Fallback to local SQLite."""
+        logger.info("🔄 Attempting local SQLite connection...")
+        
+        db_path = "fifi_sessions.db"
+        
+        try:
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            
+            # Test the connection
+            cursor = conn.execute("SELECT 1 as test")
+            result = cursor.fetchone()
+            logger.info(f"✅ Local SQLite test successful: {result}")
+            
+            return conn, "file", db_path
+            
+        except Exception as e:
+            logger.error(f"❌ Local SQLite connection failed: {e}")
+            return None
 
-        # Check for presence of a host part after the prefix. A '/' character
-        # is a reliable indicator that a host is present in both formats.
-        # e.g., sqlitecloud://user:pass@HOST/...
-        # e.g., sqlitecloud://HOST/db?apikey=...
-        if '/' not in connection_string.replace('sqlitecloud://', ''):
-            logger.warning("Connection string appears malformed (missing host part).")
-            return False
-
-        return True
-    
     def _init_local_storage(self):
-        """Initialize in-memory storage as fallback"""
+        """Initialize in-memory storage as final fallback."""
         self.local_sessions = {}
         logger.info("📝 In-memory storage initialized")
 
     def _init_database(self):
-        """Initialize database tables"""
+        """Initialize database tables."""
         with self.lock:
             try:
                 self.conn.execute('''
