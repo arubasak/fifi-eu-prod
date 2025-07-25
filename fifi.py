@@ -988,7 +988,9 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
             
             // Initialize timer state with error handling
             if (typeof window.fifi_timer_state === 'undefined' || window.fifi_timer_state === null) {{
-                window.fifi_timer_state = {{
+            console.clear(); // Clear previous session's logs
+            console.log("🆕 FiFi Timer: Starting fresh session"); 
+            window.fifi_timer_state = {{
                     lastActivityTime: Date.now(),
                     autoSaveTriggered: false,
                     sessionExpired: false,
@@ -1002,6 +1004,7 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
             
             // Reset state if session changed
             if (state.sessionId !== sessionId) {{
+                console.clear();
                 console.log("🔄 Session changed, resetting timer state");
                 state.sessionId = sessionId;
                 state.lastActivityTime = Date.now();
@@ -1209,7 +1212,7 @@ def render_browser_close_with_forced_reload(session_id: str):
         function sendEmergencySaveWithReload() {{
             if (saveTriggered) return;
             saveTriggered = true;
-            
+            console.clear();
             console.log('🚨 FiFi: Browser close detected - sending FORCED emergency save');
             
             const appUrl = getAppUrl();
