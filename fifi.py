@@ -40,6 +40,7 @@ from streamlit_javascript import st_javascript
 # - Fixed timer return value issues
 # - ADDED: Enhanced debugging for beacon CRM save failures
 # - ADDED: Fix for beacon query parameter processing in Streamlit
+# - INTEGRATED: New robust browser close detection logic
 # =============================================================================
 
 # Setup logging
@@ -1181,57 +1182,53 @@ def render_activity_timer_component_with_message_fix(session_id: str, session_ma
         logger.error(f"❌ JavaScript timer execution error: {e}")
         return None
 
-def render_browser_close_with_forced_reload(session_id: str):
+def render_browser_close_detection_fixed(session_id: str):
     """
-    Browser close detection that FORCES Streamlit to process the request
+    Fixed browser close detection that works within Streamlit's constraints
     """
     if not session_id:
         return
 
+    # Use GET requests with query parameters instead of POST
     js_code = f"""
     <script>
     (function() {{
-        const sessionKey = 'fifi_close_forced_' + '{session_id}';
+        const sessionKey = 'fifi_close_fixed_' + '{session_id}';
         if (window[sessionKey]) return;
         window[sessionKey] = true;
         
         const sessionId = '{session_id}';
         let saveTriggered = false;
         
-        function getAppUrl() {{
-            try {{
-                return window.parent.location.origin + window.parent.location.pathname;
-            }} catch (e) {{
-                return window.location.origin + window.location.pathname;
-            }}
+        function getBaseUrl() {{
+            // Get the current page URL (works from within iframe)
+            return window.location.origin + window.location.pathname;
         }}
 
-        function sendEmergencySaveWithReload() {{
+        function sendEmergencySave() {{
             if (saveTriggered) return;
             saveTriggered = true;
             
-            console.log('🚨 FiFi: Browser close detected - sending FORCED emergency save');
+            console.log('🚨 Browser close detected - attempting emergency save');
             
-            const appUrl = getAppUrl();
-            const saveUrl = `${{appUrl}}?event=close&session_id=${{sessionId}}`;
+            const baseUrl = getBaseUrl();
+            const saveUrl = `${{baseUrl}}?event=browser_close&session_id=${{sessionId}}&timestamp=${{Date.now()}}`;
             
-            console.log('📡 Sending to:', saveUrl);
+            console.log('📡 Save URL:', saveUrl);
             
-            // METHOD 1: Try beacon first (fastest)
+            // METHOD 1: Try sendBeacon with GET-style URL (some browsers support this)
             try {{
                 if (navigator.sendBeacon) {{
-                    const beaconSuccess = navigator.sendBeacon(saveUrl);
+                    // Create a minimal form data for beacon
+                    const formData = new FormData();
+                    formData.append('event', 'browser_close');
+                    formData.append('session_id', sessionId);
+                    
+                    const beaconSuccess = navigator.sendBeacon(baseUrl, formData);
                     console.log('📡 Beacon result:', beaconSuccess);
                     
                     if (beaconSuccess) {{
-                        // Also trigger a reload to ensure processing
-                        setTimeout(() => {{
-                            try {{
-                                window.parent.location.href = saveUrl;
-                            }} catch (e) {{
-                                window.location.href = saveUrl;
-                            }}
-                        }}, 100);
+                        console.log('✅ Beacon sent successfully');
                         return;
                     }}
                 }}
@@ -1239,52 +1236,60 @@ def render_browser_close_with_forced_reload(session_id: str):
                 console.log('📡 Beacon failed:', e);
             }}
             
-            // METHOD 2: Force reload with query params
+            // METHOD 2: Use fetch with keepalive (modern alternative to beacon)
             try {{
-                console.log('🔄 Forcing page reload with save params');
-                window.parent.location.href = saveUrl;
+                fetch(saveUrl, {{
+                    method: 'GET',
+                    keepalive: true,
+                    cache: 'no-cache'
+                }}).then(() => {{
+                    console.log('✅ Fetch keepalive sent');
+                }}).catch(e => {{
+                    console.log('❌ Fetch keepalive failed:', e);
+                }});
             }} catch (e) {{
-                try {{
-                    window.location.href = saveUrl;
-                }} catch (e2) {{
-                    console.error('❌ All save methods failed:', e, e2);
-                }}
+                console.log('❌ Fetch keepalive error:', e);
+            }}
+            
+            // METHOD 3: Create a hidden iframe to trigger the save URL
+            try {{
+                const iframe = document.createElement('iframe');
+                iframe.style.display = 'none';
+                iframe.src = saveUrl;
+                document.body.appendChild(iframe);
+                console.log('📄 Iframe created for save');
+                
+                // Clean up iframe after a short delay
+                setTimeout(() => {{
+                    try {{
+                        document.body.removeChild(iframe);
+                    }} catch (e) {{
+                        console.log('Iframe cleanup failed:', e);
+                    }}
+                }}, 1000);
+            }} catch (e) {{
+                console.log('❌ Iframe method failed:', e);
             }}
         }}
         
-        // Setup all close detection methods
+        // Setup close detection events
         const events = ['beforeunload', 'pagehide', 'unload'];
         events.forEach(eventType => {{
-            try {{
-                if (window.parent && window.parent !== window) {{
-                    window.parent.addEventListener(eventType, sendEmergencySaveWithReload, {{ capture: true }});
-                }}
-                window.addEventListener(eventType, sendEmergencySaveWithReload, {{ capture: true }});
-            }} catch (e) {{
-                console.debug(`Failed to add ${{eventType}} listener:`, e);
-            }}
+            window.addEventListener(eventType, sendEmergencySave, {{ 
+                capture: true,
+                passive: true
+            }});
         }});
         
         // Visibility change detection
-        try {{
-            if (window.parent && window.parent.document) {{
-                window.parent.document.addEventListener('visibilitychange', () => {{
-                    if (window.parent.document.visibilityState === 'hidden') {{
-                        console.log('🚨 Main app hidden');
-                        sendEmergencySaveWithReload();
-                    }}
-                }}, {{ passive: true }});
+        document.addEventListener('visibilitychange', () => {{
+            if (document.visibilityState === 'hidden') {{
+                console.log('🚨 Page hidden - potential close');
+                sendEmergencySave();
             }}
-        }} catch (e) {{
-            document.addEventListener('visibilitychange', () => {{
-                if (document.visibilityState === 'hidden') {{
-                    console.log('🚨 Component hidden');
-                    sendEmergencySaveWithReload();
-                }}
-            }}, {{ passive: true }});
-        }}
+        }}, {{ passive: true }});
         
-        console.log('✅ Forced reload browser close detection initialized');
+        console.log('✅ Fixed browser close detection initialized');
     }})();
     </script>
     """
@@ -1292,7 +1297,7 @@ def render_browser_close_with_forced_reload(session_id: str):
     try:
         st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
-        logger.error(f"Failed to render forced reload component: {e}")
+        logger.error(f"Failed to render close detection component: {e}")
 
 def global_message_channel_error_handler():
     """
@@ -1484,6 +1489,54 @@ def render_activity_status_indicator(session, session_manager):
     except Exception as e:
         logger.error(f"Error rendering activity status: {e}")
         # Don't show error to user, just log it
+
+def render_activity_monitor_native(session_id: str):
+    """
+    Alternative approach using Streamlit's native session state
+    """
+    if not session_id:
+        return
+    
+    # Initialize activity tracking in session state
+    if 'last_activity_check' not in st.session_state:
+        st.session_state.last_activity_check = time.time()
+    
+    if 'activity_timeout_warned' not in st.session_state:
+        st.session_state.activity_timeout_warned = False
+    
+    current_time = time.time()
+    time_since_check = current_time - st.session_state.last_activity_check
+    
+    # Auto-refresh every 30 seconds to check activity
+    if time_since_check > 30:  # 30 seconds
+        st.session_state.last_activity_check = current_time
+        
+        # Check if we should trigger auto-save
+        session_manager = st.session_state.get('session_manager')
+        if session_manager:
+            session = session_manager.get_session()
+            if session and hasattr(session, 'last_activity'):
+                inactive_time = time.time() - session.last_activity.timestamp()
+                
+                if inactive_time > 120 and not st.session_state.activity_timeout_warned:  # 2 minutes
+                    st.session_state.activity_timeout_warned = True
+                    st.warning("⏰ You've been inactive for 2 minutes. Your session will be saved automatically.")
+                    
+                    # Trigger auto-save
+                    if (session.user_type.value == "registered_user" and 
+                        session.email and 
+                        session.messages and
+                        not getattr(session, 'timeout_saved_to_crm', False)):
+                        
+                        try:
+                            session_manager._auto_save_to_crm(session, "Auto-save (Native Monitor)")
+                            st.success("💾 Chat automatically saved!")
+                        except Exception as e:
+                            st.error(f"Auto-save failed: {e}")
+        
+        # Auto-refresh the page
+        time.sleep(1)
+        st.rerun()
 
 # =============================================================================
 # SESSION MANAGER WITH CORRECTED TIMER INTEGRATION
@@ -2049,11 +2102,11 @@ def render_chat_interface_with_timer(session_manager, session):
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion")
     
-    # Add the ENHANCED browser close detection beacon
+    # Add the FIXED browser close detection component
     try:
-        render_browser_close_with_forced_reload(session.session_id)
+        render_browser_close_detection_fixed(session.session_id)
     except Exception as e:
-        logger.error(f"Failed to render enhanced browser close component: {e}")
+        logger.error(f"Failed to render fixed browser close component: {e}")
     
     # Show activity status for registered users
     try:
@@ -2235,43 +2288,46 @@ def ensure_initialization():
     
     return True
 
-def process_emergency_save(session_id: str) -> bool:
+def process_emergency_save_fixed(session_id: str, session_manager) -> bool:
     """
-    Process emergency save for a specific session
+    Process emergency save with better error handling
     """
     try:
-        session_manager = get_session_manager()
-        if not session_manager:
-            logger.error("❌ Session manager not available")
-            return False
+        logger.info(f"Processing emergency save for session {session_id[:8]}...")
         
+        # Load session
         session = session_manager.db.load_session(session_id)
         if not session:
-            logger.error(f"❌ Session {session_id[:8]} not found")
+            logger.error(f"Session {session_id[:8]} not found")
             return False
         
-        logger.info(f"✅ Session loaded: {session_id[:8]}")
-        logger.info(f"   User: {session.user_type.value}")
-        logger.info(f"   Email: {session.email}")
-        logger.info(f"   Messages: {len(session.messages)}")
-        
         # Check eligibility
-        if (session.user_type.value == "registered_user" and 
+        if (hasattr(session, 'user_type') and 
+            hasattr(session, 'email') and 
+            hasattr(session, 'messages') and
+            session.user_type.value == "registered_user" and 
             session.email and 
             session.messages and
-            not session.timeout_saved_to_crm):
+            not getattr(session, 'timeout_saved_to_crm', False)):
             
             logger.info("✅ Session eligible for emergency save")
             
-            # Extend session life
-            session.last_activity = datetime.now()
-            session_manager.db.save_session(session)
-            
             # Perform save
-            success = session_manager.zoho.save_chat_transcript_sync(session, "Emergency Save (Browser Close)")
-            return success
+            success = session_manager.zoho.save_chat_transcript_sync(
+                session, "Emergency Save (Browser Close - Fixed)"
+            )
+            
+            if success:
+                # Mark as saved
+                session.timeout_saved_to_crm = True
+                session_manager.db.save_session(session)
+                logger.info("✅ Emergency save completed successfully")
+                return True
+            else:
+                logger.error("❌ Emergency save failed")
+                return False
         else:
-            logger.info("❌ Session not eligible for save")
+            logger.info("ℹ️ Session not eligible for emergency save")
             return False
             
     except Exception as e:
@@ -2280,52 +2336,53 @@ def process_emergency_save(session_id: str) -> bool:
 
 def enhanced_handle_save_requests():
     """
-    Enhanced save handler that FORCES processing of beacon requests
+    Enhanced save handler that processes GET requests with query parameters
     """
-    
-    # Always log that we're checking - this should appear on every app load
-    logger.info("🔍 SAVE REQUEST HANDLER: Checking for emergency save requests...")
+    logger.info("🔍 Checking for emergency save requests...")
     
     query_params = st.query_params
-    logger.info(f"📋 Query params found: {dict(query_params)}")
+    logger.info(f"📋 Query params: {dict(query_params)}")
     
     event = query_params.get("event")
     session_id = query_params.get("session_id")
+    timestamp = query_params.get("timestamp")
     
-    if event == "close" and session_id:
-        logger.info("=" * 80)
-        logger.info("🚨 EMERGENCY SAVE REQUEST DETECTED")
+    if event == "browser_close" and session_id:
+        logger.info("=" * 60)
+        logger.info("🚨 BROWSER CLOSE SAVE REQUEST DETECTED")
         logger.info(f"Session ID: {session_id}")
-        logger.info(f"Event: {event}")
-        logger.info("=" * 80)
+        logger.info(f"Timestamp: {timestamp}")
+        logger.info("=" * 60)
         
-        # Show visual confirmation in UI
-        st.error("🚨 **Emergency Save Detected** - Processing browser close save...")
+        # Show immediate feedback
+        st.warning("🚨 **Browser Close Detected** - Processing emergency save...")
         
-        # Clear query params immediately
+        # Clear query params to prevent reprocessing
         st.query_params.clear()
         
         try:
-            # Process the save
-            success = process_emergency_save(session_id)
-            
-            if success:
-                st.success("✅ Emergency save completed successfully!")
-                logger.info("✅ Emergency save completed")
+            # Get session manager and process save
+            session_manager = st.session_state.get('session_manager')
+            if session_manager:
+                success = process_emergency_save_fixed(session_id, session_manager)
+                
+                if success:
+                    st.success("✅ Emergency save completed!")
+                    logger.info("✅ Emergency save successful")
+                else:
+                    st.error("❌ Emergency save failed")
+                    logger.error("❌ Emergency save failed")
             else:
-                st.error("❌ Emergency save failed")
-                logger.error("❌ Emergency save failed")
+                st.error("❌ Session manager not available")
+                logger.error("❌ Session manager not found")
                 
         except Exception as e:
-            st.error(f"❌ Emergency save error: {str(e)}")
+            st.error(f"❌ Save error: {str(e)}")
             logger.error(f"Emergency save crashed: {e}", exc_info=True)
         
-        # Add delay to show message, then stop
+        # Show message briefly then stop
         time.sleep(2)
         st.stop()
-    
-    else:
-        logger.info("ℹ️ No emergency save requests found")
 
 # =============================================================================
 # DEBUG FUNCTION TO TEST st_javascript BEHAVIOR
