@@ -2387,8 +2387,9 @@ class SessionManager:
     def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
         """Handle email verification for guest upgrade"""
         
-        # Validate email format
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
+        # Validate email format - FIXED: Added closing quote and end anchor
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, email):
             return {'success': False, 'message': 'Please enter a valid email address.'}
         
         # Check if email is already in use
