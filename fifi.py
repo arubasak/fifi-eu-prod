@@ -4362,3 +4362,1976 @@ def main():
 
 if __name__ == "__main__":
     main()
+            return {'success': False, 'message': 'Please enter a valid email address.'}
+        
+        # Check if email is already in use
+        existing_sessions = self.db.find_sessions_by_email(email)
+        
+        # Send verification code
+        verification_sent = self.email_verification.send_verification_code(email)
+        
+        if verification_sent:
+            # Track email in session
+            session.email = email
+            if email not in session.email_addresses_used:
+                session.email_addresses_used.append(email)
+            
+            self.db.save_session(session)
+            
+            return {
+                'success': True, 
+                'message': f'Verification code sent to {email}. Please check your email.',
+                'verification_pending': True
+            }
+        else:
+            return {'success': False, 'message': 'Failed to send verification code. Please try again.'}
+
+    def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
+        """Verify code and upgrade user"""
+        
+        if not session.email:
+            return {'success': False, 'message': 'No email verification in progress.'}
+        
+        # Verify the code
+        verification_success = self.email_verification.verify_code(session.email, code)
+        
+        if verification_success:
+            # Upgrade user to EMAIL_VERIFIED_GUEST
+            session.user_type = UserType.EMAIL_VERIFIED_GUEST
+            session.daily_question_count = 0  # Reset question count
+            session.question_limit_reached = False
+            
+            # Reset ban status if any
+            session.ban_status = BanStatus.NONE
+            session.ban_start_time = None
+            session.ban_end_time = None
+            session.ban_reason = None
+            
+            self.db.save_session(session)
+            
+            logger.info(f"User upgraded to EMAIL_VERIFIED_GUEST: {session.email}")
+            
+            return {
+                'success': True,
+                'message': f'Email verified! You now have 10 questions per day.',
+                'user_type': 'email_verified_guest'
+            }
+        else:
+            return {'success': False, 'message': 'Invalid verification code. Please try again.'}
+
+    def detect_evasion(self, session: UserSession) -> bool:
+        """Detect evasion attempts"""
+        
+        if not session.fingerprint_id:
+            return False
+        
+        # Check for multiple sessions with same fingerprint
+        fingerprint_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+        
+        # Look for recent sessions that hit limits
+        recent_cutoff = datetime.now() - timedelta(hours=48)
+        recent_limited_sessions = [
+            s for s in fingerprint_sessions 
+            if s.session_id != session.session_id and
+               s.last_activity > recent_cutoff and
+               (s.question_limit_reached or s.ban_status != BanStatus.NONE)
+        ]
+        
+        if recent_limited_sessions:
+            logger.warning(f"Evasion detected for fingerprint {session.fingerprint_id[:8]}... - {len(recent_limited_sessions)} recent limited sessions")
+            return True
+        
+        # Check for rapid email switching
+        if len(session.email_addresses_used) > 2:
+            logger.warning(f"Email switching detected: {len(session.email_addresses_used)} emails used")
+            return True
+        
+        return False
+
+    def get_session(self) -> UserSession:
+        """Get session with complete validation and fingerprinting"""
+        session_id = st.session_state.get('current_session_id')
+        
+        if session_id:
+            session = self.db.load_session(session_id)
+            if session and session.active:
+                # Validate and fix session data
+                session = self._validate_and_fix_session(session)
+                
+                # Check ban status
+                limit_check = self.question_limits.is_within_limits(session)
+                if not limit_check.get('allowed', True):
+                    # Session is banned - show ban message
+                    ban_type = limit_check.get('ban_type', 'unknown')
+                    message = limit_check.get('message', 'Usage limit reached.')
+                    time_remaining = limit_check.get('time_remaining')
+                    
+                    if time_remaining:
+                        hours = int(time_remaining.total_seconds() // 3600)
+                        minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                        st.error(f"🚫 **Access Restricted**")
+                        st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.info(message)
+                    else:
+                        st.error(f"🚫 **Access Restricted**")
+                        st.info(message)
+                    
+                    # Don't create new session - show ban message
+                    return session
+                
+                # Update activity and continue
+                self._update_activity(session)
+                return session
+        
+        # No session or inactive - create new guest session
+        return self._create_guest_session()
+
+    @handle_api_errors("Authentication", "WordPress Login")
+    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+        if not self.config.WORDPRESS_URL:
+            st.error("Authentication service is not configured.")
+            return None
+        if not self.rate_limiter.is_allowed(f"auth_{username}"):
+            st.error("Too many login attempts. Please wait.")
+            return None
+
+        clean_username = username.strip()
+        clean_password = password.strip()
+
+        try:
+            response = requests.post(
+                f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token",
+                json={'username': clean_username, 'password': clean_password},
+                headers={'Content-Type': 'application/json'},
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                try:
+                    current_session = self.get_session()
+                except Exception as e:
+                    logger.error(f"Error getting session during auth: {e}")
+                    current_session = self._create_guest_session()
+                
+                display_name = (
+                    data.get('user_display_name') or 
+                    data.get('displayName') or 
+                    data.get('name') or 
+                    data.get('user_nicename') or 
+                    data.get('first_name') or
+                    data.get('nickname') or
+                    clean_username
+                )
+
+                # Upgrade to REGISTERED_USER
+                current_session.user_type = UserType.REGISTERED_USER
+                current_session.email = data.get('user_email')
+                current_session.full_name = display_name
+                current_session.wp_token = data.get('token')
+                current_session.last_activity = datetime.now()
+                current_session.timeout_saved_to_crm = False
+                
+                # Reset question counts and bans for registered users
+                current_session.daily_question_count = 0
+                current_session.total_question_count = 0
+                current_session.question_limit_reached = False
+                current_session.ban_status = BanStatus.NONE
+                current_session.ban_start_time = None
+                current_session.ban_end_time = None
+                current_session.ban_reason = None
+                
+                # Add email to used addresses
+                if current_session.email and current_session.email not in current_session.email_addresses_used:
+                    current_session.email_addresses_used.append(current_session.email)
+                
+                try:
+                    self.db.save_session(current_session)
+                    logger.info(f"Saved authenticated session: user_type={current_session.user_type}")
+                except Exception as e:
+                    logger.error(f"Failed to save authenticated session: {e}")
+                    st.error("Authentication failed - could not save session.")
+                    return None
+                
+                verification_session = self.db.load_session(current_session.session_id)
+                if verification_session:
+                    verification_session = self._validate_and_fix_session(verification_session)
+                    if verification_session.user_type == UserType.REGISTERED_USER:
+                        st.session_state.current_session_id = current_session.session_id
+                        st.success(f"Welcome back, {current_session.full_name}!")
+                        return current_session
+                    else:
+                        logger.error(f"Session verification failed: expected REGISTERED_USER, got {verification_session.user_type}")
+                        st.error("Authentication failed - session verification failed.")
+                        return None
+                else:
+                    st.error("Authentication failed - session could not be verified.")
+                    return None
+                
+            else:
+                error_message = f"Invalid username or password (Code: {response.status_code})."
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get('message', error_message)
+                except json.JSONDecodeError:
+                    pass
+                
+                st.error(error_message)
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            st.error(f"A network error occurred during authentication. Please check your connection.")
+            logger.error(f"Authentication network exception: {e}")
+            return None
+
+    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+        if not self.rate_limiter.is_allowed(session.session_id):
+            return {"content": "Rate limit exceeded. Please wait.", "success": False}
+
+        # Validate session before using
+        session = self._validate_and_fix_session(session)
+        
+        # Check question limits BEFORE processing
+        limit_check = self.question_limits.is_within_limits(session)
+        if not limit_check.get('allowed', True):
+            reason = limit_check.get('reason')
+            
+            if reason == 'guest_limit':
+                # Guest hit 4-question limit → force email verification
+                return {
+                    "content": "Please provide your email address to continue using FiFi AI.",
+                    "success": False,
+                    "requires_email": True,
+                    "user_type": "guest"
+                }
+            elif reason in ['daily_limit', 'first_tier_limit', 'total_limit']:
+                # User hit daily/tier limits → show ban message
+                return {
+                    "content": limit_check.get('message', 'Usage limit reached.'),
+                    "success": False,
+                    "banned": True,
+                    "ban_type": limit_check.get('ban_type', 'unknown')
+                }
+            elif reason == 'banned':
+                # User is currently banned
+                return {
+                    "content": limit_check.get('message', 'You are currently restricted.'),
+                    "success": False,
+                    "banned": True,
+                    "time_remaining": limit_check.get('time_remaining')
+                }
+        
+        # Check for evasion attempts
+        if self.detect_evasion(session):
+            penalty_hours = self.question_limits.apply_evasion_penalty(session)
+            self.db.save_session(session)
+            
+            return {
+                "content": "Usage limit reached. Please try again later.",
+                "success": False,
+                "evasion_penalty": True,
+                "penalty_hours": penalty_hours
+            }
+
+        self._update_activity(session)
+
+        sanitized_prompt = sanitize_input(prompt)
+        
+        moderation = check_content_moderation(sanitized_prompt, self.ai.openai_client)
+        if moderation and moderation.get("flagged"):
+            return {
+                "content": moderation["message"], 
+                "success": False, 
+                "source": "Content Safety"
+            }
+
+        # Record the question
+        self.question_limits.record_question(session)
+
+        response = self.ai.get_response(sanitized_prompt, session.messages)
+        
+        session.messages.append({
+            "role": "user", 
+            "content": sanitized_prompt,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        response_message = {
+            "role": "assistant",
+            "content": response.get("content", "No response generated."),
+            "source": response.get("source", "Unknown"),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Add metadata flags
+        for flag in ["used_search", "used_pinecone", "has_citations", "has_inline_citations", "safety_override"]:
+            if response.get(flag):
+                response_message[flag] = True
+            
+        session.messages.append(response_message)
+        session.messages = session.messages[-100:]
+        
+        self._update_activity(session)
+        return response
+
+    def clear_chat_history(self, session: UserSession):
+        session = self._validate_and_fix_session(session)
+        session.messages = []
+        session.timeout_saved_to_crm = False
+        self._update_activity(session)
+
+    def end_session(self, session: UserSession):
+        """Manual session end (Sign Out button)"""
+        session = self._validate_and_fix_session(session)
+        
+        # Save to CRM if eligible
+        if (session.user_type == UserType.REGISTERED_USER and 
+            session.email and 
+            session.messages and 
+            self.zoho.config.ZOHO_ENABLED):
+            
+            self._save_to_crm_timeout(session, "Manual Sign Out")
+        
+        self._end_session_internal(session)
+
+    def _end_session_internal(self, session: UserSession):
+        """End session and clean up state"""
+        session.active = False
+        try:
+            self.db.save_session(session)
+        except Exception as e:
+            logger.error(f"Failed to mark session as inactive: {e}")
+        
+        keys_to_clear = ['current_session_id', 'page']
+        for key in keys_to_clear:
+            if key in st.session_state:
+                del st.session_state[key]
+
+    def manual_save_to_crm(self, session: UserSession):
+        """Manual CRM save (Save button)"""
+        session = self._validate_and_fix_session(session)
+        
+        if (session.user_type == UserType.REGISTERED_USER and 
+            session.email and 
+            session.messages and 
+            self.zoho.config.ZOHO_ENABLED):
+            
+            self._save_to_crm_timeout(session, "Manual Save to Zoho CRM")
+            self._update_activity(session)
+        else:
+            st.warning("Cannot save to CRM: Missing email or chat messages")
+
+# =============================================================================
+# ENHANCED UI COMPONENTS WITH NEW FEATURES
+# =============================================================================
+
+def render_welcome_page_enhanced(session_manager: SessionManager):
+    st.title("🤖 Welcome to FiFi AI Assistant")
+    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.info("🧠 **Knowledge Base**\nAccess curated F&B industry information")
+    with col2:
+        st.info("🌐 **Web Search**\nReal-time market data and trends") 
+    with col3:
+        st.info("📚 **Smart Citations**\nClickable inline source references")
+    
+    # Show user tier benefits
+    st.markdown("---")
+    st.subheader("🎯 Usage Tiers")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.success("👤 **Guest Users**")
+        st.markdown("• 4 questions to try FiFi AI")
+        st.markdown("• Email verification required")
+        st.markdown("• Quick start, no registration")
+    
+    with col2:
+        st.info("📧 **Email Verified**")
+        st.markdown("• 10 questions per day")
+        st.markdown("• Email verification required")
+        st.markdown("• Rolling 24-hour limits")
+    
+    with col3:
+        st.warning("🔐 **Registered Users**")
+        st.markdown("• 40 questions per day")
+        st.markdown("• Cross-device tracking")
+        st.markdown("• Auto-save to CRM")
+        st.markdown("• Enhanced features")
+    
+    tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
+    
+    with tab1:
+        if not session_manager.config.WORDPRESS_URL:
+            st.warning("Sign-in is disabled because the authentication service is not configured.")
+        else:
+            with st.form("login_form", clear_on_submit=False):
+                username = st.text_input("Username or Email")
+                password = st.text_input("Password", type="password")
+                submit_button = st.form_submit_button("Sign In", use_container_width=True)
+                
+                if submit_button:
+                    if not username or not password:
+                        st.error("Please enter both username and password")
+                    else:
+                        with st.spinner("🔐 Authenticating..."):
+                            authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                            
+                        if authenticated_session:
+                            st.balloons()
+                            st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
+                            time.sleep(1)
+                            st.session_state.page = "chat"
+                            st.rerun()
+    
+    with tab2:
+        st.markdown("""
+        **Continue as a guest** to try FiFi AI Assistant without signing in.
+        
+        ℹ️ **Guest experience:**
+        - Start with 4 questions to explore FiFi AI
+        - Email verification unlocks 10 questions/day
+        - Universal device fingerprinting for security
+        - Upgrade path to full registration
+        
+        ✨ **Registration benefits:**
+        - 40 questions per day across all devices
+        - Automatic CRM integration and chat history
+        - Enhanced personalization features
+        - Priority access during high usage
+        """)
+        
+        if st.button("👤 Start as Guest", use_container_width=True):
+            st.session_state.page = "chat"
+            st.rerun()
+
+def render_email_verification_dialog(session_manager: SessionManager, session: UserSession):
+    """Render email verification dialog for guest users"""
+    
+    st.error("📧 **Email Verification Required**")
+    st.info("You've reached the 4-question limit for guest users. Please verify your email to get 10 questions per day.")
+    
+    # Check if we have fingerprint history for recognition
+    if session.fingerprint_id:
+        fingerprint_history = session_manager.check_fingerprint_history(session.fingerprint_id)
+        
+        if fingerprint_history.get('has_history') and fingerprint_history.get('email'):
+            # Show recognition prompt
+            masked_email = session_manager._mask_email(fingerprint_history['email'])
+            
+            st.info(f"🤝 **We Recognize You!**")
+            st.markdown(f"Based on our records, we seem to recognize you. Are you **{masked_email}**?")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Yes, that's me", use_container_width=True):
+                    # Send verification code to recognized email
+                    verification_sent = session_manager.email_verification.send_verification_code(fingerprint_history['email'])
+                    if verification_sent:
+                        session.email = fingerprint_history['email']
+                        session.recognition_response = "yes"
+                        session_manager.db.save_session(session)
+                        st.session_state.verification_email = fingerprint_history['email']
+                        st.session_state.verification_stage = "code_entry"
+                        st.rerun()
+                    else:
+                        st.error("Failed to send verification code. Please try manual entry.")
+            
+            with col2:
+                if st.button("❌ No, different email", use_container_width=True):
+                    session.recognition_response = "no"
+                    st.session_state.verification_stage = "email_entry"
+                    st.rerun()
+    
+    # Manual email entry
+    if st.session_state.get('verification_stage') == 'email_entry' or not session.fingerprint_id:
+        with st.form("email_verification_form"):
+            st.markdown("**Enter your email address:**")
+            email = st.text_input("Email Address", placeholder="your@email.com")
+            submit_email = st.form_submit_button("Send Verification Code", use_container_width=True)
+            
+            if submit_email:
+                if email:
+                    result = session_manager.handle_guest_email_verification(session, email)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.session_state.verification_email = email
+                        st.session_state.verification_stage = "code_entry"
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter an email address.")
+    
+    # Code entry
+    if st.session_state.get('verification_stage') == 'code_entry':
+        verification_email = st.session_state.get('verification_email', session.email)
+        
+        st.success(f"📧 Verification code sent to **{verification_email}**")
+        
+        with st.form("code_verification_form"):
+            st.markdown("**Enter the verification code from your email:**")
+            code = st.text_input("Verification Code", placeholder="123456", max_chars=6)
+            submit_code = st.form_submit_button("Verify Code", use_container_width=True)
+            
+            if submit_code:
+                if code:
+                    result = session_manager.verify_email_code(session, code)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.balloons()
+                        
+                        # Clear verification state
+                        for key in ['verification_email', 'verification_stage']:
+                            if key in st.session_state:
+                                del st.session_state[key]
+                        
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter the verification code.")
+        
+        if st.button("🔄 Resend Code"):
+            if verification_email:
+                verification_sent = session_manager.email_verification.send_verification_code(verification_email)
+                if verification_sent:
+                    st.success("Verification code resent!")
+                else:
+                    st.error("Failed to resend code. Please try again.")
+
+def render_sidebar_enhanced(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
+    with st.sidebar:
+        st.title("🎛️ Dashboard")
+        
+        # Enhanced user status section
+        if session.user_type == UserType.REGISTERED_USER:
+            st.success("✅ **Registered User**")
+            if session.full_name: 
+                st.markdown(f"**Name:** {session.full_name}")
+            if session.email: 
+                st.markdown(f"**Email:** {session.email}")
+            
+            # Question usage for registered users
+            st.markdown(f"**Questions:** {session.total_question_count}/40")
+            if session.total_question_count <= 20:
+                st.progress(session.total_question_count / 20)
+                st.caption("First tier: 20 questions")
+            else:
+                st.progress((session.total_question_count - 20) / 20)
+                st.caption("Second tier: 21-40 questions")
+            
+        elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
+            st.info("📧 **Email Verified Guest**")
+            if session.email:
+                st.markdown(f"**Email:** {session.email}")
+            
+            # Daily question usage
+            st.markdown(f"**Daily Questions:** {session.daily_question_count}/10")
+            st.progress(session.daily_question_count / 10)
+            
+            if session.last_question_time:
+                next_reset = session.last_question_time + timedelta(hours=24)
+                time_to_reset = next_reset - datetime.now()
+                if time_to_reset.total_seconds() > 0:
+                    hours = int(time_to_reset.total_seconds() // 3600)
+                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
+                    st.caption(f"Resets in: {hours}h {minutes}m")
+                else:
+                    st.caption("Questions reset!")
+            
+        else:  # GUEST
+            st.warning("👤 **Guest User**")
+            st.markdown(f"**Questions:** {session.daily_question_count}/4")
+            st.progress(session.daily_question_count / 4)
+            st.caption("Email verification unlocks 10/day")
+        
+        # Fingerprinting info (if available)
+        if session.fingerprint_id:
+            st.markdown(f"**Device ID:** `{session.fingerprint_id[:8]}...`")
+            st.caption(f"Method: {session.fingerprint_method or 'unknown'}")
+        
+        # CRM Status
+        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type == UserType.REGISTERED_USER:
+            if session.zoho_contact_id: 
+                st.success("🔗 **CRM Linked**")
+            else: 
+                st.info("📋 **CRM Ready**")
+            if session.timeout_saved_to_crm:
+                st.caption("💾 Auto-saved to CRM")
+            else:
+                st.caption("💾 Auto-save at 15min")
+        else: 
+            st.caption("🚫 CRM: Registered users only")
+        
+        st.divider()
+        
+        # Enhanced session info
+        st.markdown(f"**Messages:** {len(session.messages)}")
+        st.markdown(f"**Session:** `{session.session_id[:8]}...`")
+        
+        # Ban status
+        if session.ban_status != BanStatus.NONE:
+            if session.ban_end_time and datetime.now() < session.ban_end_time:
+                time_remaining = session.ban_end_time - datetime.now()
+                hours = int(time_remaining.total_seconds() // 3600)
+                minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                st.error(f"🚫 **Restricted**")
+                st.error(f"Time: {hours}h {minutes}m")
+            else:
+                st.info("🟢 **Restrictions Lifted**")
+        
+        st.divider()
+        
+        # Action buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ Clear Chat", use_container_width=True):
+                session_manager.clear_chat_history(session)
+                st.rerun()
+        with col2:
+            if st.button("🚪 Sign Out", use_container_width=True):
+                session_manager.end_session(session)
+                st.rerun()
+
+        # Download & save section (registered users only)
+        if session.user_type == UserType.REGISTERED_USER and session.messages:
+            st.divider()
+            
+            # PDF Download
+            pdf_buffer = pdf_exporter.generate_chat_pdf(session)
+            if pdf_buffer:
+                st.download_button(
+                    label="📄 Download PDF",
+                    data=pdf_buffer,
+                    file_name=f"fifi_chat_transcript_{session.session_id[:8]}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+            
+            # CRM Save (if enabled)
+            if session_manager.zoho.config.ZOHO_ENABLED and session.email:
+                if st.button("💾 Save to Zoho CRM", use_container_width=True):
+                    session_manager.manual_save_to_crm(session)
+                st.caption("💡 Auto-saves after 15min inactivity")
+
+def render_chat_interface_complete(session_manager, session):
+    """Complete chat interface with all new features"""
+    
+    st.title("🤖 FiFi AI Assistant")
+    st.caption("Your intelligent food & beverage sourcing companion with universal fingerprinting")
+    
+    # Add global error handler
+    try:
+        global_message_channel_error_handler()
+    except Exception as e:
+        logger.error(f"Failed to add global error handler: {e}")
+    
+    # Initialize fingerprinting for session
+    if not session.fingerprint_id:
+        fingerprint_data = render_fingerprinting_component(session.session_id, session_manager.fingerprinting)
+        if fingerprint_data:
+            session_manager.apply_fingerprinting(session, fingerprint_data)
+            session_manager.db.save_session(session)
+            st.rerun()
+    
+    # Add enhanced browser close detection
+    try:
+        render_browser_close_detection_enhanced(session.session_id)
+    except Exception as e:
+        logger.error(f"Failed to render browser close detection: {e}")
+    
+    # Handle guest email verification dialog
+    if (session.user_type == UserType.GUEST and 
+        session.daily_question_count >= 4):
+        render_email_verification_dialog(session_manager, session)
+        return  # Don't show chat interface during verification
+    
+    # Show user tier status
+    if session.user_type == UserType.GUEST:
+        remaining = 4 - session.daily_question_count
+        if remaining > 0:
+            st.info(f"👤 **Guest Mode:** {remaining} questions remaining before email verification")
+        else:
+            st.warning("👤 **Guest Mode:** Email verification required to continue")
+    elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
+        remaining = 10 - session.daily_question_count
+        st.info(f"📧 **Email Verified:** {remaining} questions remaining today")
+    elif session.user_type == UserType.REGISTERED_USER:
+        if session.total_question_count <= 20:
+            remaining = 20 - session.total_question_count
+            st.success(f"🔐 **Registered User:** {remaining} questions in first tier")
+        else:
+            remaining = 40 - session.total_question_count
+            st.success(f"🔐 **Registered User:** {remaining} questions remaining")
+    
+    # 15-minute timer for registered users
+    if session.user_type == UserType.REGISTERED_USER:
+        timer_result = None
+        try:
+            timer_result = render_activity_timer_component_15min(session.session_id, session_manager)
+        except Exception as e:
+            logger.error(f"15-minute timer error: {e}")
+        
+        # Process timer events
+        if timer_result:
+            try:
+                should_rerun = handle_15min_timer_event(timer_result, session_manager, session)
+                if should_rerun:
+                    time.sleep(1)
+                    st.rerun()
+            except Exception as e:
+                logger.error(f"Timer event handling error: {e}")
+                st.warning("⚠️ Timer event processing encountered an error, but continuing...")
+    
+    # Display chat messages
+    for msg in session.messages:
+        with st.chat_message(msg.get("role", "user")):
+            st.markdown(msg.get("content", ""), unsafe_allow_html=True)
+            
+            if msg.get("role") == "assistant":
+                if "source" in msg:
+                    st.caption(f"Source: {msg['source']}")
+                
+                indicators = []
+                if msg.get("used_pinecone"):
+                    indicators.append("🧠 Knowledge Base")
+                if msg.get("used_search"):
+                    indicators.append("🌐 Web Search")
+                
+                if indicators:
+                    st.caption(f"Enhanced with: {', '.join(indicators)}")
+
+    # Handle input
+    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...")
+    
+    # Process user input
+    if prompt:
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Processing your question..."):
+                try:
+                    response = session_manager.get_ai_response(session, prompt)
+                    
+                    if response.get('requires_email'):
+                        st.error("📧 Please verify your email to continue")
+                        st.rerun()
+                    elif response.get('banned'):
+                        st.error(response.get('content', 'Access restricted'))
+                        if response.get('time_remaining'):
+                            time_remaining = response['time_remaining']
+                            hours = int(time_remaining.total_seconds() // 3600)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                    elif response.get('evasion_penalty'):
+                        st.error("🚫 Evasion detected - Extended restriction applied")
+                        st.error(f"Penalty: {response.get('penalty_hours', 0)} hours")
+                    else:
+                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                        
+                        if response.get("source"):
+                            st.caption(f"Source: {response['source']}")
+                        
+                        # Show enhanced features used
+                        indicators = []
+                        if response.get("used_pinecone"):
+                            indicators.append("🧠 Knowledge Base")
+                        if response.get("used_search"):
+                            indicators.append("🌐 Web Search")
+                        
+                        if indicators:
+                            st.caption(f"Enhanced with: {', '.join(indicators)}")
+                        
+                except Exception as e:
+                    logger.error(f"AI response generation failed: {e}")
+                    st.error("⚠️ Sorry, I encountered an error processing your request. Please try again.")
+        
+        st.rerun()
+
+# =============================================================================
+# UTILITY FUNCTIONS (ENHANCED)
+# =============================================================================
+
+def get_session_manager() -> Optional[SessionManager]:
+    """Safely get the session manager from session state"""
+    if 'session_manager' not in st.session_state:
+        return None
+    
+    manager = st.session_state.session_manager
+    if not hasattr(manager, 'get_session'):
+        logger.error("Invalid SessionManager instance in session state")
+        return None
+    
+    return manager
+
+def ensure_complete_initialization():
+    """Ensure the complete application is properly initialized"""
+    if 'initialized' not in st.session_state or not st.session_state.initialized:
+        try:
+            config = Config()
+            pdf_exporter = PDFExporter()
+            
+            if 'db_manager' not in st.session_state:
+                st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+            
+            db_manager = st.session_state.db_manager
+            zoho_manager = ZohoCRMManager(config, pdf_exporter)
+            ai_system = EnhancedAI(config)
+            rate_limiter = RateLimiter()
+            
+            # NEW: Initialize additional managers
+            fingerprinting_manager = FingerprintingManager()
+            email_verification_manager = EmailVerificationManager(config)
+            question_limit_manager = QuestionLimitManager()
+
+            st.session_state.session_manager = SessionManager(
+                config, db_manager, zoho_manager, ai_system, rate_limiter,
+                fingerprinting_manager, email_verification_manager, question_limit_manager
+            )
+            st.session_state.pdf_exporter = pdf_exporter
+            st.session_state.error_handler = error_handler
+            st.session_state.ai_system = ai_system
+            st.session_state.fingerprinting_manager = fingerprinting_manager
+            st.session_state.email_verification_manager = email_verification_manager
+            st.session_state.question_limit_manager = question_limit_manager
+            st.session_state.initialized = True
+            
+            logger.info("✅ Complete application initialized successfully with all features")
+            return True
+            
+        except Exception as e:
+            st.error("💥 A critical error occurred during application startup.")
+            st.error(f"Error details: {str(e)}")
+            logger.critical(f"Complete initialization failed: {e}", exc_info=True)
+            return False
+    
+    return True
+
+def process_emergency_save_enhanced(session_id: str) -> bool:
+    """Enhanced emergency save processing"""
+    try:
+        session_manager = get_session_manager()
+        if not session_manager:
+            logger.error("❌ Session manager not available for emergency save")
+            return False
+        
+        session = session_manager.db.load_session(session_id)
+        if not session:
+            logger.error(f"❌ Session {session_id[:8]} not found for emergency save")
+            return False
+        
+        session = session_manager._validate_and_fix_session(session)
+        
+        logger.info(f"✅ Emergency save session loaded: {session_id[:8]}")
+        logger.info(f"   User: {session.user_type.value}")
+        logger.info(f"   Email: {session.email}")
+        logger.info(f"   Messages: {len(session.messages)}")
+        
+        # Check eligibility for emergency save
+        if (session.user_type == UserType.REGISTERED_USER and 
+            session.email and 
+            session.messages and
+            not session.timeout_saved_to_crm):
+            
+            logger.info("✅ Session eligible for emergency save")
+            
+            # Extend session life
+            session.last_activity = datetime.now()
+            session_manager.db.save_session(session)
+            
+            # Perform emergency save
+            success = session_manager.zoho.save_chat_transcript_sync(session, "Emergency Save (Enhanced Browser Close)")
+            return success
+        else:
+            logger.info("❌ Session not eligible for emergency save")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Enhanced emergency save processing failed: {e}", exc_info=True)
+        return False
+
+def enhanced_handle_save_requests():
+    """Enhanced save handler for all emergency save types"""
+    
+    logger.info("🔍 ENHANCED SAVE HANDLER: Checking for emergency save requests...")
+    
+    query_params = st.query_params
+    logger.info(f"📋 Query params found: {dict(query_params)}")
+    
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    
+    if event in ["emergency_close", "close"] and session_id:
+        logger.info("=" * 80)
+        logger.info("🚨 ENHANCED EMERGENCY SAVE REQUEST DETECTED")
+        logger.info(f"Session ID: {session_id}")
+        logger.info(f"Event: {event}")
+        logger.info("=" * 80)
+        
+        # Show visual confirmation
+        st.error("🚨 **Emergency Save Detected** - Processing enhanced browser close save...")
+        
+        # Clear query params
+        st.query_params.clear()
+        
+        try:
+            success = process_emergency_save_enhanced(session_id)
+            
+            if success:
+                st.success("✅ Enhanced emergency save completed successfully!")
+                logger.info("✅ Enhanced emergency save completed")
+            else:
+                st.error("❌ Enhanced emergency save failed")
+                logger.error("❌ Enhanced emergency save failed")
+                
+        except Exception as e:
+            st.error(f"❌ Enhanced emergency save error: {str(e)}")
+            logger.error(f"Enhanced emergency save crashed: {e}", exc_info=True)
+        
+        time.sleep(2)
+        st.stop()
+    else:
+        logger.info("ℹ️ No enhanced emergency save requests found")
+
+# =============================================================================
+# MAIN APPLICATION WITH ALL FEATURES
+# =============================================================================
+
+def main():
+    st.set_page_config(
+        page_title="FiFi AI Assistant - Complete Integration", 
+        page_icon="🤖", 
+        layout="wide"
+    )
+
+    # Add global message channel error handler
+    global_message_channel_error_handler()
+
+    # Clear state button for development
+    if st.button("🔄 Fresh Start (Dev)", key="emergency_clear"):
+        st.session_state.clear()
+        st.rerun()
+
+    # Initialize complete application
+    if not ensure_complete_initialization():
+        st.stop()
+
+    # Handle enhanced save requests
+    enhanced_handle_save_requests()
+
+    # Get session manager
+    session_manager = get_session_manager()
+    if not session_manager:
+        st.error("Failed to get enhanced session manager.")
+        st.stop()
+    
+    # Main application flow
+    current_page = st.session_state.get('page')
+    
+    if current_page != "chat":
+        render_welcome_page_enhanced(session_manager)
+    else:
+        session = session_manager.get_session()
+        if session and session.active:
+            render_sidebar_enhanced(session_manager, session, st.session_state.pdf_exporter)
+            render_chat_interface_complete(session_manager, session)
+        else:
+            if 'page' in st.session_state:
+                del st.session_state['page']
+            st.rerun()
+
+if __name__ == "__main__":
+    main()
+        if not re.match(email_pattern, email):
+            return {'success': False, 'message': 'Please enter a valid email address.'}
+        
+        # Check if email is already in use
+        existing_sessions = self.db.find_sessions_by_email(email)
+        
+        # Send verification code
+        verification_sent = self.email_verification.send_verification_code(email)
+        
+        if verification_sent:
+            # Track email in session
+            session.email = email
+            if email not in session.email_addresses_used:
+                session.email_addresses_used.append(email)
+            
+            self.db.save_session(session)
+            
+            return {
+                'success': True, 
+                'message': f'Verification code sent to {email}. Please check your email.',
+                'verification_pending': True
+            }
+        else:
+            return {'success': False, 'message': 'Failed to send verification code. Please try again.'}
+
+    def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
+        """Verify code and upgrade user"""
+        
+        if not session.email:
+            return {'success': False, 'message': 'No email verification in progress.'}
+        
+        # Verify the code
+        verification_success = self.email_verification.verify_code(session.email, code)
+        
+        if verification_success:
+            # Upgrade user to EMAIL_VERIFIED_GUEST
+            session.user_type = UserType.EMAIL_VERIFIED_GUEST
+            session.daily_question_count = 0  # Reset question count
+            session.question_limit_reached = False
+            
+            # Reset ban status if any
+            session.ban_status = BanStatus.NONE
+            session.ban_start_time = None
+            session.ban_end_time = None
+            session.ban_reason = None
+            
+            self.db.save_session(session)
+            
+            logger.info(f"User upgraded to EMAIL_VERIFIED_GUEST: {session.email}")
+            
+            return {
+                'success': True,
+                'message': f'Email verified! You now have 10 questions per day.',
+                'user_type': 'email_verified_guest'
+            }
+        else:
+            return {'success': False, 'message': 'Invalid verification code. Please try again.'}
+
+    def detect_evasion(self, session: UserSession) -> bool:
+        """Detect evasion attempts"""
+        
+        if not session.fingerprint_id:
+            return False
+        
+        # Check for multiple sessions with same fingerprint
+        fingerprint_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+        
+        # Look for recent sessions that hit limits
+        recent_cutoff = datetime.now() - timedelta(hours=48)
+        recent_limited_sessions = [
+            s for s in fingerprint_sessions 
+            if s.session_id != session.session_id and
+               s.last_activity > recent_cutoff and
+               (s.question_limit_reached or s.ban_status != BanStatus.NONE)
+        ]
+        
+        if recent_limited_sessions:
+            logger.warning(f"Evasion detected for fingerprint {session.fingerprint_id[:8]}... - {len(recent_limited_sessions)} recent limited sessions")
+            return True
+        
+        # Check for rapid email switching
+        if len(session.email_addresses_used) > 2:
+            logger.warning(f"Email switching detected: {len(session.email_addresses_used)} emails used")
+            return True
+        
+        return False
+
+    def get_session(self) -> UserSession:
+        """Get session with complete validation and fingerprinting"""
+        session_id = st.session_state.get('current_session_id')
+        
+        if session_id:
+            session = self.db.load_session(session_id)
+            if session and session.active:
+                # Validate and fix session data
+                session = self._validate_and_fix_session(session)
+                
+                # Check ban status
+                limit_check = self.question_limits.is_within_limits(session)
+                if not limit_check.get('allowed', True):
+                    # Session is banned - show ban message
+                    ban_type = limit_check.get('ban_type', 'unknown')
+                    message = limit_check.get('message', 'Usage limit reached.')
+                    time_remaining = limit_check.get('time_remaining')
+                    
+                    if time_remaining:
+                        hours = int(time_remaining.total_seconds() // 3600)
+                        minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                        st.error(f"🚫 **Access Restricted**")
+                        st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.info(message)
+                    else:
+                        st.error(f"🚫 **Access Restricted**")
+                        st.info(message)
+                    
+                    # Don't create new session - show ban message
+                    return session
+                
+                # Update activity and continue
+                self._update_activity(session)
+                return session
+        
+        # No session or inactive - create new guest session
+        return self._create_guest_session()
+
+    @handle_api_errors("Authentication", "WordPress Login")
+    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+        if not self.config.WORDPRESS_URL:
+            st.error("Authentication service is not configured.")
+            return None
+        if not self.rate_limiter.is_allowed(f"auth_{username}"):
+            st.error("Too many login attempts. Please wait.")
+            return None
+
+        clean_username = username.strip()
+        clean_password = password.strip()
+
+        try:
+            response = requests.post(
+                f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token",
+                json={'username': clean_username, 'password': clean_password},
+                headers={'Content-Type': 'application/json'},
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                try:
+                    current_session = self.get_session()
+                except Exception as e:
+                    logger.error(f"Error getting session during auth: {e}")
+                    current_session = self._create_guest_session()
+                
+                display_name = (
+                    data.get('user_display_name') or 
+                    data.get('displayName') or 
+                    data.get('name') or 
+                    data.get('user_nicename') or 
+                    data.get('first_name') or
+                    data.get('nickname') or
+                    clean_username
+                )
+
+                # Upgrade to REGISTERED_USER
+                current_session.user_type = UserType.REGISTERED_USER
+                current_session.email = data.get('user_email')
+                current_session.full_name = display_name
+                current_session.wp_token = data.get('token')
+                current_session.last_activity = datetime.now()
+                current_session.timeout_saved_to_crm = False
+                
+                # Reset question counts and bans for registered users
+                current_session.daily_question_count = 0
+                current_session.total_question_count = 0
+                current_session.question_limit_reached = False
+                current_session.ban_status = BanStatus.NONE
+                current_session.ban_start_time = None
+                current_session.ban_end_time = None
+                current_session.ban_reason = None
+                
+                # Add email to used addresses
+                if current_session.email and current_session.email not in current_session.email_addresses_used:
+                    current_session.email_addresses_used.append(current_session.email)
+                
+                try:
+                    self.db.save_session(current_session)
+                    logger.info(f"Saved authenticated session: user_type={current_session.user_type}")
+                except Exception as e:
+                    logger.error(f"Failed to save authenticated session: {e}")
+                    st.error("Authentication failed - could not save session.")
+                    return None
+                
+                verification_session = self.db.load_session(current_session.session_id)
+                if verification_session:
+                    verification_session = self._validate_and_fix_session(verification_session)
+                    if verification_session.user_type == UserType.REGISTERED_USER:
+                        st.session_state.current_session_id = current_session.session_id
+                        st.success(f"Welcome back, {current_session.full_name}!")
+                        return current_session
+                    else:
+                        logger.error(f"Session verification failed: expected REGISTERED_USER, got {verification_session.user_type}")
+                        st.error("Authentication failed - session verification failed.")
+                        return None
+                else:
+                    st.error("Authentication failed - session could not be verified.")
+                    return None
+                
+            else:
+                error_message = f"Invalid username or password (Code: {response.status_code})."
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get('message', error_message)
+                except json.JSONDecodeError:
+                    pass
+                
+                st.error(error_message)
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            st.error(f"A network error occurred during authentication. Please check your connection.")
+            logger.error(f"Authentication network exception: {e}")
+            return None
+
+    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+        if not self.rate_limiter.is_allowed(session.session_id):
+            return {"content": "Rate limit exceeded. Please wait.", "success": False}
+
+        # Validate session before using
+        session = self._validate_and_fix_session(session)
+        
+        # Check question limits BEFORE processing
+        limit_check = self.question_limits.is_within_limits(session)
+        if not limit_check.get('allowed', True):
+            reason = limit_check.get('reason')
+            
+            if reason == 'guest_limit':
+                # Guest hit 4-question limit → force email verification
+                return {
+                    "content": "Please provide your email address to continue using FiFi AI.",
+                    "success": False,
+                    "requires_email": True,
+                    "user_type": "guest"
+                }
+            elif reason in ['daily_limit', 'first_tier_limit', 'total_limit']:
+                # User hit daily/tier limits → show ban message
+                return {
+                    "content": limit_check.get('message', 'Usage limit reached.'),
+                    "success": False,
+                    "banned": True,
+                    "ban_type": limit_check.get('ban_type', 'unknown')
+                }
+            elif reason == 'banned':
+                # User is currently banned
+                return {
+                    "content": limit_check.get('message', 'You are currently restricted.'),
+                    "success": False,
+                    "banned": True,
+                    "time_remaining": limit_check.get('time_remaining')
+                }
+        
+        # Check for evasion attempts
+        if self.detect_evasion(session):
+            penalty_hours = self.question_limits.apply_evasion_penalty(session)
+            self.db.save_session(session)
+            
+            return {
+                "content": "Usage limit reached. Please try again later.",
+                "success": False,
+                "evasion_penalty": True,
+                "penalty_hours": penalty_hours
+            }
+
+        self._update_activity(session)
+
+        sanitized_prompt = sanitize_input(prompt)
+        
+        moderation = check_content_moderation(sanitized_prompt, self.ai.openai_client)
+        if moderation and moderation.get("flagged"):
+            return {
+                "content": moderation["message"], 
+                "success": False, 
+                "source": "Content Safety"
+            }
+
+        # Record the question
+        self.question_limits.record_question(session)
+
+        response = self.ai.get_response(sanitized_prompt, session.messages)
+        
+        session.messages.append({
+            "role": "user", 
+            "content": sanitized_prompt,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        response_message = {
+            "role": "assistant",
+            "content": response.get("content", "No response generated."),
+            "source": response.get("source", "Unknown"),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Add metadata flags
+        for flag in ["used_search", "used_pinecone", "has_citations", "has_inline_citations", "safety_override"]:
+            if response.get(flag):
+                response_message[flag] = True
+            
+        session.messages.append(response_message)
+        session.messages = session.messages[-100:]
+        
+        self._update_activity(session)
+        return response
+
+    def clear_chat_history(self, session: UserSession):
+        session = self._validate_and_fix_session(session)
+        session.messages = []
+        session.timeout_saved_to_crm = False
+        self._update_activity(session)
+
+    def end_session(self, session: UserSession):
+        """Manual session end (Sign Out button)"""
+        session = self._validate_and_fix_session(session)
+        
+        # Save to CRM if eligible
+        if (session.user_type == UserType.REGISTERED_USER and 
+            session.email and 
+            session.messages and 
+            self.zoho.config.ZOHO_ENABLED):
+            
+            self._save_to_crm_timeout(session, "Manual Sign Out")
+        
+        self._end_session_internal(session)
+
+    def _end_session_internal(self, session: UserSession):
+        """End session and clean up state"""
+        session.active = False
+        try:
+            self.db.save_session(session)
+        except Exception as e:
+            logger.error(f"Failed to mark session as inactive: {e}")
+        
+        keys_to_clear = ['current_session_id', 'page']
+        for key in keys_to_clear:
+            if key in st.session_state:
+                del st.session_state[key]
+
+    def manual_save_to_crm(self, session: UserSession):
+        """Manual CRM save (Save button)"""
+        session = self._validate_and_fix_session(session)
+        
+        if (session.user_type == UserType.REGISTERED_USER and 
+            session.email and 
+            session.messages and 
+            self.zoho.config.ZOHO_ENABLED):
+            
+            self._save_to_crm_timeout(session, "Manual Save to Zoho CRM")
+            self._update_activity(session)
+        else:
+            st.warning("Cannot save to CRM: Missing email or chat messages")
+
+# =============================================================================
+# ENHANCED UI COMPONENTS WITH NEW FEATURES
+# =============================================================================
+
+def render_welcome_page_enhanced(session_manager: SessionManager):
+    st.title("🤖 Welcome to FiFi AI Assistant")
+    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.info("🧠 **Knowledge Base**\nAccess curated F&B industry information")
+    with col2:
+        st.info("🌐 **Web Search**\nReal-time market data and trends") 
+    with col3:
+        st.info("📚 **Smart Citations**\nClickable inline source references")
+    
+    # Show user tier benefits
+    st.markdown("---")
+    st.subheader("🎯 Usage Tiers")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.success("👤 **Guest Users**")
+        st.markdown("• 4 questions to try FiFi AI")
+        st.markdown("• Email verification required")
+        st.markdown("• Quick start, no registration")
+    
+    with col2:
+        st.info("📧 **Email Verified**")
+        st.markdown("• 10 questions per day")
+        st.markdown("• Email verification required")
+        st.markdown("• Rolling 24-hour limits")
+    
+    with col3:
+        st.warning("🔐 **Registered Users**")
+        st.markdown("• 40 questions per day")
+        st.markdown("• Cross-device tracking")
+        st.markdown("• Auto-save to CRM")
+        st.markdown("• Enhanced features")
+    
+    tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
+    
+    with tab1:
+        if not session_manager.config.WORDPRESS_URL:
+            st.warning("Sign-in is disabled because the authentication service is not configured.")
+        else:
+            with st.form("login_form", clear_on_submit=False):
+                username = st.text_input("Username or Email")
+                password = st.text_input("Password", type="password")
+                submit_button = st.form_submit_button("Sign In", use_container_width=True)
+                
+                if submit_button:
+                    if not username or not password:
+                        st.error("Please enter both username and password")
+                    else:
+                        with st.spinner("🔐 Authenticating..."):
+                            authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                            
+                        if authenticated_session:
+                            st.balloons()
+                            st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
+                            time.sleep(1)
+                            st.session_state.page = "chat"
+                            st.rerun()
+    
+    with tab2:
+        st.markdown("""
+        **Continue as a guest** to try FiFi AI Assistant without signing in.
+        
+        ℹ️ **Guest experience:**
+        - Start with 4 questions to explore FiFi AI
+        - Email verification unlocks 10 questions/day
+        - Universal device fingerprinting for security
+        - Upgrade path to full registration
+        
+        ✨ **Registration benefits:**
+        - 40 questions per day across all devices
+        - Automatic CRM integration and chat history
+        - Enhanced personalization features
+        - Priority access during high usage
+        """)
+        
+        if st.button("👤 Start as Guest", use_container_width=True):
+            st.session_state.page = "chat"
+            st.rerun()
+
+def render_email_verification_dialog(session_manager: SessionManager, session: UserSession):
+    """Render email verification dialog for guest users"""
+    
+    st.error("📧 **Email Verification Required**")
+    st.info("You've reached the 4-question limit for guest users. Please verify your email to get 10 questions per day.")
+    
+    # Check if we have fingerprint history for recognition
+    if session.fingerprint_id:
+        fingerprint_history = session_manager.check_fingerprint_history(session.fingerprint_id)
+        
+        if fingerprint_history.get('has_history') and fingerprint_history.get('email'):
+            # Show recognition prompt
+            masked_email = session_manager._mask_email(fingerprint_history['email'])
+            
+            st.info(f"🤝 **We Recognize You!**")
+            st.markdown(f"Based on our records, we seem to recognize you. Are you **{masked_email}**?")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Yes, that's me", use_container_width=True):
+                    # Send verification code to recognized email
+                    verification_sent = session_manager.email_verification.send_verification_code(fingerprint_history['email'])
+                    if verification_sent:
+                        session.email = fingerprint_history['email']
+                        session.recognition_response = "yes"
+                        session_manager.db.save_session(session)
+                        st.session_state.verification_email = fingerprint_history['email']
+                        st.session_state.verification_stage = "code_entry"
+                        st.rerun()
+                    else:
+                        st.error("Failed to send verification code. Please try manual entry.")
+            
+            with col2:
+                if st.button("❌ No, different email", use_container_width=True):
+                    session.recognition_response = "no"
+                    st.session_state.verification_stage = "email_entry"
+                    st.rerun()
+    
+    # Manual email entry
+    if st.session_state.get('verification_stage') == 'email_entry' or not session.fingerprint_id:
+        with st.form("email_verification_form"):
+            st.markdown("**Enter your email address:**")
+            email = st.text_input("Email Address", placeholder="your@email.com")
+            submit_email = st.form_submit_button("Send Verification Code", use_container_width=True)
+            
+            if submit_email:
+                if email:
+                    result = session_manager.handle_guest_email_verification(session, email)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.session_state.verification_email = email
+                        st.session_state.verification_stage = "code_entry"
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter an email address.")
+    
+    # Code entry
+    if st.session_state.get('verification_stage') == 'code_entry':
+        verification_email = st.session_state.get('verification_email', session.email)
+        
+        st.success(f"📧 Verification code sent to **{verification_email}**")
+        
+        with st.form("code_verification_form"):
+            st.markdown("**Enter the verification code from your email:**")
+            code = st.text_input("Verification Code", placeholder="123456", max_chars=6)
+            submit_code = st.form_submit_button("Verify Code", use_container_width=True)
+            
+            if submit_code:
+                if code:
+                    result = session_manager.verify_email_code(session, code)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.balloons()
+                        
+                        # Clear verification state
+                        for key in ['verification_email', 'verification_stage']:
+                            if key in st.session_state:
+                                del st.session_state[key]
+                        
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter the verification code.")
+        
+        if st.button("🔄 Resend Code"):
+            if verification_email:
+                verification_sent = session_manager.email_verification.send_verification_code(verification_email)
+                if verification_sent:
+                    st.success("Verification code resent!")
+                else:
+                    st.error("Failed to resend code. Please try again.")
+
+def render_sidebar_enhanced(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
+    with st.sidebar:
+        st.title("🎛️ Dashboard")
+        
+        # Enhanced user status section
+        if session.user_type == UserType.REGISTERED_USER:
+            st.success("✅ **Registered User**")
+            if session.full_name: 
+                st.markdown(f"**Name:** {session.full_name}")
+            if session.email: 
+                st.markdown(f"**Email:** {session.email}")
+            
+            # Question usage for registered users
+            st.markdown(f"**Questions:** {session.total_question_count}/40")
+            if session.total_question_count <= 20:
+                st.progress(session.total_question_count / 20)
+                st.caption("First tier: 20 questions")
+            else:
+                st.progress((session.total_question_count - 20) / 20)
+                st.caption("Second tier: 21-40 questions")
+            
+        elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
+            st.info("📧 **Email Verified Guest**")
+            if session.email:
+                st.markdown(f"**Email:** {session.email}")
+            
+            # Daily question usage
+            st.markdown(f"**Daily Questions:** {session.daily_question_count}/10")
+            st.progress(session.daily_question_count / 10)
+            
+            if session.last_question_time:
+                next_reset = session.last_question_time + timedelta(hours=24)
+                time_to_reset = next_reset - datetime.now()
+                if time_to_reset.total_seconds() > 0:
+                    hours = int(time_to_reset.total_seconds() // 3600)
+                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
+                    st.caption(f"Resets in: {hours}h {minutes}m")
+                else:
+                    st.caption("Questions reset!")
+            
+        else:  # GUEST
+            st.warning("👤 **Guest User**")
+            st.markdown(f"**Questions:** {session.daily_question_count}/4")
+            st.progress(session.daily_question_count / 4)
+            st.caption("Email verification unlocks 10/day")
+        
+        # Fingerprinting info (if available)
+        if session.fingerprint_id:
+            st.markdown(f"**Device ID:** `{session.fingerprint_id[:8]}...`")
+            st.caption(f"Method: {session.fingerprint_method or 'unknown'}")
+        
+        # CRM Status
+        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type == UserType.REGISTERED_USER:
+            if session.zoho_contact_id: 
+                st.success("🔗 **CRM Linked**")
+            else: 
+                st.info("📋 **CRM Ready**")
+            if session.timeout_saved_to_crm:
+                st.caption("💾 Auto-saved to CRM")
+            else:
+                st.caption("💾 Auto-save at 15min")
+        else: 
+            st.caption("🚫 CRM: Registered users only")
+        
+        st.divider()
+        
+        # Enhanced session info
+        st.markdown(f"**Messages:** {len(session.messages)}")
+        st.markdown(f"**Session:** `{session.session_id[:8]}...`")
+        
+        # Ban status
+        if session.ban_status != BanStatus.NONE:
+            if session.ban_end_time and datetime.now() < session.ban_end_time:
+                time_remaining = session.ban_end_time - datetime.now()
+                hours = int(time_remaining.total_seconds() // 3600)
+                minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                st.error(f"🚫 **Restricted**")
+                st.error(f"Time: {hours}h {minutes}m")
+            else:
+                st.info("🟢 **Restrictions Lifted**")
+        
+        st.divider()
+        
+        # Action buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ Clear Chat", use_container_width=True):
+                session_manager.clear_chat_history(session)
+                st.rerun()
+        with col2:
+            if st.button("🚪 Sign Out", use_container_width=True):
+                session_manager.end_session(session)
+                st.rerun()
+
+        # Download & save section (registered users only)
+        if session.user_type == UserType.REGISTERED_USER and session.messages:
+            st.divider()
+            
+            # PDF Download
+            pdf_buffer = pdf_exporter.generate_chat_pdf(session)
+            if pdf_buffer:
+                st.download_button(
+                    label="📄 Download PDF",
+                    data=pdf_buffer,
+                    file_name=f"fifi_chat_transcript_{session.session_id[:8]}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+            
+            # CRM Save (if enabled)
+            if session_manager.zoho.config.ZOHO_ENABLED and session.email:
+                if st.button("💾 Save to Zoho CRM", use_container_width=True):
+                    session_manager.manual_save_to_crm(session)
+                st.caption("💡 Auto-saves after 15min inactivity")
+
+def render_chat_interface_complete(session_manager, session):
+    """Complete chat interface with all new features"""
+    
+    st.title("🤖 FiFi AI Assistant")
+    st.caption("Your intelligent food & beverage sourcing companion with universal fingerprinting")
+    
+    # Add global error handler
+    try:
+        global_message_channel_error_handler()
+    except Exception as e:
+        logger.error(f"Failed to add global error handler: {e}")
+    
+    # Initialize fingerprinting for session
+    if not session.fingerprint_id:
+        fingerprint_data = render_fingerprinting_component(session.session_id, session_manager.fingerprinting)
+        if fingerprint_data:
+            session_manager.apply_fingerprinting(session, fingerprint_data)
+            session_manager.db.save_session(session)
+            st.rerun()
+    
+    # Add enhanced browser close detection
+    try:
+        render_browser_close_detection_enhanced(session.session_id)
+    except Exception as e:
+        logger.error(f"Failed to render browser close detection: {e}")
+    
+    # Handle guest email verification dialog
+    if (session.user_type == UserType.GUEST and 
+        session.daily_question_count >= 4):
+        render_email_verification_dialog(session_manager, session)
+        return  # Don't show chat interface during verification
+    
+    # Show user tier status
+    if session.user_type == UserType.GUEST:
+        remaining = 4 - session.daily_question_count
+        if remaining > 0:
+            st.info(f"👤 **Guest Mode:** {remaining} questions remaining before email verification")
+        else:
+            st.warning("👤 **Guest Mode:** Email verification required to continue")
+    elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
+        remaining = 10 - session.daily_question_count
+        st.info(f"📧 **Email Verified:** {remaining} questions remaining today")
+    elif session.user_type == UserType.REGISTERED_USER:
+        if session.total_question_count <= 20:
+            remaining = 20 - session.total_question_count
+            st.success(f"🔐 **Registered User:** {remaining} questions in first tier")
+        else:
+            remaining = 40 - session.total_question_count
+            st.success(f"🔐 **Registered User:** {remaining} questions remaining")
+    
+    # 15-minute timer for registered users
+    if session.user_type == UserType.REGISTERED_USER:
+        timer_result = None
+        try:
+            timer_result = render_activity_timer_component_15min(session.session_id, session_manager)
+        except Exception as e:
+            logger.error(f"15-minute timer error: {e}")
+        
+        # Process timer events
+        if timer_result:
+            try:
+                should_rerun = handle_15min_timer_event(timer_result, session_manager, session)
+                if should_rerun:
+                    time.sleep(1)
+                    st.rerun()
+            except Exception as e:
+                logger.error(f"Timer event handling error: {e}")
+                st.warning("⚠️ Timer event processing encountered an error, but continuing...")
+    
+    # Display chat messages
+    for msg in session.messages:
+        with st.chat_message(msg.get("role", "user")):
+            st.markdown(msg.get("content", ""), unsafe_allow_html=True)
+            
+            if msg.get("role") == "assistant":
+                if "source" in msg:
+                    st.caption(f"Source: {msg['source']}")
+                
+                indicators = []
+                if msg.get("used_pinecone"):
+                    indicators.append("🧠 Knowledge Base")
+                if msg.get("used_search"):
+                    indicators.append("🌐 Web Search")
+                
+                if indicators:
+                    st.caption(f"Enhanced with: {', '.join(indicators)}")
+
+    # Handle input
+    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...")
+    
+    # Process user input
+    if prompt:
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Processing your question..."):
+                try:
+                    response = session_manager.get_ai_response(session, prompt)
+                    
+                    if response.get('requires_email'):
+                        st.error("📧 Please verify your email to continue")
+                        st.rerun()
+                    elif response.get('banned'):
+                        st.error(response.get('content', 'Access restricted'))
+                        if response.get('time_remaining'):
+                            time_remaining = response['time_remaining']
+                            hours = int(time_remaining.total_seconds() // 3600)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                    elif response.get('evasion_penalty'):
+                        st.error("🚫 Evasion detected - Extended restriction applied")
+                        st.error(f"Penalty: {response.get('penalty_hours', 0)} hours")
+                    else:
+                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                        
+                        if response.get("source"):
+                            st.caption(f"Source: {response['source']}")
+                        
+                        # Show enhanced features used
+                        indicators = []
+                        if response.get("used_pinecone"):
+                            indicators.append("🧠 Knowledge Base")
+                        if response.get("used_search"):
+                            indicators.append("🌐 Web Search")
+                        
+                        if indicators:
+                            st.caption(f"Enhanced with: {', '.join(indicators)}")
+                        
+                except Exception as e:
+                    logger.error(f"AI response generation failed: {e}")
+                    st.error("⚠️ Sorry, I encountered an error processing your request. Please try again.")
+        
+        st.rerun()
+
+# =============================================================================
+# UTILITY FUNCTIONS (ENHANCED)
+# =============================================================================
+
+def get_session_manager() -> Optional[SessionManager]:
+    """Safely get the session manager from session state"""
+    if 'session_manager' not in st.session_state:
+        return None
+    
+    manager = st.session_state.session_manager
+    if not hasattr(manager, 'get_session'):
+        logger.error("Invalid SessionManager instance in session state")
+        return None
+    
+    return manager
+
+def ensure_complete_initialization():
+    """Ensure the complete application is properly initialized"""
+    if 'initialized' not in st.session_state or not st.session_state.initialized:
+        try:
+            config = Config()
+            pdf_exporter = PDFExporter()
+            
+            if 'db_manager' not in st.session_state:
+                st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+            
+            db_manager = st.session_state.db_manager
+            zoho_manager = ZohoCRMManager(config, pdf_exporter)
+            ai_system = EnhancedAI(config)
+            rate_limiter = RateLimiter()
+            
+            # NEW: Initialize additional managers
+            fingerprinting_manager = FingerprintingManager()
+            email_verification_manager = EmailVerificationManager(config)
+            question_limit_manager = QuestionLimitManager()
+
+            st.session_state.session_manager = SessionManager(
+                config, db_manager, zoho_manager, ai_system, rate_limiter,
+                fingerprinting_manager, email_verification_manager, question_limit_manager
+            )
+            st.session_state.pdf_exporter = pdf_exporter
+            st.session_state.error_handler = error_handler
+            st.session_state.ai_system = ai_system
+            st.session_state.fingerprinting_manager = fingerprinting_manager
+            st.session_state.email_verification_manager = email_verification_manager
+            st.session_state.question_limit_manager = question_limit_manager
+            st.session_state.initialized = True
+            
+            logger.info("✅ Complete application initialized successfully with all features")
+            return True
+            
+        except Exception as e:
+            st.error("💥 A critical error occurred during application startup.")
+            st.error(f"Error details: {str(e)}")
+            logger.critical(f"Complete initialization failed: {e}", exc_info=True)
+            return False
+    
+    return True
+
+def process_emergency_save_enhanced(session_id: str) -> bool:
+    """Enhanced emergency save processing"""
+    try:
+        session_manager = get_session_manager()
+        if not session_manager:
+            logger.error("❌ Session manager not available for emergency save")
+            return False
+        
+        session = session_manager.db.load_session(session_id)
+        if not session:
+            logger.error(f"❌ Session {session_id[:8]} not found for emergency save")
+            return False
+        
+        session = session_manager._validate_and_fix_session(session)
+        
+        logger.info(f"✅ Emergency save session loaded: {session_id[:8]}")
+        logger.info(f"   User: {session.user_type.value}")
+        logger.info(f"   Email: {session.email}")
+        logger.info(f"   Messages: {len(session.messages)}")
+        
+        # Check eligibility for emergency save
+        if (session.user_type == UserType.REGISTERED_USER and 
+            session.email and 
+            session.messages and
+            not session.timeout_saved_to_crm):
+            
+            logger.info("✅ Session eligible for emergency save")
+            
+            # Extend session life
+            session.last_activity = datetime.now()
+            session_manager.db.save_session(session)
+            
+            # Perform emergency save
+            success = session_manager.zoho.save_chat_transcript_sync(session, "Emergency Save (Enhanced Browser Close)")
+            return success
+        else:
+            logger.info("❌ Session not eligible for emergency save")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Enhanced emergency save processing failed: {e}", exc_info=True)
+        return False
+
+def enhanced_handle_save_requests():
+    """Enhanced save handler for all emergency save types"""
+    
+    logger.info("🔍 ENHANCED SAVE HANDLER: Checking for emergency save requests...")
+    
+    query_params = st.query_params
+    logger.info(f"📋 Query params found: {dict(query_params)}")
+    
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    
+    if event in ["emergency_close", "close"] and session_id:
+        logger.info("=" * 80)
+        logger.info("🚨 ENHANCED EMERGENCY SAVE REQUEST DETECTED")
+        logger.info(f"Session ID: {session_id}")
+        logger.info(f"Event: {event}")
+        logger.info("=" * 80)
+        
+        # Show visual confirmation
+        st.error("🚨 **Emergency Save Detected** - Processing enhanced browser close save...")
+        
+        # Clear query params
+        st.query_params.clear()
+        
+        try:
+            success = process_emergency_save_enhanced(session_id)
+            
+            if success:
+                st.success("✅ Enhanced emergency save completed successfully!")
+                logger.info("✅ Enhanced emergency save completed")
+            else:
+                st.error("❌ Enhanced emergency save failed")
+                logger.error("❌ Enhanced emergency save failed")
+                
+        except Exception as e:
+            st.error(f"❌ Enhanced emergency save error: {str(e)}")
+            logger.error(f"Enhanced emergency save crashed: {e}", exc_info=True)
+        
+        time.sleep(2)
+        st.stop()
+    else:
+        logger.info("ℹ️ No enhanced emergency save requests found")
+
+# =============================================================================
+# MAIN APPLICATION WITH ALL FEATURES
+# =============================================================================
+
+def main():
+    st.set_page_config(
+        page_title="FiFi AI Assistant - Complete Integration", 
+        page_icon="🤖", 
+        layout="wide"
+    )
+
+    # Add global message channel error handler
+    global_message_channel_error_handler()
+
+    # Clear state button for development
+    if st.button("🔄 Fresh Start (Dev)", key="emergency_clear"):
+        st.session_state.clear()
+        st.rerun()
+
+    # Initialize complete application
+    if not ensure_complete_initialization():
+        st.stop()
+
+    # Handle enhanced save requests
+    enhanced_handle_save_requests()
+
+    # Get session manager
+    session_manager = get_session_manager()
+    if not session_manager:
+        st.error("Failed to get enhanced session manager.")
+        st.stop()
+    
+    # Main application flow
+    current_page = st.session_state.get('page')
+    
+    if current_page != "chat":
+        render_welcome_page_enhanced(session_manager)
+    else:
+        session = session_manager.get_session()
+        if session and session.active:
+            render_sidebar_enhanced(session_manager, session, st.session_state.pdf_exporter)
+            render_chat_interface_complete(session_manager, session)
+        else:
+            if 'page' in st.session_state:
+                del st.session_state['page']
+            st.rerun()
+
+if __name__ == "__main__":
+    main()
