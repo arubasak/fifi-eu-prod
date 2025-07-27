@@ -46,6 +46,7 @@ from streamlit_javascript import st_javascript
 # - FIX: Non-destructive database schema migration logic using ALTER TABLE ADD COLUMN.
 # - FIX: Dynamic column handling in REPLACE INTO for database consistency and robustness.
 # - FIX: Removed 'height' parameter from st_javascript to prevent error.
+# - FIX: Critical database loading error where 'session_id' was missing from UserSession constructor.
 # =============================================================================
 
 # Setup logging
@@ -523,7 +524,8 @@ class DatabaseManager:
                 }
 
                 # Construct the list of values to insert in the exact order of db_column_names.
-                # If a column exists in the DB but not in our UserSession_attr_map, it will receive None.
+                # If a column exists in the DB but doesn't have a corresponding attribute in UserSession_attr_to_value,
+                # it will receive None (or whatever SQLite's default for that column is if not specified as NULL).
                 values_to_insert = [
                     session_attr_to_value.get(col_name) for col_name in db_column_names
                 ]
@@ -568,19 +570,45 @@ class DatabaseManager:
                 # Convert row to dictionary for consistent processing
                 row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
 
+                # DEBUG: Log what we got from database
+                logger.debug(f"DEBUG - Database row for session {session_id[:8]}: columns={list(row_dict.keys())}")
+                logger.debug(f"DEBUG - 'session_id' in row_dict: {'session_id' in row_dict}")
+                logger.debug(f"DEBUG - hasattr(UserSession, 'session_id'): {hasattr(UserSession, 'session_id')}")
+                
                 # Dynamically create UserSession, converting types as needed
                 session_params = {}
+                
+                # CRITICAL FIX: Ensure session_id is always included first.
+                # It's a required positional argument for the UserSession dataclass.
+                if 'session_id' in row_dict:
+                    session_params['session_id'] = row_dict['session_id']
+                else:
+                    # Fallback: if 'session_id' somehow missing from DB row, use the one passed to the method.
+                    # This should ideally not happen if the DB schema is correct, but provides robustness.
+                    logger.warning(f"session_id column missing from database row for {session_id[:8]}, using method parameter.")
+                    session_params['session_id'] = session_id
+                
+                # Process all other fields from the database row
                 for key, value in row_dict.items():
-                    # Only map values to UserSession attributes if the attribute exists in the dataclass
+                    # Skip 'session_id' as we've already handled it explicitly above
+                    if key == 'session_id':
+                        continue
+                        
+                    # Only map values to UserSession attributes if the attribute exists in the dataclass.
+                    # This handles cases where the DB might have old columns not present in the latest UserSession.
                     if hasattr(UserSession, key):
                         session_params[key] = self._convert_db_value_to_python(key, value)
                     else:
-                        # Log if an unexpected column is found in the DB that's not in UserSession
-                        logger.debug(f"Skipping unknown DB column '{key}' during session load for {session_id[:8]}.")
+                        # Log if an unexpected column is found in the DB that's not in the UserSession dataclass
+                        logger.debug(f"Skipping unknown DB column '{key}' during session load for {session_id[:8]} (not in UserSession dataclass).")
                 
-                user_session = UserSession(**session_params)
+                # DEBUG: Log what parameters are finally being passed to the UserSession constructor
+                logger.debug(f"DEBUG - Final session params keys for {session_id[:8]}: {list(session_params.keys())}")
+                
+                user_session = UserSession(**session_params) # Unpack dictionary into dataclass constructor
                 logger.debug(f"Successfully loaded session {session_id[:8]}: type={user_session.user_type.value}.")
                 return user_session
+                
             except Exception as e:
                 logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
                 return None
