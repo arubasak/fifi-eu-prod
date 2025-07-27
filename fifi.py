@@ -44,6 +44,8 @@ from streamlit_javascript import st_javascript
 # - Enhanced browser close detection and error handling preserved.
 # - All syntax errors fixed and duplicate code properly merged and adapted.
 # - FIX: Non-destructive database schema migration logic using ALTER TABLE ADD COLUMN.
+# - FIX: Explicit column listing in REPLACE INTO for database consistency.
+# - FIX: Removed 'height' parameter from st_javascript to prevent error.
 # =============================================================================
 
 # Setup logging
@@ -398,8 +400,8 @@ class DatabaseManager:
                 self.conn.execute("CREATE INDEX IF NOT EXISTS idx_email ON sessions(email)")
                 self.conn.execute("CREATE INDEX IF NOT EXISTS idx_user_type ON sessions(user_type)")
                 self.conn.execute("CREATE INDEX IF NOT EXISTS idx_active ON sessions(active)")
-                self.conn.execute("CREATE INDEX IF NOT EXISTS idx_last_activity ON sessions(last_activity)") # Added from Code 1
-                self.conn.execute("CREATE INDEX IF NOT EXISTS idx_ban_status ON sessions(ban_status)") # Added from Code 1
+                self.conn.execute("CREATE INDEX IF NOT EXISTS idx_last_activity ON sessions(last_activity)")
+                self.conn.execute("CREATE INDEX IF NOT EXISTS idx_ban_status ON sessions(ban_status)")
                 self.conn.commit()
                 logger.info("✅ Database indexes ensured.")
             except Exception as e:
@@ -490,8 +492,21 @@ class DatabaseManager:
             )
             
             try:
-                # Use REPLACE INTO for upsert functionality (insert or update if primary key exists)
-                self.conn.execute('REPLACE INTO sessions VALUES (' + ','.join('?'*len(session_data)) + ')', session_data)
+                # FIX: Explicitly list all columns in the REPLACE INTO statement.
+                # This prevents issues with default values or column count mismatches.
+                self.conn.execute('''
+                    REPLACE INTO sessions (
+                        session_id, user_type, email, full_name, zoho_contact_id,
+                        created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm,
+                        fingerprint_id, fingerprint_method, visitor_type, recognition_response,
+                        daily_question_count, total_question_count, last_question_time, question_limit_reached,
+                        ban_status, ban_start_time, ban_end_time, ban_reason,
+                        evasion_count, current_penalty_hours, escalation_level,
+                        email_addresses_used, email_switches_count,
+                        ip_address, ip_detection_method, user_agent, browser_privacy_level,
+                        registration_prompted, registration_link_clicked
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', session_data)
                 self.conn.commit()
                 logger.debug(f"Successfully saved session {s.session_id[:8]} to database.")
             except Exception as e:
@@ -2915,7 +2930,21 @@ def render_email_verification_dialog(session_manager: SessionManager, session: U
             with col_code2:
                 resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
             
-            if submit_code:
+            if resend_code: # Check resend button first, as it might change stage
+                if verification_email:
+                    with st.spinner("Resending code..."):
+                        verification_sent = session_manager.email_verification.send_verification_code(verification_email)
+                        if verification_sent:
+                            st.success("Verification code resent successfully!")
+                            st.session_state.verification_stage = "code_entry" # Remain in code entry stage
+                        else:
+                            st.error("Failed to resend code. Please try again later.")
+                else:
+                    st.error("Error: No email address found to resend the code. Please go back and enter your email.")
+                    st.session_state.verification_stage = "email_entry" # Force back to email entry if no email is known
+                st.rerun() # Rerun after resend attempt
+
+            if submit_code: # Process submit button after resend logic
                 if code:
                     with st.spinner("Verifying code..."):
                         result = session_manager.verify_email_code(session, code)
@@ -2933,20 +2962,6 @@ def render_email_verification_dialog(session_manager: SessionManager, session: U
                 else:
                     st.error("Please enter the verification code you received.")
             
-            if resend_code:
-                if verification_email:
-                    with st.spinner("Resending code..."):
-                        verification_sent = session_manager.email_verification.send_verification_code(verification_email)
-                        if verification_sent:
-                            st.success("Verification code resent successfully!")
-                            st.session_state.verification_stage = "code_entry" # Remain in code entry stage
-                        else:
-                            st.error("Failed to resend code. Please try again later.")
-                else:
-                    st.error("Error: No email address found to resend the code. Please go back and enter your email.")
-                    st.session_state.verification_stage = "email_entry" # Force back to email entry if no email is known
-                    st.rerun()
-
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
     """Renders the main chat interface, integrating all features like fingerprinting, timers, and question handling."""
     
@@ -2960,9 +2975,9 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
     # This ensures a fingerprint ID is captured early in the session lifecycle.
     if not session.fingerprint_id:
         fingerprint_js_code = session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
+        # FIX: Removed 'height' parameter from st_javascript.
         # Execute the JS component. Use a consistent key for repeated calls within Streamlit.
-        # Set height/width to 0 as it's a hidden component for data collection.
-        fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id[:8]}", height=0, width=0)
+        fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id[:8]}")
         
         if fp_result:
             # If the JavaScript component returned a result, extract and apply the fingerprint data
@@ -3053,7 +3068,7 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
                         # If AI response indicates email is required (e.g., guest hit 4-question limit)
                         st.error("📧 Please verify your email to continue using FiFi AI.")
                         st.session_state.verification_stage = 'email_entry' # Set stage to show email dialog
-                        st.rerun() # Force a rerun to display the email verification dialog
+                        st.rerun()
                     elif response.get('banned'):
                         # If AI response indicates a ban (e.g., daily limit, tier limit)
                         st.error(response.get('content', 'Access restricted.')) # Display the ban message
@@ -3102,7 +3117,7 @@ def ensure_initialization():
     It handles graceful fallback for optional dependencies and critical error logging.
     """
     if 'initialized' not in st.session_state or not st.session_state.initialized:
-        logger.info("Starting application initialization...")
+        logger.info("Starting application initialization sequence...")
         try:
             config = Config() # Load application configuration from Streamlit secrets
             pdf_exporter = PDFExporter() # Initialize PDF exporter
