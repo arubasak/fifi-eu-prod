@@ -48,6 +48,7 @@ from streamlit_javascript import st_javascript
 # - FIX: Removed 'height' parameter from st_javascript to prevent error.
 # - FIX: Critical database loading error where 'session_id' was missing from UserSession constructor.
 # - FIX: Implement workaround for failing JavaScript fingerprinting; add JS test.
+# - CRITICAL DEBUG: Added extensive debug logging to get_session() to diagnose restriction issue.
 # =============================================================================
 
 # Setup logging
@@ -581,12 +582,11 @@ class DatabaseManager:
                 
                 # CRITICAL FIX: Ensure session_id is always included first.
                 # It's a required positional argument for the UserSession dataclass constructor.
+                # Prioritize row_dict, but fall back to the method parameter if needed (shouldn't happen with correct schema)
                 if 'session_id' in row_dict:
                     session_params['session_id'] = row_dict['session_id']
                 else:
-                    # Fallback: if 'session_id' is somehow missing from the database row (shouldn't happen with correct schema),
-                    # use the session_id parameter that was passed to the load_session method.
-                    logger.warning(f"session_id column missing from database row for {session_id[:8]}, falling back to method parameter.")
+                    logger.warning(f"session_id column missing from database row for {session_id[:8]}, falling back to method parameter. Database schema might be incomplete or corrupted.")
                     session_params['session_id'] = session_id
                 
                 # Process all other fields from the database row.
@@ -598,7 +598,7 @@ class DatabaseManager:
                         
                     # Only map values to UserSession attributes if the attribute exists in the dataclass.
                     # This is crucial for backward compatibility with older DB schemas that might have
-                    # columns not present in the current UserSession dataclass definition.
+                    # columns not present in the current UserSession dataclass definition, preventing AttributeError.
                     if hasattr(UserSession, key):
                         session_params[key] = self._convert_db_value_to_python(key, value)
                     else:
@@ -2005,7 +2005,7 @@ def process_emergency_save_from_query(session_id: str) -> bool:
             success = session_manager.zoho.save_chat_transcript_sync(session, "Emergency Save (Browser Close/Unload)")
             if success:
                 # Mark session as saved due to timeout/emergency to prevent re-saves for this period
-                session.timeout_saved_crm = True # Corrected attribute name
+                session.timeout_saved_to_crm = True
                 session_manager.db.save_session(session) # Persist this status update
             return success
         else:
@@ -2442,9 +2442,61 @@ class SessionManager:
                 # 1. Validate and fix session data types (Enums, lists etc.)
                 session = self._validate_session(session)
                 
+                # TEMPORARY WORKAROUND: Force fingerprint for sessions that don't have one
+                # This will prevent immediate errors if JS fingerprinting is failing,
+                # allowing other parts of the app to run.
+                if not session.fingerprint_id:
+                    session.fingerprint_id = f"temp_fp_{session.session_id[:8]}"
+                    session.fingerprint_method = "temporary_fallback_python"
+                    # Also set visitor_type for completeness, even for fallback
+                    session.visitor_type = "new_visitor_fallback"
+                    self.db.save_session(session) # Save the session with the temporary fingerprint
+                    logger.info(f"Applied temporary fallback fingerprint to session {session.session_id[:8]} (JS fingerprinting might be failing).")
+                
                 # 2. Check ban status BEFORE allowing any further interaction.
                 # If banned, display message and return the current session (which will be inactive for AI).
                 limit_check = self.question_limits.is_within_limits(session)
+
+                # CRITICAL DEBUG - Add this to get_session() method
+                st.sidebar.write("🚨 **CRITICAL DEBUG INFO:**")
+                st.sidebar.write(f"Session ID: {session.session_id[:8]}...")
+                st.sidebar.write(f"User Type: {session.user_type} (type: {type(session.user_type)})")
+                st.sidebar.write(f"User Type Value: {session.user_type.value if hasattr(session.user_type, 'value') else 'NO VALUE'}")
+                st.sidebar.write(f"Ban Status: {session.ban_status} (type: {type(session.ban_status)})")
+                st.sidebar.write(f"Ban Status Value: {session.ban_status.value if hasattr(session.ban_status, 'value') else 'NO VALUE'}")
+                st.sidebar.write(f"Daily Question Count: {session.daily_question_count}")
+                st.sidebar.write(f"Total Question Count: {session.total_question_count}")
+                st.sidebar.write(f"Question Limit Reached Flag: {session.question_limit_reached}")
+                st.sidebar.write(f"Fingerprint ID: {session.fingerprint_id}")
+
+                # MOST IMPORTANT - What is limit_check returning?
+                st.sidebar.write("---")
+                st.sidebar.write("🔍 **LIMIT CHECK RESULT:**")
+                st.sidebar.write(f"Allowed: {limit_check.get('allowed', 'KEY_MISSING')}")
+                st.sidebar.write(f"Reason: {limit_check.get('reason', 'NO_REASON')}")
+                st.sidebar.write(f"Message: {limit_check.get('message', 'NO_MESSAGE')}")
+                st.sidebar.write(f"Full limit_check: {limit_check}")
+
+                # Check enum comparisons
+                st.sidebar.write("---")
+                st.sidebar.write("🔍 **ENUM COMPARISONS (Should be True if validated correctly):**")
+                st.sidebar.write(f"session.user_type == UserType.GUEST: {session.user_type == UserType.GUEST}")
+                st.sidebar.write(f"session.user_type == UserType.EMAIL_VERIFIED_GUEST: {session.user_type == UserType.EMAIL_VERIFIED_GUEST}")
+                st.sidebar.write(f"session.user_type == UserType.REGISTERED_USER: {session.user_type == UserType.REGISTERED_USER}")
+                st.sidebar.write(f"session.ban_status == BanStatus.NONE: {session.ban_status == BanStatus.NONE}")
+                st.sidebar.write(f"session.ban_status == BanStatus.ONE_HOUR: {session.ban_status == BanStatus.ONE_HOUR}")
+                st.sidebar.write(f"session.ban_status == BanStatus.TWENTY_FOUR_HOUR: {session.ban_status == BanStatus.TWENTY_FOUR_HOUR}")
+                st.sidebar.write(f"session.ban_status == BanStatus.EVASION_BLOCK: {session.ban_status == BanStatus.EVASION_BLOCK}")
+
+
+                # Force display the restriction condition
+                if not limit_check.get('allowed', True):
+                    st.sidebar.error("❌ RESTRICTION TRIGGERED! (Based on limit_check)")
+                    st.sidebar.write(f"Restriction reason: {limit_check.get('reason')}")
+                else:
+                    st.sidebar.success("✅ Session should be allowed! (Based on limit_check)")
+                st.sidebar.markdown("---") # Visual separator
+
                 if not limit_check.get('allowed', True):
                     ban_type = limit_check.get('ban_type', 'unknown')
                     message = limit_check.get('message', 'Access restricted due to usage policy.')
@@ -2467,6 +2519,35 @@ class SessionManager:
         # If no session ID in Streamlit state, or session not found/inactive in DB, create a new guest session.
         logger.info("No active session found or current session is invalid. Creating a new guest session.")
         new_session = self._create_guest_session()
+        # TEMPORARY WORKAROUND: Apply temporary fingerprint to new sessions immediately
+        if not new_session.fingerprint_id:
+            new_session.fingerprint_id = f"temp_fp_new_{new_session.session_id[:8]}"
+            new_session.fingerprint_method = "temporary_fallback_python_new_session"
+            new_session.visitor_type = "new_visitor_fallback"
+            self.db.save_session(new_session)
+            logger.info(f"Applied temporary fingerprint to NEW session {new_session.session_id[:8]}")
+        
+        # Rerun limit check for the newly created session
+        limit_check = self.question_limits.is_within_limits(new_session)
+        
+        # Display debug info for newly created session too
+        st.sidebar.write("🚨 **CRITICAL DEBUG INFO (NEW SESSION):**")
+        st.sidebar.write(f"Session ID: {new_session.session_id[:8]}...")
+        st.sidebar.write(f"User Type: {new_session.user_type} (type: {type(new_session.user_type)})")
+        st.sidebar.write(f"Daily Question Count: {new_session.daily_question_count}")
+        st.sidebar.write(f"Fingerprint ID: {new_session.fingerprint_id}")
+        st.sidebar.write("---")
+        st.sidebar.write("🔍 **LIMIT CHECK RESULT (NEW SESSION):**")
+        st.sidebar.write(f"Allowed: {limit_check.get('allowed', 'KEY_MISSING')}")
+        st.sidebar.write(f"Reason: {limit_check.get('reason', 'NO_REASON')}")
+        st.sidebar.write(f"Message: {limit_check.get('message', 'NO_MESSAGE')}")
+        st.sidebar.write(f"Full limit_check: {limit_check}")
+        if not limit_check.get('allowed', True):
+            st.sidebar.error("❌ RESTRICTION TRIGGERED! (New Session)")
+        else:
+            st.sidebar.success("✅ New Session allowed!")
+        st.sidebar.markdown("---")
+        
         return self._validate_session(new_session) # Validate the newly created session
 
     @handle_api_errors("Authentication", "WordPress Login")
@@ -3046,7 +3127,7 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
 
     # 2. Initialize Fingerprinting if not already done for this session
     # This ensures a fingerprint ID is captured early in the session lifecycle.
-    if not session.fingerprint_id:
+    if not session.fingerprint_id or session.fingerprint_method == "temporary_fallback_python":
         fingerprint_js_code = session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
         # FIX: Removed 'height' parameter from st_javascript.
         # Execute the JS component. Use a consistent key for repeated calls within Streamlit.
@@ -3055,10 +3136,14 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
         if fp_result:
             # If the JavaScript component returned a result, extract and apply the fingerprint data
             extracted_fp_data = session_manager.fingerprinting.extract_fingerprint_from_result(fp_result)
-            session_manager.apply_fingerprinting(session, extracted_fp_data)
-            # Crucially, force a rerun to update the session state with the new fingerprint ID
-            # and allow the application to proceed with the updated session object.
-            st.rerun()
+            # Only apply if it's a real fingerprint, not a JS fallback
+            if extracted_fp_data.get('fingerprint_method') not in ["fallback", "canvas_blocked", "webgl_blocked", "audio_blocked"]:
+                session_manager.apply_fingerprinting(session, extracted_fp_data)
+                # Crucially, force a rerun to update the session state with the new fingerprint ID
+                # and allow the application to proceed with the updated session object.
+                st.rerun()
+            else:
+                logger.debug(f"JS Fingerprint returned a fallback/blocked result: {extracted_fp_data.get('fingerprint_method')}. Retaining Python fallback if present.")
         else:
             # If fingerprinting JS doesn't return immediately (e.g., still loading),
             # it will return on a subsequent rerun. Log a debug message.
@@ -3144,7 +3229,7 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
                         st.rerun()
                     elif response.get('banned'):
                         # If AI response indicates a ban (e.g., daily limit, tier limit)
-                        st.error(response.get('content', 'Access restricted.')) # Display the ban message
+                        st.error(response.get("content", 'Access restricted.')) # Display the ban message
                         if response.get('time_remaining'): # Display remaining time if provided
                             time_remaining = response['time_remaining']
                             hours = int(time_remaining.total_seconds() // 3600)
