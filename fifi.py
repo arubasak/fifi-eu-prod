@@ -49,6 +49,7 @@ from streamlit_javascript import st_javascript
 # - FIX: Critical database loading error where 'session_id' was missing from UserSession constructor.
 # - FIX: Implement workaround for failing JavaScript fingerprinting; add JS test.
 # - FIX: CRITICAL SESSION OBJECT INCONSISTENCY (Passing single session object from main).
+# - CRITICAL DEBUG: Added extensive debug logging to render_sidebar() to diagnose display issue.
 # =============================================================================
 
 # Setup logging
@@ -1906,7 +1907,7 @@ def global_message_channel_error_handler():
 
 def handle_timer_event(timer_result: Dict[str, Any], session_manager, session: UserSession) -> bool:
     """
-    Processes events triggered by the JavaScript activity timer (e.g., 15-minute timeout).
+    Processes events triggered by thelukas JavaScript activity timer (e.g., 15-minute timeout).
     This function adapted from Code 1's detailed event handler to fit 15-min timeout.
     """
     if not timer_result or not isinstance(timer_result, dict):
@@ -2866,19 +2867,47 @@ def render_welcome_page(session_manager: SessionManager):
 
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     """Renders the application's sidebar, displaying session information, user status, and action buttons."""
-    # DEBUG: Check if we're getting the same session
-    st.sidebar.write("🔍 **SIDEBAR SESSION DEBUG:**")
+    # DEBUG: Check if we're getting the same session and its properties
+    st.sidebar.write("🔍 **SIDEBAR SESSION DEBUG (render_sidebar):**")
     st.sidebar.write(f"Sidebar Session ID: {session.session_id[:8]}...")
-    st.sidebar.write(f"Sidebar User Type: {session.user_type.value}")
-    st.sidebar.write(f"Sidebar Ban Status: {session.ban_status.value}")
+    st.sidebar.write(f"Sidebar User Type: {session.user_type} (type: {type(session.user_type)})")
+    st.sidebar.write(f"Sidebar User Type Value: {session.user_type.value if hasattr(session.user_type, 'value') else 'NO VALUE'}")
+    st.sidebar.write(f"Sidebar Ban Status: {session.ban_status} (type: {type(session.ban_status)})")
+    st.sidebar.write(f"Sidebar Ban Status Value: {session.ban_status.value if hasattr(session.ban_status, 'value') else 'NO VALUE'}")
+    st.sidebar.write(f"Daily Question Count (Sidebar): {session.daily_question_count}")
+    st.sidebar.write(f"Total Question Count (Sidebar): {session.total_question_count}")
+    
+    # Check enum comparisons
+    st.sidebar.write("---")
+    st.sidebar.write("🔍 **ENUM COMPARISONS (render_sidebar - Should be True if validated correctly):**")
+    st.sidebar.write(f"session.user_type == UserType.GUEST: {session.user_type == UserType.GUEST}")
+    st.sidebar.write(f"session.user_type == UserType.EMAIL_VERIFIED_GUEST: {session.user_type == UserType.EMAIL_VERIFIED_GUEST}")
+    st.sidebar.write(f"session.user_type == UserType.REGISTERED_USER: {session.user_type == UserType.REGISTERED_USER}")
+    st.sidebar.write(f"session.ban_status == BanStatus.NONE: {session.ban_status == BanStatus.NONE}")
+    st.sidebar.write(f"session.ban_status == BanStatus.ONE_HOUR: {session.ban_status == BanStatus.ONE_HOUR}")
+    st.sidebar.write(f"session.ban_status == BanStatus.TWENTY_FOUR_HOUR: {session.ban_status == BanStatus.TWENTY_FOUR_HOUR}")
+    st.sidebar.write(f"session.ban_status == BanStatus.EVASION_BLOCK: {session.ban_status == BanStatus.EVASION_BLOCK}")
     st.sidebar.markdown("---") # Visual separator
 
+    # TEMPORARY DEBUG - Replace the existing user type display with this:
+    st.sidebar.write(f"🔧 USER TYPE DEBUG: {session.user_type} == {session.user_type.value}")
+
+    if session.user_type == UserType.REGISTERED_USER:
+        st.sidebar.success("✅ **Registered User** (CORRECT Display)")
+    elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:  
+        st.sidebar.info("📧 **Email Verified Guest** (CORRECT Display)")
+    elif session.user_type == UserType.GUEST:
+        st.sidebar.warning("👤 **Guest User** (CORRECT Display)")
+    else:
+        st.sidebar.error(f"🚨 **UNKNOWN USER TYPE:** {session.user_type} (BUG in display logic!)")
+    st.sidebar.markdown("---") # Visual separator for temporary debug
+
     with st.sidebar:
-        st.title("🎛️ Dashboard")
+        st.title("🎛️ Dashboard") # Title for the actual dashboard content
         
-        # Dynamic user status display
+        # Dynamic user status display (original logic, will be overridden by temporary debug above for now)
         if session.user_type == UserType.REGISTERED_USER:
-            st.success("✅ **Registered User**")
+            # st.success("✅ **Registered User**") # Commented out due to temporary debug
             if session.full_name: 
                 st.markdown(f"**Name:** {session.full_name}")
             if session.email: 
@@ -2893,7 +2922,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 st.progress((session.total_question_count - 20) / 20, text="Tier 2 (21-40 questions)")
             
         elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
-            st.info("📧 **Email Verified Guest**")
+            # st.info("📧 **Email Verified Guest**") # Commented out due to temporary debug
             if session.email:
                 st.markdown(f"**Email:** {session.email}")
             
@@ -2913,7 +2942,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     st.caption("Daily questions have reset!")
             
         else: # UserType.GUEST
-            st.warning("👤 **Guest User**")
+            # st.warning("👤 **Guest User**") # Commented out due to temporary debug
             st.markdown(f"**Questions:** {session.daily_question_count}/4")
             st.progress(session.daily_question_count / 4)
             st.caption("Email verification unlocks 10 questions/day.")
@@ -2943,7 +2972,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
         
         # Display Ban Status prominently if session is restricted
-        if session.ban_status != BanStatus.NONE:
+        if session.ban_status != BanStatus.NONE: # This is the check for displaying RESTRICTED status
             st.error(f"🚫 **STATUS: RESTRICTED**")
             if session.ban_end_time:
                 time_remaining = session.ban_end_time - datetime.now()
