@@ -50,6 +50,8 @@ from streamlit_javascript import st_javascript
 # - FIX: Implement workaround for failing JavaScript fingerprinting; add JS test.
 # - FIX: CRITICAL SESSION OBJECT INCONSISTENCY (Passing single session object from main).
 # - CRITICAL DEBUG: Added extensive debug logging to render_sidebar() to diagnose display issue.
+# - FIX: Enum Comparison Issue: Changed `enum_member == Enum.MEMBER` to `enum_member.value == Enum.MEMBER.value`
+#        for consistent comparisons across Streamlit reruns where Enum objects might have different IDs.
 # =============================================================================
 
 # Setup logging
@@ -676,7 +678,10 @@ class DatabaseManager:
                 for row in cursor.fetchall():
                     row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
                     session_params = {}
+                    # CRITICAL FIX: Ensure session_id is always passed.
+                    session_params['session_id'] = row_dict.get('session_id', str(uuid.uuid4())) # Fallback if missing
                     for key, value in row_dict.items():
+                        if key == 'session_id': continue # Already handled
                         if hasattr(UserSession, key): # Only map if attribute exists in UserSession
                             session_params[key] = self._convert_db_value_to_python(key, value)
                     sessions.append(UserSession(**session_params))
@@ -700,7 +705,10 @@ class DatabaseManager:
                 for row in cursor.fetchall():
                     row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
                     session_params = {}
+                    # CRITICAL FIX: Ensure session_id is always passed.
+                    session_params['session_id'] = row_dict.get('session_id', str(uuid.uuid4())) # Fallback if missing
                     for key, value in row_dict.items():
+                        if key == 'session_id': continue # Already handled
                         if hasattr(UserSession, key): # Only map if attribute exists in UserSession
                             session_params[key] = self._convert_db_value_to_python(key, value)
                     sessions.append(UserSession(**session_params))
@@ -937,9 +945,9 @@ class QuestionLimitManager:
     
     def __init__(self):
         self.question_limits = {
-            UserType.GUEST: 4,                    # 4 questions → forced email verification
-            UserType.EMAIL_VERIFIED_GUEST: 10,   # 10 questions/day
-            UserType.REGISTERED_USER: 40         # 40 questions/day cross-device
+            UserType.GUEST.value: 4,                    # 4 questions → forced email verification
+            UserType.EMAIL_VERIFIED_GUEST.value: 10,   # 10 questions/day
+            UserType.REGISTERED_USER.value: 40         # 40 questions/day cross-device
         }
         self.evasion_penalties = [24, 48, 96, 192, 336] # Escalating evasion penalties in hours
     
@@ -948,10 +956,10 @@ class QuestionLimitManager:
         Checks if the current session is within its allowed question limits
         or if any bans are active.
         """
-        user_limit = self.question_limits.get(session.user_type, 0)
+        user_limit = self.question_limits.get(session.user_type.value, 0)
         
         # 1. Check current ban status (if any)
-        if session.ban_status != BanStatus.NONE:
+        if session.ban_status.value != BanStatus.NONE.value:
             if session.ban_end_time and datetime.now() < session.ban_end_time:
                 time_remaining = session.ban_end_time - datetime.now()
                 return {
@@ -979,7 +987,7 @@ class QuestionLimitManager:
                 session.question_limit_reached = False # Reset UI flag
         
         # 3. Apply limits based on UserType
-        if session.user_type == UserType.GUEST:
+        if session.user_type.value == UserType.GUEST.value:
             if session.daily_question_count >= user_limit:
                 return {
                     'allowed': False,
@@ -987,7 +995,7 @@ class QuestionLimitManager:
                     'message': 'Please provide your email address to continue.'
                 }
         
-        elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
+        elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             if session.daily_question_count >= user_limit:
                 # Exceeded 10 questions/day for email-verified guest → 24-hour ban
                 self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
@@ -997,7 +1005,7 @@ class QuestionLimitManager:
                     'message': self._get_email_verified_limit_message()
                 }
         
-        elif session.user_type == UserType.REGISTERED_USER:
+        elif session.user_type.value == UserType.REGISTERED_USER.value:
             # Registered users have a 40-question total limit, with a softer 1-hour ban after 20.
             if session.total_question_count >= user_limit:
                 # Exceeded 40 questions → 24-hour ban
@@ -1007,7 +1015,7 @@ class QuestionLimitManager:
                     'reason': 'total_limit',
                     'message': "Usage limit reached. Please retry in 24 hours as we are giving preference to others in the queue."
                 }
-            elif session.total_question_count >= 20 and session.ban_status == BanStatus.NONE:
+            elif session.total_question_count >= 20 and session.ban_status.value == BanStatus.NONE.value:
                 # Hit 20 questions → apply 1-hour ban if not already banned
                 self._apply_ban(session, BanStatus.ONE_HOUR, "Registered user first tier limit reached")
                 return {
@@ -1021,7 +1029,7 @@ class QuestionLimitManager:
     def record_question(self, session: UserSession):
         """Increments question counters for the session."""
         session.daily_question_count += 1
-        if session.user_type == UserType.REGISTERED_USER:
+        if session.user_type.value == UserType.REGISTERED_USER.value:
             session.total_question_count += 1
         session.last_question_time = datetime.now()
         logger.debug(f"Question recorded for {session.session_id[:8]}: daily={session.daily_question_count}, total={session.total_question_count}.")
@@ -1029,10 +1037,10 @@ class QuestionLimitManager:
     def _apply_ban(self, session: UserSession, ban_type: BanStatus, reason: str):
         """Applies a ban to the session for a specified duration."""
         ban_hours = {
-            BanStatus.ONE_HOUR: 1,
-            BanStatus.TWENTY_FOUR_HOUR: 24,
-            BanStatus.EVASION_BLOCK: session.current_penalty_hours # Use current_penalty_hours for evasion
-        }.get(ban_type, 24) # Default to 24 hours if type is unknown
+            BanStatus.ONE_HOUR.value: 1,
+            BanStatus.TWENTY_FOUR_HOUR.value: 24,
+            BanStatus.EVASION_BLOCK.value: session.current_penalty_hours # Use current_penalty_hours for evasion
+        }.get(ban_type.value, 24) # Default to 24 hours if type is unknown
 
         session.ban_status = ban_type
         session.ban_start_time = datetime.now()
@@ -1058,9 +1066,9 @@ class QuestionLimitManager:
     
     def _get_ban_message(self, session: UserSession) -> str:
         """Provides a user-friendly message for current bans."""
-        if session.ban_status == BanStatus.EVASION_BLOCK:
+        if session.ban_status.value == BanStatus.EVASION_BLOCK.value:
             return "Usage limit reached due to detected unusual activity. Please try again later."
-        elif session.user_type == UserType.REGISTERED_USER:
+        elif session.user_type.value == UserType.REGISTERED_USER.value:
             return "Usage limit reached. Please retry in 1 hour as we are giving preference to others in the queue."
         else: # EMAIL_VERIFIED_GUEST (or other cases that hit 24-hour daily limit)
             return self._get_email_verified_limit_message()
@@ -1329,7 +1337,7 @@ class ZohoCRMManager:
         logger.info(f"ZOHO SAVE START - Trigger: {trigger_reason}")
         
         # Only registered users with email and messages can save to CRM
-        if (session.user_type != UserType.REGISTERED_USER or 
+        if (session.user_type.value != UserType.REGISTERED_USER.value or 
             not session.email or 
             not session.messages or 
             not self.config.ZOHO_ENABLED):
@@ -1928,7 +1936,7 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager, session: U
             st.info(f"⏰ **Session timeout:** Detected {inactive_minutes} minutes of inactivity.")
             
             # Perform CRM save if the session is eligible (registered user, has email, has messages, and not already saved for this timeout)
-            if (session.user_type == UserType.REGISTERED_USER and 
+            if (session.user_type.value == UserType.REGISTERED_USER.value and
                 session.email and 
                 session.messages and
                 not session.timeout_saved_to_crm):
@@ -1991,7 +1999,7 @@ def process_emergency_save_from_query(session_id: str) -> bool:
         logger.info(f"✅ Emergency save processing for session '{session_id[:8]}': UserType={session.user_type.value}, Email={session.email}, Messages={len(session.messages)}.")
         
         # Check eligibility for emergency save: Must be a registered user with email and chat history, and not already saved.
-        if (session.user_type == UserType.REGISTERED_USER and 
+        if (session.user_type.value == UserType.REGISTERED_USER.value and
             session.email and 
             session.messages and
             not session.timeout_saved_to_crm): # Important: Only save if not already saved by a timeout timer
@@ -2242,7 +2250,7 @@ class SessionManager:
             if not self.zoho.config.ZOHO_ENABLED:
                 logger.info("CRM save skipped: Zoho integration is disabled in configuration.")
                 return False
-            if session.user_type != UserType.REGISTERED_USER:
+            if session.user_type.value != UserType.REGISTERED_USER.value: # FIX: Use .value
                 logger.info("CRM save skipped: Only REGISTERED_USER sessions are saved to CRM.")
                 return False
             if not session.email:
@@ -2411,7 +2419,7 @@ class SessionManager:
             # Exclude the current session itself
             if s.session_id != session.session_id and s.last_activity and s.last_activity > recent_cutoff:
                 # If a previous session from this device hit a question limit or was banned
-                if s.question_limit_reached or s.ban_status != BanStatus.NONE:
+                if s.question_limit_reached or s.ban_status.value != BanStatus.NONE.value: # FIX: Use .value
                     logger.warning(f"Evasion detected: Fingerprint {session.fingerprint_id[:8]}... has recent limited/banned session {s.session_id[:8]}. Triggering evasion penalty.")
                     return True 
 
@@ -2470,6 +2478,13 @@ class SessionManager:
                 st.sidebar.write(f"Question Limit Reached Flag: {session.question_limit_reached}")
                 st.sidebar.write(f"Fingerprint ID: {session.fingerprint_id}")
 
+                st.sidebar.write(f"🔍 UserType object ID: {id(UserType)}")
+                st.sidebar.write(f"🔍 UserType.REGISTERED_USER ID: {id(UserType.REGISTERED_USER)}")
+                st.sidebar.write(f"🔍 BanStatus object ID: {id(BanStatus)}")
+                st.sidebar.write(f"🔍 BanStatus.NONE ID: {id(BanStatus.NONE)}")
+                st.sidebar.write(f"🔍 session.user_type ID: {id(session.user_type)}")
+                st.sidebar.write(f"🔍 session.ban_status ID: {id(session.ban_status)}")
+
                 # MOST IMPORTANT - What is limit_check returning?
                 st.sidebar.write("---")
                 st.sidebar.write("🔍 **LIMIT CHECK RESULT (get_session):**")
@@ -2477,18 +2492,6 @@ class SessionManager:
                 st.sidebar.write(f"Reason: {limit_check.get('reason', 'NO_REASON')}")
                 st.sidebar.write(f"Message: {limit_check.get('message', 'NO_MESSAGE')}")
                 st.sidebar.write(f"Full limit_check: {limit_check}")
-
-                # Check enum comparisons
-                st.sidebar.write("---")
-                st.sidebar.write("🔍 **ENUM COMPARISONS (get_session - Should be True if validated correctly):**")
-                st.sidebar.write(f"session.user_type == UserType.GUEST: {session.user_type == UserType.GUEST}")
-                st.sidebar.write(f"session.user_type == UserType.EMAIL_VERIFIED_GUEST: {session.user_type == UserType.EMAIL_VERIFIED_GUEST}")
-                st.sidebar.write(f"session.user_type == UserType.REGISTERED_USER: {session.user_type == UserType.REGISTERED_USER}")
-                st.sidebar.write(f"session.ban_status == BanStatus.NONE: {session.ban_status == BanStatus.NONE}")
-                st.sidebar.write(f"session.ban_status == BanStatus.ONE_HOUR: {session.ban_status == BanStatus.ONE_HOUR}")
-                st.sidebar.write(f"session.ban_status == BanStatus.TWENTY_FOUR_HOUR: {session.ban_status == BanStatus.TWENTY_FOUR_HOUR}")
-                st.sidebar.write(f"session.ban_status == BanStatus.EVASION_BLOCK: {session.ban_status == BanStatus.EVASION_BLOCK}")
-
 
                 # Force display the restriction condition
                 if not limit_check.get('allowed', True):
@@ -2538,6 +2541,14 @@ class SessionManager:
         st.sidebar.write(f"User Type: {new_session.user_type} (type: {type(new_session.user_type)})")
         st.sidebar.write(f"Daily Question Count: {new_session.daily_question_count}")
         st.sidebar.write(f"Fingerprint ID: {new_session.fingerprint_id}")
+
+        st.sidebar.write(f"🔍 UserType object ID: {id(UserType)}")
+        st.sidebar.write(f"🔍 UserType.REGISTERED_USER ID: {id(UserType.REGISTERED_USER)}")
+        st.sidebar.write(f"🔍 BanStatus object ID: {id(BanStatus)}")
+        st.sidebar.write(f"🔍 BanStatus.NONE ID: {id(BanStatus.NONE)}")
+        st.sidebar.write(f"🔍 session.user_type ID: {id(new_session.user_type)}")
+        st.sidebar.write(f"🔍 session.ban_status ID: {id(new_session.ban_status)}")
+
         st.sidebar.write("---")
         st.sidebar.write("🔍 **LIMIT CHECK RESULT (NEW SESSION from get_session):**")
         st.sidebar.write(f"Allowed: {limit_check.get('allowed', 'KEY_MISSING')}")
@@ -2750,7 +2761,7 @@ class SessionManager:
         session = self._validate_session(session)
         
         # Attempt CRM save for registered users with chat history
-        if (session.user_type == UserType.REGISTERED_USER and 
+        if (session.user_type.value == UserType.REGISTERED_USER.value and # FIX: Use .value
             session.email and 
             session.messages and 
             self.zoho.config.ZOHO_ENABLED):
@@ -2776,7 +2787,7 @@ class SessionManager:
         """Allows registered users to manually save their current chat transcript to Zoho CRM."""
         session = self._validate_session(session)
         
-        if (session.user_type == UserType.REGISTERED_USER and 
+        if (session.user_type.value == UserType.REGISTERED_USER.value and # FIX: Use .value
             session.email and 
             session.messages and 
             self.zoho.config.ZOHO_ENABLED):
@@ -2867,47 +2878,43 @@ def render_welcome_page(session_manager: SessionManager):
 
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     """Renders the application's sidebar, displaying session information, user status, and action buttons."""
-    # DEBUG: Check if we're getting the same session and its properties
-    st.sidebar.write("🔍 **SIDEBAR SESSION DEBUG (render_sidebar):**")
-    st.sidebar.write(f"Sidebar Session ID: {session.session_id[:8]}...")
-    st.sidebar.write(f"Sidebar User Type: {session.user_type} (type: {type(session.user_type)})")
-    st.sidebar.write(f"Sidebar User Type Value: {session.user_type.value if hasattr(session.user_type, 'value') else 'NO VALUE'}")
-    st.sidebar.write(f"Sidebar Ban Status: {session.ban_status} (type: {type(session.ban_status)})")
-    st.sidebar.write(f"Sidebar Ban Status Value: {session.ban_status.value if hasattr(session.ban_status, 'value') else 'NO VALUE'}")
-    st.sidebar.write(f"Daily Question Count (Sidebar): {session.daily_question_count}")
-    st.sidebar.write(f"Total Question Count (Sidebar): {session.total_question_count}")
+    # CRITICAL DEBUG - Add this to render_sidebar() method
+    st.sidebar.write("🚨 **CRITICAL DEBUG INFO (render_sidebar):**")
+    st.sidebar.write(f"Session ID: {session.session_id[:8]}...")
+    st.sidebar.write(f"User Type: {session.user_type} (type: {type(session.user_type)})")
+    st.sidebar.write(f"User Type Value: {session.user_type.value if hasattr(session.user_type, 'value') else 'NO VALUE'}")
+    st.sidebar.write(f"Ban Status: {session.ban_status} (type: {type(session.ban_status)})")
+    st.sidebar.write(f"Ban Status Value: {session.ban_status.value if hasattr(session.ban_status, 'value') else 'NO VALUE'}")
+    st.sidebar.write(f"Daily Question Count: {session.daily_question_count}")
+    st.sidebar.write(f"Total Question Count: {session.total_question_count}")
+    st.sidebar.write(f"Question Limit Reached Flag: {session.question_limit_reached}")
+    st.sidebar.write(f"Fingerprint ID: {session.fingerprint_id}")
     
-    # Check enum comparisons
+    st.sidebar.write(f"🔍 UserType object ID: {id(UserType)}")
+    st.sidebar.write(f"🔍 UserType.REGISTERED_USER ID: {id(UserType.REGISTERED_USER)}")
+    st.sidebar.write(f"🔍 BanStatus object ID: {id(BanStatus)}")
+    st.sidebar.write(f"🔍 BanStatus.NONE ID: {id(BanStatus.NONE)}")
+    st.sidebar.write(f"🔍 session.user_type ID: {id(session.user_type)}")
+    st.sidebar.write(f"🔍 session.ban_status ID: {id(session.ban_status)}")
+
+    # Check enum comparisons (these will now be TRUE if the values match)
     st.sidebar.write("---")
     st.sidebar.write("🔍 **ENUM COMPARISONS (render_sidebar - Should be True if validated correctly):**")
-    st.sidebar.write(f"session.user_type == UserType.GUEST: {session.user_type == UserType.GUEST}")
-    st.sidebar.write(f"session.user_type == UserType.EMAIL_VERIFIED_GUEST: {session.user_type == UserType.EMAIL_VERIFIED_GUEST}")
-    st.sidebar.write(f"session.user_type == UserType.REGISTERED_USER: {session.user_type == UserType.REGISTERED_USER}")
-    st.sidebar.write(f"session.ban_status == BanStatus.NONE: {session.ban_status == BanStatus.NONE}")
-    st.sidebar.write(f"session.ban_status == BanStatus.ONE_HOUR: {session.ban_status == BanStatus.ONE_HOUR}")
-    st.sidebar.write(f"session.ban_status == BanStatus.TWENTY_FOUR_HOUR: {session.ban_status == BanStatus.TWENTY_FOUR_HOUR}")
-    st.sidebar.write(f"session.ban_status == BanStatus.EVASION_BLOCK: {session.ban_status == BanStatus.EVASION_BLOCK}")
+    st.sidebar.write(f"session.user_type.value == UserType.GUEST.value: {session.user_type.value == UserType.GUEST.value}")
+    st.sidebar.write(f"session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value: {session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value}")
+    st.sidebar.write(f"session.user_type.value == UserType.REGISTERED_USER.value: {session.user_type.value == UserType.REGISTERED_USER.value}")
+    st.sidebar.write(f"session.ban_status.value == BanStatus.NONE.value: {session.ban_status.value == BanStatus.NONE.value}")
+    st.sidebar.write(f"session.ban_status.value == BanStatus.ONE_HOUR.value: {session.ban_status.value == BanStatus.ONE_HOUR.value}")
+    st.sidebar.write(f"session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value: {session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value}")
+    st.sidebar.write(f"session.ban_status.value == BanStatus.EVASION_BLOCK.value: {session.ban_status.value == BanStatus.EVASION_BLOCK.value}")
     st.sidebar.markdown("---") # Visual separator
-
-    # TEMPORARY DEBUG - Replace the existing user type display with this:
-    st.sidebar.write(f"🔧 USER TYPE DEBUG: {session.user_type} == {session.user_type.value}")
-
-    if session.user_type == UserType.REGISTERED_USER:
-        st.sidebar.success("✅ **Registered User** (CORRECT Display)")
-    elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:  
-        st.sidebar.info("📧 **Email Verified Guest** (CORRECT Display)")
-    elif session.user_type == UserType.GUEST:
-        st.sidebar.warning("👤 **Guest User** (CORRECT Display)")
-    else:
-        st.sidebar.error(f"🚨 **UNKNOWN USER TYPE:** {session.user_type} (BUG in display logic!)")
-    st.sidebar.markdown("---") # Visual separator for temporary debug
 
     with st.sidebar:
         st.title("🎛️ Dashboard") # Title for the actual dashboard content
         
-        # Dynamic user status display (original logic, will be overridden by temporary debug above for now)
-        if session.user_type == UserType.REGISTERED_USER:
-            # st.success("✅ **Registered User**") # Commented out due to temporary debug
+        # Dynamic user status display
+        if session.user_type.value == UserType.REGISTERED_USER.value: # FIX: Use .value
+            st.success("✅ **Registered User**")
             if session.full_name: 
                 st.markdown(f"**Name:** {session.full_name}")
             if session.email: 
@@ -2921,8 +2928,8 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
             else:
                 st.progress((session.total_question_count - 20) / 20, text="Tier 2 (21-40 questions)")
             
-        elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
-            # st.info("📧 **Email Verified Guest**") # Commented out due to temporary debug
+        elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value: # FIX: Use .value
+            st.info("📧 **Email Verified Guest**")
             if session.email:
                 st.markdown(f"**Email:** {session.email}")
             
@@ -2941,8 +2948,8 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 else:
                     st.caption("Daily questions have reset!")
             
-        else: # UserType.GUEST
-            # st.warning("👤 **Guest User**") # Commented out due to temporary debug
+        else: # UserType.GUEST.value (default case) # FIX: Use .value
+            st.warning("👤 **Guest User**")
             st.markdown(f"**Questions:** {session.daily_question_count}/4")
             st.progress(session.daily_question_count / 4)
             st.caption("Email verification unlocks 10 questions/day.")
@@ -2953,7 +2960,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
             st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
         
         # Zoho CRM Status Display (only for registered users if Zoho is enabled)
-        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type == UserType.REGISTERED_USER:
+        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value == UserType.REGISTERED_USER.value: # FIX: Use .value
             if session.zoho_contact_id: 
                 st.success("🔗 **CRM Linked**")
             else: 
@@ -2972,7 +2979,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
         
         # Display Ban Status prominently if session is restricted
-        if session.ban_status != BanStatus.NONE: # This is the check for displaying RESTRICTED status
+        if session.ban_status.value != BanStatus.NONE.value: # FIX: Use .value
             st.error(f"🚫 **STATUS: RESTRICTED**")
             if session.ban_end_time:
                 time_remaining = session.ban_end_time - datetime.now()
@@ -2980,7 +2987,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 minutes = int((time_remaining.total_seconds() % 3600) // 60)
                 st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
             st.markdown(f"Reason: {session.ban_reason or 'Usage policy violation'}")
-        elif session.question_limit_reached and session.user_type == UserType.GUEST: 
+        elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: # FIX: Use .value
             # Specific warning for guest users who hit limit (to prompt email verification)
             st.warning("⚠️ **ACTION REQUIRED: Email Verification**")
         
@@ -2998,7 +3005,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 st.rerun() # Rerun to switch to welcome page
 
         # Download & Save Chat options (only for registered users with chat history)
-        if session.user_type == UserType.REGISTERED_USER and session.messages:
+        if session.user_type.value == UserType.REGISTERED_USER.value and session.messages: # FIX: Use .value
             st.divider()
             
             # PDF Download Button
@@ -3188,14 +3195,14 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
 
     # 3. Render browser close detection for emergency saves (only for Registered Users)
     # This JavaScript must be rendered on every rerun to ensure its listeners are active.
-    if session.user_type == UserType.REGISTERED_USER:
+    if session.user_type.value == UserType.REGISTERED_USER.value: # FIX: Use .value
         try:
             render_browser_close_detection_enhanced(session.session_id)
         except Exception as e:
             logger.error(f"Failed to render browser close detection JS for {session.session_id[:8]}: {e}", exc_info=True)
 
     # 4. Handle inactivity timer for 15-minute timeout (only for Registered Users)
-    if session.user_type == UserType.REGISTERED_USER:
+    if session.user_type.value == UserType.REGISTERED_USER.value: # FIX: Use .value
         timer_result = None
         try:
             # The JS component will return a dictionary event if the 15-minute timeout is reached
@@ -3245,7 +3252,7 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
     # 7. Chat input for user interaction
     # The `disabled` attribute will prevent input if the user is banned.
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=session.ban_status != BanStatus.NONE)
+                            disabled=session.ban_status.value != BanStatus.NONE.value) # FIX: Use .value
     
     if prompt:
         # Display the user's message immediately in the chat interface
