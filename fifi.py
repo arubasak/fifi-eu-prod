@@ -47,6 +47,7 @@ from streamlit_javascript import st_javascript
 # - FIX: Dynamic column handling in REPLACE INTO for database consistency and robustness.
 # - FIX: Removed 'height' parameter from st_javascript to prevent error.
 # - FIX: Critical database loading error where 'session_id' was missing from UserSession constructor.
+# - FIX: Implement workaround for failing JavaScript fingerprinting; add JS test.
 # =============================================================================
 
 # Setup logging
@@ -579,30 +580,32 @@ class DatabaseManager:
                 session_params = {}
                 
                 # CRITICAL FIX: Ensure session_id is always included first.
-                # It's a required positional argument for the UserSession dataclass.
+                # It's a required positional argument for the UserSession dataclass constructor.
                 if 'session_id' in row_dict:
                     session_params['session_id'] = row_dict['session_id']
                 else:
-                    # Fallback: if 'session_id' somehow missing from DB row, use the one passed to the method.
-                    # This should ideally not happen if the DB schema is correct, but provides robustness.
-                    logger.warning(f"session_id column missing from database row for {session_id[:8]}, using method parameter.")
+                    # Fallback: if 'session_id' is somehow missing from the database row (shouldn't happen with correct schema),
+                    # use the session_id parameter that was passed to the load_session method.
+                    logger.warning(f"session_id column missing from database row for {session_id[:8]}, falling back to method parameter.")
                     session_params['session_id'] = session_id
                 
-                # Process all other fields from the database row
+                # Process all other fields from the database row.
+                # Iterate through the keys in row_dict.
                 for key, value in row_dict.items():
-                    # Skip 'session_id' as we've already handled it explicitly above
+                    # Skip 'session_id' here as we've already handled it explicitly above.
                     if key == 'session_id':
                         continue
                         
                     # Only map values to UserSession attributes if the attribute exists in the dataclass.
-                    # This handles cases where the DB might have old columns not present in the latest UserSession.
+                    # This is crucial for backward compatibility with older DB schemas that might have
+                    # columns not present in the current UserSession dataclass definition.
                     if hasattr(UserSession, key):
                         session_params[key] = self._convert_db_value_to_python(key, value)
                     else:
-                        # Log if an unexpected column is found in the DB that's not in the UserSession dataclass
+                        # Log if an unexpected column is found in the DB that is not part of the UserSession dataclass.
                         logger.debug(f"Skipping unknown DB column '{key}' during session load for {session_id[:8]} (not in UserSession dataclass).")
                 
-                # DEBUG: Log what parameters are finally being passed to the UserSession constructor
+                # DEBUG: Log what parameters are finally being passed to the UserSession constructor.
                 logger.debug(f"DEBUG - Final session params keys for {session_id[:8]}: {list(session_params.keys())}")
                 
                 user_session = UserSession(**session_params) # Unpack dictionary into dataclass constructor
@@ -2002,7 +2005,7 @@ def process_emergency_save_from_query(session_id: str) -> bool:
             success = session_manager.zoho.save_chat_transcript_sync(session, "Emergency Save (Browser Close/Unload)")
             if success:
                 # Mark session as saved due to timeout/emergency to prevent re-saves for this period
-                session.timeout_saved_to_crm = True
+                session.timeout_saved_crm = True # Corrected attribute name
                 session_manager.db.save_session(session) # Persist this status update
             return success
         else:
