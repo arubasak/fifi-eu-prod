@@ -44,7 +44,7 @@ from streamlit_javascript import st_javascript
 # - Enhanced browser close detection and error handling preserved.
 # - All syntax errors fixed and duplicate code properly merged and adapted.
 # - FIX: Non-destructive database schema migration logic using ALTER TABLE ADD COLUMN.
-# - FIX: Explicit column listing in REPLACE INTO for database consistency.
+# - FIX: Dynamic column handling in REPLACE INTO for database consistency and robustness.
 # - FIX: Removed 'height' parameter from st_javascript to prevent error.
 # =============================================================================
 
@@ -474,41 +474,76 @@ class DatabaseManager:
                 self.local_sessions[session.session_id] = copy.deepcopy(session)
                 logger.debug(f"Saved session {session.session_id[:8]} to in-memory.")
                 return
-            
-            # Prepare data for storage, converting complex types to string/JSON
-            s = session
-            session_data = (
-                s.session_id, s.user_type.value, s.email, s.full_name, s.zoho_contact_id,
-                s.created_at.isoformat(), s.last_activity.isoformat(), json.dumps(s.messages),
-                int(s.active), s.wp_token, int(s.timeout_saved_to_crm), s.fingerprint_id,
-                s.fingerprint_method, s.visitor_type, s.recognition_response, s.daily_question_count,
-                s.total_question_count, s.last_question_time.isoformat() if s.last_question_time else None,
-                int(s.question_limit_reached), s.ban_status.value,
-                s.ban_start_time.isoformat() if s.ban_start_time else None,
-                s.ban_end_time.isoformat() if s.ban_end_time else None, s.ban_reason, s.evasion_count,
-                s.current_penalty_hours, s.escalation_level, json.dumps(s.email_addresses_used),
-                s.email_switches_count, s.ip_address, s.ip_detection_method, s.user_agent,
-                s.browser_privacy_level, int(s.registration_prompted), int(s.registration_link_clicked)
-            )
-            
+
             try:
-                # FIX: Explicitly list all columns in the REPLACE INTO statement.
-                # This prevents issues with default values or column count mismatches.
-                self.conn.execute('''
-                    REPLACE INTO sessions (
-                        session_id, user_type, email, full_name, zoho_contact_id,
-                        created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm,
-                        fingerprint_id, fingerprint_method, visitor_type, recognition_response,
-                        daily_question_count, total_question_count, last_question_time, question_limit_reached,
-                        ban_status, ban_start_time, ban_end_time, ban_reason,
-                        evasion_count, current_penalty_hours, escalation_level,
-                        email_addresses_used, email_switches_count,
-                        ip_address, ip_detection_method, user_agent, browser_privacy_level,
-                        registration_prompted, registration_link_clicked
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', session_data)
+                # Get the actual column names from the database table at runtime
+                cursor = self.conn.execute("PRAGMA table_info(sessions)")
+                db_column_names = [row[1] for row in cursor.fetchall()] # row[1] is the column name
+                
+                # Map UserSession attributes to a dictionary for easy lookup by column name
+                s = session
+                session_attr_to_value = {
+                    "session_id": s.session_id,
+                    "user_type": s.user_type.value,
+                    "email": s.email,
+                    "full_name": s.full_name,
+                    "zoho_contact_id": s.zoho_contact_id,
+                    "created_at": s.created_at.isoformat(),
+                    "last_activity": s.last_activity.isoformat(),
+                    "messages": json.dumps(s.messages),
+                    "active": int(s.active),
+                    "wp_token": s.wp_token,
+                    "timeout_saved_to_crm": int(s.timeout_saved_to_crm),
+                    "fingerprint_id": s.fingerprint_id,
+                    "fingerprint_method": s.fingerprint_method,
+                    "visitor_type": s.visitor_type,
+                    "recognition_response": s.recognition_response,
+                    "daily_question_count": s.daily_question_count,
+                    "total_question_count": s.total_question_count,
+                    "last_question_time": s.last_question_time.isoformat() if s.last_question_time else None,
+                    "question_limit_reached": int(s.question_limit_reached),
+                    "ban_status": s.ban_status.value,
+                    "ban_start_time": s.ban_start_time.isoformat() if s.ban_start_time else None,
+                    "ban_end_time": s.ban_end_time.isoformat() if s.ban_end_time else None,
+                    "ban_reason": s.ban_reason,
+                    "evasion_count": s.evasion_count,
+                    "current_penalty_hours": s.current_penalty_hours,
+                    "escalation_level": s.escalation_level,
+                    "email_addresses_used": json.dumps(s.email_addresses_used),
+                    "email_switches_count": s.email_switches_count,
+                    "ip_address": s.ip_address,
+                    "ip_detection_method": s.ip_detection_method,
+                    "user_agent": s.user_agent,
+                    "browser_privacy_level": s.browser_privacy_level,
+                    "registration_prompted": int(s.registration_prompted),
+                    "registration_link_clicked": int(s.registration_link_clicked)
+                    # Add any other legacy column mappings here if you need to specifically
+                    # populate them from UserSession data, e.g.,
+                    # "first_name": s.full_name # if you want full_name copied to an old first_name column
+                }
+
+                # Construct the list of values to insert in the exact order of db_column_names.
+                # If a column exists in the DB but not in our UserSession_attr_map, it will receive None.
+                values_to_insert = [
+                    session_attr_to_value.get(col_name) for col_name in db_column_names
+                ]
+                
+                # Log for debugging - extremely helpful to see the counts and names at runtime
+                logger.debug(f"DB Columns (Actual): Count={len(db_column_names)} -> {db_column_names}")
+                logger.debug(f"Values to Insert: Count={len(values_to_insert)}")
+                # logger.debug(f"Values to Insert: {values_to_insert}") # Uncomment for full value inspection
+
+                # Construct the REPLACE INTO statement dynamically using discovered column names
+                columns_sql = ", ".join(db_column_names)
+                placeholders_sql = ", ".join(["?"] * len(db_column_names))
+
+                sql_statement = f'''
+                    REPLACE INTO sessions ({columns_sql}) VALUES ({placeholders_sql})
+                '''
+                
+                self.conn.execute(sql_statement, values_to_insert)
                 self.conn.commit()
-                logger.debug(f"Successfully saved session {s.session_id[:8]} to database.")
+                logger.debug(f"Successfully saved session {s.session_id[:8]} to database using dynamic columns.")
             except Exception as e:
                 logger.error(f"Failed to save session {s.session_id[:8]}: {e}", exc_info=True)
                 raise # Re-raise to be caught by handle_api_errors
@@ -536,7 +571,12 @@ class DatabaseManager:
                 # Dynamically create UserSession, converting types as needed
                 session_params = {}
                 for key, value in row_dict.items():
-                    session_params[key] = self._convert_db_value_to_python(key, value)
+                    # Only map values to UserSession attributes if the attribute exists in the dataclass
+                    if hasattr(UserSession, key):
+                        session_params[key] = self._convert_db_value_to_python(key, value)
+                    else:
+                        # Log if an unexpected column is found in the DB that's not in UserSession
+                        logger.debug(f"Skipping unknown DB column '{key}' during session load for {session_id[:8]}.")
                 
                 user_session = UserSession(**session_params)
                 logger.debug(f"Successfully loaded session {session_id[:8]}: type={user_session.user_type.value}.")
@@ -605,7 +645,8 @@ class DatabaseManager:
                     row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
                     session_params = {}
                     for key, value in row_dict.items():
-                        session_params[key] = self._convert_db_value_to_python(key, value)
+                        if hasattr(UserSession, key): # Only map if attribute exists in UserSession
+                            session_params[key] = self._convert_db_value_to_python(key, value)
                     sessions.append(UserSession(**session_params))
                 return sessions
             except Exception as e:
@@ -628,7 +669,8 @@ class DatabaseManager:
                     row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
                     session_params = {}
                     for key, value in row_dict.items():
-                        session_params[key] = self._convert_db_value_to_python(key, value)
+                        if hasattr(UserSession, key): # Only map if attribute exists in UserSession
+                            session_params[key] = self._convert_db_value_to_python(key, value)
                     sessions.append(UserSession(**session_params))
                 return sessions
             except Exception as e:
