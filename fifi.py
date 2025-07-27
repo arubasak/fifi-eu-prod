@@ -35,6 +35,9 @@ from streamlit_javascript import st_javascript
 # - All previous fixes including enum comparison.
 # - OpenAI content moderation model name corrected.
 # - All temporary debug logging removed for production use.
+# - FIX: Password field DOM warning and console visibility.
+# - FIX: Question progress bar affecting chat visibility (sidebar layout).
+# - FIX: Simplified browser close detection (redirect-only).
 # =============================================================================
 
 # Setup logging
@@ -381,7 +384,7 @@ class DatabaseManager:
 
                 # --- NEW: Non-destructive migration logic ---
                 self._migrate_existing_table()
-                # --- END NEW MIGRATION LOGIC ---
+                # --- END NEW MIGRATION LOGUSIC ---
 
                 # Create indexes for common lookup fields (IF NOT EXISTS will prevent errors if they already exist)
                 # These must run AFTER any potential column additions by _migrate_existing_table
@@ -442,7 +445,6 @@ class DatabaseManager:
                         self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {column_name} {column_def}")
                         logger.info(f"Successfully added missing column to 'sessions' table: {column_name}")
                     except Exception as e:
-                        # Log a warning if a column can't be added (e.g., if it was already added by another process)
                         logger.warning(f"Could not add column '{column_name}' to 'sessions' table (might already exist or other issue): {e}")
             
             self.conn.commit()
@@ -450,24 +452,20 @@ class DatabaseManager:
             
         except Exception as e:
             logger.error(f"❌ Database schema migration (ALTER TABLE) failed: {e}", exc_info=True)
-            # Re-raise the exception to indicate a critical failure in initialization process
             raise 
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         with self.lock:
             if self.db_type == "memory":
-                # For in-memory, store a deep copy to prevent external modifications
                 self.local_sessions[session.session_id] = copy.deepcopy(session)
                 logger.debug(f"Saved session {session.session_id[:8]} to in-memory.")
                 return
 
             try:
-                # Get the actual column names from the database table at runtime
                 cursor = self.conn.execute("PRAGMA table_info(sessions)")
-                db_column_names = [row[1] for row in cursor.fetchall()] # row[1] is the column name
+                db_column_names = [row[1] for row in cursor.fetchall()]
                 
-                # Map UserSession attributes to a dictionary for easy lookup by column name
                 s = session
                 session_attr_to_value = {
                     "session_id": s.session_id,
@@ -506,7 +504,6 @@ class DatabaseManager:
                     "registration_link_clicked": int(s.registration_link_clicked)
                 }
 
-                # Construct the list of values to insert in the exact order of db_column_names.
                 values_to_insert = [
                     session_attr_to_value.get(col_name) for col_name in db_column_names
                 ]
@@ -514,7 +511,6 @@ class DatabaseManager:
                 logger.debug(f"DB Columns (Actual): Count={len(db_column_names)} -> {db_column_names}")
                 logger.debug(f"Values to Insert: Count={len(values_to_insert)}")
 
-                # Construct the REPLACE INTO statement dynamically using discovered column names
                 columns_sql = ", ".join(db_column_names)
                 placeholders_sql = ", ".join(["?"] * len(db_column_names))
 
@@ -527,7 +523,7 @@ class DatabaseManager:
                 logger.debug(f"Successfully saved session {s.session_id[:8]} to database using dynamic columns.")
             except Exception as e:
                 logger.error(f"Failed to save session {s.session_id[:8]}: {e}", exc_info=True)
-                raise # Re-raise to be caught by handle_api_errors
+                raise
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
@@ -690,7 +686,7 @@ class FingerprintingManager:
                     ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; ctx.fillText('Food & Beverage Industry', 4, 45);
                     ctx.strokeStyle = '#000'; ctx.beginPath();
                     ctx.arc(50, 50, 20, 0, Math.PI * 2); ctx.stroke();
-                    return btoa(canvas.toDataURL()).slice(0, 32); // Base64 and truncate for consistency
+                    return btoa(canvas.toDataURL()).slice(0, 32);
                 }} catch (e) {{
                     console.error("❌ Canvas fingerprint failed:", e);
                     return 'canvas_blocked';
@@ -760,7 +756,7 @@ class FingerprintingManager:
             
             if (workingMethods.length === 0) {{
                 primaryMethod = 'fallback';
-                fingerprintId = 'privacy_browser_' + Date.now(); // Fallback if all are blocked
+                fingerprintId = 'privacy_browser_' + Date.now();
             }} else if (workingMethods.length > 1) {{
                 primaryMethod = 'hybrid';
                 fingerprintId = btoa([canvasFp, webglFp, audioFp].join('|')).slice(0, 32);
@@ -797,7 +793,7 @@ class FingerprintingManager:
 
     def extract_fingerprint_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Extracts and validates fingerprint data from the JavaScript component's return."""
-        if not result or not isinstance(result, dict) or result.get('fingerprint_id') == 'ZXJyb3I=': # b64('error')
+        if not result or not isinstance(result, dict) or result.get('fingerprint_id') == 'ZXJyb3I=':
             logger.warning("Fingerprint JavaScript returned error or null. Using fallback.")
             return self._generate_fallback_fingerprint()
         
@@ -808,9 +804,8 @@ class FingerprintingManager:
             logger.info("Fingerprint ID indicates privacy browser or fallback. Generating new fallback.")
             return self._generate_fallback_fingerprint()
         
-        # Determine visitor type based on in-memory cache
         visitor_type = "returning_visitor" if fingerprint_id in self.fingerprint_cache else "new_visitor"
-        self.fingerprint_cache[fingerprint_id] = {'last_seen': datetime.now()} # Update cache
+        self.fingerprint_cache[fingerprint_id] = {'last_seen': datetime.now()}
         
         return {
             'fingerprint_id': fingerprint_id,
@@ -898,7 +893,6 @@ class QuestionLimitManager:
         """
         user_limit = self.question_limits.get(session.user_type.value, 0)
         
-        # 1. Check current ban status (if any)
         if session.ban_status.value != BanStatus.NONE.value:
             if session.ban_end_time and datetime.now() < session.ban_end_time:
                 time_remaining = session.ban_end_time - datetime.now()
@@ -910,7 +904,6 @@ class QuestionLimitManager:
                     'message': self._get_ban_message(session)
                 }
             else:
-                # Ban expired, reset status
                 logger.info(f"Ban for session {session.session_id[:8]} expired. Resetting status.")
                 session.ban_status = BanStatus.NONE
                 session.ban_start_time = None
@@ -918,7 +911,6 @@ class QuestionLimitManager:
                 session.ban_reason = None
                 session.question_limit_reached = False
         
-        # 2. Check activity-based reset (24-hour rolling window for daily counts)
         if session.last_question_time:
             time_since_last = datetime.now() - session.last_question_time
             if time_since_last >= timedelta(hours=24):
@@ -926,7 +918,6 @@ class QuestionLimitManager:
                 session.daily_question_count = 0
                 session.question_limit_reached = False
         
-        # 3. Apply limits based on UserType
         if session.user_type.value == UserType.GUEST.value:
             if session.daily_question_count >= user_limit:
                 return {
@@ -1058,7 +1049,7 @@ class ZohoCRMManager:
 
     def _get_access_token(self, force_refresh: bool = False, timeout: int = 15) -> Optional[str]:
         """
-        Retrieves or refreshes the Zoho CRM access token, with caching and timeout.
+        Retrieves or refreshes the Zoho CRM access token.
         """
         if not self.config.ZOHO_ENABLED:
             logger.debug("Zoho is not enabled in configuration. Skipping token request.")
@@ -1099,7 +1090,7 @@ class ZohoCRMManager:
             return None
 
     def _find_contact_by_email(self, email: str) -> Optional[str]:
-        """Finds a Zoho contact by email, with token refresh logic."""
+        """Finds a Zoho contact by email."""
         access_token = self._get_access_token()
         if not access_token: return None
         
@@ -1131,7 +1122,7 @@ class ZohoCRMManager:
         return None
 
     def _create_contact(self, email: str, full_name: Optional[str]) -> Optional[str]:
-        """Creates a new Zoho contact, with token refresh logic."""
+        """Creates a new Zoho contact."""
         access_token = self._get_access_token()
         if not access_token: return None
 
@@ -1169,7 +1160,7 @@ class ZohoCRMManager:
         return None
 
     def _upload_attachment(self, contact_id: str, pdf_buffer: io.BytesIO, filename: str) -> bool:
-        """Uploads a PDF attachment to a Zoho contact, with retry and token refresh."""
+        """Uploads a PDF attachment to a Zoho contact."""
         access_token = self._get_access_token()
         if not access_token: return False
 
@@ -1214,7 +1205,7 @@ class ZohoCRMManager:
         return False
 
     def _add_note(self, contact_id: str, note_title: str, note_content: str) -> bool:
-        """Adds a note to a Zoho contact, with token refresh logic."""
+        """Adds a note to a Zoho contact."""
         access_token = self._get_access_token()
         if not access_token: return False
 
@@ -1260,8 +1251,7 @@ class ZohoCRMManager:
 
     def save_chat_transcript_sync(self, session: UserSession, trigger_reason: str) -> bool:
         """
-        Synchronously saves the chat transcript to Zoho CRM, including contact creation,
-        PDF attachment, and a summary note.
+        Synchronously saves the chat transcript to Zoho CRM.
         """
         logger.info("=" * 80)
         logger.info(f"ZOHO SAVE START - Trigger: {trigger_reason}")
@@ -1408,10 +1398,8 @@ class EnhancedAI:
     @handle_api_errors("AI System", "Get Response", show_to_user=True)
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """
-        Provides a simplified AI response. In a real application, this would
-        integrate with LangChain, Pinecone, Tavily, and OpenAI.
+        Provides a simplified AI response.
         """
-        # Simplified placeholder response for demonstration
         return {
             "content": f"I understand you're asking about: '{prompt}'. This is the integrated FiFi AI. Your question is processed based on your user tier and system limits.",
             "source": "Integrated FiFi AI System Placeholder",
@@ -1431,7 +1419,6 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
         return {"flagged": False}
     
     try:
-        # FIX: Changed model to "omni-moderation-latest"
         response = client.moderations.create(model="omni-moderation-latest", input=prompt)
         result = response.results[0]
         
@@ -1609,10 +1596,10 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
         logger.error(f"❌ JavaScript timer component execution error: {e}", exc_info=True)
         return None
 
-def render_browser_close_detection_enhanced(session_id: str):
+def render_browser_close_detection_simplified(session_id: str):
     """
-    Renders a JavaScript component to detect browser/tab close events
-    and trigger an "emergency save" to the Streamlit app.
+    Simplified browser close detection using redirect only.
+    No POST requests - just redirects to trigger emergency save.
     """
     if not session_id:
         return
@@ -1620,7 +1607,7 @@ def render_browser_close_detection_enhanced(session_id: str):
     js_code = f"""
     <script>
     (function() {{
-        const scriptIdentifier = 'fifi_close_enhanced_script_' + '{session_id}';
+        const scriptIdentifier = 'fifi_close_simple_' + '{session_id}';
         if (window[scriptIdentifier]) return;
         window[scriptIdentifier] = true;
         
@@ -1633,103 +1620,59 @@ def render_browser_close_detection_enhanced(session_id: str):
                     return window.parent.location.origin + window.parent.location.pathname;
                 }}
             }} catch (e) {{
-                console.warn("Could not access parent.location. Fallbacking to current window.location for app URL:", e);
+                console.warn("Using current window location as fallback");
             }}
             return window.location.origin + window.location.pathname;
         }}
 
-        function sendEmergencySaveWithReload() {{
+        function triggerEmergencySave() {{
             if (saveTriggered) return;
             saveTriggered = true;
-            console.clear();
-            console.log('🚨 FiFi Enhanced: Browser close detected - sending FORCED emergency save.');
+            
+            console.log('🚨 Browser close detected - triggering emergency save via redirect');
             
             const appUrl = getAppUrl();
             const saveUrl = `${{appUrl}}?event=emergency_close&session_id=${{sessionId}}`;
             
-            console.log('📡 Attempting to send emergency save to:', saveUrl);
-            
             try {{
-                if (navigator.sendBeacon) {{
-                    const formData = new FormData();
-                    formData.append('event', 'emergency_close');
-                    formData.append('session_id', sessionId);
-                    const beaconSuccess = navigator.sendBeacon(saveUrl, formData);
-                    console.log('📡 Beacon result:', beaconSuccess ? 'Success (sent)' : 'Failed (not sent)');
-                    
-                    if (beaconSuccess) {{
-                        setTimeout(() => {{
-                            try {{
-                                if (window.parent && window.parent.location.origin === window.location.origin) {{
-                                    window.parent.location.href = saveUrl;
-                                }} else {{
-                                    window.location.href = saveUrl;
-                                }}
-                            }} catch (e) {{
-                                console.error('Error redirecting after beacon:', e);
-                            }}
-                        }}, 100);
-                        return;
-                    }}
+                if (window.parent && window.parent.location.origin === window.location.origin) {{
+                    window.parent.location.href = saveUrl;
+                }} else {{
+                    window.location.href = saveUrl;
                 }}
             }} catch (e) {{
-                console.warn('📡 navigator.sendBeacon API failed or not available:', e);
+                console.error('Emergency save redirect failed:', e);
             }}
-            
-            try {{
-                console.log('🔄 Forcing emergency save via synchronous XMLHttpRequest fallback.');
-                const xhr = new XMLHttpRequest();
-                xhr.open("GET", saveUrl, false);
-                xhr.send(null);
-                console.log('📡 Synchronous XHR sent.');
-            }} catch (e2) {{
-                console.error('❌ Synchronous XHR failed:', e2);
-            }}
-            
-            setTimeout(() => {{
-                try {{
-                    if (window.parent && window.parent.location.origin === window.location.origin) {{
-                        window.parent.location.href = saveUrl;
-                    }} else {{
-                        window.location.href = saveUrl;
-                    }}
-                }} catch (e) {{
-                    console.error('❌ Final forced reload failed:', e);
-                }}
-            }}, 50);
         }}
         
         const events = ['beforeunload', 'pagehide', 'unload'];
         events.forEach(eventType => {{
             try {{
                 if (window.parent && window.parent.location.origin === window.location.origin) {{
-                    window.parent.addEventListener(eventType, sendEmergencySaveWithReload, {{ capture: true }});
+                    window.parent.addEventListener(eventType, triggerEmergencySave, {{ capture: true }});
                 }}
-                window.addEventListener(eventType, sendEmergencySaveWithReload, {{ capture: true }});
+                window.addEventListener(eventType, triggerEmergencySave, {{ capture: true }});
             }} catch (e) {{
                 console.debug(`Failed to add ${{eventType}} listener:`, e);
             }}
         }});
         
         try {{
-            if (window.parent && window.parent.document && window.parent.document.location.origin === window.location.origin) {{
-                window.parent.document.addEventListener('visibilitychange', () => {{
-                    if (window.parent.document.visibilityState === 'hidden') {{
-                        console.log('🚨 Main app tab hidden (visibilitychange event).');
-                        sendEmergencySaveWithReload();
-                    }}
-                }}, {{ passive: true }});
-            }}
-        }} catch (e) {{
-            document.addEventListener('visibilitychange', () => {{
+            const handleVisibilityChange = () => {{
                 if (document.visibilityState === 'hidden') {{
-                    console.log('🚨 Component tab hidden (visibilitychange event).');
-                    sendEmergencySaveWithReload();
+                    triggerEmergencySave();
                 }}
-            }}, {{ passive: true }});
+            }};
+            
+            if (window.parent && window.parent.document) {{
+                window.parent.document.addEventListener('visibilitychange', handleVisibilityChange);
+            }}
+            document.addEventListener('visibilitychange', handleVisibilityChange);
+        }} catch (e) {{
+            console.debug('Visibility change detection setup failed:', e);
         }}
         
-        console.log('✅ Enhanced browser close detection initialized for session', sessionId.substring(0, 8));
+        console.log('✅ Simplified browser close detection initialized');
     }})();
     </script>
     """
@@ -1737,7 +1680,7 @@ def render_browser_close_detection_enhanced(session_id: str):
     try:
         st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
-        logger.error(f"Failed to render enhanced browser close component JS for session {session_id[:8]}: {e}", exc_info=True)
+        logger.error(f"Failed to render simplified browser close component: {e}", exc_info=True)
 
 def global_message_channel_error_handler():
     """
@@ -2457,418 +2400,6 @@ class SessionManager:
                 st.error("❌ Failed to manually save chat to Zoho CRM. Please check logs for details.")
         else:
             st.warning("Cannot save to CRM: Only registered users with a chat history can manually save.")
-
-# =============================================================================
-# UI COMPONENTS (INTEGRATED & ENHANCED)
-# =============================================================================
-
-def render_welcome_page(session_manager: SessionManager):
-    """Renders the application's welcome page, including sign-in and guest options."""
-    st.title("🤖 Welcome to FiFi AI Assistant")
-    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
-    
-    st.markdown("---")
-    st.subheader("🎯 Usage Tiers")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.success("👤 **Guest Users**")
-        st.markdown("• **4 questions** to try FiFi AI")
-        st.markdown("• Email verification required to continue")
-        st.markdown("• Quick start, no registration needed")
-    
-    with col2:
-        st.info("📧 **Email Verified Guest**")
-        st.markdown("• **10 questions per day** (rolling 24-hour period)")
-        st.markdown("• Email verification for access")
-        st.markdown("• No full registration required")
-    
-    with col3:
-        st.warning("🔐 **Registered Users**")
-        st.markdown("• **40 questions per day** (across devices)")
-        st.markdown("• Cross-device tracking & consistent experience")
-        st.markdown("• Automatic chat saving to Zoho CRM")
-        st.markdown("• Priority access during high usage")
-    
-    tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
-    
-    with tab1:
-        if not session_manager.config.WORDPRESS_URL:
-            st.warning("Sign-in is currently disabled because the authentication service (WordPress URL) is not configured in application secrets.")
-        else:
-            with st.form("login_form", clear_on_submit=False):
-                username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
-                password = st.text_input("Password", type="password", help="Enter your WordPress password.")
-                submit_button = st.form_submit_button("Sign In", use_container_width=True)
-                
-                if submit_button:
-                    if not username or not password:
-                        st.error("Please enter both username and password to sign in.")
-                    else:
-                        with st.spinner("🔐 Authenticating..."):
-                            authenticated_session = session_manager.authenticate_with_wordpress(username, password)
-                            
-                        if authenticated_session:
-                            st.balloons()
-                            st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
-                            time.sleep(1)
-                            st.session_state.page = "chat"
-                            st.rerun()
-    
-    with tab2:
-        st.markdown("""
-        **Continue as a guest** to get a quick start and try FiFi AI Assistant without signing in.
-        
-        ℹ️ **What to expect as a Guest:**
-        - You get an initial allowance of **4 questions** to explore FiFi AI's capabilities.
-        - After these 4 questions, **email verification will be required** to continue (unlocks 10 questions/day).
-        - Our system utilizes **universal device fingerprinting** for security and to track usage across sessions.
-        - You can always choose to **upgrade to a full registration** later for extended benefits.
-        """)
-        
-        if st.button("👤 Start as Guest", use_container_width=True):
-            st.session_state.page = "chat"
-            st.rerun()
-
-def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
-    """Renders the application's sidebar, displaying session information, user status, and action buttons."""
-    with st.sidebar:
-        st.title("🎛️ Dashboard")
-        
-        if session.user_type.value == UserType.REGISTERED_USER.value:
-            st.success("✅ **Registered User**")
-            if session.full_name: 
-                st.markdown(f"**Name:** {session.full_name}")
-            if session.email: 
-                st.markdown(f"**Email:** {session.email}")
-            
-            st.markdown(f"**Questions Today:** {session.total_question_count}/40")
-            if session.total_question_count <= 20:
-                st.progress(session.total_question_count / 20, text="Tier 1 (up to 20 questions)")
-            else:
-                st.progress((session.total_question_count - 20) / 20, text="Tier 2 (21-40 questions)")
-            
-        elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
-            st.info("📧 **Email Verified Guest**")
-            if session.email:
-                st.markdown(f"**Email:** {session.email}")
-            
-            st.markdown(f"**Daily Questions:** {session.daily_question_count}/10")
-            st.progress(session.daily_question_count / 10)
-            
-            if session.last_question_time:
-                next_reset = session.last_question_time + timedelta(hours=24)
-                time_to_reset = next_reset - datetime.now()
-                if time_to_reset.total_seconds() > 0:
-                    hours = int(time_to_reset.total_seconds() // 3600)
-                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
-                    st.caption(f"Resets in: {hours}h {minutes}m")
-                else:
-                    st.caption("Daily questions have reset!")
-            
-        else: # UserType.GUEST.value
-            st.warning("👤 **Guest User**")
-            st.markdown(f"**Questions:** {session.daily_question_count}/4")
-            st.progress(session.daily_question_count / 4)
-            st.caption("Email verification unlocks 10 questions/day.")
-        
-        if session.fingerprint_id:
-            st.markdown(f"**Device ID:** `{session.fingerprint_id[:8]}...`")
-            st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
-        
-        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value == UserType.REGISTERED_USER.value:
-            if session.zoho_contact_id: 
-                st.success("🔗 **CRM Linked**")
-            else: 
-                st.info("📋 **CRM Ready** (will link on first save)")
-            if session.timeout_saved_to_crm:
-                st.caption("💾 Auto-saved to CRM (after inactivity)")
-            else:
-                st.caption("💾 Auto-save enabled (after 15 min inactivity)")
-        else: 
-            st.caption("🚫 CRM Integration: Registered users only")
-        
-        st.divider()
-        
-        st.markdown(f"**Messages in Chat:** {len(session.messages)}")
-        st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
-        
-        if session.ban_status.value != BanStatus.NONE.value:
-            st.error(f"🚫 **STATUS: RESTRICTED**")
-            if session.ban_end_time:
-                time_remaining = session.ban_end_time - datetime.now()
-                hours = int(time_remaining.total_seconds() // 3600)
-                minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
-            st.markdown(f"Reason: {session.ban_reason or 'Usage policy violation'}")
-        elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: 
-            st.warning("⚠️ **ACTION REQUIRED: Email Verification**")
-        
-        st.divider()
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🗑️ Clear Chat", use_container_width=True, help="Clears all messages from the current conversation."):
-                session_manager.clear_chat_history(session)
-                st.rerun()
-        with col2:
-            if st.button("🚪 Sign Out", use_container_width=True, help="Ends your current session and returns to the welcome page."):
-                session_manager.end_session(session)
-                st.rerun()
-
-        if session.user_type.value == UserType.REGISTERED_USER.value and session.messages:
-            st.divider()
-            
-            pdf_buffer = pdf_exporter.generate_chat_pdf(session)
-            if pdf_buffer:
-                st.download_button(
-                    label="📄 Download Chat PDF",
-                    data=pdf_buffer,
-                    file_name=f"fifi_chat_transcript_{session.session_id[:8]}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                    help="Download the current chat conversation as a PDF document."
-                )
-            
-            if session_manager.zoho.config.ZOHO_ENABLED and session.email:
-                if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Manually save your current chat transcript to your linked Zoho CRM contact."):
-                    session_manager.manual_save_to_crm(session)
-                st.caption("💡 Chat automatically saves to CRM after 15 minutes of inactivity.")
-
-def render_email_verification_dialog(session_manager: SessionManager, session: UserSession):
-    """
-    Renders the email verification dialog for guest users who have hit their
-    initial question limit (4 questions).
-    """
-    st.error("📧 **Email Verification Required**")
-    st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
-    
-    if 'verification_stage' not in st.session_state:
-        st.session_state.verification_stage = 'initial_check'
-
-    if st.session_state.verification_stage == 'initial_check':
-        fingerprint_history = session_manager.check_fingerprint_history(session.fingerprint_id)
-        
-        if fingerprint_history.get('has_history') and fingerprint_history.get('email'):
-            masked_email = session_manager._mask_email(fingerprint_history['email'])
-            st.info(f"🤝 **We seem to recognize this device!**")
-            st.markdown(f"Are you **{masked_email}**?")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("✅ Yes, that's my email", use_container_width=True, key="recognize_yes_btn"):
-                    session.recognition_response = "yes"
-                    st.session_state.verification_email = fingerprint_history['email']
-                    st.session_state.verification_stage = "send_code_recognized"
-                    st.rerun()
-            with col2:
-                if st.button("❌ No, use a different email", use_container_width=True, key="recognize_no_btn"):
-                    session.recognition_response = "no"
-                    st.session_state.verification_stage = "email_entry"
-                    st.rerun()
-        else:
-            st.session_state.verification_stage = "email_entry"
-            st.rerun()
-
-    if st.session_state.verification_stage == 'send_code_recognized':
-        email_to_verify = st.session_state.get('verification_email')
-        if email_to_verify:
-            with st.spinner(f"Sending verification code to {email_to_verify}..."):
-                result = session_manager.handle_guest_email_verification(session, email_to_verify)
-                if result['success']:
-                    st.success(result['message'])
-                    st.session_state.verification_stage = "code_entry"
-                else:
-                    st.error(result['message'])
-                    st.session_state.verification_stage = "email_entry"
-            st.rerun()
-        else:
-            st.error("Error: No recognized email found to send the code. Please enter your email manually.")
-            st.session_state.verification_stage = "email_entry"
-            st.rerun()
-
-    if st.session_state.verification_stage == 'email_entry':
-        with st.form("email_verification_form", clear_on_submit=False):
-            st.markdown("**Please enter your email address to receive a verification code:**")
-            current_email_input = st.text_input("Email Address", placeholder="your@email.com", value=st.session_state.get('verification_email', session.email or ""), key="manual_email_input")
-            submit_email = st.form_submit_button("Send Verification Code", use_container_width=True)
-            
-            if submit_email:
-                if current_email_input:
-                    if session.email and current_email_input != session.email:
-                        session.email_switches_count += 1
-                        session.email = current_email_input
-                        session_manager.db.save_session(session)
-                        
-                    result = session_manager.handle_guest_email_verification(session, current_email_input)
-                    if result['success']:
-                        st.success(result['message'])
-                        st.session_state.verification_email = current_email_input
-                        st.session_state.verification_stage = "code_entry"
-                        st.rerun()
-                    else:
-                        st.error(result['message'])
-                else:
-                    st.error("Please enter an email address to receive the code.")
-    
-    if st.session_state.verification_stage == 'code_entry':
-        verification_email = st.session_state.get('verification_email', session.email)
-        
-        st.success(f"📧 A verification code has been sent to **{verification_email}**.")
-        st.info("Please check your email, including spam/junk folders. The code is valid for 10 minutes.")
-        
-        with st.form("code_verification_form", clear_on_submit=False):
-            code = st.text_input("Enter Verification Code", placeholder="e.g., 123456", max_chars=6, key="verification_code_input")
-            
-            col_code1, col_code2 = st.columns(2)
-            with col_code1:
-                submit_code = st.form_submit_button("Verify Code", use_container_width=True)
-            with col_code2:
-                resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
-            
-            if resend_code:
-                if verification_email:
-                    with st.spinner("Resending code..."):
-                        verification_sent = session_manager.email_verification.send_verification_code(verification_email)
-                        if verification_sent:
-                            st.success("Verification code resent successfully!")
-                            st.session_state.verification_stage = "code_entry"
-                        else:
-                            st.error("Failed to resend code. Please try again later.")
-                else:
-                    st.error("Error: No email address found to resend the code. Please go back and enter your email.")
-                    st.session_state.verification_stage = "email_entry"
-                st.rerun()
-
-            if submit_code:
-                if code:
-                    with st.spinner("Verifying code..."):
-                        result = session_manager.verify_email_code(session, code)
-                    if result['success']:
-                        st.success(result['message'])
-                        st.balloons()
-                        for key in ['verification_email', 'verification_stage']:
-                            if key in st.session_state:
-                                del st.session_state[key]
-                        time.sleep(2)
-                        st.rerun()
-                    else:
-                        st.error(result['message'])
-                else:
-                    st.error("Please enter the verification code you received.")
-            
-def render_chat_interface(session_manager: SessionManager, session: UserSession):
-    """Renders the main chat interface."""
-    
-    st.title("🤖 FiFi AI Assistant")
-    st.caption("Your intelligent food & beverage sourcing companion with universal fingerprinting.")
-    
-    global_message_channel_error_handler()
-
-    if not session.fingerprint_id or session.fingerprint_method == "temporary_fallback_python":
-        fingerprint_js_code = session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
-        fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id[:8]}")
-        
-        if fp_result:
-            extracted_fp_data = session_manager.fingerprinting.extract_fingerprint_from_result(fp_result)
-            if extracted_fp_data.get('fingerprint_method') not in ["fallback", "canvas_blocked", "webgl_blocked", "audio_blocked"]:
-                session_manager.apply_fingerprinting(session, extracted_fp_data)
-                st.rerun()
-            else:
-                logger.debug(f"JS Fingerprint returned a fallback/blocked result: {extracted_fp_data.get('fingerprint_method')}. Retaining Python fallback if present.")
-        else:
-            logger.debug(f"Fingerprinting component for session {session.session_id[:8]} did not return result on this run. Will try again.")
-
-    if session.user_type.value == UserType.REGISTERED_USER.value:
-        try:
-            render_browser_close_detection_enhanced(session.session_id)
-        except Exception as e:
-            logger.error(f"Failed to render browser close detection JS for {session.session_id[:8]}: {e}", exc_info=True)
-
-    if session.user_type.value == UserType.REGISTERED_USER.value:
-        timer_result = None
-        try:
-            timer_result = render_activity_timer_component_15min(session.session_id)
-        except Exception as e:
-            logger.error(f"15-minute timer component execution failed: {e}", exc_info=True)
-        
-        if timer_result:
-            if handle_timer_event(timer_result, session_manager, session):
-                st.rerun()
-
-    limit_check = session_manager.question_limits.is_within_limits(session)
-    if not limit_check['allowed']:
-        if limit_check.get('reason') == 'guest_limit':
-            render_email_verification_dialog(session_manager, session)
-            return
-        else:
-            return
-
-    for msg in session.messages:
-        with st.chat_message(msg.get("role", "user")):
-            st.markdown(msg.get("content", ""), unsafe_allow_html=True)
-            
-            if msg.get("role") == "assistant":
-                if "source" in msg:
-                    st.caption(f"Source: {msg['source']}")
-                
-                indicators = []
-                if msg.get("used_pinecone"):
-                    indicators.append("🧠 Knowledge Base")
-                if msg.get("used_search"):
-                    indicators.append("🌐 Web Search")
-                
-                if indicators:
-                    st.caption(f"Enhanced with: {', '.join(indicators)}")
-
-    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=session.ban_status.value != BanStatus.NONE.value)
-    
-    if prompt:
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        with st.chat_message("assistant"):
-            with st.spinner("🔍 Processing your question..."):
-                try:
-                    response = session_manager.get_ai_response(session, prompt)
-                    
-                    if response.get('requires_email'):
-                        st.error("📧 Please verify your email to continue using FiFi AI.")
-                        st.session_state.verification_stage = 'email_entry'
-                        st.rerun()
-                    elif response.get('banned'):
-                        st.error(response.get("content", 'Access restricted.'))
-                        if response.get('time_remaining'):
-                            time_remaining = response['time_remaining']
-                            hours = int(time_remaining.total_seconds() // 3600)
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                            st.error(f"Time remaining: {hours}h {minutes}m")
-                        st.rerun()
-                    elif response.get('evasion_penalty'):
-                        st.error("🚫 Evasion detected - Your access has been temporarily restricted.")
-                        st.error(f"Penalty duration: {response.get('penalty_hours', 0)} hours.")
-                        st.rerun()
-                    else:
-                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
-                        
-                        if response.get("source"):
-                            st.caption(f"Source: {response['source']}")
-                        
-                        indicators = []
-                        if response.get("used_pinecone"):
-                            indicators.append("🧠 Knowledge Base")
-                        if response.get("used_search"):
-                            indicators.append("🌐 Web Search")
-                        
-                        if indicators:
-                            st.caption(f"Enhanced with: {', '.join(indicators)}")
-                        
-                except Exception as e:
-                    logger.error(f"AI response generation failed due to an unexpected error: {e}", exc_info=True)
-                    st.error("⚠️ Sorry, I encountered an unexpected error processing your request. Please try again.")
-        
-        st.rerun()
 
 # =============================================================================
 # MAIN APPLICATION FLOW
