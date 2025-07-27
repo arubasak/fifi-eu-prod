@@ -31,27 +31,10 @@ import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
 # =============================================================================
-# FINAL INTEGRATED FIFI AI - ALL FEATURES IMPLEMENTED (CORRECTED & COMPLETE)
-# - Merges the robust structure of Code 1 with the advanced features of Code 2.
-# - ALL features are preserved and correctly integrated.
-# - Universal fingerprinting (Canvas/WebGL/Audio) for ALL sessions.
-# - 3-tier user system: GUEST → EMAIL_VERIFIED_GUEST → REGISTERED_USER.
-# - Activity-based question limits with rolling 24-hour windows.
-# - Email verification with Supabase Auth OTP.
-# - 15-minute session timeout for CRM saves, integrated with robust timer logic.
-# - Cross-device enforcement and evasion detection.
-# - Complete new database schema implemented in the robust DatabaseManager.
-# - Enhanced browser close detection and error handling preserved.
-# - All syntax errors fixed and duplicate code properly merged and adapted.
-# - FIX: Non-destructive database schema migration logic using ALTER TABLE ADD COLUMN.
-# - FIX: Dynamic column handling in REPLACE INTO for database consistency and robustness.
-# - FIX: Removed 'height' parameter from st_javascript to prevent error.
-# - FIX: Critical database loading error where 'session_id' was missing from UserSession constructor.
-# - FIX: Implement workaround for failing JavaScript fingerprinting; add JS test.
-# - FIX: CRITICAL SESSION OBJECT INCONSISTENCY (Passing single session object from main).
-# - CRITICAL DEBUG: Added extensive debug logging to render_sidebar() to diagnose display issue.
-# - FIX: Enum Comparison Issue: Changed `enum_member == Enum.MEMBER` to `enum_member.value == Enum.MEMBER.value`
-#        for consistent comparisons across Streamlit reruns where Enum objects might have different IDs.
+# FINAL INTEGRATED FIFI AI - ALL FEATURES IMPLEMENTED (CLEANED & COMPLETE)
+# - All previous fixes including enum comparison.
+# - OpenAI content moderation model name corrected.
+# - All temporary debug logging removed for production use.
 # =============================================================================
 
 # Setup logging
@@ -450,8 +433,6 @@ class DatabaseManager:
                 ("browser_privacy_level", "TEXT"),
                 ("registration_prompted", "INTEGER DEFAULT 0"),
                 ("registration_link_clicked", "INTEGER DEFAULT 0")
-                # Ensure all columns from the UserSession dataclass that are NOT in the initial Code 1 schema are listed here
-                # And that their DEFAULT values match those in UserSession where applicable.
             ]
             
             # Iterate through the defined new columns and add any that are missing
@@ -523,22 +504,15 @@ class DatabaseManager:
                     "browser_privacy_level": s.browser_privacy_level,
                     "registration_prompted": int(s.registration_prompted),
                     "registration_link_clicked": int(s.registration_link_clicked)
-                    # Add any other legacy column mappings here if you need to specifically
-                    # populate them from UserSession data, e.g.,
-                    # "first_name": s.full_name # if you want full_name copied to an old first_name column
                 }
 
                 # Construct the list of values to insert in the exact order of db_column_names.
-                # If a column exists in the DB but doesn't have a corresponding attribute in UserSession_attr_to_value,
-                # it will receive None (or whatever SQLite's default for that column is if not specified as NULL).
                 values_to_insert = [
                     session_attr_to_value.get(col_name) for col_name in db_column_names
                 ]
                 
-                # Log for debugging - extremely helpful to see the counts and names at runtime
                 logger.debug(f"DB Columns (Actual): Count={len(db_column_names)} -> {db_column_names}")
                 logger.debug(f"Values to Insert: Count={len(values_to_insert)}")
-                # logger.debug(f"Values to Insert: {values_to_insert}") # Uncomment for full value inspection
 
                 # Construct the REPLACE INTO statement dynamically using discovered column names
                 columns_sql = ", ".join(db_column_names)
@@ -559,12 +533,10 @@ class DatabaseManager:
     def load_session(self, session_id: str) -> Optional[UserSession]:
         with self.lock:
             if self.db_type == "memory":
-                # For in-memory, return a deep copy to isolate from external modifications
                 return copy.deepcopy(self.local_sessions.get(session_id))
             try:
-                # Set row_factory based on DB type for consistent dictionary-like access
                 if self.db_type == "file": self.conn.row_factory = sqlite3.Row
-                else: self.conn.row_factory = None # sqlitecloud returns tuples, convert manually
+                else: self.conn.row_factory = None
 
                 cursor = self.conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
                 row = cursor.fetchone()
@@ -572,46 +544,21 @@ class DatabaseManager:
                     logger.debug(f"No active session found for ID {session_id[:8]}.")
                     return None
                 
-                # Convert row to dictionary for consistent processing
                 row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
-
-                # DEBUG: Log what we got from database
-                logger.debug(f"DEBUG - Database row for session {session_id[:8]}: columns={list(row_dict.keys())}")
-                logger.debug(f"DEBUG - 'session_id' in row_dict: {'session_id' in row_dict}")
-                logger.debug(f"DEBUG - hasattr(UserSession, 'session_id'): {hasattr(UserSession, 'session_id')}")
                 
-                # Dynamically create UserSession, converting types as needed
                 session_params = {}
+                session_params['session_id'] = row_dict.get('session_id', session_id)
                 
-                # CRITICAL FIX: Ensure session_id is always included first.
-                # It's a required positional argument for the UserSession dataclass constructor.
-                # Prioritize row_dict, but fall back to the method parameter if needed (shouldn't happen with correct schema)
-                if 'session_id' in row_dict:
-                    session_params['session_id'] = row_dict['session_id']
-                else:
-                    logger.warning(f"session_id column missing from database row for {session_id[:8]}, falling back to method parameter. Database schema might be incomplete or corrupted.")
-                    session_params['session_id'] = session_id
-                
-                # Process all other fields from the database row.
-                # Iterate through the keys in row_dict.
                 for key, value in row_dict.items():
-                    # Skip 'session_id' here as we've already handled it explicitly above.
                     if key == 'session_id':
                         continue
                         
-                    # Only map values to UserSession attributes if the attribute exists in the dataclass.
-                    # This is crucial for backward compatibility with older DB schemas that might have
-                    # columns not present in the current UserSession dataclass definition, preventing AttributeError.
                     if hasattr(UserSession, key):
                         session_params[key] = self._convert_db_value_to_python(key, value)
                     else:
-                        # Log if an unexpected column is found in the DB that is not part of the UserSession dataclass.
                         logger.debug(f"Skipping unknown DB column '{key}' during session load for {session_id[:8]} (not in UserSession dataclass).")
                 
-                # DEBUG: Log what parameters are finally being passed to the UserSession constructor.
-                logger.debug(f"DEBUG - Final session params keys for {session_id[:8]}: {list(session_params.keys())}")
-                
-                user_session = UserSession(**session_params) # Unpack dictionary into dataclass constructor
+                user_session = UserSession(**session_params)
                 logger.debug(f"Successfully loaded session {session_id[:8]}: type={user_session.user_type.value}.")
                 return user_session
                 
@@ -624,7 +571,6 @@ class DatabaseManager:
         if value is None:
             return None
         
-        # Datetime fields
         datetime_keys = ['created_at', 'last_activity', 'last_question_time', 'ban_start_time', 'ban_end_time']
         if key in datetime_keys and isinstance(value, str):
             try:
@@ -633,7 +579,6 @@ class DatabaseManager:
                 logger.warning(f"Could not convert {key} '{value}' to datetime. Returning None.")
                 return None
         
-        # JSON fields (lists in this case)
         json_list_keys = ['messages', 'email_addresses_used']
         if key in json_list_keys and isinstance(value, str):
             try:
@@ -642,7 +587,6 @@ class DatabaseManager:
                 logger.warning(f"Could not decode JSON for {key}: '{value}'. Returning empty list.")
                 return []
         
-        # Enum fields
         if key == 'user_type' and isinstance(value, str):
             try:
                 return UserType(value)
@@ -656,7 +600,6 @@ class DatabaseManager:
                 logger.warning(f"Invalid ban_status '{value}'. Defaulting to NONE.")
                 return BanStatus.NONE
         
-        # Boolean fields (stored as INTEGER 0 or 1)
         bool_keys = ['active', 'timeout_saved_to_crm', 'question_limit_reached', 'registration_prompted', 'registration_link_clicked']
         if key in bool_keys:
             return bool(value)
@@ -678,11 +621,10 @@ class DatabaseManager:
                 for row in cursor.fetchall():
                     row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
                     session_params = {}
-                    # CRITICAL FIX: Ensure session_id is always passed.
-                    session_params['session_id'] = row_dict.get('session_id', str(uuid.uuid4())) # Fallback if missing
+                    session_params['session_id'] = row_dict.get('session_id', str(uuid.uuid4()))
                     for key, value in row_dict.items():
-                        if key == 'session_id': continue # Already handled
-                        if hasattr(UserSession, key): # Only map if attribute exists in UserSession
+                        if key == 'session_id': continue
+                        if hasattr(UserSession, key):
                             session_params[key] = self._convert_db_value_to_python(key, value)
                     sessions.append(UserSession(**session_params))
                 return sessions
@@ -705,11 +647,10 @@ class DatabaseManager:
                 for row in cursor.fetchall():
                     row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
                     session_params = {}
-                    # CRITICAL FIX: Ensure session_id is always passed.
-                    session_params['session_id'] = row_dict.get('session_id', str(uuid.uuid4())) # Fallback if missing
+                    session_params['session_id'] = row_dict.get('session_id', str(uuid.uuid4()))
                     for key, value in row_dict.items():
-                        if key == 'session_id': continue # Already handled
-                        if hasattr(UserSession, key): # Only map if attribute exists in UserSession
+                        if key == 'session_id': continue
+                        if hasattr(UserSession, key):
                             session_params[key] = self._convert_db_value_to_python(key, value)
                     sessions.append(UserSession(**session_params))
                 return sessions
@@ -725,7 +666,7 @@ class FingerprintingManager:
     """Manages the 3-layer browser fingerprinting for device identification."""
     
     def __init__(self):
-        self.fingerprint_cache = {} # Cache for quick lookup of seen fingerprints
+        self.fingerprint_cache = {}
 
     def generate_fingerprint_component(self, session_id: str) -> str:
         """
@@ -887,7 +828,7 @@ class FingerprintingManager:
             'fingerprint_id': fallback_id,
             'fingerprint_method': 'fallback',
             'visitor_type': 'new_visitor',
-            'browser_info': {}, # Empty dict as no real info is collected
+            'browser_info': {},
             'privacy_level': 'high_privacy',
             'working_methods': []
         }
@@ -904,7 +845,7 @@ class EmailVerificationManager:
                 logger.info("✅ Supabase client initialized for email verification.")
             except Exception as e:
                 logger.error(f"❌ Supabase client initialization failed: {e}. Email verification will be disabled.")
-                self.supabase = None # Ensure it's None if init fails
+                self.supabase = None
 
     @handle_api_errors("Supabase Auth", "Send Verification Code")
     def send_verification_code(self, email: str) -> bool:
@@ -913,7 +854,6 @@ class EmailVerificationManager:
             return False
         
         try:
-            # Supabase Auth's sign_in_with_otp sends a magic link or OTP to the email
             self.supabase.auth.sign_in_with_otp({'email': email, 'options': {'should_create_user': True}})
             logger.info(f"Email verification code/link sent to {email} via Supabase.")
             return True
@@ -930,7 +870,7 @@ class EmailVerificationManager:
         
         try:
             response = self.supabase.auth.verify_otp({'email': email, 'token': code.strip(), 'type': 'email'})
-            if response.user: # If user object is returned, verification was successful
+            if response.user:
                 logger.info(f"Email verification successful for {email} (Supabase User ID: {response.user.id}).")
                 return True
             else:
@@ -945,11 +885,11 @@ class QuestionLimitManager:
     
     def __init__(self):
         self.question_limits = {
-            UserType.GUEST.value: 4,                    # 4 questions → forced email verification
-            UserType.EMAIL_VERIFIED_GUEST.value: 10,   # 10 questions/day
-            UserType.REGISTERED_USER.value: 40         # 40 questions/day cross-device
+            UserType.GUEST.value: 4,
+            UserType.EMAIL_VERIFIED_GUEST.value: 10,
+            UserType.REGISTERED_USER.value: 40
         }
-        self.evasion_penalties = [24, 48, 96, 192, 336] # Escalating evasion penalties in hours
+        self.evasion_penalties = [24, 48, 96, 192, 336]
     
     def is_within_limits(self, session: UserSession) -> Dict[str, Any]:
         """
@@ -976,7 +916,7 @@ class QuestionLimitManager:
                 session.ban_start_time = None
                 session.ban_end_time = None
                 session.ban_reason = None
-                session.question_limit_reached = False # Important for UI display
+                session.question_limit_reached = False
         
         # 2. Check activity-based reset (24-hour rolling window for daily counts)
         if session.last_question_time:
@@ -984,7 +924,7 @@ class QuestionLimitManager:
             if time_since_last >= timedelta(hours=24):
                 logger.info(f"Daily question count reset for session {session.session_id[:8]}.")
                 session.daily_question_count = 0
-                session.question_limit_reached = False # Reset UI flag
+                session.question_limit_reached = False
         
         # 3. Apply limits based on UserType
         if session.user_type.value == UserType.GUEST.value:
@@ -997,7 +937,6 @@ class QuestionLimitManager:
         
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             if session.daily_question_count >= user_limit:
-                # Exceeded 10 questions/day for email-verified guest → 24-hour ban
                 self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
                 return {
                     'allowed': False,
@@ -1006,9 +945,7 @@ class QuestionLimitManager:
                 }
         
         elif session.user_type.value == UserType.REGISTERED_USER.value:
-            # Registered users have a 40-question total limit, with a softer 1-hour ban after 20.
             if session.total_question_count >= user_limit:
-                # Exceeded 40 questions → 24-hour ban
                 self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user total limit reached")
                 return {
                     'allowed': False,
@@ -1016,7 +953,6 @@ class QuestionLimitManager:
                     'message': "Usage limit reached. Please retry in 24 hours as we are giving preference to others in the queue."
                 }
             elif session.total_question_count >= 20 and session.ban_status.value == BanStatus.NONE.value:
-                # Hit 20 questions → apply 1-hour ban if not already banned
                 self._apply_ban(session, BanStatus.ONE_HOUR, "Registered user first tier limit reached")
                 return {
                     'allowed': False,
@@ -1024,7 +960,7 @@ class QuestionLimitManager:
                     'message': "Usage limit reached. Please retry in 1 hour as we are giving preference to others in the queue."
                 }
         
-        return {'allowed': True} # User is allowed to ask a question
+        return {'allowed': True}
     
     def record_question(self, session: UserSession):
         """Increments question counters for the session."""
@@ -1039,25 +975,24 @@ class QuestionLimitManager:
         ban_hours = {
             BanStatus.ONE_HOUR.value: 1,
             BanStatus.TWENTY_FOUR_HOUR.value: 24,
-            BanStatus.EVASION_BLOCK.value: session.current_penalty_hours # Use current_penalty_hours for evasion
-        }.get(ban_type.value, 24) # Default to 24 hours if type is unknown
+            BanStatus.EVASION_BLOCK.value: session.current_penalty_hours
+        }.get(ban_type.value, 24)
 
         session.ban_status = ban_type
         session.ban_start_time = datetime.now()
         session.ban_end_time = session.ban_start_time + timedelta(hours=ban_hours)
         session.ban_reason = reason
-        session.question_limit_reached = True # Flag for UI/logging
+        session.question_limit_reached = True
         
         logger.info(f"Ban applied to session {session.session_id[:8]}: Type={ban_type.value}, Duration={ban_hours}h, Reason='{reason}'.")
     
     def apply_evasion_penalty(self, session: UserSession) -> int:
         """Applies an escalating penalty for evasion attempts."""
         session.evasion_count += 1
-        # Escalation level caps at the max index of evasion_penalties list
         session.escalation_level = min(session.evasion_count, len(self.evasion_penalties))
         
-        penalty_hours = self.evasion_penalties[session.escalation_level - 1] # -1 because lists are 0-indexed
-        session.current_penalty_hours = penalty_hours # Store the current penalty
+        penalty_hours = self.evasion_penalties[session.escalation_level - 1]
+        session.current_penalty_hours = penalty_hours
         
         self._apply_ban(session, BanStatus.EVASION_BLOCK, f"Evasion attempt #{session.evasion_count}")
         
@@ -1070,7 +1005,7 @@ class QuestionLimitManager:
             return "Usage limit reached due to detected unusual activity. Please try again later."
         elif session.user_type.value == UserType.REGISTERED_USER.value:
             return "Usage limit reached. Please retry in 1 hour as we are giving preference to others in the queue."
-        else: # EMAIL_VERIFIED_GUEST (or other cases that hit 24-hour daily limit)
+        else:
             return self._get_email_verified_limit_message()
     
     def _get_email_verified_limit_message(self) -> str:
@@ -1098,7 +1033,6 @@ class PDFExporter:
         for msg in session.messages:
             role = str(msg.get('role', 'unknown')).capitalize()
             content = html.escape(str(msg.get('content', '')))
-            # Remove HTML tags for cleaner PDF output
             content = re.sub(r'<[^>]+>', '', content)
             
             style = self.styles['UserMessage'] if role == 'User' else self.styles['Normal']
@@ -1125,7 +1059,6 @@ class ZohoCRMManager:
     def _get_access_token(self, force_refresh: bool = False, timeout: int = 15) -> Optional[str]:
         """
         Retrieves or refreshes the Zoho CRM access token, with caching and timeout.
-        Preserved from Code 1, which had more robust token handling.
         """
         if not self.config.ZOHO_ENABLED:
             logger.debug("Zoho is not enabled in configuration. Skipping token request.")
@@ -1147,11 +1080,10 @@ class ZohoCRMManager:
                 },
                 timeout=timeout
             )
-            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+            response.raise_for_status()
             data = response.json()
             
             self._access_token = data.get('access_token')
-            # Token usually valid for 1 hour, refresh slightly before expiry
             self._token_expiry = datetime.now() + timedelta(minutes=50) 
             
             logger.info("Successfully obtained Zoho access token.")
@@ -1177,7 +1109,7 @@ class ZohoCRMManager:
         try:
             response = requests.get(f"{self.base_url}/Contacts/search", headers=headers, params=params, timeout=10)
             
-            if response.status_code == 401: # Token expired during call
+            if response.status_code == 401:
                 logger.warning("Zoho token expired, attempting refresh for _find_contact_by_email...")
                 access_token = self._get_access_token(force_refresh=True)
                 if not access_token: return None
@@ -1206,7 +1138,7 @@ class ZohoCRMManager:
         headers = {'Authorization': f'Zoho-oauthtoken {access_token}', 'Content-Type': 'application/json'}
         contact_data = {
             "data": [{
-                "Last_Name": full_name or "Food Professional", # Zoho requires Last_Name
+                "Last_Name": full_name or "Food Professional",
                 "Email": email,
                 "Lead_Source": "FiFi AI Assistant"
             }]
@@ -1247,7 +1179,7 @@ class ZohoCRMManager:
         max_retries = 2
         for attempt in range(max_retries):
             try:
-                pdf_buffer.seek(0) # Reset buffer position for reading
+                pdf_buffer.seek(0)
                 response = requests.post(
                     upload_url, 
                     headers=headers, 
@@ -1258,9 +1190,9 @@ class ZohoCRMManager:
                 if response.status_code == 401:
                     logger.warning("Zoho token expired during upload, attempting refresh...")
                     access_token = self._get_access_token(force_refresh=True)
-                    if not access_token: return False # If token refresh fails, give up
+                    if not access_token: return False
                     headers['Authorization'] = f'Zoho-oauthtoken {access_token}'
-                    continue # Retry with new token
+                    continue
                 
                 response.raise_for_status()
                 data = response.json()
@@ -1277,7 +1209,7 @@ class ZohoCRMManager:
                 logger.error(f"Error uploading Zoho attachment (attempt {attempt + 1}/{max_retries}): {e}", exc_info=True)
                 
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt) # Exponential backoff
+                time.sleep(2 ** attempt)
                 
         return False
 
@@ -1288,7 +1220,6 @@ class ZohoCRMManager:
 
         headers = {'Authorization': f'Zoho-oauthtoken {access_token}', 'Content-Type': 'application/json'}
         
-        # Truncate note content if too long (Zoho limit is typically 32000 characters)
         max_content_length = 32000
         if len(note_content) > max_content_length:
             note_content = note_content[:max_content_length - 100] + "\n\n[Content truncated due to size limits]"
@@ -1330,13 +1261,11 @@ class ZohoCRMManager:
     def save_chat_transcript_sync(self, session: UserSession, trigger_reason: str) -> bool:
         """
         Synchronously saves the chat transcript to Zoho CRM, including contact creation,
-        PDF attachment, and a summary note. Includes comprehensive error handling and retries.
-        Preserved from Code 1, which had robust debug logging and retry logic.
+        PDF attachment, and a summary note.
         """
         logger.info("=" * 80)
         logger.info(f"ZOHO SAVE START - Trigger: {trigger_reason}")
         
-        # Only registered users with email and messages can save to CRM
         if (session.user_type.value != UserType.REGISTERED_USER.value or 
             not session.email or 
             not session.messages or 
@@ -1349,24 +1278,19 @@ class ZohoCRMManager:
         for attempt in range(max_retries):
             logger.info(f"Zoho Save Attempt {attempt + 1}/{max_retries}")
             try:
-                # Find or create contact
                 contact_id = self._find_contact_by_email(session.email)
                 if not contact_id:
                     contact_id = self._create_contact(session.email, session.full_name)
                 if not contact_id:
                     logger.error("Failed to find or create Zoho contact. Cannot proceed with save.")
-                    # If this is the last attempt, return False
                     if attempt == max_retries - 1: return False
-                    # Else, continue to next retry
                     time.sleep(2 ** attempt)
                     continue 
-                session.zoho_contact_id = contact_id # Update session with Zoho contact ID
+                session.zoho_contact_id = contact_id
 
-                # Generate PDF transcript
                 pdf_buffer = self.pdf_exporter.generate_chat_pdf(session)
                 if not pdf_buffer:
                     logger.error("Failed to generate PDF transcript. Cannot proceed with attachment.")
-                    # Continue attempting note creation even if PDF fails
                 
                 upload_success = False
                 if pdf_buffer:
@@ -1376,7 +1300,6 @@ class ZohoCRMManager:
                     if not upload_success:
                         logger.warning("Failed to upload PDF attachment to Zoho. Continuing with note only.")
 
-                # Add summary note to CRM
                 note_title = f"FiFi AI Chat Transcript from {datetime.now().strftime('%Y-%m-%d %H:%M')} ({trigger_reason})"
                 note_content = self._generate_note_content(session, upload_success, trigger_reason)
                 note_success = self._add_note(contact_id, note_title, note_content)
@@ -1389,7 +1312,6 @@ class ZohoCRMManager:
                     return True
                 else:
                     logger.error("Failed to add note to Zoho contact.")
-                    # If note failed, and it's the last attempt, report overall failure
                     if attempt == max_retries - 1:
                         logger.error("Max retries reached. Aborting save.")
                         return False
@@ -1401,12 +1323,12 @@ class ZohoCRMManager:
                 logger.error("=" * 80)
                 error_handler.log_error(error_handler.handle_api_error("Zoho CRM", "Save Transcript", e))
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt) # Exponential backoff
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error("Max retries reached. Aborting save.")
                     return False
         
-        return False # Should only be reached if all retries fail
+        return False
 
     def _generate_note_content(self, session: UserSession, attachment_uploaded: bool, trigger_reason: str) -> str:
         """Generates the text content for the Zoho CRM note."""
@@ -1430,7 +1352,7 @@ class ZohoCRMManager:
         
         for i, msg in enumerate(session.messages):
             role = msg.get("role", "Unknown").capitalize()
-            content = re.sub(r'<[^>]+>', '', msg.get("content", "")) # Clean HTML for note
+            content = re.sub(r'<[^>]+>', '', msg.get("content", ""))
             
             max_msg_length = 500
             if len(content) > max_msg_length:
@@ -1451,14 +1373,13 @@ class RateLimiter:
     """Simple in-memory rate limiter to prevent abuse."""
     def __init__(self, max_requests: int = 30, window_seconds: int = 60):
         self.requests = defaultdict(list)
-        self._lock = threading.Lock() # Use a lock for thread safety
+        self._lock = threading.Lock()
         self.max_requests = max_requests
         self.window_seconds = window_seconds
 
     def is_allowed(self, identifier: str) -> bool:
         with self._lock:
             now = time.time()
-            # Filter out old requests outside the window
             self.requests[identifier] = [t for t in self.requests[identifier] if t > now - self.window_seconds]
             if len(self.requests[identifier]) < self.max_requests:
                 self.requests[identifier].append(now)
@@ -1468,7 +1389,7 @@ class RateLimiter:
 def sanitize_input(text: str, max_length: int = 4000) -> str:
     """Sanitizes user input to prevent XSS and limit length."""
     if not isinstance(text, str): 
-        return "" # Ensure it's a string
+        return ""
     return html.escape(text)[:max_length].strip()
     
 class EnhancedAI:
@@ -1476,7 +1397,6 @@ class EnhancedAI:
     def __init__(self, config: Config):
         self.config = config
         self.openai_client = None
-        # Initialize OpenAI client if available
         if OPENAI_AVAILABLE and self.config.OPENAI_API_KEY:
             try:
                 self.openai_client = openai.OpenAI(api_key=self.config.OPENAI_API_KEY)
@@ -1491,22 +1411,6 @@ class EnhancedAI:
         Provides a simplified AI response. In a real application, this would
         integrate with LangChain, Pinecone, Tavily, and OpenAI.
         """
-        # Example of how you would connect to OpenAI (if available)
-        # if self.openai_client:
-        #     try:
-        #         messages = [{"role": "user", "content": prompt}]
-        #         if chat_history:
-        #             messages = chat_history[-5:] + messages # Last 5 messages for context
-        #         response = self.openai_client.chat.completions.create(
-        #             model="gpt-3.5-turbo", # or your chosen model
-        #             messages=messages
-        #         )
-        #         return {"content": response.choices[0].message.content, "source": "OpenAI", "success": True}
-        #     except Exception as e:
-        #         logger.error(f"OpenAI API call failed: {e}")
-        #         # Fallback to generic response
-        #         return {"content": "Sorry, my AI services are currently unavailable.", "success": False, "source": "AI Error"}
-
         # Simplified placeholder response for demonstration
         return {
             "content": f"I understand you're asking about: '{prompt}'. This is the integrated FiFi AI. Your question is processed based on your user tier and system limits.",
@@ -1519,15 +1423,16 @@ class EnhancedAI:
             "success": True
         }
 
-@handle_api_errors("Content Moderation", "Check Prompt", show_to_user=False) # Don't show technical errors to user
+@handle_api_errors("Content Moderation", "Check Prompt", show_to_user=False)
 def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
     """Checks user prompt against content moderation guidelines using OpenAI's moderation API."""
     if not client or not hasattr(client, 'moderations') :
         logger.debug("OpenAI client or moderation API not available. Skipping content moderation.")
-        return {"flagged": False} # Moderation is optional, so default to not flagged if service is down/unavailable
+        return {"flagged": False}
     
     try:
-        response = client.moderations.create(model="text-moderation-latest", input=prompt) # Use text-moderation-latest or omni-moderation-latest
+        # FIX: Changed model to "omni-moderation-latest"
+        response = client.moderations.create(model="omni-moderation-latest", input=prompt)
         result = response.results[0]
         
         if result.flagged:
@@ -1540,7 +1445,6 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
             }
     except Exception as e:
         logger.error(f"Content moderation API call failed: {e}", exc_info=True)
-        # In case of API error, it's safer to not flag unless explicitly configured otherwise
         return {"flagged": False}
     
     return {"flagged": False}
@@ -1552,29 +1456,25 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
 def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str, Any]]:
     """
     Renders a JavaScript component that tracks user inactivity and triggers
-    an event after 15 minutes. This version integrates the robust listener setup
-    from Code 1 with the 15-minute timeout requirement from Code 2.
+    an event after 15 minutes.
     """
     if not session_id:
         return None
     
-    # JavaScript logic, optimized for stability and correct event triggering
     js_timer_code = f"""
     (() => {{
-        // Wrap everything in an IIFE and try-catch for robustness
         try {{
             const sessionId = "{session_id}";
-            const SESSION_TIMEOUT_MS = 900000;  // 15 minutes in milliseconds
+            const SESSION_TIMEOUT_MS = 900000;
             
             console.log("🕐 FiFi 15-Minute Timer: Checking session", sessionId.substring(0, 8));
             
-            // Initialize or reset timer state if session changed or first load
             if (typeof window.fifi_timer_state === 'undefined' || window.fifi_timer_state === null || window.fifi_timer_state.sessionId !== sessionId) {{
-                console.clear(); // Clear old console logs for a fresh session
+                console.clear();
                 console.log("🆕 FiFi 15-Minute Timer: Starting/Resetting for session", sessionId.substring(0, 8)); 
                 window.fifi_timer_state = {{
                     lastActivityTime: Date.now(),
-                    expired: false, // Flag to ensure event fires only once per timeout
+                    expired: false,
                     listenersInitialized: false,
                     sessionId: sessionId
                 }};
@@ -1583,43 +1483,39 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             
             const state = window.fifi_timer_state;
             
-            // Initialize activity listeners only once per session
             if (!state.listenersInitialized) {{
                 console.log("👂 Setting up FiFi 15-Minute activity listeners...");
                 
                 function resetActivity() {{
                     try {{
                         const now = Date.now();
-                        if (state.lastActivityTime !== now) {{ // Only update if actual change
+                        if (state.lastActivityTime !== now) {{
                             state.lastActivityTime = now;
                             if (state.expired) {{
-                                // Log if state was expired but activity detected
                                 console.log("🔄 Activity detected, resetting expired flag for timer.");
                             }}
-                            state.expired = false; // Reset expired flag on activity
+                            state.expired = false;
                         }}
                     }} catch (e) {{
                         console.debug("Error in resetActivity:", e);
                     }}
                 }}
                 
-                // Events to detect user activity
                 const events = [
                     'mousedown', 'mousemove', 'mouseup', 'click', 'dblclick',
                     'keydown', 'keyup', 'keypress',
                     'scroll', 'wheel',
                     'touchstart', 'touchmove', 'touchend',
-                    'focus' // Detects when window/tab gains focus
+                    'focus'
                 ];
                 
-                // Add listeners to the component iframe and the parent window/document
                 const addListenersToTarget = (target) => {{
                     events.forEach(eventType => {{
                         try {{
                             target.addEventListener(eventType, resetActivity, {{ 
                                 passive: true, 
                                 capture: true,
-                                once: false // Keep listening
+                                once: false
                             }});
                         }} catch (e) {{
                             console.debug(`Failed to add ${{eventType}} listener to target:`, e);
@@ -1627,19 +1523,18 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                     }});
                 }};
                 
-                addListenersToTarget(document); // Add to current iframe document
+                addListenersToTarget(document);
                 
                 try {{
                     if (window.parent && window.parent.document && window.parent.document !== document &&
                         window.parent.location.origin === window.location.origin) {{
-                        addListenersToTarget(window.parent.document); // Add to main Streamlit app document
+                        addListenersToTarget(window.parent.document);
                         console.log("👂 Parent document listeners added successfully.");
                     }}
                 }} catch (e) {{
                     console.debug("Cannot access parent document for listeners:", e);
                 }}
                 
-                // Add visibility change detection for overall activity
                 const handleVisibilityChange = () => {{
                     try {{
                         if (document.visibilityState === 'visible') {{
@@ -1662,7 +1557,6 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                 console.log("✅ FiFi 15-Minute activity listeners initialized.");
             }}
             
-            // Calculate current inactivity time
             const currentTime = Date.now();
             const inactiveTimeMs = currentTime - state.lastActivityTime;
             const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
@@ -1670,9 +1564,8 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             
             console.log(`⏰ Session ${{sessionId.substring(0, 8)}} inactive: ${{inactiveMinutes}}m${{inactiveSeconds}}s`);
             
-            // Check for 15-minute timeout and fire event only once
             if (inactiveTimeMs >= SESSION_TIMEOUT_MS && !state.expired) {{
-                state.expired = true; // Set flag to prevent re-firing until activity
+                state.expired = true;
                 console.log("🚨 15-MINUTE SESSION TIMEOUT REACHED for session", sessionId.substring(0, 8));
                 
                 return {{
@@ -1685,32 +1578,23 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                 }};
             }}
             
-            // Explicitly return null if no event is triggered, essential for st_javascript
             return null;
             
         }} catch (error) {{
             console.error("🚨 FiFi 15-Minute Timer component caught a critical error:", error);
-            return null; // Ensure null is returned on error
+            return null;
         }}
     }})()
     """
     
     try:
-        # Create a stable key for st_javascript, incorporating session ID and a hash of session ID
-        # This helps Streamlit identify the component across reruns consistently.
         stable_key = f"fifi_timer_15min_{session_id[:8]}_{hash(session_id) % 10000}"
-        
-        # Execute the JavaScript code
         timer_result = st_javascript(js_timer_code, key=stable_key)
         
-        # Validate the result from JavaScript
-        # st_javascript can return None, 0, or an empty string if nothing is returned or an error occurs in JS
         if timer_result is None or timer_result == 0 or timer_result == "" or timer_result == False:
-            return None # No meaningful event or error occurred in JS (or it's not yet triggered)
+            return None
         
-        # Further validate if the result is a dictionary and contains the expected event
         if isinstance(timer_result, dict) and timer_result.get('event') == "session_timeout_15min":
-            # Ensure the session ID returned by JS matches the current session ID to prevent cross-session interference
             if timer_result.get('session_id') == session_id:
                 logger.info(f"✅ Valid 15-min timer event received: {timer_result.get('event')} for session {session_id[:8]}.")
                 return timer_result
@@ -1729,99 +1613,79 @@ def render_browser_close_detection_enhanced(session_id: str):
     """
     Renders a JavaScript component to detect browser/tab close events
     and trigger an "emergency save" to the Streamlit app.
-    This uses the robust beacon API (or XHR fallback) from Code 1 for reliability.
     """
     if not session_id:
         return
 
-    # JavaScript code to send a beacon on unload events
     js_code = f"""
     <script>
     (function() {{
-        // Use a flag to ensure the script runs only once per iframe load
         const scriptIdentifier = 'fifi_close_enhanced_script_' + '{session_id}';
-        if (window[scriptIdentifier]) return; // If already initialized for this session, exit
+        if (window[scriptIdentifier]) return;
         window[scriptIdentifier] = true;
         
         const sessionId = '{session_id}';
-        let saveTriggered = false; // Flag to prevent multiple save attempts
+        let saveTriggered = false;
         
-        // Helper to get the full application URL including path, handling iframe parent context
         function getAppUrl() {{
             try {{
-                // Try to get parent's URL if in an iframe (Streamlit's default setup)
-                // Ensure origin matches to avoid cross-origin security errors
                 if (window.parent && window.parent.location.origin === window.location.origin) {{
                     return window.parent.location.origin + window.parent.location.pathname;
                 }}
             }} catch (e) {{
-                // Fallback to current window's URL if parent access is restricted or not applicable
                 console.warn("Could not access parent.location. Fallbacking to current window.location for app URL:", e);
             }}
             return window.location.origin + window.location.pathname;
         }}
 
         function sendEmergencySaveWithReload() {{
-            if (saveTriggered) return; // Only send once per unload sequence
+            if (saveTriggered) return;
             saveTriggered = true;
-            console.clear(); // Clear console for clearer logging of this critical event
+            console.clear();
             console.log('🚨 FiFi Enhanced: Browser close detected - sending FORCED emergency save.');
             
             const appUrl = getAppUrl();
-            // Construct the URL with query parameters for the emergency save event
             const saveUrl = `${{appUrl}}?event=emergency_close&session_id=${{sessionId}}`;
             
             console.log('📡 Attempting to send emergency save to:', saveUrl);
             
-            // METHOD 1: Use navigator.sendBeacon (asynchronous, non-blocking, designed for unload)
             try {{
                 if (navigator.sendBeacon) {{
                     const formData = new FormData();
                     formData.append('event', 'emergency_close');
                     formData.append('session_id', sessionId);
-                    // sendBeacon can also take a URL and Blob/FormData
-                    const beaconSuccess = navigator.sendBeacon(saveUrl, formData); // Send as POST data
+                    const beaconSuccess = navigator.sendBeacon(saveUrl, formData);
                     console.log('📡 Beacon result:', beaconSuccess ? 'Success (sent)' : 'Failed (not sent)');
                     
                     if (beaconSuccess) {{
-                        // Even if beacon succeeds, forcing a reload after a short delay
-                        // can help ensure Streamlit processes the query parameter for robust handling.
-                        // Add a small delay to allow the beacon to initiate fully.
                         setTimeout(() => {{
                             try {{
-                                // Redirect parent window if possible
                                 if (window.parent && window.parent.location.origin === window.location.origin) {{
                                     window.parent.location.href = saveUrl;
                                 }} else {{
-                                    window.location.href = saveUrl; // Fallback for current window
+                                    window.location.href = saveUrl;
                                 }}
                             }} catch (e) {{
                                 console.error('Error redirecting after beacon:', e);
                             }}
-                        }}, 100); // Short delay
-                        return; // Exit after successful beacon attempt
+                        }}, 100);
+                        return;
                     }}
                 }}
             }} catch (e) {{
                 console.warn('📡 navigator.sendBeacon API failed or not available:', e);
             }}
             
-            // METHOD 2: Fallback to synchronous XMLHttpRequest (less ideal, but robust for critical saves)
-            // This is a blocking call, which ensures the request is sent before the page unloads completely.
-            // It might cause a slight delay in page closing, but prioritizes data persistence.
             try {{
                 console.log('🔄 Forcing emergency save via synchronous XMLHttpRequest fallback.');
                 const xhr = new XMLHttpRequest();
-                xhr.open("GET", saveUrl, false); // `false` makes it synchronous
+                xhr.open("GET", saveUrl, false);
                 xhr.send(null);
                 console.log('📡 Synchronous XHR sent.');
             }} catch (e2) {{
                 console.error('❌ Synchronous XHR failed:', e2);
             }}
             
-            // Final fallback/redundancy: Force a page reload with the save parameters
-            // This ensures Streamlit processes the request on the *next* load.
-            // Add a slight delay to allow other mechanisms to attempt first.
             setTimeout(() => {{
                 try {{
                     if (window.parent && window.parent.location.origin === window.location.origin) {{
@@ -1832,25 +1696,21 @@ def render_browser_close_detection_enhanced(session_id: str):
                 }} catch (e) {{
                     console.error('❌ Final forced reload failed:', e);
                 }}
-            }}, 50); // Very short delay
+            }}, 50);
         }}
         
-        // Attach event listeners for various browser unload/hide scenarios
         const events = ['beforeunload', 'pagehide', 'unload'];
         events.forEach(eventType => {{
             try {{
-                // Add listener to the parent window/document if accessible and same-origin
                 if (window.parent && window.parent.location.origin === window.location.origin) {{
                     window.parent.addEventListener(eventType, sendEmergencySaveWithReload, {{ capture: true }});
                 }}
-                // Always add listener to the current window/document (iframe context)
                 window.addEventListener(eventType, sendEmergencySaveWithReload, {{ capture: true }});
             }} catch (e) {{
                 console.debug(`Failed to add ${{eventType}} listener:`, e);
             }}
         }});
         
-        // Enhanced visibility change detection (e.g., tab switched away or browser minimized)
         try {{
             if (window.parent && window.parent.document && window.parent.document.location.origin === window.location.origin) {{
                 window.parent.document.addEventListener('visibilitychange', () => {{
@@ -1861,7 +1721,6 @@ def render_browser_close_detection_enhanced(session_id: str):
                 }}, {{ passive: true }});
             }}
         }} catch (e) {{
-            // Fallback for current iframe's visibility if parent is inaccessible
             document.addEventListener('visibilitychange', () => {{
                 if (document.visibilityState === 'hidden') {{
                     console.log('🚨 Component tab hidden (visibilitychange event).');
@@ -1876,7 +1735,6 @@ def render_browser_close_detection_enhanced(session_id: str):
     """
     
     try:
-        # Streamlit components.v1.html allows injecting raw HTML/JS code into the app's iframe.
         st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component JS for session {session_id[:8]}: {e}", exc_info=True)
@@ -1884,23 +1742,19 @@ def render_browser_close_detection_enhanced(session_id: str):
 def global_message_channel_error_handler():
     """
     Injects a global JavaScript error handler to specifically catch and prevent
-    "message channel closed" errors, which are common with Streamlit iframes
-    and can cause uncaught promise rejections in browsers. This improves stability.
+    "message channel closed" errors.
     """
     js_error_handler = """
     <script>
     (function() {
-        // Use a flag to ensure this handler is initialized only once per page load
         if (window.fifi_global_error_handler_initialized) return;
         window.fifi_global_error_handler_initialized = true;
         
-        // Global error handler for uncaught promise rejections (e.g., from st_javascript)
         window.addEventListener('unhandledrejection', function(event) {
             const error = event.reason;
-            // Check if the error message indicates a "message channel closed" issue
             if (error && error.message && error.message.includes('message channel closed')) {
                 console.log('🛡️ FiFi: Caught and gracefully handled a "message channel closed" error:', error.message);
-                event.preventDefault(); // Prevent the default browser handling (e.g., printing to console as an unhandled error)
+                event.preventDefault();
             }
         });
         
@@ -1915,11 +1769,10 @@ def global_message_channel_error_handler():
 
 def handle_timer_event(timer_result: Dict[str, Any], session_manager, session: UserSession) -> bool:
     """
-    Processes events triggered by thelukas JavaScript activity timer (e.g., 15-minute timeout).
-    This function adapted from Code 1's detailed event handler to fit 15-min timeout.
+    Processes events triggered by the JavaScript activity timer (e.g., 15-minute timeout).
     """
     if not timer_result or not isinstance(timer_result, dict):
-        return False # No valid timer event received
+        return False
     
     event = timer_result.get('event')
     session_id = timer_result.get('session_id')
@@ -1928,14 +1781,11 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager, session: U
     logger.info(f"🎯 Processing timer event: '{event}' for session {session_id[:8] if session_id else 'unknown'}.")
     
     try:
-        # Ensure session object is fully validated and types are correct for logic
         session = session_manager._validate_session(session)
         
         if event == 'session_timeout_15min':
-            # This event signifies 15 minutes of user inactivity, triggering a CRM save.
             st.info(f"⏰ **Session timeout:** Detected {inactive_minutes} minutes of inactivity.")
             
-            # Perform CRM save if the session is eligible (registered user, has email, has messages, and not already saved for this timeout)
             if (session.user_type.value == UserType.REGISTERED_USER.value and
                 session.email and 
                 session.messages and
@@ -1943,30 +1793,26 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager, session: U
                 
                 with st.spinner("💾 Auto-saving chat to CRM (15-min timeout)..."):
                     try:
-                        # Call the robust synchronous CRM save method
                         save_success = session_manager.zoho.save_chat_transcript_sync(session, "15-Minute Session Inactivity Timeout")
                     except Exception as e:
                         logger.error(f"15-min timeout CRM save failed during execution: {e}", exc_info=True)
-                        save_success = False # Ensure save_success is False on exception
+                        save_success = False
                 
                 if save_success:
                     st.success("✅ Chat automatically saved to CRM!")
-                    # Mark the session as saved for this timeout period to prevent duplicate saves
                     session.timeout_saved_to_crm = True
-                    # Update session's last activity timestamp (as the save itself is an "activity" for the system)
                     session.last_activity = datetime.now() 
-                    session_manager.db.save_session(session) # Persist the updated session state
+                    session_manager.db.save_session(session)
                 else:
                     st.warning("⚠️ Auto-save to CRM failed. Please check your credentials or contact support if issue persists.")
                 
-                # IMPORTANT: As per your specification, a 15-minute timeout is ONLY for CRM save, NOT for a session ban or expiry.
                 st.info("ℹ️ You can continue using FiFi AI.")
-                return False # No immediate rerun needed unless there are specific UI updates that require it
+                return False
             else:
                 st.info("ℹ️ Session timeout detected, but no CRM save was performed (e.g., Guest user, no chat history, or already saved).")
                 logger.info(f"15-min timeout CRM save eligibility check failed for {session_id[:8]}: UserType={session.user_type.value}, Email={bool(session.email)}, Messages={len(session.messages)}, Saved Status={session.timeout_saved_to_crm}.")
                 st.info("ℹ️ You can continue using FiFi AI.")
-                return False # No immediate rerun needed
+                return False
                 
         else:
             logger.warning(f"⚠️ Received unhandled timer event type: '{event}'.")
@@ -1980,11 +1826,9 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager, session: U
 def process_emergency_save_from_query(session_id: str) -> bool:
     """
     Processes an emergency save request initiated by the browser close beacon/reload.
-    This function directly loads the session from the database and attempts a CRM save if eligible.
-    Preserved and adapted from Code 1's robust emergency save handler.
     """
     try:
-        session_manager = st.session_state.get('session_manager') # Get manager from session state
+        session_manager = st.session_state.get('session_manager')
         if not session_manager:
             logger.error("❌ Session manager not available during emergency save processing from query. Initialization likely failed.")
             return False
@@ -1994,28 +1838,24 @@ def process_emergency_save_from_query(session_id: str) -> bool:
             logger.error(f"❌ Emergency save from query: Session '{session_id[:8]}' not found or not active in database.")
             return False
         
-        session = session_manager._validate_session(session) # Ensure the loaded session object is correctly typed
+        session = session_manager._validate_session(session)
         
         logger.info(f"✅ Emergency save processing for session '{session_id[:8]}': UserType={session.user_type.value}, Email={session.email}, Messages={len(session.messages)}.")
         
-        # Check eligibility for emergency save: Must be a registered user with email and chat history, and not already saved.
         if (session.user_type.value == UserType.REGISTERED_USER.value and
             session.email and 
             session.messages and
-            not session.timeout_saved_to_crm): # Important: Only save if not already saved by a timeout timer
+            not session.timeout_saved_to_crm):
             
             logger.info(f"✅ Session '{session_id[:8]}' is eligible for emergency CRM save.")
             
-            # Extend session activity to keep it 'active' in the DB during the save process
             session.last_activity = datetime.now()
-            session_manager.db.save_session(session) # Persist the updated activity timestamp
+            session_manager.db.save_session(session)
             
-            # Perform the synchronous CRM save
             success = session_manager.zoho.save_chat_transcript_sync(session, "Emergency Save (Browser Close/Unload)")
             if success:
-                # Mark session as saved due to timeout/emergency to prevent re-saves for this period
                 session.timeout_saved_to_crm = True
-                session_manager.db.save_session(session) # Persist this status update
+                session_manager.db.save_session(session)
             return success
         else:
             logger.info(f"❌ Session '{session_id[:8]}' not eligible for emergency save (e.g., Guest, no email, no messages, or already saved by timer).")
@@ -2028,36 +1868,29 @@ def process_emergency_save_from_query(session_id: str) -> bool:
 
 def handle_emergency_save_requests_from_query():
     """
-    Checks for and processes emergency save requests sent via URL query parameters
-    (typically from browser close/unload events detected by JavaScript).
-    This function must be called very early in `main()` to intercept the request.
+    Checks for and processes emergency save requests sent via URL query parameters.
     """
     logger.info("🔍 EMERGENCY SAVE HANDLER: Checking for query parameter requests for emergency save...")
     
-    query_params = st.query_params # Access Streamlit's query parameters
+    query_params = st.query_params
     event = query_params.get("event")
     session_id = query_params.get("session_id")
     
-    # Check if the required event and session ID parameters are present
     if event == "emergency_close" and session_id:
         logger.info("=" * 80)
         logger.info("🚨 EMERGENCY SAVE REQUEST DETECTED VIA URL QUERY PARAMETERS!")
         logger.info(f"Session ID: {session_id}, Event: {event}")
         logger.info("=" * 80)
         
-        # Show an immediate visual message to the user that a save is in progress
         st.error("🚨 **Emergency Save Detected** - Processing browser close save...")
         st.info("Please wait, your conversation is being saved...")
         
-        # IMPORTANT: Clear these query parameters *immediately* for the current run context
-        # and for subsequent reruns if the app doesn't stop, to prevent re-triggering.
         if "event" in st.query_params:
             del st.query_params["event"]
         if "session_id" in st.query_params:
             del st.query_params["session_id"]
         
         try:
-            # Attempt to process the emergency save
             success = process_emergency_save_from_query(session_id)
             
             if success:
@@ -2071,11 +1904,8 @@ def handle_emergency_save_requests_from_query():
             st.error(f"❌ An unexpected error occurred during emergency save: {str(e)}")
             logger.critical(f"Emergency save processing crashed from query parameter: {e}", exc_info=True)
         
-        # Add a short delay to allow the user to see the final message, then stop the app execution.
-        # `st.stop()` is crucial to prevent the Streamlit app from rendering its main UI,
-        # ensuring only the save message is shown and the session effectively ends.
         time.sleep(2)
-        st.stop() # Stops the script execution
+        st.stop()
     else:
         logger.info("ℹ️ No emergency save requests found in current URL query parameters.")
 
@@ -2086,8 +1916,7 @@ def handle_emergency_save_requests_from_query():
 class SessionManager:
     """
     Manages user sessions, orchestrating interactions between database, CRM,
-    AI, and various feature managers (fingerprinting, email verification, limits).
-    This class centralizes the core application logic and session lifecycle.
+    AI, and various feature managers.
     """
     def __init__(self, config: Config, db_manager: DatabaseManager, zoho_manager: ZohoCRMManager, 
                  ai_system: EnhancedAI, rate_limiter: RateLimiter, fingerprinting_manager: FingerprintingManager,
@@ -2100,28 +1929,23 @@ class SessionManager:
         self.fingerprinting = fingerprinting_manager
         self.email_verification = email_verification_manager
         self.question_limits = question_limit_manager
-        self._save_lock = threading.Lock() # For synchronizing Zoho CRM saves
+        self._save_lock = threading.Lock()
 
     def get_session_timeout_minutes(self) -> int:
         """Returns the configured session timeout duration in minutes."""
-        return 15 # Hardcoded 15 minutes as per specification
+        return 15
 
     def _update_activity(self, session: UserSession):
         """
         Updates the session's last activity timestamp and saves it to the DB.
-        Also resets the `timeout_saved_to_crm` flag if the user becomes active again
-        after a timeout save occurred.
+        Also resets the `timeout_saved_to_crm` flag if the user becomes active again.
         """
         session.last_activity = datetime.now()
         
-        # If the session was previously saved due to a timeout, and now user activity
-        # is detected, reset this flag. This ensures the chat can be saved again
-        # if another 15-minute inactivity period occurs.
         if session.timeout_saved_to_crm:
             session.timeout_saved_to_crm = False
             logger.info(f"Reset 'timeout_saved_to_crm' flag for session {session.session_id[:8]} due to new activity.")
         
-        # Ensure UserType is properly an Enum member before saving (re-hydration safeguard)
         if isinstance(session.user_type, str):
             session.user_type = UserType(session.user_type)
         
@@ -2133,31 +1957,24 @@ class SessionManager:
 
     def _create_guest_session(self) -> UserSession:
         """
-        Creates a new guest user session with a unique ID.
-        Attempts to capture client's IP address and User-Agent string from
-        Streamlit's internal request context for tracking purposes.
+        Creates a new guest user session with a unique ID and attempts to capture client info.
         """
         session = UserSession(session_id=str(uuid.uuid4()))
         
-        # Attempt to capture client IP and User-Agent from Streamlit's request context
-        # This is implementation-dependent and might not work in all deployment scenarios.
         try:
             from streamlit.runtime.scriptrunner import get_script_run_ctx
             ctx = get_script_run_ctx()
             if ctx and ctx.request_context and ctx.request_context.headers:
                 headers = ctx.request_context.headers
                 
-                # Iterate through common headers used by proxies to get the client's real IP
                 ip_headers_priority = ['x-forwarded-for', 'x-real-ip', 'cf-connecting-ip', 'x-client-ip']
                 for header_name in ip_headers_priority:
                     ip_val = headers.get(header_name)
                     if ip_val:
-                        # For 'x-forwarded-for', the first IP is typically the client's IP
                         session.ip_address = ip_val.split(',')[0].strip()
                         session.ip_detection_method = header_name
-                        break # Found an IP, break from loop
+                        break
                 else:
-                    # Fallback if no specific IP header found (might be direct connection or obscured)
                     session.ip_address = "unknown_direct_connection" 
                     session.ip_detection_method = "direct_connection"
 
@@ -2168,20 +1985,18 @@ class SessionManager:
             session.ip_address = "capture_failed"
             session.user_agent = "capture_failed"
 
-        self.db.save_session(session) # Save the newly created session to DB
-        st.session_state.current_session_id = session.session_id # Store in Streamlit's state
+        self.db.save_session(session)
+        st.session_state.current_session_id = session.session_id
         logger.info(f"Created new guest session: {session.session_id[:8]}.")
         return session
 
     def _validate_session(self, session: UserSession) -> UserSession:
         """
         Ensures the `UserSession` object's Enum fields are correctly typed
-        and other defaults/conversions are applied, especially after loading from the database.
-        This re-hydrates the object from potentially stored string representations.
+        and other defaults/conversions are applied.
         """
-        if not session: return session # Nothing to validate if session object is None
+        if not session: return session
             
-        # Convert user_type string to UserType Enum
         if isinstance(session.user_type, str):
             try:
                 session.user_type = UserType(session.user_type)
@@ -2189,7 +2004,6 @@ class SessionManager:
                 logger.error(f"Invalid user_type string '{session.user_type}' for session {session.session_id[:8]}. Defaulting to GUEST.")
                 session.user_type = UserType.GUEST
         
-        # Convert ban_status string to BanStatus Enum
         if isinstance(session.ban_status, str):
             try:
                 session.ban_status = BanStatus(session.ban_status)
@@ -2197,12 +2011,10 @@ class SessionManager:
                 logger.error(f"Invalid ban_status string '{session.ban_status}' for session {session.session_id[:8]}. Defaulting to NONE.")
                 session.ban_status = BanStatus.NONE
         
-        # Ensure 'messages' is a list (it's stored as JSON string in DB)
         if not isinstance(session.messages, list):
             logger.warning(f"Session {session.session_id[:8]} messages field is not a list. Resetting to empty list.")
             session.messages = []
         
-        # Ensure 'email_addresses_used' is a list (it's stored as JSON string in DB)
         if not isinstance(session.email_addresses_used, list):
             logger.warning(f"Session {session.session_id[:8]} email_addresses_used field is not a list. Resetting to empty list.")
             session.email_addresses_used = []
@@ -2212,26 +2024,21 @@ class SessionManager:
     def _mask_email(self, email: str) -> str:
         """
         Masks an email address for display in the UI, preserving privacy.
-        Example: "john.doe@example.com" -> "j***e@e***e.com"
         """
-        if '@' not in email: return email # Not a valid email format, return as is
+        if '@' not in email: return email
         
         local_part, domain_part = email.split('@', 1)
         
-        # Mask local part: first character, then asterisks, then last character (if long enough)
         if len(local_part) <= 2:
             masked_local = local_part[0] + '*' * (len(local_part) - 1)
         else:
             masked_local = local_part[0] + '*' * (len(local_part) - 2) + local_part[-1]
         
-        # Mask domain part: similar logic, but handles dot-separated parts
         domain_segments = domain_part.split('.')
         if len(domain_segments) > 1:
-            # Mask the first segment of the domain
             masked_domain_first_part = '*' * len(domain_segments[0]) 
             masked_domain = masked_domain_first_part + '.' + '.'.join(domain_segments[1:])
         else:
-            # If no dots in domain (unlikely for real emails, but for robustness), mask whole domain
             masked_domain = '*' * len(domain_part) 
         
         return f"{masked_local}@{masked_domain}"
@@ -2239,45 +2046,34 @@ class SessionManager:
     def _save_to_crm_timeout(self, session: UserSession, trigger_reason: str):
         """
         Internal method to initiate a CRM save, specifically for scenarios like
-        inactivity timeout or emergency browser close. It wraps the actual Zoho call
-        with logic for eligibility and logging.
+        inactivity timeout or emergency browser close.
         """
-        with self._save_lock: # Use a thread-safe lock to prevent concurrent CRM saves
+        with self._save_lock:
             logger.info(f"=== INITIATING CRM SAVE (Internal from SessionManager) ===")
             logger.info(f"Trigger: '{trigger_reason}', Session ID: {session.session_id[:8]}.")
             
-            # Pre-flight checks for CRM save eligibility
-            if not self.zoho.config.ZOHO_ENABLED:
-                logger.info("CRM save skipped: Zoho integration is disabled in configuration.")
+            if (session.user_type.value != UserType.REGISTERED_USER.value or 
+                not session.email or 
+                not session.messages or 
+                not self.config.ZOHO_ENABLED):
+                logger.info("CRM save skipped: Not eligible.")
                 return False
-            if session.user_type.value != UserType.REGISTERED_USER.value: # FIX: Use .value
-                logger.info("CRM save skipped: Only REGISTERED_USER sessions are saved to CRM.")
-                return False
-            if not session.email:
-                logger.info("CRM save skipped: Session has no associated email address.")
-                return False
-            if not session.messages:
-                logger.info("CRM save skipped: No chat messages to save for session.")
-                return False
-            # Prevent duplicate save for the same trigger type if already saved in this "timeout window"
             if session.timeout_saved_to_crm and "timeout" in trigger_reason.lower():
                 logger.info("CRM save skipped: Session already marked as saved for this timeout period.")
                 return False 
             
             try:
-                # Call the ZohoCRMManager's synchronous save method
                 success = self.zoho.save_chat_transcript_sync(session, trigger_reason)
                 if success:
                     logger.info("CRM save (internal) completed successfully.")
-                    session.timeout_saved_to_crm = True # Mark session as saved by this event
-                    self.db.save_session(session) # Persist this updated status
+                    session.timeout_saved_to_crm = True
+                    self.db.save_session(session)
                     return True
                 else:
                     logger.error("CRM save (internal) failed. See ZohoCRMManager logs for details.")
                     return False
             except Exception as e:
                 logger.error(f"CRM save (internal) encountered an unexpected exception: {e}", exc_info=True)
-                # Error handler already logs this via `@handle_api_errors` in ZohoCRMManager, no need to re-log here.
                 return False
             finally:
                 logger.info(f"=== CRM SAVE (Internal from SessionManager) ENDED ===\n")
@@ -2285,38 +2081,30 @@ class SessionManager:
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]):
         """
         Applies collected fingerprinting data (from JavaScript component) to the current session.
-        This data is then persisted in the database.
         """
         session.fingerprint_id = fingerprint_data.get('fingerprint_id')
         session.fingerprint_method = fingerprint_data.get('fingerprint_method')
         session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor')
         session.browser_privacy_level = fingerprint_data.get('privacy_level', 'standard')
         
-        # Update browser/user agent info if provided by fingerprint data
         browser_info = fingerprint_data.get('browser_info', {})
         if browser_info.get('userAgent'):
             session.user_agent = browser_info['userAgent']
-        # Client-side IP capture from JS is often unreliable/proxied, so relying on server-side
-        # IP capture during session creation is generally preferred, but can be updated here too.
         
         logger.info(f"Applied fingerprint to session {session.session_id[:8]}: ID={session.fingerprint_id[:8]}..., Method={session.fingerprint_method}.")
-        self.db.save_session(session) # Persist the updated session with fingerprint
+        self.db.save_session(session)
 
     def check_fingerprint_history(self, fingerprint_id: str) -> Dict[str, Any]:
         """
         Checks the database to see if a given fingerprint ID has been seen before.
-        If history is found, it returns relevant details (like associated email)
-        for user recognition purposes (e.g., "We recognize you, is this your email?").
         """
         try:
             sessions_with_same_fp = self.db.find_sessions_by_fingerprint(fingerprint_id)
             
             if sessions_with_same_fp:
-                # Filter for sessions that have an associated email
                 email_sessions = [s for s in sessions_with_same_fp if s.email]
                 
                 if email_sessions:
-                    # Find the most recently active session with an email to suggest to the user
                     latest_email_session = max(email_sessions, key=lambda x: x.last_activity)
                     
                     return {
@@ -2324,10 +2112,10 @@ class SessionManager:
                         'email': latest_email_session.email,
                         'full_name': latest_email_session.full_name,
                         'last_seen': latest_email_session.last_activity,
-                        'session_count': len(sessions_with_same_fp) # Total sessions with this fingerprint
+                        'session_count': len(sessions_with_same_fp)
                     }
             
-            return {'has_history': False} # No history found for this fingerprint
+            return {'has_history': False}
             
         except Exception as e:
             logger.error(f"Error checking fingerprint history for '{fingerprint_id[:8]}...': {e}", exc_info=True)
@@ -2336,28 +2124,20 @@ class SessionManager:
 
     def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
         """
-        Initiates the email verification process for a guest user who is trying to
-        upgrade their tier (e.g., after hitting the 4-question limit).
-        It validates the email format and sends a verification code via Supabase.
+        Initiates the email verification process for a guest user.
         """
-        # Corrected and robust email regex pattern
         email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$' 
         if not re.match(email_pattern, email):
             return {'success': False, 'message': 'Please enter a valid email address.'}
         
-        # You could add more advanced checks here, e.g., if this email has been used excessively on different devices,
-        # or if it's blacklisted.
-
-        # Send the verification code using the EmailVerificationManager
         verification_sent = self.email_verification.send_verification_code(email)
         
         if verification_sent:
-            session.email = email # Associate email with the current session
-            # Track all email addresses used by this session/fingerprint (for evasion detection)
+            session.email = email
             if email not in session.email_addresses_used:
                 session.email_addresses_used.append(email) 
             
-            self.db.save_session(session) # Persist the session with the new email/tracking
+            self.db.save_session(session)
             
             return {
                 'success': True, 
@@ -2369,26 +2149,24 @@ class SessionManager:
     def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
         """
         Verifies the email code provided by the user. If successful, it upgrades
-        the user's tier to `EMAIL_VERIFIED_GUEST` and resets their question counts.
+        the user's tier.
         """
         if not session.email:
             return {'success': False, 'message': 'No email address is set for verification in this session.'}
         
-        # Verify the code using the EmailVerificationManager
         verification_success = self.email_verification.verify_code(session.email, code)
         
         if verification_success:
-            session.user_type = UserType.EMAIL_VERIFIED_GUEST # Upgrade user tier
-            session.daily_question_count = 0 # Reset daily question count for the new tier
-            session.question_limit_reached = False # Clear any previous limit flags for UI
+            session.user_type = UserType.EMAIL_VERIFIED_GUEST
+            session.daily_question_count = 0
+            session.question_limit_reached = False
             
-            # Reset ban status if any was active (e.g., a temporary ban from hitting guest limit)
             session.ban_status = BanStatus.NONE
             session.ban_start_time = None
             session.ban_end_time = None
             session.ban_reason = None
             
-            self.db.save_session(session) # Persist the updated session state
+            self.db.save_session(session)
             
             logger.info(f"Session {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST for email: {session.email}.")
             
@@ -2401,106 +2179,46 @@ class SessionManager:
 
     def detect_evasion(self, session: UserSession) -> bool:
         """
-        Detects potential evasion attempts based on heuristics like
-        multiple recent sessions from the same fingerprint hitting limits,
-        or rapid email switching within the current session.
-        This is a simplified detection; real systems may use more complex algorithms.
+        Detects potential evasion attempts based on heuristics.
         """
         if not session.fingerprint_id:
             logger.debug("Cannot detect evasion: Session has no fingerprint ID.")
-            return False # Cannot detect evasion without a fingerprint
+            return False
         
-        # 1. Check for other *recent* sessions from the *same fingerprint* that previously hit limits.
-        # This suggests an attempt to bypass limits by creating new sessions/accounts on the same device.
-        recent_cutoff = datetime.now() - timedelta(hours=48) # Look back 48 hours for "recent" activity
+        recent_cutoff = datetime.now() - timedelta(hours=48)
         sessions_from_same_fingerprint = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
         
         for s in sessions_from_same_fingerprint:
-            # Exclude the current session itself
             if s.session_id != session.session_id and s.last_activity and s.last_activity > recent_cutoff:
-                # If a previous session from this device hit a question limit or was banned
-                if s.question_limit_reached or s.ban_status.value != BanStatus.NONE.value: # FIX: Use .value
+                if s.question_limit_reached or s.ban_status.value != BanStatus.NONE.value:
                     logger.warning(f"Evasion detected: Fingerprint {session.fingerprint_id[:8]}... has recent limited/banned session {s.session_id[:8]}. Triggering evasion penalty.")
                     return True 
 
-        # 2. Check for rapid email switching within the current session.
-        # A high count of email switches for a single session might indicate an attempt to exploit guest limits.
-        # The threshold (e.g., > 1 or 2 switches) can be adjusted.
-        if session.email_switches_count > 1: # More than one switch (initial + 2nd attempt onwards)
+        if session.email_switches_count > 1:
             logger.warning(f"Evasion detected: Session {session.session_id[:8]} has switched emails {session.email_switches_count} times. Triggering evasion penalty.")
             return True
             
-        return False # No evasion detected based on current heuristics
+        return False
 
     def get_session(self) -> UserSession:
         """
-        Retrieves the current user session. This is the primary method to get
-        the `UserSession` object for any interaction.
-        It handles:
-        - Loading existing sessions from DB.
-        - Creating new guest sessions if none exist.
-        - Validating and re-hydrating session data.
-        - Checking for active bans and displaying appropriate messages.
-        - Updating last activity timestamp.
+        Retrieves the current user session.
         """
         session_id = st.session_state.get('current_session_id')
         
         if session_id:
             session = self.db.load_session(session_id)
             if session and session.active:
-                # 1. Validate and fix session data types (Enums, lists etc.)
                 session = self._validate_session(session)
                 
-                # TEMPORARY WORKAROUND: Force fingerprint for sessions that don't have one
-                # This will prevent immediate errors if JS fingerprinting is failing,
-                # allowing other parts of the app to run.
                 if not session.fingerprint_id:
                     session.fingerprint_id = f"temp_fp_{session.session_id[:8]}"
                     session.fingerprint_method = "temporary_fallback_python"
-                    # Also set visitor_type for completeness, even for fallback
                     session.visitor_type = "new_visitor_fallback"
-                    self.db.save_session(session) # Save the session with the temporary fingerprint
+                    self.db.save_session(session)
                     logger.info(f"Applied temporary fallback fingerprint to session {session.session_id[:8]} (JS fingerprinting might be failing).")
                 
-                # 2. Check ban status BEFORE allowing any further interaction.
-                # If banned, display message and return the current session (which will be inactive for AI).
                 limit_check = self.question_limits.is_within_limits(session)
-
-                # CRITICAL DEBUG - Add this to get_session() method
-                st.sidebar.write("🚨 **CRITICAL DEBUG INFO (get_session):**")
-                st.sidebar.write(f"Session ID: {session.session_id[:8]}...")
-                st.sidebar.write(f"User Type: {session.user_type} (type: {type(session.user_type)})")
-                st.sidebar.write(f"User Type Value: {session.user_type.value if hasattr(session.user_type, 'value') else 'NO VALUE'}")
-                st.sidebar.write(f"Ban Status: {session.ban_status} (type: {type(session.ban_status)})")
-                st.sidebar.write(f"Ban Status Value: {session.ban_status.value if hasattr(session.ban_status, 'value') else 'NO VALUE'}")
-                st.sidebar.write(f"Daily Question Count: {session.daily_question_count}")
-                st.sidebar.write(f"Total Question Count: {session.total_question_count}")
-                st.sidebar.write(f"Question Limit Reached Flag: {session.question_limit_reached}")
-                st.sidebar.write(f"Fingerprint ID: {session.fingerprint_id}")
-
-                st.sidebar.write(f"🔍 UserType object ID: {id(UserType)}")
-                st.sidebar.write(f"🔍 UserType.REGISTERED_USER ID: {id(UserType.REGISTERED_USER)}")
-                st.sidebar.write(f"🔍 BanStatus object ID: {id(BanStatus)}")
-                st.sidebar.write(f"🔍 BanStatus.NONE ID: {id(BanStatus.NONE)}")
-                st.sidebar.write(f"🔍 session.user_type ID: {id(session.user_type)}")
-                st.sidebar.write(f"🔍 session.ban_status ID: {id(session.ban_status)}")
-
-                # MOST IMPORTANT - What is limit_check returning?
-                st.sidebar.write("---")
-                st.sidebar.write("🔍 **LIMIT CHECK RESULT (get_session):**")
-                st.sidebar.write(f"Allowed: {limit_check.get('allowed', 'KEY_MISSING')}")
-                st.sidebar.write(f"Reason: {limit_check.get('reason', 'NO_REASON')}")
-                st.sidebar.write(f"Message: {limit_check.get('message', 'NO_MESSAGE')}")
-                st.sidebar.write(f"Full limit_check: {limit_check}")
-
-                # Force display the restriction condition
-                if not limit_check.get('allowed', True):
-                    st.sidebar.error("❌ RESTRICTION TRIGGERED! (Based on get_session limit_check)")
-                    st.sidebar.write(f"Restriction reason: {limit_check.get('reason')}")
-                else:
-                    st.sidebar.success("✅ Session should be allowed! (Based on get_session limit_check)")
-                st.sidebar.markdown("---") # Visual separator
-
 
                 if not limit_check.get('allowed', True):
                     ban_type = limit_check.get('ban_type', 'unknown')
@@ -2514,17 +2232,13 @@ class SessionManager:
                         st.error(f"Time remaining: {hours}h {minutes}m")
                     st.info(message)
                     logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
-                    # No activity update needed for banned sessions, as they cannot initiate activity.
                     return session
                 
-                # 3. If not banned, the session is active and valid: update its last activity timestamp and return.
                 self._update_activity(session)
                 return session
         
-        # If no session ID in Streamlit state, or session not found/inactive in DB, create a new guest session.
         logger.info("No active session found or current session is invalid. Creating a new guest session.")
         new_session = self._create_guest_session()
-        # TEMPORARY WORKAROUND: Apply temporary fingerprint to new sessions immediately
         if not new_session.fingerprint_id:
             new_session.fingerprint_id = f"temp_fp_new_{new_session.session_id[:8]}"
             new_session.fingerprint_method = "temporary_fallback_python_new_session"
@@ -2532,47 +2246,18 @@ class SessionManager:
             self.db.save_session(new_session)
             logger.info(f"Applied temporary fingerprint to NEW session {new_session.session_id[:8]}")
         
-        # Rerun limit check for the newly created session
         limit_check = self.question_limits.is_within_limits(new_session)
         
-        # Display debug info for newly created session too
-        st.sidebar.write("🚨 **CRITICAL DEBUG INFO (NEW SESSION from get_session):**")
-        st.sidebar.write(f"Session ID: {new_session.session_id[:8]}...")
-        st.sidebar.write(f"User Type: {new_session.user_type} (type: {type(new_session.user_type)})")
-        st.sidebar.write(f"Daily Question Count: {new_session.daily_question_count}")
-        st.sidebar.write(f"Fingerprint ID: {new_session.fingerprint_id}")
-
-        st.sidebar.write(f"🔍 UserType object ID: {id(UserType)}")
-        st.sidebar.write(f"🔍 UserType.REGISTERED_USER ID: {id(UserType.REGISTERED_USER)}")
-        st.sidebar.write(f"🔍 BanStatus object ID: {id(BanStatus)}")
-        st.sidebar.write(f"🔍 BanStatus.NONE ID: {id(BanStatus.NONE)}")
-        st.sidebar.write(f"🔍 session.user_type ID: {id(new_session.user_type)}")
-        st.sidebar.write(f"🔍 session.ban_status ID: {id(new_session.ban_status)}")
-
-        st.sidebar.write("---")
-        st.sidebar.write("🔍 **LIMIT CHECK RESULT (NEW SESSION from get_session):**")
-        st.sidebar.write(f"Allowed: {limit_check.get('allowed', 'KEY_MISSING')}")
-        st.sidebar.write(f"Reason: {limit_check.get('reason', 'NO_REASON')}")
-        st.sidebar.write(f"Message: {limit_check.get('message', 'NO_MESSAGE')}")
-        st.sidebar.write(f"Full limit_check: {limit_check}")
-        if not limit_check.get('allowed', True):
-            st.sidebar.error("❌ RESTRICTION TRIGGERED! (New Session from get_session)")
-        else:
-            st.sidebar.success("✅ New Session allowed! (from get_session)")
-        st.sidebar.markdown("---")
-        
-        return self._validate_session(new_session) # Validate the newly created session
+        return self._validate_session(new_session)
 
     @handle_api_errors("Authentication", "WordPress Login")
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
         """
         Authenticates a user against the configured WordPress site using JWT.
-        If successful, it upgrades the current `UserSession` to `REGISTERED_USER` status.
         """
         if not self.config.WORDPRESS_URL:
             st.error("Authentication service (WordPress URL) is not configured in secrets.")
             return None
-        # Basic rate limiting for login attempts to prevent brute force
         if not self.rate_limiter.is_allowed(f"auth_login_attempt_{username}"):
             st.error("Too many login attempts. Please wait a moment before trying again.")
             return None
@@ -2586,17 +2271,15 @@ class SessionManager:
                 f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token",
                 json={'username': clean_username, 'password': clean_password},
                 headers={'Content-Type': 'application/json'},
-                timeout=15 # Set a timeout for network requests
+                timeout=15
             )
             
             if response.status_code == 200:
                 data = response.json()
                 logger.info(f"WordPress authentication successful for '{clean_username}'.")
                 
-                # Get the current session (could be a guest session, which will be upgraded)
                 current_session = self.get_session() 
                 
-                # Extract display name for personalization in the UI
                 display_name = (
                     data.get('user_display_name') or 
                     data.get('displayName') or 
@@ -2604,18 +2287,16 @@ class SessionManager:
                     data.get('user_nicename') or 
                     data.get('first_name') or
                     data.get('nickname') or
-                    clean_username # Fallback if no specific display name found
+                    clean_username
                 )
 
-                # Upgrade the current session's attributes to REGISTERED_USER status
                 current_session.user_type = UserType.REGISTERED_USER
                 current_session.email = data.get('user_email')
                 current_session.full_name = display_name
                 current_session.wp_token = data.get('token')
-                current_session.last_activity = datetime.now() # Reset activity on login
-                current_session.timeout_saved_to_crm = False # Reset for new registered session
+                current_session.last_activity = datetime.now()
+                current_session.timeout_saved_to_crm = False
 
-                # Reset question counts and clear any active bans for newly authenticated registered users
                 current_session.daily_question_count = 0
                 current_session.total_question_count = 0
                 current_session.question_limit_reached = False
@@ -2624,14 +2305,13 @@ class SessionManager:
                 current_session.ban_end_time = None
                 current_session.ban_reason = None
                 
-                # Add the authenticated email to the list of used addresses for this session/fingerprint
                 if current_session.email and current_session.email not in current_session.email_addresses_used:
                     current_session.email_addresses_used.append(current_session.email)
                 
                 try:
-                    self.db.save_session(current_session) # Persist the upgraded session
+                    self.db.save_session(current_session)
                     logger.info(f"Authenticated session {current_session.session_id[:8]} saved as REGISTERED_USER.")
-                    st.session_state.current_session_id = current_session.session_id # Ensure Streamlit state is updated
+                    st.session_state.current_session_id = current_session.session_id
                     st.success(f"🎉 Welcome back, {current_session.full_name}!")
                     return current_session
                 except Exception as e:
@@ -2640,20 +2320,18 @@ class SessionManager:
                     return None
                 
             else:
-                # Authentication failed on WordPress side
                 error_message = f"Invalid username or password (HTTP Status Code: {response.status_code})."
                 try:
                     error_data = response.json()
-                    error_message = error_data.get('message', error_message) # Get more specific error from WP API response
+                    error_message = error_data.get('message', error_message)
                 except json.JSONDecodeError:
-                    pass # If JSON decoding fails, use default HTTP error message
+                    pass
                 
                 st.error(error_message)
                 logger.warning(f"WordPress authentication failed for '{clean_username}': {error_message}")
                 return None
                 
         except requests.exceptions.RequestException as e:
-            # Handle network-related errors during the authentication request
             st.error(f"A network error occurred during authentication. Please check your internet connection or try again later.")
             logger.error(f"WordPress authentication network exception for '{clean_username}': {e}", exc_info=True)
             return None
@@ -2661,70 +2339,56 @@ class SessionManager:
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
         """
         Handles the entire AI response generation process for a user prompt.
-        This includes: rate limiting, content moderation, evasion detection,
-        and question limit checks before forwarding to the AI system.
         """
-        # 1. Rate Limiting: Prevent rapid-fire requests from a single session.
         if not self.rate_limiter.is_allowed(session.session_id):
             return {"content": "You are sending requests too quickly. Please wait a moment and try again.", "success": False, "source": "Rate Limiter"}
 
-        # 2. Validate session and check for active bans. This is a critical first step.
-        session = self._validate_session(session) # Ensure session object is valid
+        session = self._validate_session(session)
         limit_check = self.question_limits.is_within_limits(session)
         if not limit_check.get('allowed', True):
-            # If user is banned or hits a hard limit, return appropriate message to the UI.
             return {
                 "content": limit_check.get('message', 'Access restricted due to usage policy.'),
                 "success": False,
-                "banned": True, # Flag for UI to display ban message prominently
+                "banned": True,
                 "reason": limit_check.get('reason'),
                 "time_remaining": limit_check.get('time_remaining')
             }
         
-        # 3. Evasion Detection: Check if the user is trying to bypass limits.
         if self.detect_evasion(session):
-            penalty_hours = self.question_limits.apply_evasion_penalty(session) # Apply escalating penalty
-            self.db.save_session(session) # Persist the session with the new ban status
+            penalty_hours = self.question_limits.apply_evasion_penalty(session)
+            self.db.save_session(session)
             return {
                 "content": "Unusual activity detected. Your access has been temporarily restricted. Please try again later.",
                 "success": False,
-                "evasion_penalty": True, # Flag for UI to display evasion message
+                "evasion_penalty": True,
                 "penalty_hours": penalty_hours
             }
 
-        # 4. Update Activity: User is now active, so update their last_activity timestamp.
         self._update_activity(session)
 
-        # 5. Sanitize Input: Clean the user's prompt to prevent potential XSS or injection.
         sanitized_prompt = sanitize_input(prompt)
         
-        # 6. Content Moderation: Check if the prompt violates any safety policies.
         moderation_result = check_content_moderation(sanitized_prompt, self.ai.openai_client)
         if moderation_result and moderation_result.get("flagged"):
-            # If flagged, record the user's prompt and the moderation warning in chat history.
             session.messages.append({"role": "user", "content": sanitized_prompt, "timestamp": datetime.now().isoformat()})
             session.messages.append({"role": "assistant", "content": moderation_result["message"], "source": "Content Safety Policy", "timestamp": datetime.now().isoformat()})
-            self.db.save_session(session) # Persist the conversation including the moderation warning
+            self.db.save_session(session)
             return {
                 "content": moderation_result["message"], 
                 "success": False, 
                 "source": "Content Safety"
             }
 
-        # 7. Record Question: Increment the question count for the current session and tier.
         self.question_limits.record_question(session)
 
-        # 8. Get AI Response: Call the underlying AI system to generate a response.
         ai_response = self.ai.get_response(sanitized_prompt, session.messages)
         
-        # 9. Append Messages: Add both the user's prompt and the AI's response to chat history.
         session.messages.append({
             "role": "user", 
             "content": sanitized_prompt,
             "timestamp": datetime.now().isoformat()
         })
         
-        # Prepare the assistant's message with content and metadata
         response_message = {
             "role": "assistant",
             "content": ai_response.get("content", "No response generated."),
@@ -2732,15 +2396,13 @@ class SessionManager:
             "timestamp": datetime.now().isoformat()
         }
         
-        # Add any additional metadata flags from the AI response (e.g., if search or Pinecone was used)
         for flag in ["used_search", "used_pinecone", "has_citations", "has_inline_citations", "safety_override"]:
             if ai_response.get(flag):
                 response_message[flag] = True
             
         session.messages.append(response_message)
-        session.messages = session.messages[-100:] # Keep chat history limited to the last 100 messages for performance
+        session.messages = session.messages[-100:]
         
-        # 10. Save Session: Persist the updated session (with new messages and question counts) to the database.
         self.db.save_session(session)
         return ai_response
 
@@ -2748,20 +2410,16 @@ class SessionManager:
         """Clears the chat history for the current session."""
         session = self._validate_session(session)
         session.messages = []
-        session.timeout_saved_to_crm = False # Reset save flag if chat history is cleared
-        self._update_activity(session) # Save changes to DB
+        session.timeout_saved_to_crm = False
+        self._update_activity(session)
 
     def end_session(self, session: UserSession):
         """
-        Ends the current user session. This includes:
-        - Attempting to save the chat transcript to CRM if the user is registered.
-        - Marking the session as inactive in the database.
-        - Clearing relevant session state variables to return to the welcome page.
+        Ends the current user session.
         """
         session = self._validate_session(session)
         
-        # Attempt CRM save for registered users with chat history
-        if (session.user_type.value == UserType.REGISTERED_USER.value and # FIX: Use .value
+        if (session.user_type.value == UserType.REGISTERED_USER.value and 
             session.email and 
             session.messages and 
             self.zoho.config.ZOHO_ENABLED):
@@ -2769,14 +2427,12 @@ class SessionManager:
             logger.info(f"Performing CRM save for manual sign-out of session {session.session_id[:8]}.")
             self._save_to_crm_timeout(session, "Manual Sign Out")
         
-        # Mark the session as inactive in the database
         session.active = False
         try:
             self.db.save_session(session)
         except Exception as e:
             logger.error(f"Failed to mark session {session.session_id[:8]} as inactive in DB during end_session: {e}", exc_info=True)
         
-        # Clear Streamlit session state variables to force a fresh start on next rerun
         keys_to_clear = ['current_session_id', 'page', 'verification_stage', 'verification_email']
         for key in keys_to_clear:
             if key in st.session_state:
@@ -2787,7 +2443,7 @@ class SessionManager:
         """Allows registered users to manually save their current chat transcript to Zoho CRM."""
         session = self._validate_session(session)
         
-        if (session.user_type.value == UserType.REGISTERED_USER.value and # FIX: Use .value
+        if (session.user_type.value == UserType.REGISTERED_USER.value and 
             session.email and 
             session.messages and 
             self.zoho.config.ZOHO_ENABLED):
@@ -2796,7 +2452,7 @@ class SessionManager:
                 success = self._save_to_crm_timeout(session, "Manual Save to Zoho CRM")
             if success:
                 st.success("✅ Chat manually saved to Zoho CRM!")
-                self._update_activity(session) # Update activity after successful manual save
+                self._update_activity(session)
             else:
                 st.error("❌ Failed to manually save chat to Zoho CRM. Please check logs for details.")
         else:
@@ -2814,7 +2470,6 @@ def render_welcome_page(session_manager: SessionManager):
     st.markdown("---")
     st.subheader("🎯 Usage Tiers")
     
-    # Display information about different user tiers and their benefits
     col1, col2, col3 = st.columns(3)
     with col1:
         st.success("👤 **Guest Users**")
@@ -2835,7 +2490,6 @@ def render_welcome_page(session_manager: SessionManager):
         st.markdown("• Automatic chat saving to Zoho CRM")
         st.markdown("• Priority access during high usage")
     
-    # Tabs for Sign In vs. Continue as Guest
     tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
     
     with tab1:
@@ -2855,11 +2509,11 @@ def render_welcome_page(session_manager: SessionManager):
                             authenticated_session = session_manager.authenticate_with_wordpress(username, password)
                             
                         if authenticated_session:
-                            st.balloons() # Visual celebration for successful login
+                            st.balloons()
                             st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
-                            time.sleep(1) # Small delay for user to read the message
-                            st.session_state.page = "chat" # Change application page
-                            st.rerun() # Force a rerun to switch to the chat interface
+                            time.sleep(1)
+                            st.session_state.page = "chat"
+                            st.rerun()
     
     with tab2:
         st.markdown("""
@@ -2873,71 +2527,35 @@ def render_welcome_page(session_manager: SessionManager):
         """)
         
         if st.button("👤 Start as Guest", use_container_width=True):
-            st.session_state.page = "chat" # Change application page
-            st.rerun() # Force a rerun to switch to the chat interface
+            st.session_state.page = "chat"
+            st.rerun()
 
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     """Renders the application's sidebar, displaying session information, user status, and action buttons."""
-    # CRITICAL DEBUG - Add this to render_sidebar() method
-    st.sidebar.write("🚨 **CRITICAL DEBUG INFO (render_sidebar):**")
-    st.sidebar.write(f"Session ID: {session.session_id[:8]}...")
-    st.sidebar.write(f"User Type: {session.user_type} (type: {type(session.user_type)})")
-    st.sidebar.write(f"User Type Value: {session.user_type.value if hasattr(session.user_type, 'value') else 'NO VALUE'}")
-    st.sidebar.write(f"Ban Status: {session.ban_status} (type: {type(session.ban_status)})")
-    st.sidebar.write(f"Ban Status Value: {session.ban_status.value if hasattr(session.ban_status, 'value') else 'NO VALUE'}")
-    st.sidebar.write(f"Daily Question Count: {session.daily_question_count}")
-    st.sidebar.write(f"Total Question Count: {session.total_question_count}")
-    st.sidebar.write(f"Question Limit Reached Flag: {session.question_limit_reached}")
-    st.sidebar.write(f"Fingerprint ID: {session.fingerprint_id}")
-    
-    st.sidebar.write(f"🔍 UserType object ID: {id(UserType)}")
-    st.sidebar.write(f"🔍 UserType.REGISTERED_USER ID: {id(UserType.REGISTERED_USER)}")
-    st.sidebar.write(f"🔍 BanStatus object ID: {id(BanStatus)}")
-    st.sidebar.write(f"🔍 BanStatus.NONE ID: {id(BanStatus.NONE)}")
-    st.sidebar.write(f"🔍 session.user_type ID: {id(session.user_type)}")
-    st.sidebar.write(f"🔍 session.ban_status ID: {id(session.ban_status)}")
-
-    # Check enum comparisons (these will now be TRUE if the values match)
-    st.sidebar.write("---")
-    st.sidebar.write("🔍 **ENUM COMPARISONS (render_sidebar - Should be True if validated correctly):**")
-    st.sidebar.write(f"session.user_type.value == UserType.GUEST.value: {session.user_type.value == UserType.GUEST.value}")
-    st.sidebar.write(f"session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value: {session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value}")
-    st.sidebar.write(f"session.user_type.value == UserType.REGISTERED_USER.value: {session.user_type.value == UserType.REGISTERED_USER.value}")
-    st.sidebar.write(f"session.ban_status.value == BanStatus.NONE.value: {session.ban_status.value == BanStatus.NONE.value}")
-    st.sidebar.write(f"session.ban_status.value == BanStatus.ONE_HOUR.value: {session.ban_status.value == BanStatus.ONE_HOUR.value}")
-    st.sidebar.write(f"session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value: {session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value}")
-    st.sidebar.write(f"session.ban_status.value == BanStatus.EVASION_BLOCK.value: {session.ban_status.value == BanStatus.EVASION_BLOCK.value}")
-    st.sidebar.markdown("---") # Visual separator
-
     with st.sidebar:
-        st.title("🎛️ Dashboard") # Title for the actual dashboard content
+        st.title("🎛️ Dashboard")
         
-        # Dynamic user status display
-        if session.user_type.value == UserType.REGISTERED_USER.value: # FIX: Use .value
+        if session.user_type.value == UserType.REGISTERED_USER.value:
             st.success("✅ **Registered User**")
             if session.full_name: 
                 st.markdown(f"**Name:** {session.full_name}")
             if session.email: 
                 st.markdown(f"**Email:** {session.email}")
             
-            # Question usage display for registered users (40 total)
             st.markdown(f"**Questions Today:** {session.total_question_count}/40")
-            # Visual progress bar, potentially showing tiers
             if session.total_question_count <= 20:
                 st.progress(session.total_question_count / 20, text="Tier 1 (up to 20 questions)")
             else:
                 st.progress((session.total_question_count - 20) / 20, text="Tier 2 (21-40 questions)")
             
-        elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value: # FIX: Use .value
+        elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             st.info("📧 **Email Verified Guest**")
             if session.email:
                 st.markdown(f"**Email:** {session.email}")
             
-            # Daily question usage for email-verified guests (10 per day)
             st.markdown(f"**Daily Questions:** {session.daily_question_count}/10")
             st.progress(session.daily_question_count / 10)
             
-            # Display time until daily question limit resets
             if session.last_question_time:
                 next_reset = session.last_question_time + timedelta(hours=24)
                 time_to_reset = next_reset - datetime.now()
@@ -2948,19 +2566,17 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 else:
                     st.caption("Daily questions have reset!")
             
-        else: # UserType.GUEST.value (default case) # FIX: Use .value
+        else: # UserType.GUEST.value
             st.warning("👤 **Guest User**")
             st.markdown(f"**Questions:** {session.daily_question_count}/4")
             st.progress(session.daily_question_count / 4)
             st.caption("Email verification unlocks 10 questions/day.")
         
-        # Display Fingerprinting Information (for all users once captured)
         if session.fingerprint_id:
             st.markdown(f"**Device ID:** `{session.fingerprint_id[:8]}...`")
             st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
         
-        # Zoho CRM Status Display (only for registered users if Zoho is enabled)
-        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value == UserType.REGISTERED_USER.value: # FIX: Use .value
+        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value == UserType.REGISTERED_USER.value:
             if session.zoho_contact_id: 
                 st.success("🔗 **CRM Linked**")
             else: 
@@ -2974,12 +2590,10 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         
         st.divider()
         
-        # General session information
         st.markdown(f"**Messages in Chat:** {len(session.messages)}")
         st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
         
-        # Display Ban Status prominently if session is restricted
-        if session.ban_status.value != BanStatus.NONE.value: # FIX: Use .value
+        if session.ban_status.value != BanStatus.NONE.value:
             st.error(f"🚫 **STATUS: RESTRICTED**")
             if session.ban_end_time:
                 time_remaining = session.ban_end_time - datetime.now()
@@ -2987,28 +2601,24 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 minutes = int((time_remaining.total_seconds() % 3600) // 60)
                 st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
             st.markdown(f"Reason: {session.ban_reason or 'Usage policy violation'}")
-        elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: # FIX: Use .value
-            # Specific warning for guest users who hit limit (to prompt email verification)
+        elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: 
             st.warning("⚠️ **ACTION REQUIRED: Email Verification**")
         
         st.divider()
         
-        # Action buttons: Clear Chat and Sign Out
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🗑️ Clear Chat", use_container_width=True, help="Clears all messages from the current conversation."):
                 session_manager.clear_chat_history(session)
-                st.rerun() # Rerun to update the chat display
+                st.rerun()
         with col2:
             if st.button("🚪 Sign Out", use_container_width=True, help="Ends your current session and returns to the welcome page."):
                 session_manager.end_session(session)
-                st.rerun() # Rerun to switch to welcome page
+                st.rerun()
 
-        # Download & Save Chat options (only for registered users with chat history)
-        if session.user_type.value == UserType.REGISTERED_USER.value and session.messages: # FIX: Use .value
+        if session.user_type.value == UserType.REGISTERED_USER.value and session.messages:
             st.divider()
             
-            # PDF Download Button
             pdf_buffer = pdf_exporter.generate_chat_pdf(session)
             if pdf_buffer:
                 st.download_button(
@@ -3020,7 +2630,6 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     help="Download the current chat conversation as a PDF document."
                 )
             
-            # Manual CRM Save Button (if Zoho is enabled and user is eligible)
             if session_manager.zoho.config.ZOHO_ENABLED and session.email:
                 if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Manually save your current chat transcript to your linked Zoho CRM contact."):
                     session_manager.manual_save_to_crm(session)
@@ -3030,22 +2639,17 @@ def render_email_verification_dialog(session_manager: SessionManager, session: U
     """
     Renders the email verification dialog for guest users who have hit their
     initial question limit (4 questions).
-    This dialog guides them through entering their email and verifying a code.
     """
     st.error("📧 **Email Verification Required**")
     st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
     
-    # Initialize the verification stage if it's not already set
     if 'verification_stage' not in st.session_state:
-        st.session_state.verification_stage = 'initial_check' # Start with checking fingerprint history
+        st.session_state.verification_stage = 'initial_check'
 
-    # --- Stage 1: Initial check / User recognition ---
     if st.session_state.verification_stage == 'initial_check':
-        # Check if we have fingerprint history to suggest a previously used email
         fingerprint_history = session_manager.check_fingerprint_history(session.fingerprint_id)
         
         if fingerprint_history.get('has_history') and fingerprint_history.get('email'):
-            # If a recognized email is found, prompt the user for confirmation
             masked_email = session_manager._mask_email(fingerprint_history['email'])
             st.info(f"🤝 **We seem to recognize this device!**")
             st.markdown(f"Are you **{masked_email}**?")
@@ -3054,20 +2658,18 @@ def render_email_verification_dialog(session_manager: SessionManager, session: U
             with col1:
                 if st.button("✅ Yes, that's my email", use_container_width=True, key="recognize_yes_btn"):
                     session.recognition_response = "yes"
-                    st.session_state.verification_email = fingerprint_history['email'] # Store recognized email
-                    st.session_state.verification_stage = "send_code_recognized" # Proceed to send code to recognized email
+                    st.session_state.verification_email = fingerprint_history['email']
+                    st.session_state.verification_stage = "send_code_recognized"
                     st.rerun()
             with col2:
                 if st.button("❌ No, use a different email", use_container_width=True, key="recognize_no_btn"):
                     session.recognition_response = "no"
-                    st.session_state.verification_stage = "email_entry" # Proceed to manual email entry
+                    st.session_state.verification_stage = "email_entry"
                     st.rerun()
         else:
-            # If no history or email associated, skip recognition and go directly to manual entry
             st.session_state.verification_stage = "email_entry"
-            st.rerun() # Force rerun to update UI to the email entry form
+            st.rerun()
 
-    # --- Stage 2: Send code to recognized email (automated) ---
     if st.session_state.verification_stage == 'send_code_recognized':
         email_to_verify = st.session_state.get('verification_email')
         if email_to_verify:
@@ -3075,46 +2677,42 @@ def render_email_verification_dialog(session_manager: SessionManager, session: U
                 result = session_manager.handle_guest_email_verification(session, email_to_verify)
                 if result['success']:
                     st.success(result['message'])
-                    st.session_state.verification_stage = "code_entry" # Move to code entry stage
+                    st.session_state.verification_stage = "code_entry"
                 else:
                     st.error(result['message'])
-                    st.session_state.verification_stage = "email_entry" # Fallback to manual entry on send failure
+                    st.session_state.verification_stage = "email_entry"
             st.rerun()
         else:
             st.error("Error: No recognized email found to send the code. Please enter your email manually.")
-            st.session_state.verification_stage = "email_entry" # Force back to manual email entry
+            st.session_state.verification_stage = "email_entry"
             st.rerun()
 
-    # --- Stage 3: Manual Email Entry ---
     if st.session_state.verification_stage == 'email_entry':
         with st.form("email_verification_form", clear_on_submit=False):
             st.markdown("**Please enter your email address to receive a verification code:**")
-            # Pre-fill with session's email if available, or a placeholder
             current_email_input = st.text_input("Email Address", placeholder="your@email.com", value=st.session_state.get('verification_email', session.email or ""), key="manual_email_input")
             submit_email = st.form_submit_button("Send Verification Code", use_container_width=True)
             
             if submit_email:
                 if current_email_input:
-                    # Check for email switching and update count (for evasion detection)
                     if session.email and current_email_input != session.email:
                         session.email_switches_count += 1
-                        session.email = current_email_input # Update session email to the new one
-                        session_manager.db.save_session(session) # Persist the updated session (important for tracking)
+                        session.email = current_email_input
+                        session_manager.db.save_session(session)
                         
                     result = session_manager.handle_guest_email_verification(session, current_email_input)
                     if result['success']:
                         st.success(result['message'])
-                        st.session_state.verification_email = current_email_input # Store for code entry stage
-                        st.session_state.verification_stage = "code_entry" # Move to code entry
+                        st.session_state.verification_email = current_email_input
+                        st.session_state.verification_stage = "code_entry"
                         st.rerun()
                     else:
                         st.error(result['message'])
                 else:
                     st.error("Please enter an email address to receive the code.")
     
-    # --- Stage 4: Code Entry ---
     if st.session_state.verification_stage == 'code_entry':
-        verification_email = st.session_state.get('verification_email', session.email) # Get email to display
+        verification_email = st.session_state.get('verification_email', session.email)
         
         st.success(f"📧 A verification code has been sent to **{verification_email}**.")
         st.info("Please check your email, including spam/junk folders. The code is valid for 10 minutes.")
@@ -3128,114 +2726,88 @@ def render_email_verification_dialog(session_manager: SessionManager, session: U
             with col_code2:
                 resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
             
-            if resend_code: # Check resend button first, as it might change stage
+            if resend_code:
                 if verification_email:
                     with st.spinner("Resending code..."):
                         verification_sent = session_manager.email_verification.send_verification_code(verification_email)
                         if verification_sent:
                             st.success("Verification code resent successfully!")
-                            st.session_state.verification_stage = "code_entry" # Remain in code entry stage
+                            st.session_state.verification_stage = "code_entry"
                         else:
                             st.error("Failed to resend code. Please try again later.")
                 else:
                     st.error("Error: No email address found to resend the code. Please go back and enter your email.")
-                    st.session_state.verification_stage = "email_entry" # Force back to email entry if no email is known
-                st.rerun() # Rerun after resend attempt
+                    st.session_state.verification_stage = "email_entry"
+                st.rerun()
 
-            if submit_code: # Process submit button after resend logic
+            if submit_code:
                 if code:
                     with st.spinner("Verifying code..."):
                         result = session_manager.verify_email_code(session, code)
                     if result['success']:
                         st.success(result['message'])
-                        st.balloons() # Visual celebration
-                        # Clear verification state on successful verification
+                        st.balloons()
                         for key in ['verification_email', 'verification_stage']:
                             if key in st.session_state:
                                 del st.session_state[key]
-                        time.sleep(2) # Small delay for user to see success message
-                        st.rerun() # Rerun to refresh the app and proceed to chat
+                        time.sleep(2)
+                        st.rerun()
                     else:
                         st.error(result['message'])
                 else:
                     st.error("Please enter the verification code you received.")
             
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
-    """Renders the main chat interface, integrating all features like fingerprinting, timers, and question handling."""
+    """Renders the main chat interface."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion with universal fingerprinting.")
     
-    # 1. Global handler for JS message channel errors (should run very early, only once)
     global_message_channel_error_handler()
 
-    # 2. Initialize Fingerprinting if not already done for this session
-    # This ensures a fingerprint ID is captured early in the session lifecycle.
     if not session.fingerprint_id or session.fingerprint_method == "temporary_fallback_python":
         fingerprint_js_code = session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
-        # FIX: Removed 'height' parameter from st_javascript.
-        # Execute the JS component. Use a consistent key for repeated calls within Streamlit.
         fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id[:8]}")
         
         if fp_result:
-            # If the JavaScript component returned a result, extract and apply the fingerprint data
             extracted_fp_data = session_manager.fingerprinting.extract_fingerprint_from_result(fp_result)
-            # Only apply if it's a real fingerprint, not a JS fallback
             if extracted_fp_data.get('fingerprint_method') not in ["fallback", "canvas_blocked", "webgl_blocked", "audio_blocked"]:
                 session_manager.apply_fingerprinting(session, extracted_fp_data)
-                # Crucially, force a rerun to update the session state with the new fingerprint ID
-                # and allow the application to proceed with the updated session object.
                 st.rerun()
             else:
                 logger.debug(f"JS Fingerprint returned a fallback/blocked result: {extracted_fp_data.get('fingerprint_method')}. Retaining Python fallback if present.")
         else:
-            # If fingerprinting JS doesn't return immediately (e.g., still loading),
-            # it will return on a subsequent rerun. Log a debug message.
             logger.debug(f"Fingerprinting component for session {session.session_id[:8]} did not return result on this run. Will try again.")
 
-    # 3. Render browser close detection for emergency saves (only for Registered Users)
-    # This JavaScript must be rendered on every rerun to ensure its listeners are active.
-    if session.user_type.value == UserType.REGISTERED_USER.value: # FIX: Use .value
+    if session.user_type.value == UserType.REGISTERED_USER.value:
         try:
             render_browser_close_detection_enhanced(session.session_id)
         except Exception as e:
             logger.error(f"Failed to render browser close detection JS for {session.session_id[:8]}: {e}", exc_info=True)
 
-    # 4. Handle inactivity timer for 15-minute timeout (only for Registered Users)
-    if session.user_type.value == UserType.REGISTERED_USER.value: # FIX: Use .value
+    if session.user_type.value == UserType.REGISTERED_USER.value:
         timer_result = None
         try:
-            # The JS component will return a dictionary event if the 15-minute timeout is reached
             timer_result = render_activity_timer_component_15min(session.session_id)
         except Exception as e:
             logger.error(f"15-minute timer component execution failed: {e}", exc_info=True)
-            # Do not stop the app, just log the error
         
         if timer_result:
-            # If an event was received from the timer, handle it
-            # `handle_timer_event` might trigger a rerun if required (e.g., to update UI after CRM save).
             if handle_timer_event(timer_result, session_manager, session):
                 st.rerun()
 
-    # 5. Check for user limits/bans and display appropriate dialogs or messages.
-    # This prevents users from interacting with the chat if they are restricted.
     limit_check = session_manager.question_limits.is_within_limits(session)
     if not limit_check['allowed']:
-        # If the user is a GUEST and has hit the 4-question limit, display the email verification dialog.
         if limit_check.get('reason') == 'guest_limit':
             render_email_verification_dialog(session_manager, session)
-            return # IMPORTANT: Stop rendering the rest of the chat interface (especially the input box) if the dialog is active.
+            return
         else:
-            # For other ban reasons (daily limit, evasion), the message is displayed via get_session()
-            # and the user cannot interact with the chat input. So just return.
             return
 
-    # 6. Display chat messages from the session history
     for msg in session.messages:
-        with st.chat_message(msg.get("role", "user")): # Default role to 'user' if not specified
-            st.markdown(msg.get("content", ""), unsafe_allow_html=True) # Render content, allowing some HTML if applicable
+        with st.chat_message(msg.get("role", "user")):
+            st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
-            # Display source and AI tool indicators for assistant messages
             if msg.get("role") == "assistant":
                 if "source" in msg:
                     st.caption(f"Source: {msg['source']}")
@@ -3249,47 +2821,37 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
                 if indicators:
                     st.caption(f"Enhanced with: {', '.join(indicators)}")
 
-    # 7. Chat input for user interaction
-    # The `disabled` attribute will prevent input if the user is banned.
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=session.ban_status.value != BanStatus.NONE.value) # FIX: Use .value
+                            disabled=session.ban_status.value != BanStatus.NONE.value)
     
     if prompt:
-        # Display the user's message immediately in the chat interface
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Display a spinner while the AI processes the request
         with st.chat_message("assistant"):
             with st.spinner("🔍 Processing your question..."):
                 try:
-                    # Get AI response via the SessionManager, which handles all pre-processing.
                     response = session_manager.get_ai_response(session, prompt)
                     
                     if response.get('requires_email'):
-                        # If AI response indicates email is required (e.g., guest hit 4-question limit)
                         st.error("📧 Please verify your email to continue using FiFi AI.")
-                        st.session_state.verification_stage = 'email_entry' # Set stage to show email dialog
+                        st.session_state.verification_stage = 'email_entry'
                         st.rerun()
                     elif response.get('banned'):
-                        # If AI response indicates a ban (e.g., daily limit, tier limit)
-                        st.error(response.get("content", 'Access restricted.')) # Display the ban message
-                        if response.get('time_remaining'): # Display remaining time if provided
+                        st.error(response.get("content", 'Access restricted.'))
+                        if response.get('time_remaining'):
                             time_remaining = response['time_remaining']
                             hours = int(time_remaining.total_seconds() // 3600)
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
-                        st.rerun() # Rerun to update the UI with ban status
+                        st.rerun()
                     elif response.get('evasion_penalty'):
-                        # If AI response indicates an evasion attempt was detected
                         st.error("🚫 Evasion detected - Your access has been temporarily restricted.")
                         st.error(f"Penalty duration: {response.get('penalty_hours', 0)} hours.")
-                        st.rerun() # Rerun to update the UI with evasion status
+                        st.rerun()
                     else:
-                        # If AI response is successful, display its content
                         st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         
-                        # Display AI source and tool usage indicators
                         if response.get("source"):
                             st.caption(f"Source: {response['source']}")
                         
@@ -3306,7 +2868,7 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
                     logger.error(f"AI response generation failed due to an unexpected error: {e}", exc_info=True)
                     st.error("⚠️ Sorry, I encountered an unexpected error processing your request. Please try again.")
         
-        st.rerun() # Always rerun after processing user input to update chat history and UI
+        st.rerun()
 
 # =============================================================================
 # MAIN APPLICATION FLOW
@@ -3315,120 +2877,91 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
 def ensure_initialization():
     """
     Ensures all necessary application components and managers are initialized and
-    stored in Streamlit's session state. This function runs only once per Streamlit session.
-    It handles graceful fallback for optional dependencies and critical error logging.
+    stored in Streamlit's session state.
     """
     if 'initialized' not in st.session_state or not st.session_state.initialized:
         logger.info("Starting application initialization sequence...")
         try:
-            config = Config() # Load application configuration from Streamlit secrets
-            pdf_exporter = PDFExporter() # Initialize PDF exporter
+            config = Config()
+            pdf_exporter = PDFExporter()
             
-            # Database Manager is crucial and should be initialized only once and persisted.
-            # It attempts SQLite Cloud first, then local file, then in-memory.
             if 'db_manager' not in st.session_state:
                 st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
             
-            db_manager = st.session_state.db_manager # Get the initialized DB manager
-            zoho_manager = ZohoCRMManager(config, pdf_exporter) # Initialize Zoho CRM manager
-            ai_system = EnhancedAI(config) # Initialize AI system placeholder
-            rate_limiter = RateLimiter() # Initialize rate limiter
+            db_manager = st.session_state.db_manager
+            zoho_manager = ZohoCRMManager(config, pdf_exporter)
+            ai_system = EnhancedAI(config)
+            rate_limiter = RateLimiter()
             
-            # Initialize the new feature managers
             fingerprinting_manager = FingerprintingManager()
             email_verification_manager = EmailVerificationManager(config)
             question_limit_manager = QuestionLimitManager()
 
-            # The main SessionManager orchestrates all other managers and core logic
             st.session_state.session_manager = SessionManager(
                 config, db_manager, zoho_manager, ai_system, rate_limiter,
                 fingerprinting_manager, email_verification_manager, question_limit_manager
             )
-            # Store other managers directly in session state if UI components need direct access
             st.session_state.pdf_exporter = pdf_exporter
-            st.session_state.error_handler = error_handler # Central error handler
-            st.session_state.ai_system = ai_system # Potentially used by content moderation directly
+            st.session_state.error_handler = error_handler
+            st.session_state.ai_system = ai_system
             st.session_state.fingerprinting_manager = fingerprinting_manager
             st.session_state.email_verification_manager = email_verification_manager
             st.session_state.question_limit_manager = question_limit_manager
 
-            st.session_state.initialized = True # Mark application as initialized
+            st.session_state.initialized = True
             logger.info("✅ Application initialized successfully with all features.")
             return True
             
         except Exception as e:
-            # Critical error during initialization: display message and log
             st.error("💥 A critical error occurred during application startup and initialization. The application cannot run.")
             st.error(f"Error details: {str(e)}")
             logger.critical(f"CRITICAL: Application initialization failed: {e}", exc_info=True)
-            return False # Indicate initialization failure
+            return False
     
-    return True # Application was already initialized
+    return True
 
 def main():
     """
     Main entry point for the Streamlit application.
-    This function controls the overall flow, initialization, and page rendering.
     """
-    # Configure Streamlit page settings
     st.set_page_config(
         page_title="FiFi AI Assistant - Complete Integration", 
         page_icon="🤖", 
         layout="wide"
     )
 
-    # Inject a global JavaScript handler for "message channel closed" errors.
-    # This should be one of the very first things to run in the app.
     global_message_channel_error_handler()
 
-    # Provide a "Fresh Start" button for development or emergency resets.
-    # This clears all session state and forces a full re-initialization.
     if st.button("🔄 Fresh Start (Dev)", key="emergency_clear_state_btn", help="Clears all session state and restarts the app. Use only for development or if the app is stuck."):
         logger.warning("User initiated 'Fresh Start (Dev)' button action.")
-        st.session_state.clear() # Clears all session_state variables
-        st.rerun() # Forces Streamlit to rerun the script from scratch
+        st.session_state.clear()
+        st.rerun()
 
-    # Ensure all application components and managers are initialized.
-    # If initialization fails, the function will stop further execution.
     if not ensure_initialization():
         st.stop()
 
-    # Handle emergency save requests that may come via URL query parameters (from browser close beacon)
-    # This must run very early in the app lifecycle before main UI rendering.
     handle_emergency_save_requests_from_query()
 
-    # Retrieve the main SessionManager instance from Streamlit's session state.
     session_manager = st.session_state.get('session_manager')
     if not session_manager:
-        # If session manager is somehow not available after initialization, it's a critical error.
         st.error("Fatal: Session Manager failed to initialize or retrieve. The application cannot proceed.")
         logger.critical("Fatal: Session Manager not found in st.session_state after initialization attempt. App stopping.")
-        st.stop() # Stop execution
+        st.stop()
 
-    # Determine which main application page to render (Welcome/Login or Chat interface).
     current_page = st.session_state.get('page')
     
     if current_page != "chat":
-        # If 'page' is not 'chat', render the welcome and login/guest options page.
         render_welcome_page(session_manager)
     else:
-        # If 'page' is 'chat', retrieve the current user session.
-        # `session_manager.get_session()` handles loading, validation, expiry, and ban checks.
         session = session_manager.get_session() 
         
-        # Check if the retrieved session is active and valid to proceed to chat interface.
         if session and session.active:
-            # Pass the SAME session object to both sidebar and chat interface functions.
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
             render_chat_interface(session_manager, session)
         else:
-            # If `get_session()` determines the session is inactive, expired, or banned,
-            # it would have already displayed a message to the user.
-            # We then clear the 'page' state to force a redirect back to the welcome page
-            # on the next rerun.
             if 'page' in st.session_state:
-                del st.session_state['page'] # Remove 'page' to default to welcome
-            st.rerun() # Force a rerun to display the welcome page for a fresh start.
+                del st.session_state['page']
+            st.rerun()
 
 if __name__ == "__main__":
     main()
