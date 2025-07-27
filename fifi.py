@@ -48,7 +48,7 @@ from streamlit_javascript import st_javascript
 # - FIX: Removed 'height' parameter from st_javascript to prevent error.
 # - FIX: Critical database loading error where 'session_id' was missing from UserSession constructor.
 # - FIX: Implement workaround for failing JavaScript fingerprinting; add JS test.
-# - CRITICAL DEBUG: Added extensive debug logging to get_session() to diagnose restriction issue.
+# - FIX: CRITICAL SESSION OBJECT INCONSISTENCY (Passing single session object from main).
 # =============================================================================
 
 # Setup logging
@@ -2458,7 +2458,7 @@ class SessionManager:
                 limit_check = self.question_limits.is_within_limits(session)
 
                 # CRITICAL DEBUG - Add this to get_session() method
-                st.sidebar.write("🚨 **CRITICAL DEBUG INFO:**")
+                st.sidebar.write("🚨 **CRITICAL DEBUG INFO (get_session):**")
                 st.sidebar.write(f"Session ID: {session.session_id[:8]}...")
                 st.sidebar.write(f"User Type: {session.user_type} (type: {type(session.user_type)})")
                 st.sidebar.write(f"User Type Value: {session.user_type.value if hasattr(session.user_type, 'value') else 'NO VALUE'}")
@@ -2471,7 +2471,7 @@ class SessionManager:
 
                 # MOST IMPORTANT - What is limit_check returning?
                 st.sidebar.write("---")
-                st.sidebar.write("🔍 **LIMIT CHECK RESULT:**")
+                st.sidebar.write("🔍 **LIMIT CHECK RESULT (get_session):**")
                 st.sidebar.write(f"Allowed: {limit_check.get('allowed', 'KEY_MISSING')}")
                 st.sidebar.write(f"Reason: {limit_check.get('reason', 'NO_REASON')}")
                 st.sidebar.write(f"Message: {limit_check.get('message', 'NO_MESSAGE')}")
@@ -2479,7 +2479,7 @@ class SessionManager:
 
                 # Check enum comparisons
                 st.sidebar.write("---")
-                st.sidebar.write("🔍 **ENUM COMPARISONS (Should be True if validated correctly):**")
+                st.sidebar.write("🔍 **ENUM COMPARISONS (get_session - Should be True if validated correctly):**")
                 st.sidebar.write(f"session.user_type == UserType.GUEST: {session.user_type == UserType.GUEST}")
                 st.sidebar.write(f"session.user_type == UserType.EMAIL_VERIFIED_GUEST: {session.user_type == UserType.EMAIL_VERIFIED_GUEST}")
                 st.sidebar.write(f"session.user_type == UserType.REGISTERED_USER: {session.user_type == UserType.REGISTERED_USER}")
@@ -2491,11 +2491,12 @@ class SessionManager:
 
                 # Force display the restriction condition
                 if not limit_check.get('allowed', True):
-                    st.sidebar.error("❌ RESTRICTION TRIGGERED! (Based on limit_check)")
+                    st.sidebar.error("❌ RESTRICTION TRIGGERED! (Based on get_session limit_check)")
                     st.sidebar.write(f"Restriction reason: {limit_check.get('reason')}")
                 else:
-                    st.sidebar.success("✅ Session should be allowed! (Based on limit_check)")
+                    st.sidebar.success("✅ Session should be allowed! (Based on get_session limit_check)")
                 st.sidebar.markdown("---") # Visual separator
+
 
                 if not limit_check.get('allowed', True):
                     ban_type = limit_check.get('ban_type', 'unknown')
@@ -2531,21 +2532,21 @@ class SessionManager:
         limit_check = self.question_limits.is_within_limits(new_session)
         
         # Display debug info for newly created session too
-        st.sidebar.write("🚨 **CRITICAL DEBUG INFO (NEW SESSION):**")
+        st.sidebar.write("🚨 **CRITICAL DEBUG INFO (NEW SESSION from get_session):**")
         st.sidebar.write(f"Session ID: {new_session.session_id[:8]}...")
         st.sidebar.write(f"User Type: {new_session.user_type} (type: {type(new_session.user_type)})")
         st.sidebar.write(f"Daily Question Count: {new_session.daily_question_count}")
         st.sidebar.write(f"Fingerprint ID: {new_session.fingerprint_id}")
         st.sidebar.write("---")
-        st.sidebar.write("🔍 **LIMIT CHECK RESULT (NEW SESSION):**")
+        st.sidebar.write("🔍 **LIMIT CHECK RESULT (NEW SESSION from get_session):**")
         st.sidebar.write(f"Allowed: {limit_check.get('allowed', 'KEY_MISSING')}")
         st.sidebar.write(f"Reason: {limit_check.get('reason', 'NO_REASON')}")
         st.sidebar.write(f"Message: {limit_check.get('message', 'NO_MESSAGE')}")
         st.sidebar.write(f"Full limit_check: {limit_check}")
         if not limit_check.get('allowed', True):
-            st.sidebar.error("❌ RESTRICTION TRIGGERED! (New Session)")
+            st.sidebar.error("❌ RESTRICTION TRIGGERED! (New Session from get_session)")
         else:
-            st.sidebar.success("✅ New Session allowed!")
+            st.sidebar.success("✅ New Session allowed! (from get_session)")
         st.sidebar.markdown("---")
         
         return self._validate_session(new_session) # Validate the newly created session
@@ -2865,6 +2866,13 @@ def render_welcome_page(session_manager: SessionManager):
 
 def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
     """Renders the application's sidebar, displaying session information, user status, and action buttons."""
+    # DEBUG: Check if we're getting the same session
+    st.sidebar.write("🔍 **SIDEBAR SESSION DEBUG:**")
+    st.sidebar.write(f"Sidebar Session ID: {session.session_id[:8]}...")
+    st.sidebar.write(f"Sidebar User Type: {session.user_type.value}")
+    st.sidebar.write(f"Sidebar Ban Status: {session.ban_status.value}")
+    st.sidebar.markdown("---") # Visual separator
+
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
@@ -3374,10 +3382,8 @@ def main():
         
         # Check if the retrieved session is active and valid to proceed to chat interface.
         if session and session.active:
-            # Render the application sidebar (with user info, actions).
-            # The PDF exporter is passed as it's needed for download functionality.
+            # Pass the SAME session object to both sidebar and chat interface functions.
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            # Render the main chat interface.
             render_chat_interface(session_manager, session)
         else:
             # If `get_session()` determines the session is inactive, expired, or banned,
