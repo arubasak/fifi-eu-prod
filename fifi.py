@@ -38,6 +38,7 @@ from streamlit_javascript import st_javascript
 # - FIX: Password field DOM warning and console visibility.
 # - FIX: Question progress bar affecting chat visibility (sidebar layout).
 # - FIX: Simplified browser close detection (redirect-only).
+# - FIX: render_welcome_page function correctly replaced.
 # =============================================================================
 
 # Setup logging
@@ -384,7 +385,7 @@ class DatabaseManager:
 
                 # --- NEW: Non-destructive migration logic ---
                 self._migrate_existing_table()
-                # --- END NEW MIGRATION LOGUSIC ---
+                # --- END NEW MIGRATION LOGIC ---
 
                 # Create indexes for common lookup fields (IF NOT EXISTS will prevent errors if they already exist)
                 # These must run AFTER any potential column additions by _migrate_existing_table
@@ -405,67 +406,72 @@ class DatabaseManager:
         Adds missing columns to an existing 'sessions' table without dropping data.
         This method is called during initialization to ensure schema compatibility.
         """
-        try:
-            # Get existing columns in the 'sessions' table
-            cursor = self.conn.execute("PRAGMA table_info(sessions)")
-            existing_columns = {row[1] for row in cursor.fetchall()} # row[1] is the column name
-            
-            # Define all new columns that should be present in the latest schema
-            # Format: (column_name, column_definition_SQL)
-            new_columns_to_add = [
-                ("fingerprint_id", "TEXT"),
-                ("fingerprint_method", "TEXT"),
-                ("visitor_type", "TEXT DEFAULT 'new_visitor'"),
-                ("recognition_response", "TEXT"),
-                ("daily_question_count", "INTEGER DEFAULT 0"),
-                ("total_question_count", "INTEGER DEFAULT 0"),
-                ("last_question_time", "TEXT"),
-                ("question_limit_reached", "INTEGER DEFAULT 0"),
-                ("ban_status", "TEXT DEFAULT 'none'"),
-                ("ban_start_time", "TEXT"),
-                ("ban_end_time", "TEXT"),
-                ("ban_reason", "TEXT"),
-                ("evasion_count", "INTEGER DEFAULT 0"),
-                ("current_penalty_hours", "INTEGER DEFAULT 0"),
-                ("escalation_level", "INTEGER DEFAULT 0"),
-                ("email_addresses_used", "TEXT DEFAULT '[]'"),
-                ("email_switches_count", "INTEGER DEFAULT 0"),
-                ("ip_address", "TEXT"),
-                ("ip_detection_method", "TEXT"),
-                ("user_agent", "TEXT"),
-                ("browser_privacy_level", "TEXT"),
-                ("registration_prompted", "INTEGER DEFAULT 0"),
-                ("registration_link_clicked", "INTEGER DEFAULT 0")
-            ]
-            
-            # Iterate through the defined new columns and add any that are missing
-            for column_name, column_def in new_columns_to_add:
-                if column_name not in existing_columns:
-                    try:
-                        self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {column_name} {column_def}")
-                        logger.info(f"Successfully added missing column to 'sessions' table: {column_name}")
-                    except Exception as e:
-                        logger.warning(f"Could not add column '{column_name}' to 'sessions' table (might already exist or other issue): {e}")
-            
-            self.conn.commit()
-            logger.info("✅ Database schema migration (adding columns) completed successfully.")
-            
-        except Exception as e:
-            logger.error(f"❌ Database schema migration (ALTER TABLE) failed: {e}", exc_info=True)
-            raise 
+        with self.lock: # Ensure migration is thread-safe too
+            try:
+                # Get existing columns in the 'sessions' table
+                cursor = self.conn.execute("PRAGMA table_info(sessions)")
+                existing_columns = {row[1] for row in cursor.fetchall()} # row[1] is the column name
+                
+                # Define all new columns that should be present in the latest schema
+                # Format: (column_name, column_definition_SQL)
+                new_columns_to_add = [
+                    ("fingerprint_id", "TEXT"),
+                    ("fingerprint_method", "TEXT"),
+                    ("visitor_type", "TEXT DEFAULT 'new_visitor'"),
+                    ("recognition_response", "TEXT"),
+                    ("daily_question_count", "INTEGER DEFAULT 0"),
+                    ("total_question_count", "INTEGER DEFAULT 0"),
+                    ("last_question_time", "TEXT"),
+                    ("question_limit_reached", "INTEGER DEFAULT 0"),
+                    ("ban_status", "TEXT DEFAULT 'none'"),
+                    ("ban_start_time", "TEXT"),
+                    ("ban_end_time", "TEXT"),
+                    ("ban_reason", "TEXT"),
+                    ("evasion_count", "INTEGER DEFAULT 0"),
+                    ("current_penalty_hours", "INTEGER DEFAULT 0"),
+                    ("escalation_level", "INTEGER DEFAULT 0"),
+                    ("email_addresses_used", "TEXT DEFAULT '[]'"),
+                    ("email_switches_count", "INTEGER DEFAULT 0"),
+                    ("ip_address", "TEXT"),
+                    ("ip_detection_method", "TEXT"),
+                    ("user_agent", "TEXT"),
+                    ("browser_privacy_level", "TEXT"),
+                    ("registration_prompted", "INTEGER DEFAULT 0"),
+                    ("registration_link_clicked", "INTEGER DEFAULT 0")
+                ]
+                
+                # Iterate through the defined new columns and add any that are missing
+                for column_name, column_def in new_columns_to_add:
+                    if column_name not in existing_columns:
+                        try:
+                            self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {column_name} {column_def}")
+                            logger.info(f"Successfully added missing column to 'sessions' table: {column_name}")
+                        except Exception as e:
+                            # Log a warning if a column can't be added (e.g., if it was already added by another process)
+                            logger.warning(f"Could not add column '{column_name}' to 'sessions' table (might already exist or other issue): {e}")
+                
+                self.conn.commit()
+                logger.info("✅ Database schema migration (adding columns) completed successfully.")
+                
+            except Exception as e:
+                logger.error(f"❌ Database schema migration (ALTER TABLE) failed: {e}", exc_info=True)
+                raise # Re-raise to indicate a critical failure
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         with self.lock:
             if self.db_type == "memory":
+                # For in-memory, store a deep copy to prevent external modifications
                 self.local_sessions[session.session_id] = copy.deepcopy(session)
                 logger.debug(f"Saved session {session.session_id[:8]} to in-memory.")
                 return
 
             try:
+                # Get the actual column names from the database table at runtime
                 cursor = self.conn.execute("PRAGMA table_info(sessions)")
-                db_column_names = [row[1] for row in cursor.fetchall()]
+                db_column_names = [row[1] for row in cursor.fetchall()] # row[1] is the column name
                 
+                # Map UserSession attributes to a dictionary for easy lookup by column name
                 s = session
                 session_attr_to_value = {
                     "session_id": s.session_id,
@@ -504,6 +510,7 @@ class DatabaseManager:
                     "registration_link_clicked": int(s.registration_link_clicked)
                 }
 
+                # Construct the list of values to insert in the exact order of db_column_names.
                 values_to_insert = [
                     session_attr_to_value.get(col_name) for col_name in db_column_names
                 ]
@@ -511,6 +518,7 @@ class DatabaseManager:
                 logger.debug(f"DB Columns (Actual): Count={len(db_column_names)} -> {db_column_names}")
                 logger.debug(f"Values to Insert: Count={len(values_to_insert)}")
 
+                # Construct the REPLACE INTO statement dynamically using discovered column names
                 columns_sql = ", ".join(db_column_names)
                 placeholders_sql = ", ".join(["?"] * len(db_column_names))
 
@@ -523,16 +531,18 @@ class DatabaseManager:
                 logger.debug(f"Successfully saved session {s.session_id[:8]} to database using dynamic columns.")
             except Exception as e:
                 logger.error(f"Failed to save session {s.session_id[:8]}: {e}", exc_info=True)
-                raise
+                raise # Re-raise to be caught by handle_api_errors
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
         with self.lock:
             if self.db_type == "memory":
+                # For in-memory, return a deep copy to isolate from external modifications
                 return copy.deepcopy(self.local_sessions.get(session_id))
             try:
+                # Set row_factory based on DB type for consistent dictionary-like access
                 if self.db_type == "file": self.conn.row_factory = sqlite3.Row
-                else: self.conn.row_factory = None
+                else: self.conn.row_factory = None # sqlitecloud returns tuples, convert manually
 
                 cursor = self.conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
                 row = cursor.fetchone()
@@ -540,11 +550,16 @@ class DatabaseManager:
                     logger.debug(f"No active session found for ID {session_id[:8]}.")
                     return None
                 
+                # Convert row to dictionary for consistent processing
                 row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
                 
+                # Dynamically create UserSession, converting types as needed
                 session_params = {}
+                
+                # Ensure session_id is always included.
                 session_params['session_id'] = row_dict.get('session_id', session_id)
                 
+                # Process all other fields from the database row.
                 for key, value in row_dict.items():
                     if key == 'session_id':
                         continue
@@ -567,6 +582,7 @@ class DatabaseManager:
         if value is None:
             return None
         
+        # Datetime fields
         datetime_keys = ['created_at', 'last_activity', 'last_question_time', 'ban_start_time', 'ban_end_time']
         if key in datetime_keys and isinstance(value, str):
             try:
@@ -575,6 +591,7 @@ class DatabaseManager:
                 logger.warning(f"Could not convert {key} '{value}' to datetime. Returning None.")
                 return None
         
+        # JSON fields (lists in this case)
         json_list_keys = ['messages', 'email_addresses_used']
         if key in json_list_keys and isinstance(value, str):
             try:
@@ -583,6 +600,7 @@ class DatabaseManager:
                 logger.warning(f"Could not decode JSON for {key}: '{value}'. Returning empty list.")
                 return []
         
+        # Enum fields
         if key == 'user_type' and isinstance(value, str):
             try:
                 return UserType(value)
@@ -596,6 +614,7 @@ class DatabaseManager:
                 logger.warning(f"Invalid ban_status '{value}'. Defaulting to NONE.")
                 return BanStatus.NONE
         
+        # Boolean fields (stored as INTEGER 0 or 1)
         bool_keys = ['active', 'timeout_saved_to_crm', 'question_limit_reached', 'registration_prompted', 'registration_link_clicked']
         if key in bool_keys:
             return bool(value)
@@ -686,7 +705,7 @@ class FingerprintingManager:
                     ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; ctx.fillText('Food & Beverage Industry', 4, 45);
                     ctx.strokeStyle = '#000'; ctx.beginPath();
                     ctx.arc(50, 50, 20, 0, Math.PI * 2); ctx.stroke();
-                    return btoa(canvas.toDataURL()).slice(0, 32);
+                    return btoa(canvas.toDataURL()).slice(0, 32); // Base64 and truncate for consistency
                 }} catch (e) {{
                     console.error("❌ Canvas fingerprint failed:", e);
                     return 'canvas_blocked';
@@ -1400,6 +1419,23 @@ class EnhancedAI:
         """
         Provides a simplified AI response.
         """
+        # In a real application, this would integrate with LangChain, Pinecone, Tavily, and OpenAI.
+        # Example of how you would connect to OpenAI (if available)
+        # if self.openai_client:
+        #     try:
+        #         messages = [{"role": "user", "content": prompt}]
+        #         if chat_history:
+        #             messages = chat_history[-5:] + messages # Last 5 messages for context
+        #         response = self.openai_client.chat.completions.create(
+        #             model="gpt-3.5-turbo", # or your chosen model
+        #             messages=messages
+        #         )
+        #         return {"content": response.choices[0].message.content, "source": "OpenAI", "success": True}
+        #     except Exception as e:
+        #         logger.error(f"OpenAI API call failed: {e}")
+        #         # Fallback to generic response
+        #         return {"content": "Sorry, my AI services are currently unavailable.", "success": False, "source": "AI Error"}
+
         return {
             "content": f"I understand you're asking about: '{prompt}'. This is the integrated FiFi AI. Your question is processed based on your user tier and system limits.",
             "source": "Integrated FiFi AI System Placeholder",
@@ -1419,6 +1455,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
         return {"flagged": False}
     
     try:
+        # CORRECTED MODEL NAME: "omni-moderation-latest"
         response = client.moderations.create(model="omni-moderation-latest", input=prompt)
         result = response.results[0]
         
@@ -2400,6 +2437,435 @@ class SessionManager:
                 st.error("❌ Failed to manually save chat to Zoho CRM. Please check logs for details.")
         else:
             st.warning("Cannot save to CRM: Only registered users with a chat history can manually save.")
+
+# =============================================================================
+# UI COMPONENTS (INTEGRATED & ENHANCED)
+# =============================================================================
+
+def render_welcome_page(session_manager: SessionManager):
+    """Renders the application's welcome page, including sign-in and guest options."""
+    st.title("🤖 Welcome to FiFi AI Assistant")
+    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
+    
+    st.markdown("---")
+    st.subheader("🎯 Usage Tiers")
+    
+    # Display information about different user tiers and their benefits
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.success("👤 **Guest Users**")
+        st.markdown("• **4 questions** to try FiFi AI")
+        st.markdown("• Email verification required to continue")
+        st.markdown("• Quick start, no registration needed")
+    
+    with col2:
+        st.info("📧 **Email Verified Guest**")
+        st.markdown("• **10 questions per day** (rolling 24-hour period)")
+        st.markdown("• Email verification for access")
+        st.markdown("• No full registration required")
+    
+    with col3:
+        st.warning("🔐 **Registered Users**")
+        st.markdown("• **40 questions per day** (across devices)")
+        st.markdown("• Cross-device tracking & consistent experience")
+        st.markdown("• Automatic chat saving to Zoho CRM")
+        st.markdown("• Priority access during high usage")
+    
+    # Tabs for Sign In vs. Continue as Guest
+    tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
+    
+    with tab1:
+        if not session_manager.config.WORDPRESS_URL:
+            st.warning("Sign-in is currently disabled because the authentication service (WordPress URL) is not configured in application secrets.")
+        else:
+            # Use a properly structured form with unique key and security fixes
+            with st.form("login_form", clear_on_submit=True):
+                st.markdown("### 🔐 Sign In to Your Account")
+                username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
+                password = st.text_input("Password", type="password", help="Enter your WordPress password.")
+                
+                # Add some spacing
+                st.markdown("")
+                
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
+                
+                if submit_button:
+                    if not username or not password:
+                        st.error("Please enter both username and password to sign in.")
+                    else:
+                        with st.spinner("🔐 Authenticating..."):
+                            authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                            
+                        if authenticated_session:
+                            st.balloons() # Visual celebration for successful login
+                            st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
+                            time.sleep(1) # Small delay for user to read the message
+                            st.session_state.page = "chat" # Change application page
+                            st.rerun() # Force a rerun to switch to the chat interface
+            
+            # Add registration link
+            st.markdown("---")
+            st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
+    
+    with tab2:
+        st.markdown("""
+        **Continue as a guest** to get a quick start and try FiFi AI Assistant without signing in.
+        
+        ℹ️ **What to expect as a Guest:**
+        - You get an initial allowance of **4 questions** to explore FiFi AI's capabilities.
+        - After these 4 questions, **email verification will be required** to continue (unlocks 10 questions/day).
+        - Our system utilizes **universal device fingerprinting** for security and to track usage across sessions.
+        - You can always choose to **upgrade to a full registration** later for extended benefits.
+        """)
+        
+        st.markdown("")
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            if st.button("👤 Start as Guest", use_container_width=True):
+                st.session_state.page = "chat" # Change application page
+                st.rerun() # Force a rerun to switch to the chat interface
+
+def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
+    """Renders the application's sidebar, displaying session information, user status, and action buttons."""
+    with st.sidebar:
+        st.title("🎛️ Dashboard")
+        
+        if session.user_type.value == UserType.REGISTERED_USER.value:
+            st.success("✅ **Registered User**")
+            if session.full_name: 
+                st.markdown(f"**Name:** {session.full_name}")
+            if session.email: 
+                st.markdown(f"**Email:** {session.email}")
+            
+            st.markdown(f"**Questions Today:** {session.total_question_count}/40")
+            if session.total_question_count <= 20:
+                st.progress(session.total_question_count / 20, text="Tier 1 (up to 20 questions)")
+            else:
+                st.progress((session.total_question_count - 20) / 20, text="Tier 2 (21-40 questions)")
+            
+        elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
+            st.info("📧 **Email Verified Guest**")
+            if session.email:
+                st.markdown(f"**Email:** {session.email}")
+            
+            st.markdown(f"**Daily Questions:** {session.daily_question_count}/10")
+            st.progress(session.daily_question_count / 10)
+            
+            if session.last_question_time:
+                next_reset = session.last_question_time + timedelta(hours=24)
+                time_to_reset = next_reset - datetime.now()
+                if time_to_reset.total_seconds() > 0:
+                    hours = int(time_to_reset.total_seconds() // 3600)
+                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
+                    st.caption(f"Resets in: {hours}h {minutes}m")
+                else:
+                    st.caption("Daily questions have reset!")
+            
+        else: # UserType.GUEST.value
+            st.warning("👤 **Guest User**")
+            st.markdown(f"**Questions:** {session.daily_question_count}/4")
+            st.progress(session.daily_question_count / 4)
+            st.caption("Email verification unlocks 10 questions/day.")
+        
+        if session.fingerprint_id:
+            st.markdown(f"**Device ID:** `{session.fingerprint_id[:8]}...`")
+            st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
+        
+        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value == UserType.REGISTERED_USER.value:
+            if session.zoho_contact_id: 
+                st.success("🔗 **CRM Linked**")
+            else: 
+                st.info("📋 **CRM Ready** (will link on first save)")
+            if session.timeout_saved_to_crm:
+                st.caption("💾 Auto-saved to CRM (after inactivity)")
+            else:
+                st.caption("💾 Auto-save enabled (after 15 min inactivity)")
+        else: 
+            st.caption("🚫 CRM Integration: Registered users only")
+        
+        st.divider()
+        
+        st.markdown(f"**Messages in Chat:** {len(session.messages)}")
+        st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
+        
+        if session.ban_status.value != BanStatus.NONE.value:
+            st.error(f"🚫 **STATUS: RESTRICTED**")
+            if session.ban_end_time:
+                time_remaining = session.ban_end_time - datetime.now()
+                hours = int(time_remaining.total_seconds() // 3600)
+                minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
+            st.markdown(f"Reason: {session.ban_reason or 'Usage policy violation'}")
+        elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: 
+            st.warning("⚠️ **ACTION REQUIRED: Email Verification**")
+        
+        st.divider()
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ Clear Chat", use_container_width=True, help="Clears all messages from the current conversation."):
+                session_manager.clear_chat_history(session)
+                st.rerun()
+        with col2:
+            if st.button("🚪 Sign Out", use_container_width=True, help="Ends your current session and returns to the welcome page."):
+                session_manager.end_session(session)
+                st.rerun()
+
+        if session.user_type.value == UserType.REGISTERED_USER.value and session.messages:
+            st.divider()
+            
+            pdf_buffer = pdf_exporter.generate_chat_pdf(session)
+            if pdf_buffer:
+                st.download_button(
+                    label="📄 Download Chat PDF",
+                    data=pdf_buffer,
+                    file_name=f"fifi_chat_transcript_{session.session_id[:8]}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    help="Download the current chat conversation as a PDF document."
+                )
+            
+            if session_manager.zoho.config.ZOHO_ENABLED and session.email:
+                if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Manually save your current chat transcript to your linked Zoho CRM contact."):
+                    session_manager.manual_save_to_crm(session)
+                st.caption("💡 Chat automatically saves to CRM after 15 minutes of inactivity.")
+
+def render_email_verification_dialog(session_manager: SessionManager, session: UserSession):
+    """
+    Renders the email verification dialog for guest users who have hit their
+    initial question limit (4 questions).
+    """
+    st.error("📧 **Email Verification Required**")
+    st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
+    
+    if 'verification_stage' not in st.session_state:
+        st.session_state.verification_stage = 'initial_check'
+
+    if st.session_state.verification_stage == 'initial_check':
+        fingerprint_history = session_manager.check_fingerprint_history(session.fingerprint_id)
+        
+        if fingerprint_history.get('has_history') and fingerprint_history.get('email'):
+            masked_email = session_manager._mask_email(fingerprint_history['email'])
+            st.info(f"🤝 **We seem to recognize this device!**")
+            st.markdown(f"Are you **{masked_email}**?")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Yes, that's my email", use_container_width=True, key="recognize_yes_btn"):
+                    session.recognition_response = "yes"
+                    st.session_state.verification_email = fingerprint_history['email']
+                    st.session_state.verification_stage = "send_code_recognized"
+                    st.rerun()
+            with col2:
+                if st.button("❌ No, use a different email", use_container_width=True, key="recognize_no_btn"):
+                    session.recognition_response = "no"
+                    st.session_state.verification_stage = "email_entry"
+                    st.rerun()
+        else:
+            st.session_state.verification_stage = "email_entry"
+            st.rerun()
+
+    if st.session_state.verification_stage == 'send_code_recognized':
+        email_to_verify = st.session_state.get('verification_email')
+        if email_to_verify:
+            with st.spinner(f"Sending verification code to {email_to_verify}..."):
+                result = session_manager.handle_guest_email_verification(session, email_to_verify)
+                if result['success']:
+                    st.success(result['message'])
+                    st.session_state.verification_stage = "code_entry"
+                else:
+                    st.error(result['message'])
+                    st.session_state.verification_stage = "email_entry"
+            st.rerun()
+        else:
+            st.error("Error: No recognized email found to send the code. Please enter your email manually.")
+            st.session_state.verification_stage = "email_entry"
+            st.rerun()
+
+    if st.session_state.verification_stage == 'email_entry':
+        with st.form("email_verification_form", clear_on_submit=False):
+            st.markdown("**Please enter your email address to receive a verification code:**")
+            current_email_input = st.text_input("Email Address", placeholder="your@email.com", value=st.session_state.get('verification_email', session.email or ""), key="manual_email_input")
+            submit_email = st.form_submit_button("Send Verification Code", use_container_width=True)
+            
+            if submit_email:
+                if current_email_input:
+                    if session.email and current_email_input != session.email:
+                        session.email_switches_count += 1
+                        session.email = current_email_input
+                        session_manager.db.save_session(session)
+                        
+                    result = session_manager.handle_guest_email_verification(session, current_email_input)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.session_state.verification_email = current_email_input
+                        st.session_state.verification_stage = "code_entry"
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter an email address to receive the code.")
+    
+    if st.session_state.verification_stage == 'code_entry':
+        verification_email = st.session_state.get('verification_email', session.email)
+        
+        st.success(f"📧 A verification code has been sent to **{verification_email}**.")
+        st.info("Please check your email, including spam/junk folders. The code is valid for 10 minutes.")
+        
+        with st.form("code_verification_form", clear_on_submit=False):
+            code = st.text_input("Enter Verification Code", placeholder="e.g., 123456", max_chars=6, key="verification_code_input")
+            
+            col_code1, col_code2 = st.columns(2)
+            with col_code1:
+                submit_code = st.form_submit_button("Verify Code", use_container_width=True)
+            with col_code2:
+                resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
+            
+            if resend_code:
+                if verification_email:
+                    with st.spinner("Resending code..."):
+                        verification_sent = session_manager.email_verification.send_verification_code(verification_email)
+                        if verification_sent:
+                            st.success("Verification code resent successfully!")
+                            st.session_state.verification_stage = "code_entry"
+                        else:
+                            st.error("Failed to resend code. Please try again later.")
+                else:
+                    st.error("Error: No email address found to resend the code. Please go back and enter your email.")
+                    st.session_state.verification_stage = "email_entry"
+                st.rerun()
+
+            if submit_code:
+                if code:
+                    with st.spinner("Verifying code..."):
+                        result = session_manager.verify_email_code(session, code)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.balloons()
+                        for key in ['verification_email', 'verification_stage']:
+                            if key in st.session_state:
+                                del st.session_state[key]
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter the verification code you received.")
+            
+def render_chat_interface(session_manager: SessionManager, session: UserSession):
+    """Renders the main chat interface."""
+    
+    st.title("🤖 FiFi AI Assistant")
+    st.caption("Your intelligent food & beverage sourcing companion with universal fingerprinting.")
+    
+    global_message_channel_error_handler()
+
+    if not session.fingerprint_id or session.fingerprint_method == "temporary_fallback_python":
+        fingerprint_js_code = session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
+        fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id[:8]}")
+        
+        if fp_result:
+            extracted_fp_data = session_manager.fingerprinting.extract_fingerprint_from_result(fp_result)
+            if extracted_fp_data.get('fingerprint_method') not in ["fallback", "canvas_blocked", "webgl_blocked", "audio_blocked"]:
+                session_manager.apply_fingerprinting(session, extracted_fp_data)
+                st.rerun()
+            else:
+                logger.debug(f"JS Fingerprint returned a fallback/blocked result: {extracted_fp_data.get('fingerprint_method')}. Retaining Python fallback if present.")
+        else:
+            logger.debug(f"Fingerprinting component for session {session.session_id[:8]} did not return result on this run. Will try again.")
+
+    if session.user_type.value == UserType.REGISTERED_USER.value:
+        try:
+            render_browser_close_detection_simplified(session.session_id)
+        except Exception as e:
+            logger.error(f"Failed to render browser close detection JS for {session.session_id[:8]}: {e}", exc_info=True)
+
+    if session.user_type.value == UserType.REGISTERED_USER.value:
+        timer_result = None
+        try:
+            timer_result = render_activity_timer_component_15min(session.session_id)
+        except Exception as e:
+            logger.error(f"15-minute timer component execution failed: {e}", exc_info=True)
+        
+        if timer_result:
+            if handle_timer_event(timer_result, session_manager, session):
+                st.rerun()
+
+    limit_check = session_manager.question_limits.is_within_limits(session)
+    if not limit_check['allowed']:
+        if limit_check.get('reason') == 'guest_limit':
+            render_email_verification_dialog(session_manager, session)
+            return
+        else:
+            return
+
+    for msg in session.messages:
+        with st.chat_message(msg.get("role", "user")):
+            st.markdown(msg.get("content", ""), unsafe_allow_html=True)
+            
+            if msg.get("role") == "assistant":
+                if "source" in msg:
+                    st.caption(f"Source: {msg['source']}")
+                
+                indicators = []
+                if msg.get("used_pinecone"):
+                    indicators.append("🧠 Knowledge Base")
+                if msg.get("used_search"):
+                    indicators.append("🌐 Web Search")
+                
+                if indicators:
+                    st.caption(f"Enhanced with: {', '.join(indicators)}")
+
+    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                            disabled=session.ban_status.value != BanStatus.NONE.value)
+    
+    if prompt:
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Processing your question..."):
+                try:
+                    response = session_manager.get_ai_response(session, prompt)
+                    
+                    if response.get('requires_email'):
+                        st.error("📧 Please verify your email to continue using FiFi AI.")
+                        st.session_state.verification_stage = 'email_entry'
+                        st.rerun()
+                    elif response.get('banned'):
+                        st.error(response.get("content", 'Access restricted.'))
+                        if response.get('time_remaining'):
+                            time_remaining = response['time_remaining']
+                            hours = int(time_remaining.total_seconds() // 3600)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.rerun()
+                    elif response.get('evasion_penalty'):
+                        st.error("🚫 Evasion detected - Your access has been temporarily restricted.")
+                        st.error(f"Penalty duration: {response.get('penalty_hours', 0)} hours.")
+                        st.rerun()
+                    else:
+                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                        
+                        if response.get("source"):
+                            st.caption(f"Source: {response['source']}")
+                        
+                        indicators = []
+                        if response.get("used_pinecone"):
+                            indicators.append("🧠 Knowledge Base")
+                        if response.get("used_search"):
+                            indicators.append("🌐 Web Search")
+                        
+                        if indicators:
+                            st.caption(f"Enhanced with: {', '.join(indicators)}")
+                        
+                except Exception as e:
+                    logger.error(f"AI response generation failed due to an unexpected error: {e}", exc_info=True)
+                    st.error("⚠️ Sorry, I encountered an unexpected error processing your request. Please try again.")
+        
+        st.rerun()
 
 # =============================================================================
 # MAIN APPLICATION FLOW
