@@ -1499,12 +1499,21 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     try:
         response = client.moderations.create(model="omni-moderation-latest", input=prompt)
-        result = response.results[0]
+        result = response.results[0] # Note: results is a list, get the first item
         
         if result.flagged:
             flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
-            logger.warning(f"Input flagged by moderation for: {', '.join(flagged_categories)}")
-
+            logger.warning(f"Input flagged by moderation for: {', '.join(flagged_categories)}") # CORRECTED LINE
+            return {
+                "flagged": True, 
+                "message": "Your message violates our content policy and cannot be processed.",
+                "categories": flagged_categories
+            }
+    except Exception as e:
+        logger.error(f"Content moderation API call failed: {e}", exc_info=True)
+        return {"flagged": False}
+    
+    return {"flagged": False}
 `_init_database_folders_and_files()`: This helper function ensures that the necessary local directories and files for the database are created if they don't already exist. This prevents `FileNotFoundError` or similar issues when the application tries to access the database.
 
 2. **Establish the database connection.**
