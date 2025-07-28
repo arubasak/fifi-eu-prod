@@ -947,7 +947,6 @@ class FingerprintingManager:
                 
             }} catch (error) {{
                 console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
-                // Send error to parent
                 const errorResult = {{
                     type: 'fingerprint_error',
                     session_id: "{session_id}",
@@ -971,7 +970,7 @@ class FingerprintingManager:
         </html>
         """
         
-        # Render the component
+        # Render the component (NO KEY PARAMETER!)
         st.components.v1.html(html_code, height=0, width=0, key=f"fifi_fp_init_{safe_session_id}")
 
 
@@ -1944,7 +1943,6 @@ class SessionManager:
                     if not session.fingerprint_id: # If fingerprint is missing, apply temporary fallback
                         session.fingerprint_id = f"temp_fp_{session.session_id[:8]}"
                         session.fingerprint_method = "temporary_fallback_python"
-                        session.visitor_type = "new_visitor_fallback"
                         try:
                             self.db.save_session(session)
                             logger.info(f"Applied temporary fallback fingerprint to session {session.session_id[:8]}.")
@@ -2824,7 +2822,6 @@ def render_client_info_detector(session_id: str) -> None:
             
         }} catch (error) {{
             console.error("🚨 FiFi Client Info Detector caught a critical error:", error);
-            // Send error to parent
             const errorResult = {{
                 type: 'client_info_error',
                 session_id: "{session_id}",
@@ -2848,7 +2845,7 @@ def render_client_info_detector(session_id: str) -> None:
     </html>
     """
     
-    # Render the component
+    # Render the component (NO KEY PARAMETER!)
     st.components.v1.html(html_code, height=0, width=0, key=f"client_info_{safe_session_id}")
 
 
@@ -3323,7 +3320,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     
     global_message_channel_error_handler()
     
-    # Add message listener for component communication (Fix 4)
+    # Add message listener for component communication (Fix 3)
     add_message_listener()
     
     # Check for component messages first (Fix 3)
@@ -3344,9 +3341,6 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     if not session.fingerprint_id or session.fingerprint_method == "temporary_fallback_python":
         session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
 
-    # The previous logger.info(f"🔍 raw_fp_result type: ...") and logger.info(f"🔍 raw_client_info_result type: ...")
-    # were part of debugging st_javascript returns and are no longer needed
-    # as the components now communicate via postMessage and check_component_messages handles parsing.
 
     if session.user_type.value == UserType.REGISTERED_USER.value:
         try:
