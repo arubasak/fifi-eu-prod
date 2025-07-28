@@ -510,9 +510,14 @@ class DatabaseManager:
                 for key, value in row_dict.items():
                     if key == 'session_id':
                         continue
-                        
+                    
+                    # Debug logging to see what's happening
+                    logger.debug(f"Processing column '{key}' with value: {value} (type: {type(value)})")
+                    
                     if hasattr(UserSession, key):
-                        session_params[key] = self._convert_db_value_to_python(key, value)
+                        converted_value = self._convert_db_value_to_python(key, value)
+                        session_params[key] = converted_value
+                        logger.debug(f"Converted '{key}' to: {converted_value} (type: {type(converted_value)})")
                     else:
                         logger.debug(f"Skipping unknown DB column '{key}' during session load for {session_id[:8]} (not in UserSession dataclass).")
                 
@@ -538,11 +543,17 @@ class DatabaseManager:
                 return None
         
         json_list_keys = ['messages', 'email_addresses_used']
-        if key in json_list_keys and isinstance(value, str):
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                logger.warning(f"Could not decode JSON for {key}: '{value}'. Returning empty list.")
+        if key in json_list_keys:
+            if isinstance(value, str) and value:
+                try:
+                    result = json.loads(value)
+                    logger.debug(f"Successfully decoded JSON for {key}: {result}")
+                    return result
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Could not decode JSON for {key}: '{value}'. Error: {e}. Returning empty list.")
+                    return []
+            else:
+                logger.debug(f"Non-string or empty value for {key}: {value} (type: {type(value)})")
                 return []
         
         if key == 'user_type' and isinstance(value, str):
