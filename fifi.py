@@ -3346,7 +3346,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 time_to_reset = next_reset - datetime.now()
                 if time_to_reset.total_seconds() > 0:
                     hours = int(time_to_reset.total_seconds() // 3600)
-                    minutes = int((time_to_روزeconds() % 3600) // 60)
+                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
                     st.caption(f"Resets in: {hours}h {minutes}m")
                 else:
                     st.caption("Daily questions have reset!")
