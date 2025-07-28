@@ -1693,6 +1693,505 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
+# SESSION MANAGER - MAIN ORCHESTRATOR CLASS (WAS MISSING FROM ORIGINAL CODE)
+# =============================================================================
+
+class SessionManager:
+    """
+    Main orchestrator class that manages user sessions, integrates all managers,
+    and provides the primary interface for the application.
+    """
+    
+    def __init__(self, config: Config, db_manager: DatabaseManager, 
+                 zoho_manager: ZohoCRMManager, ai_system: EnhancedAI, 
+                 rate_limiter: RateLimiter, fingerprinting_manager: FingerprintingManager,
+                 email_verification_manager, question_limit_manager: QuestionLimitManager):
+        self.config = config
+        self.db = db_manager
+        self.zoho = zoho_manager
+        self.ai = ai_system
+        self.rate_limiter = rate_limiter
+        self.fingerprinting = fingerprinting_manager
+        self.email_verification = email_verification_manager
+        self.question_limits = question_limit_manager
+        self._cleanup_interval = timedelta(hours=1)  # Cleanup every hour (Fix 6)
+        self._last_cleanup = datetime.now() # (Fix 6)
+        
+        logger.info("✅ SessionManager initialized with all component managers.")
+
+    def get_session_timeout_minutes(self) -> int:
+        """Returns the configured session timeout duration in minutes."""
+        return 15
+    
+    # Added for memory management (Fix 6)
+    def _periodic_cleanup(self):
+        """Perform periodic cleanup of memory and resources"""
+        now = datetime.now()
+        if now - self._last_cleanup < self._cleanup_interval:
+            return
+            
+        try:
+            # Clean up fingerprinting cache
+            if hasattr(self.fingerprinting, 'fingerprint_cache'):
+                old_entries = []
+                for fp_id, data in self.fingerprinting.fingerprint_cache.items():
+                    if now - data.get('last_seen', now) > timedelta(hours=24):
+                        old_entries.append(fp_id)
+                
+                for old_fp in old_entries:
+                    del self.fingerprinting.fingerprint_cache[old_fp]
+                
+                if old_entries:
+                    logger.info(f"Cleaned up {len(old_entries)} old fingerprint cache entries")
+            
+            # Clean up rate limiter
+            if hasattr(self.rate_limiter, 'requests'):
+                old_limit_entries = []
+                for identifier, timestamps in self.rate_limiter.requests.items():
+                    # Remove timestamps older than the window
+                    cutoff = time.time() - self.rate_limiter.window_seconds
+                    self.rate_limiter.requests[identifier] = [t for t in timestamps if t > cutoff]
+                    
+                    if not self.rate_limiter.requests[identifier]:
+                        old_limit_entries.append(identifier)
+                
+                for old_id in old_limit_entries:
+                    del self.rate_limiter.requests[old_id]
+                
+                if old_limit_entries:
+                    logger.info(f"Cleaned up {len(old_limit_entries)} old rate limiter entries")
+            
+            # Clean up error history (assuming self.error_handler is available in SessionManager,
+            # which it is via st.session_state)
+            if hasattr(st.session_state, 'error_handler') and hasattr(st.session_state.error_handler, 'error_history') and len(st.session_state.error_handler.error_history) > 100:
+                st.session_state.error_handler.error_history = st.session_state.error_handler.error_history[-50:]  # Keep last 50
+                logger.info("Cleaned up error history")
+            
+            self._last_cleanup = now
+            logger.debug("Periodic cleanup completed")
+            
+        except Exception as e:
+            logger.error(f"Error during periodic cleanup: {e}", exc_info=True)
+
+
+    def _update_activity(self, session: UserSession):
+        """
+        Updates the session's last activity timestamp and saves it to the DB.
+        Also resets the `timeout_saved_to_crm` flag if the user becomes active again.
+        """
+        session.last_activity = datetime.now()
+        
+        if session.timeout_saved_to_crm:
+            session.timeout_saved_to_crm = False
+            logger.info(f"Reset 'timeout_saved_to_crm' flag for session {session.session_id[:8]} due to new activity.")
+        
+        if isinstance(session.user_type, str):
+            session.user_type = UserType(session.user_type)
+        
+        # FIX: Ensure messages list integrity before saving (already present, but good)
+        if not isinstance(session.messages, list):
+            logger.warning(f"Messages field corrupted for session {session.session_id[:8]}, preserving as empty list")
+            session.messages = []
+
+        try:
+            self.db.save_session(session)
+            logger.debug(f"Activity update saved for {session.session_id[:8]} with {len(session.messages)} messages")
+        except Exception as e:
+            logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
+
+    def _capture_client_info(self, session: UserSession) -> UserSession:
+        """
+        Enhanced client info capture with multiple fallback methods.
+        Attempts to get IP and User-Agent from Streamlit's internal context,
+        falling back to JS detection if necessary.
+        """
+        ip_captured = False
+        ua_captured = False
+        
+        # Method 1: Try the current Streamlit context (most reliable if available)
+        try:
+            from streamlit.runtime.scriptrunner import get_script_run_ctx
+            ctx = get_script_run_ctx()
+            
+            headers = None
+            if ctx:
+                if hasattr(ctx, 'request_context') and ctx.request_context and hasattr(ctx.request_context, 'headers'):
+                    headers = ctx.request_context.headers # Older Streamlit versions
+                elif hasattr(ctx, 'session_info') and ctx.session_info and hasattr(ctx.session_info, 'headers'):
+                    headers = ctx.session_info.headers # Newer Streamlit versions
+                elif hasattr(ctx, '_session_state') and hasattr(ctx._session_state, '_session_info') and hasattr(ctx._session_state._session_info, 'headers'):
+                    # Fallback for some specific deployments/versions
+                    headers = ctx._session_state._session_info.headers
+
+            if headers:
+                # Extract IP address from common headers
+                ip_headers_priority = [
+                    'x-forwarded-for', 'x-real-ip', 'cf-connecting-ip', 
+                    'x-client-ip', 'x-forwarded', 'forwarded-for', 'forwarded'
+                ]
+                
+                for header_name in ip_headers_priority:
+                    ip_val = headers.get(header_name) or headers.get(header_name.upper()) # Check both cases
+                    if ip_val:
+                        session.ip_address = ip_val.split(',')[0].strip()
+                        session.ip_detection_method = header_name
+                        ip_captured = True
+                        break
+                
+                # Extract User-Agent
+                ua_val = headers.get('user-agent') or headers.get('User-Agent')
+                if ua_val:
+                    session.user_agent = ua_val
+                    ua_captured = True
+                    
+        except Exception as e:
+            logger.debug(f"Method 1 (Streamlit context) failed to capture client info: {e}")
+        
+        # Final fallbacks if info was not captured by Python server-side
+        if not ip_captured:
+            session.ip_address = "capture_failed_py_context"
+            session.ip_detection_method = "python_context_unavailable"
+            
+        if not ua_captured:
+            session.user_agent = "capture_failed_py_context"
+        
+        logger.info(f"Client info capture for {session.session_id[:8]}: IP_Captured={ip_captured}, UA_Captured={ua_captured}")
+        return session
+
+    def _create_new_session(self) -> UserSession:
+        """Creates a new user session with client info capture."""
+        session_id = str(uuid.uuid4())
+        session = UserSession(session_id=session_id)
+        
+        # Capture client information
+        session = self._capture_client_info(session)
+        
+        # Apply temporary fingerprint until JS fingerprinting completes
+        session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
+        session.fingerprint_method = "temporary_fallback_python"
+        
+        # Save to database
+        self.db.save_session(session)
+        
+        logger.info(f"Created new session {session_id[:8]} with user type {session.user_type.value}")
+        return session
+
+
+    def _validate_session(self, session: UserSession) -> UserSession:
+        """
+        Ensures the `UserSession` object's Enum fields are correctly typed
+        and other defaults/conversions are applied.
+        """
+        if not session: return session
+            
+        if isinstance(session.user_type, str):
+            try:
+                session.user_type = UserType(session.user_type)
+            except ValueError:
+                logger.error(f"Invalid user_type string '{session.user_type}' for session {session.session_id[:8]}. Defaulting to GUEST.")
+                session.user_type = UserType.GUEST
+        
+        if isinstance(session.ban_status, str):
+            try:
+                session.ban_status = BanStatus(session.ban_status)
+            except ValueError:
+                logger.error(f"Invalid ban_status string '{session.ban_status}' for session {session.session_id[:8]}. Defaulting to NONE.")
+                session.ban_status = BanStatus.NONE
+        
+        if not isinstance(session.messages, list):
+            logger.warning(f"Session {session.session_id[:8]} messages field is not a list. Resetting to empty list.")
+            session.messages = []
+        
+        if not isinstance(session.email_addresses_used, list):
+            logger.warning(f"Session {session.session_id[:8]} email_addresses_used field is not a list. Resetting to empty list.")
+            session.email_addresses_used = []
+            
+        return session
+
+    def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]):
+        """Applies fingerprinting data to the session."""
+        session.fingerprint_id = fingerprint_data.get('fingerprint_id')
+        session.fingerprint_method = fingerprint_data.get('fingerprint_method')
+        session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor')
+        session.browser_privacy_level = fingerprint_data.get('privacy_level', 'standard')
+        
+        # Check for existing sessions with same fingerprint
+        existing_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+        if existing_sessions:
+            # Inherit recognition data from most recent session
+            recent_session = max(existing_sessions, key=lambda s: s.last_activity)
+            if recent_session.email and recent_session.user_type != UserType.GUEST:
+                session.visitor_type = "returning_visitor"
+        
+        self.db.save_session(session)
+        logger.info(f"Fingerprinting applied to {session.session_id[:8]}: {session.fingerprint_method}")
+
+    def check_fingerprint_history(self, fingerprint_id: str) -> Dict[str, Any]:
+        """Checks fingerprint history for device recognition."""
+        if not fingerprint_id:
+            return {'has_history': False}
+        
+        sessions = self.db.find_sessions_by_fingerprint(fingerprint_id)
+        if not sessions:
+            return {'has_history': False}
+        
+        # Find most recent session with email
+        email_sessions = [s for s in sessions if s.email and s.user_type != UserType.GUEST]
+        if email_sessions:
+            recent = max(email_sessions, key=lambda s: s.last_activity)
+            return {
+                'has_history': True,
+                'email': recent.email,
+                'last_seen': recent.last_activity,
+                'user_type': recent.user_type.value
+            }
+        
+        return {'has_history': False}
+
+    def _mask_email(self, email: str) -> str:
+        """Masks an email address for privacy."""
+        if '@' not in email:
+            return email
+        local, domain = email.split('@', 1)
+        if len(local) <= 2:
+            return f"{local[0]}***@{domain}"
+        return f"{local[0]}{'*' * (len(local) - 2)}{local[-1]}@{domain}"
+
+    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+        """Authenticates user with WordPress and creates/updates session."""
+        if not self.config.WORDPRESS_URL:
+            st.error("WordPress authentication is not configured.")
+            return None
+        
+        try:
+            auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
+            response = requests.post(auth_url, json={
+                'username': username,
+                'password': password
+            }, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                wp_token = data.get('token')
+                email = data.get('user_email')
+                display_name = data.get('user_display_name')
+                
+                # Get current session
+                session = self.get_session()
+                
+                # Update session to registered user
+                session.user_type = UserType.REGISTERED_USER
+                session.email = email
+                session.full_name = display_name
+                session.wp_token = wp_token
+                
+                # Add email to email history if not already there
+                if email not in session.email_addresses_used:
+                    session.email_addresses_used.append(email)
+                
+                self.db.save_session(session)
+                
+                logger.info(f"WordPress authentication successful for {email}")
+                return session
+                
+            else:
+                st.error("Invalid username or password.")
+                return None
+                
+        except Exception as e:
+            logger.error(f"WordPress authentication failed: {e}")
+            st.error("Authentication service is temporarily unavailable.")
+            return None
+
+    def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
+        """Handles email verification for guest users."""
+        try:
+            # Update session with email
+            session.email = email
+            if email not in session.email_addresses_used:
+                session.email_addresses_used.append(email)
+            
+            self.db.save_session(session)
+            
+            # Send verification code
+            success = self.email_verification.send_verification_code(email)
+            if success:
+                return {
+                    'success': True,
+                    'message': f"Verification code sent to {email}. Please check your email including spam folder."
+                }
+            else:
+                return {
+                    'success': False,
+                    'message': "Failed to send verification code. Please try again later."
+                }
+                
+        except Exception as e:
+            logger.error(f"Email verification handling failed: {e}")
+            return {
+                'success': False,
+                'message': "An error occurred while sending verification code."
+            }
+
+    def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
+        """Verifies email verification code."""
+        try:
+            if not session.email:
+                return {
+                    'success': False,
+                    'message': "No email address found for verification."
+                }
+            
+            success = self.email_verification.verify_code(session.email, code)
+            if success:
+                # Upgrade session to email verified guest
+                session.user_type = UserType.EMAIL_VERIFIED_GUEST
+                session.question_limit_reached = False
+                session.daily_question_count = 0  # Reset count after verification
+                
+                self.db.save_session(session)
+                
+                return {
+                    'success': True,
+                    'message': "Email verified successfully! You now have 10 questions per day."
+                }
+            else:
+                return {
+                    'success': False,
+                    'message': "Invalid verification code. Please try again."
+                }
+                
+        except Exception as e:
+            logger.error(f"Email code verification failed: {e}")
+            return {
+                'success': False,
+                'message': "Verification failed due to a technical error."
+            }
+
+    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+        """Gets AI response for user prompt with all checks and limits."""
+        try:
+            # Rate limiting check
+            if not self.rate_limiter.is_allowed(session.session_id):
+                return {
+                    'content': 'Please slow down - you are sending requests too quickly.',
+                    'success': False
+                }
+            
+            # Question limit check
+            limit_check = self.question_limits.is_within_limits(session)
+            if not limit_check['allowed']:
+                if limit_check['reason'] == 'guest_limit':
+                    return {'requires_email': True}
+                elif limit_check['reason'] in ['banned', 'daily_limit', 'total_limit']:
+                    return {
+                        'banned': True,
+                        'content': limit_check.get('message', 'Access restricted.'),
+                        'time_remaining': limit_check.get('time_remaining')
+                    }
+            
+            # Content moderation (if available)
+            sanitized_prompt = sanitize_input(prompt)
+            moderation_result = check_content_moderation(sanitized_prompt, self.ai.openai_client)
+            if moderation_result and moderation_result.get('flagged'):
+                return {
+                    'content': moderation_result.get('message', 'Your message violates content policy.'),
+                    'success': False
+                }
+            
+            # Record the question
+            self.question_limits.record_question(session)
+            
+            # Add user message to session
+            user_message = {"role": "user", "content": sanitized_prompt}
+            session.messages.append(user_message)
+            
+            # Get AI response
+            ai_response = self.ai.get_response(sanitized_prompt, session.messages[-10:])  # Last 10 messages for context
+            
+            # Add AI response to session
+            assistant_message = {
+                "role": "assistant",
+                "content": ai_response.get("content", "No response generated."),
+                "source": ai_response.get("source", "FiFi AI"),
+                "used_search": ai_response.get("used_search", False),
+                "used_pinecone": ai_response.get("used_pinecone", False),
+                "has_citations": ai_response.get("has_citations", False),
+                "has_inline_citations": ai_response.get("has_inline_citations", False),
+                "safety_override": ai_response.get("safety_override", False)
+            }
+            session.messages.append(assistant_message)
+            
+            # Save session with new messages
+            session.last_activity = datetime.now()
+            self.db.save_session(session)
+            
+            return ai_response
+            
+        except Exception as e:
+            logger.error(f"AI response generation failed: {e}", exc_info=True)
+            return {
+                'content': 'I encountered an error processing your request. Please try again.',
+                'success': False,
+                'source': 'Error Handler'
+            }
+
+    def clear_chat_history(self, session: UserSession):
+        """Clears chat history for the session."""
+        session.messages = []
+        session.last_activity = datetime.now()
+        self.db.save_session(session)
+        logger.info(f"Chat history cleared for session {session.session_id[:8]}")
+
+    def end_session(self, session: UserSession):
+        """Ends the current session and performs cleanup."""
+        try:
+            # Save to CRM if eligible
+            if (session.user_type == UserType.REGISTERED_USER and 
+                session.email and 
+                session.messages and 
+                not session.timeout_saved_to_crm):
+                
+                logger.info(f"Performing CRM save during session end for {session.session_id[:8]}")
+                self.zoho.save_chat_transcript_sync(session, "Manual Sign Out")
+            
+            # Mark session as inactive
+            session.active = False
+            session.last_activity = datetime.now()
+            self.db.save_session(session)
+            
+            # Clear Streamlit session state
+            if 'current_session' in st.session_state:
+                del st.session_state['current_session']
+            if 'page' in st.session_state:
+                del st.session_state['page']
+            
+            logger.info(f"Session {session.session_id[:8]} ended successfully")
+            
+        except Exception as e:
+            logger.error(f"Error ending session {session.session_id[:8]}: {e}", exc_info=True)
+
+    def manual_save_to_crm(self, session: UserSession):
+        """Manually saves chat transcript to CRM."""
+        if not session.messages:
+            st.warning("No conversation to save.")
+            return
+        
+        if session.user_type != UserType.REGISTERED_USER:
+            st.error("CRM saving is only available for registered users.")
+            return
+        
+        with st.spinner("Saving conversation to Zoho CRM..."):
+            success = self.zoho.save_chat_transcript_sync(session, "Manual Save Request")
+            
+        if success:
+            st.success("✅ Conversation saved to Zoho CRM successfully!")
+            session.timeout_saved_to_crm = True
+            self.db.save_session(session)
+        else:
+            st.error("❌ Failed to save to CRM. Please try again later.")
+
+# =============================================================================
 # JAVASCRIPT COMPONENTS & EVENT HANDLING
 # =============================================================================
 
@@ -2215,7 +2714,7 @@ def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Python-side parsing or execution error for JavaScript client info: {e}", exc_info=True)
         return None
 
-def handle_timer_event(timer_result: Dict[str, Any], session_manager, session: UserSession) -> bool:
+def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool: # Forward reference
     """
     Processes events triggered by the JavaScript activity timer (e.g., 15-minute timeout).
     """
