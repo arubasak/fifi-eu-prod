@@ -50,6 +50,7 @@ from streamlit_javascript import st_javascript
 # - FIX: Missing `fingerprinting_manager` instantiation in `ensure_initialization` (corrected).
 # - FIX: Syntax errors in QuestionLimitManager and database methods corrected.
 # - NEW: Added diagnostic page for troubleshooting.
+# - FIX: SYNTAX ERROR CORRECTED - Fixed incomplete try/except blocks
 # =============================================================================
 
 # Setup logging
@@ -311,8 +312,8 @@ class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
         self.lock = threading.Lock()
         self.conn = None
-        self._last_health_check = None # Added for health check (Fix 3)
-        self._health_check_interval = timedelta(minutes=5)  # Check every 5 minutes (Fix 3)
+        self._last_health_check = None
+        self._health_check_interval = timedelta(minutes=5)
         logger.info("🔄 INITIALIZING DATABASE MANAGER")
         
         # Prioritize SQLite Cloud if configured and available
@@ -327,10 +328,10 @@ class DatabaseManager:
         if not self.conn:
             logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED. FALLING BACK TO NON-PERSISTENT IN-MEMORY STORAGE.")
             self.db_type = "memory"
-            self.local_sessions = {} # For in-memory storage
+            self.local_sessions = {}
         
-        # Initialize database schema (SIMPLIFIED - no signal timeout needed)
-        if self.conn: # Only attempt if a connection was established
+        # Initialize database schema
+        if self.conn:
             try:
                 self._init_complete_database()
                 logger.info("✅ Database initialization completed successfully")
@@ -340,12 +341,12 @@ class DatabaseManager:
                 logger.error(f"Database initialization failed: {e}", exc_info=True)
                 self.conn = None
                 self.db_type = "memory" 
-                self.local_sessions = {} # Fallback to in-memory on any init error
+                self.local_sessions = {}
         
     def _try_sqlite_cloud(self, cs: str):
         try:
             conn = sqlitecloud.connect(cs)
-            conn.execute("SELECT 1").fetchone() # Test connection
+            conn.execute("SELECT 1").fetchone()
             logger.info("✅ SQLite Cloud connection established!")
             return conn, "cloud"
         except Exception as e:
@@ -355,7 +356,7 @@ class DatabaseManager:
     def _try_local_sqlite(self):
         try:
             conn = sqlite3.connect("fifi_sessions_v2.db", check_same_thread=False)
-            conn.execute("SELECT 1").fetchone() # Test connection
+            conn.execute("SELECT 1").fetchone()
             logger.info("✅ Local SQLite connection established!")
             return conn, "file"
         except Exception as e:
@@ -422,9 +423,8 @@ class DatabaseManager:
                 
             except Exception as e:
                 logger.error(f"Database initialization failed: {e}", exc_info=True)
-                raise # Re-raise to indicate a critical failure
+                raise
 
-    # Added for database health check (Fix 3)
     def _check_connection_health(self) -> bool:
         """Check if database connection is healthy"""
         if not self.conn:
@@ -433,7 +433,7 @@ class DatabaseManager:
         now = datetime.now()
         if (self._last_health_check and 
             now - self._last_health_check < self._health_check_interval):
-            return True  # Skip check if recently checked
+            return True
             
         try:
             if self.db_type == "cloud":
@@ -448,8 +448,7 @@ class DatabaseManager:
             logger.error(f"Database health check failed: {e}")
             return False
     
-    # Added for database health check and reconnection (Fix 3)
-    def _ensure_connection(self, config_instance: Any): # Pass config to access connection string
+    def _ensure_connection(self, config_instance: Any):
         """Ensure database connection is healthy, reconnect if needed"""
         if not self._check_connection_health():
             logger.warning("Database connection unhealthy, attempting reconnection...")
@@ -475,21 +474,19 @@ class DatabaseManager:
                 if not hasattr(self, 'local_sessions'):
                     self.local_sessions = {}
 
-    # FIX 1: Replaced save_session() method (with Fix 3 health check integration)
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         """Save session with SQLite Cloud compatibility and connection health check"""
         with self.lock:
-            # Check and ensure connection health before any DB operation (Fix 3)
+            # Check and ensure connection health before any DB operation
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
             if current_config:
-                self._ensure_connection(current_config) # Pass config instance (Fix 3)
+                self._ensure_connection(current_config)
             else:
                 logger.warning("Config not found for _ensure_connection in save_session. Skipping health check.")
 
-
             if self.db_type == "memory":
-                self.local_sessions[session.session_id] = copy.deepcopy(session) # Use deepcopy for in-memory safety
+                self.local_sessions[session.session_id] = copy.deepcopy(session)
                 logger.debug(f"Saved session {session.session_id[:8]} to in-memory.")
                 return
             
@@ -498,21 +495,21 @@ class DatabaseManager:
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
                 
-                # Validate messages before saving (Fix 3)
+                # Validate messages before saving
                 if not isinstance(session.messages, list):
                     logger.warning(f"Invalid messages field for session {session.session_id[:8]}, resetting to empty list")
                     session.messages = []
                 
-                # Ensure JSON serializable data (Fix 3)
+                # Ensure JSON serializable data
                 try:
-                    json_messages = json.dumps(session.messages)  # Test serialization
-                    json_emails_used = json.dumps(session.email_addresses_used)  # Test serialization
+                    json_messages = json.dumps(session.messages)
+                    json_emails_used = json.dumps(session.email_addresses_used)
                 except (TypeError, ValueError) as e:
                     logger.error(f"Session data not JSON serializable for {session.session_id[:8]}: {e}. Resetting data to empty lists.")
                     json_messages = "[]"
                     json_emails_used = "[]"
-                    session.messages = [] # Reset to empty list if serialization fails
-                    session.email_addresses_used = [] # Reset to empty list if serialization fails
+                    session.messages = []
+                    session.email_addresses_used = []
                 
                 self.conn.execute(
                     '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, ip_address, ip_detection_method, user_agent, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
@@ -537,22 +534,21 @@ class DatabaseManager:
                 
             except Exception as e:
                 logger.error(f"Failed to save session {session.session_id[:8]}: {e}", exc_info=True)
-                # Try to fallback to in-memory on save failure (Fix 3)
+                # Try to fallback to in-memory on save failure
                 if not hasattr(self, 'local_sessions'):
                     self.local_sessions = {}
-                self.local_sessions[session.session_id] = copy.deepcopy(session) # Save a deepcopy on fallback
+                self.local_sessions[session.session_id] = copy.deepcopy(session)
                 logger.info(f"Fallback: Saved session {session.session_id[:8]} to in-memory storage")
-                raise # Re-raise to be caught by handle_api_errors
+                raise
 
-    # FIX 2: Replaced load_session() method (with Fix 3 health check integration)
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
         """Load session with complete SQLite Cloud compatibility and connection health check"""
         with self.lock:
-            # Check and ensure connection health before any DB operation (Fix 3)
+            # Check and ensure connection health before any DB operation
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
             if current_config:
-                self._ensure_connection(current_config) # Pass config instance (Fix 3)
+                self._ensure_connection(current_config)
             else:
                 logger.warning("Config not found for _ensure_connection in load_session. Skipping health check.")
 
@@ -564,7 +560,7 @@ class DatabaseManager:
                         session.user_type = UserType(session.user_type)
                     except ValueError:
                         session.user_type = UserType.GUEST
-                return copy.deepcopy(session) # Return a deepcopy for safety
+                return copy.deepcopy(session)
             
             try:
                 # NEVER set row_factory for cloud connections - always use raw tuples
@@ -579,7 +575,7 @@ class DatabaseManager:
                     return None
                 
                 # Handle as tuple (SQLite Cloud returns tuples)
-                # Ensure row has enough columns (Fix 3: Robustness)
+                # Ensure row has enough columns
                 expected_cols = 34 
                 if len(row) < expected_cols:
                     logger.error(f"Row has insufficient columns: {len(row)} (expected {expected_cols}) for session {session_id[:8]}. Data corruption suspected.")
@@ -594,7 +590,7 @@ class DatabaseManager:
                         zoho_contact_id=row[4],
                         created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
                         last_activity=datetime.fromisoformat(row[6]) if row[6] else datetime.now(),
-                        messages=safe_json_loads(row[7], default_value=[]), # Use safe_json_loads (Fix 2)
+                        messages=safe_json_loads(row[7], default_value=[]),
                         active=bool(row[8]), 
                         wp_token=row[9],
                         timeout_saved_to_crm=bool(row[10]),
@@ -612,7 +608,7 @@ class DatabaseManager:
                         evasion_count=row[22] or 0,
                         current_penalty_hours=row[23] or 0,
                         escalation_level=row[24] or 0,
-                        email_addresses_used=safe_json_loads(row[25], default_value=[]), # Use safe_json_loads (Fix 2)
+                        email_addresses_used=safe_json_loads(row[25], default_value=[]),
                         email_switches_count=row[26] or 0,
                         ip_address=row[27],
                         ip_detection_method=row[28],
@@ -635,21 +631,19 @@ class DatabaseManager:
                 logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
                 return None
 
-    # FIX 3: Removed _convert_db_value_to_python method completely as per instructions.
-    # Its functionality is now inlined in load_session and below methods.
-
     @handle_api_errors("Database", "Find by Fingerprint")
     def find_sessions_by_fingerprint(self, fingerprint_id: str) -> List[UserSession]:
         """Find all sessions with the same fingerprint_id."""
         with self.lock:
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
             if current_config:
-                self._ensure_connection(current_config) # Pass config instance (Fix 3)
+                self._ensure_connection(current_config)
             else:
                 logger.warning("Config not found for _ensure_connection in find_sessions_by_fingerprint. Skipping health check.")
 
             if self.db_type == "memory":
                 return [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fingerprint_id]
+            
             try:
                 # Never set row_factory for cloud connections - always use raw tuples
                 if hasattr(self.conn, 'row_factory'):
@@ -657,13 +651,13 @@ class DatabaseManager:
 
                 cursor = self.conn.execute("SELECT * FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
                 sessions = []
-                expected_cols = 34 # Define expected columns based on table schema
+                expected_cols = 34
                 for row in cursor.fetchall():
                     if len(row) < expected_cols:
                         logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected {expected_cols}). Skipping row.")
                         continue
                     try:
-                        # Reconstruct UserSession using explicit tuple indexing and safe_json_loads (Fix 2)
+                        # Reconstruct UserSession using explicit tuple indexing and safe_json_loads
                         s = UserSession(
                             session_id=row[0], 
                             user_type=UserType(row[1]) if row[1] else UserType.GUEST,
@@ -672,7 +666,7 @@ class DatabaseManager:
                             zoho_contact_id=row[4],
                             created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
                             last_activity=datetime.fromisoformat(row[6]) if row[6] else datetime.now(),
-                            messages=safe_json_loads(row[7], default_value=[]), # Use safe_json_loads (Fix 2)
+                            messages=safe_json_loads(row[7], default_value=[]),
                             active=bool(row[8]), 
                             wp_token=row[9],
                             timeout_saved_to_crm=bool(row[10]),
@@ -690,7 +684,7 @@ class DatabaseManager:
                             evasion_count=row[22] or 0,
                             current_penalty_hours=row[23] or 0,
                             escalation_level=row[24] or 0,
-                            email_addresses_used=safe_json_loads(row[25], default_value=[]), # Use safe_json_loads (Fix 2)
+                            email_addresses_used=safe_json_loads(row[25], default_value=[]),
                             email_switches_count=row[26] or 0,
                             ip_address=row[27],
                             ip_detection_method=row[28],
@@ -703,7 +697,7 @@ class DatabaseManager:
                         sessions.append(s)
                     except Exception as e:
                         logger.error(f"Error converting row to UserSession in find_sessions_by_fingerprint: {e}", exc_info=True)
-                        continue # Skip this row if conversion fails
+                        continue
                 return sessions
             except Exception as e:
                 logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
@@ -715,12 +709,13 @@ class DatabaseManager:
         with self.lock:
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
             if current_config:
-                self._ensure_connection(current_config) # Pass config instance (Fix 3)
+                self._ensure_connection(current_config)
             else:
                 logger.warning("Config not found for _ensure_connection in find_sessions_by_email. Skipping health check.")
 
             if self.db_type == "memory":
                 return [copy.deepcopy(s) for s in self.local_sessions.values() if s.email == email]
+            
             try:
                 # Never set row_factory for cloud connections - always use raw tuples
                 if hasattr(self.conn, 'row_factory'):
@@ -728,13 +723,13 @@ class DatabaseManager:
 
                 cursor = self.conn.execute("SELECT * FROM sessions WHERE email = ? ORDER BY last_activity DESC", (email,))
                 sessions = []
-                expected_cols = 34 # Define expected columns based on table schema
+                expected_cols = 34
                 for row in cursor.fetchall():
                     if len(row) < expected_cols:
                         logger.warning(f"Row has insufficient columns in find_sessions_by_email: {len(row)} (expected {expected_cols}). Skipping row.")
                         continue
                     try:
-                        # Reconstruct UserSession using explicit tuple indexing and safe_json_loads (Fix 2)
+                        # Reconstruct UserSession using explicit tuple indexing and safe_json_loads
                         s = UserSession(
                             session_id=row[0], 
                             user_type=UserType(row[1]) if row[1] else UserType.GUEST,
@@ -743,7 +738,7 @@ class DatabaseManager:
                             zoho_contact_id=row[4],
                             created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
                             last_activity=datetime.fromisoformat(row[6]) if row[6] else datetime.now(),
-                            messages=safe_json_loads(row[7], default_value=[]), # Use safe_json_loads (Fix 2)
+                            messages=safe_json_loads(row[7], default_value=[]),
                             active=bool(row[8]), 
                             wp_token=row[9],
                             timeout_saved_to_crm=bool(row[10]),
@@ -761,7 +756,7 @@ class DatabaseManager:
                             evasion_count=row[22] or 0,
                             current_penalty_hours=row[23] or 0,
                             escalation_level=row[24] or 0,
-                            email_addresses_used=safe_json_loads(row[25], default_value=[]), # Use safe_json_loads (Fix 2)
+                            email_addresses_used=safe_json_loads(row[25], default_value=[]),
                             email_switches_count=row[26] or 0,
                             ip_address=row[27],
                             ip_detection_method=row[28],
@@ -774,7 +769,7 @@ class DatabaseManager:
                         sessions.append(s)
                     except Exception as e:
                         logger.error(f"Error converting row to UserSession in find_sessions_by_email: {e}", exc_info=True)
-                        continue # Skip this row if conversion fails
+                        continue
                 return sessions
             except Exception as e:
                 logger.error(f"Failed to find sessions by email '{email}': {e}", exc_info=True)
@@ -789,7 +784,7 @@ class FingerprintingManager:
     
     def __init__(self):
         self.fingerprint_cache = {}
-        self.last_fingerprint_attempt = {}  # Track attempts per session
+        self.last_fingerprint_attempt = {}
 
     def get_fingerprint_directly(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -798,7 +793,7 @@ class FingerprintingManager:
         # Prevent too frequent calls
         now = time.time()
         last_attempt = self.last_fingerprint_attempt.get(session_id, 0)
-        if now - last_attempt < 2:  # Wait at least 2 seconds between attempts
+        if now - last_attempt < 2:
             logger.debug(f"Fingerprinting rate limited for session {session_id[:8]}")
             return None
         
@@ -1159,8 +1154,8 @@ class EmailVerificationManager:
                 'options': {
                     'should_create_user': True,
                     'email_redirect_to': None,
-                    'data': { # This 'data' payload might not be directly used by all Supabase versions for OTP type.
-                        'verification_type': 'email_otp' # Explicitly request OTP (best effort)
+                    'data': {
+                        'verification_type': 'email_otp'
                     }
                 }
             })
@@ -1187,7 +1182,7 @@ class EmailVerificationManager:
             response = self.supabase.auth.verify_otp({
                 'email': email,
                 'token': code.strip(),
-                'type': 'email' # Explicitly specify email OTP type
+                'type': 'email'
             })
             
             if response and response.user:
@@ -1230,7 +1225,7 @@ class EmailVerificationManagerDirect:
                 json={
                     'email': email,
                     'create_user': True,
-                    'gotrue_meta_security': {} # Required by Supabase API for OTP
+                    'gotrue_meta_security': {}
                 },
                 timeout=10
             )
@@ -1264,7 +1259,7 @@ class EmailVerificationManagerDirect:
                     'Content-Type': 'application/json'
                 },
                 json={
-                    'type': 'email', # Must be 'email' for email OTP verification
+                    'type': 'email',
                     'email': email,
                     'token': code.strip()
                 },
@@ -1347,7 +1342,7 @@ class QuestionLimitManager:
                 }
         
         elif session.user_type.value == UserType.REGISTERED_USER.value:
-            if session.total_question_count >= user_limit: # This is the 40-question absolute limit
+            if session.total_question_count >= user_limit:
                 self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user total limit reached")
                 return {
                     'allowed': False,
@@ -1804,23 +1799,6 @@ class EnhancedAI:
         """
         Provides a simplified AI response.
         """
-        # In a real application, this would integrate with LangChain, Pinecone, Tavily, and OpenAI.
-        # Example of how you would connect to OpenAI (if available)
-        # if self.openai_client:
-        #     try:
-        #         messages = [{"role": "user", "content": prompt}]
-        #         if chat_history:
-        #             messages = chat_history[-5:] + messages # Last 5 messages for context
-        #         response = self.openai_client.chat.completions.create(
-        #             model="gpt-3.5-turbo", # or your chosen model
-        #             messages=messages
-        #         )
-        #         return {"content": response.choices[0].message.content, "source": "OpenAI", "success": True}
-        #     except Exception as e:
-        #         logger.error(f"OpenAI API call failed: {e}")
-        #         # Fallback to generic response
-        #         return {"content": "Sorry, my AI services are currently unavailable.", "success": False, "source": "AI Error"}
-
         return {
             "content": f"I understand you're asking about: '{prompt}'. This is the integrated FiFi AI. Your question is processed based on your user tier and system limits.",
             "source": "Integrated FiFi AI System Placeholder",
@@ -1841,7 +1819,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     try:
         response = client.moderations.create(model="omni-moderation-latest", input=prompt)
-        result = response.results[0] # Note: results is a list, get the first item
+        result = response.results[0]
         
         if result.flagged:
             flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
@@ -1858,7 +1836,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
-# SESSION MANAGER - MAIN ORCHESTRATOR CLASS (WAS MISSING FROM ORIGINAL CODE)
+# SESSION MANAGER - MAIN ORCHESTRATOR CLASS
 # =============================================================================
 
 class SessionManager:
@@ -1879,8 +1857,8 @@ class SessionManager:
         self.fingerprinting = fingerprinting_manager
         self.email_verification = email_verification_manager
         self.question_limits = question_limit_manager
-        self._cleanup_interval = timedelta(hours=1)  # Cleanup every hour (Fix 6)
-        self._last_cleanup = datetime.now() # (Fix 6)
+        self._cleanup_interval = timedelta(hours=1)
+        self._last_cleanup = datetime.now()
         
         logger.info("✅ SessionManager initialized with all component managers.")
 
@@ -1888,7 +1866,6 @@ class SessionManager:
         """Returns the configured session timeout duration in minutes."""
         return 15
     
-    # Added for memory management (Fix 6)
     def _periodic_cleanup(self):
         """Perform periodic cleanup of memory and resources"""
         now = datetime.now()
@@ -1926,9 +1903,9 @@ class SessionManager:
                 if old_limit_entries:
                     logger.info(f"Cleaned up {len(old_limit_entries)} old rate limiter entries")
             
-            # Clean up error history (assuming st.session_state.error_handler is available)
+            # Clean up error history
             if hasattr(st.session_state, 'error_handler') and hasattr(st.session_state.error_handler, 'error_history') and len(st.session_state.error_handler.error_history) > 100:
-                st.session_state.error_handler.error_history = st.session_state.error_handler.error_history[-50:]  # Keep last 50
+                st.session_state.error_handler.error_history = st.session_state.error_handler.error_history[-50:]
                 logger.info("Cleaned up error history")
             
             self._last_cleanup = now
@@ -1936,7 +1913,6 @@ class SessionManager:
             
         except Exception as e:
             logger.error(f"Error during periodic cleanup: {e}", exc_info=True)
-
 
     def _update_activity(self, session: UserSession):
         """
@@ -1952,7 +1928,7 @@ class SessionManager:
         if isinstance(session.user_type, str):
             session.user_type = UserType(session.user_type)
         
-        # FIX: Ensure messages list integrity before saving (already present, but good)
+        # Ensure messages list integrity before saving
         if not isinstance(session.messages, list):
             logger.warning(f"Messages field corrupted for session {session.session_id[:8]}, preserving as empty list")
             session.messages = []
@@ -1972,7 +1948,7 @@ class SessionManager:
         ip_captured = False
         ua_captured = False
         
-        # Method 1: Try the current Streamlit context (most reliable if available)
+        # Method 1: Try the current Streamlit context
         try:
             from streamlit.runtime.scriptrunner import get_script_run_ctx
             ctx = get_script_run_ctx()
@@ -1980,11 +1956,10 @@ class SessionManager:
             headers = None
             if ctx:
                 if hasattr(ctx, 'request_context') and ctx.request_context and hasattr(ctx.request_context, 'headers'):
-                    headers = ctx.request_context.headers # Older Streamlit versions
+                    headers = ctx.request_context.headers
                 elif hasattr(ctx, 'session_info') and ctx.session_info and hasattr(ctx.session_info, 'headers'):
-                    headers = ctx.session_info.headers # Newer Streamlit versions
+                    headers = ctx.session_info.headers
                 elif hasattr(ctx, '_session_state') and hasattr(ctx._session_state, '_session_info') and hasattr(ctx._session_state._session_info, 'headers'):
-                    # Fallback for some specific deployments/versions
                     headers = ctx._session_state._session_info.headers
 
             if headers:
@@ -1995,7 +1970,7 @@ class SessionManager:
                 ]
                 
                 for header_name in ip_headers_priority:
-                    ip_val = headers.get(header_name) or headers.get(header_name.upper()) # Check both cases
+                    ip_val = headers.get(header_name) or headers.get(header_name.upper())
                     if ip_val:
                         session.ip_address = ip_val.split(',')[0].strip()
                         session.ip_detection_method = header_name
@@ -2147,7 +2122,7 @@ class SessionManager:
                     # If fingerprint was updated, trigger a rerun to refresh the UI
                     if fingerprint_updated:
                         logger.info(f"Fingerprint updated for session {session.session_id[:8]}, triggering rerun...")
-                        time.sleep(0.2)  # Small delay
+                        time.sleep(0.2)
                         st.rerun()
                     
                     return session
@@ -2320,7 +2295,7 @@ class SessionManager:
                 # Upgrade session to email verified guest
                 session.user_type = UserType.EMAIL_VERIFIED_GUEST
                 session.question_limit_reached = False
-                session.daily_question_count = 0  # Reset count after verification
+                session.daily_question_count = 0
                 
                 self.db.save_session(session)
                 
@@ -2380,7 +2355,7 @@ class SessionManager:
             session.messages.append(user_message)
             
             # Get AI response
-            ai_response = self.ai.get_response(sanitized_prompt, session.messages[-10:])  # Last 10 messages for context
+            ai_response = self.ai.get_response(sanitized_prompt, session.messages[-10:])
             
             # Add AI response to session
             assistant_message = {
@@ -2434,7 +2409,7 @@ class SessionManager:
             self.db.save_session(session)
             
             # Clear Streamlit session state
-            if 'current_session_id' in st.session_state: # Corrected key
+            if 'current_session_id' in st.session_state:
                 del st.session_state['current_session_id']
             if 'page' in st.session_state:
                 del st.session_state['page']
@@ -2465,7 +2440,7 @@ class SessionManager:
             st.error("❌ Failed to save to CRM. Please try again later.")
 
 # =============================================================================
-# JAVASCRIPT COMPONENTS & EVENT HANDLING (Removed obsolete ones)
+# JAVASCRIPT COMPONENTS & EVENT HANDLING
 # =============================================================================
 
 def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str, Any]]:
@@ -2644,7 +2619,7 @@ def render_browser_close_detection_simplified(session_id: str):
     js_code = f"""
     <script>
     (function() {{
-        const scriptIdentifier = 'fifi_close_simple_' + '{safe_session_id_js}'; // Corrected here
+        const scriptIdentifier = 'fifi_close_simple_' + '{safe_session_id_js}';
         if (window[scriptIdentifier]) return;
         window[scriptIdentifier] = true;
         
@@ -2719,7 +2694,6 @@ def render_browser_close_detection_simplified(session_id: str):
     except Exception as e:
         logger.error(f"Failed to render simplified browser close component: {e}", exc_info=True)
 
-# Added for enhanced browser close detection (Fix 5)
 def render_browser_close_detection_enhanced(session_id: str):
     """
     Enhanced browser close detection with multiple fallback mechanisms
@@ -2733,7 +2707,7 @@ def render_browser_close_detection_enhanced(session_id: str):
     js_code = f"""
     <script>
     (function() {{
-        const scriptIdentifier = 'fifi_close_enhanced_' + '{safe_session_id_js}'; // Corrected here
+        const scriptIdentifier = 'fifi_close_enhanced_' + '{safe_session_id_js}';
         if (window[scriptIdentifier]) return;
         window[scriptIdentifier] = true;
         
@@ -2868,7 +2842,7 @@ def render_browser_close_detection_enhanced(session_id: str):
     """
     
     try:
-        st.components.v1.html(js_code, height=0, width=0) # Keep height=0 as it doesn't cause issue here
+        st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
 
@@ -2902,7 +2876,7 @@ def global_message_channel_error_handler():
         logger.error(f"Failed to initialize global message channel error handler: {e}", exc_info=True)
 
 
-def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool: # Forward reference
+def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
     """
     Processes events triggered by the JavaScript activity timer (e.g., 15-minute timeout).
     """
@@ -2937,8 +2911,6 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
                     st.success("✅ Chat automatically saved to CRM!")
                     session.timeout_saved_to_crm = True
                     session.last_activity = datetime.now()
-                    # IMPORTANT: Don't deactivate session on 15-min timeout - let user continue
-                    # Only deactivate on actual browser close (emergency save)
                     session_manager.db.save_session(session)
                 else:
                     st.warning("⚠️ Auto-save to CRM failed. Please check your credentials or contact support if issue persists.")
@@ -2960,8 +2932,7 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
         st.error(f"⚠️ An internal error occurred while processing activity. Please try refreshing if issues persist.")
         return False
 
-# FIX 1 (part of new functionality): process_emergency_save_from_query for deactivating session based on reason
-def process_emergency_save_from_query(session_id: str, reason: str) -> bool: # Added 'reason' parameter
+def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
     """
     Processes an emergency save request initiated by the browser close beacon/reload.
     Conditionally deactivates session based on the 'reason'.
@@ -3012,10 +2983,10 @@ def process_emergency_save_from_query(session_id: str, reason: str) -> bool: # A
             else:
                 logger.info(f"ℹ️ Session '{session_id[:8]}' remains active (not a definitive close reason: {reason}).")
 
-            session_manager.db.save_session(session) # Save status update
-            return save_success # Return success of CRM save
+            session_manager.db.save_session(session)
+            return save_success
 
-        else: # Not eligible for CRM save (e.g., Guest, no email, no messages, or already saved by timer)
+        else:
             logger.info(f"❌ Session '{session_id[:8]}' not eligible for CRM save (UserType={session.user_type.value}, Email={bool(session.email)}, Messages={len(session.messages)}, Saved Status={session.timeout_saved_to_crm}).")
             
             if should_deactivate:
@@ -3024,9 +2995,12 @@ def process_emergency_save_from_query(session_id: str, reason: str) -> bool: # A
                 logger.info(f"ℹ️ Session '{session_id[:8]}' marked as inactive (emergency close reason: {reason}, but not CRM eligible).")
             else:
                 logger.info(f"ℹ️ Session '{session_id[:8]}' remains active (emergency close but not a definitive close reason: {reason}).")
-            return False # No CRM save performed
+            return False
 
-# Modified to pass 'reason' to process_emergency_save_from_query
+    except Exception as e:
+        logger.error(f"Emergency save processing failed: {e}", exc_info=True)
+        return False
+
 def handle_emergency_save_requests_from_query():
     """
     Checks for and processes emergency save requests sent via URL query parameters.
@@ -3036,7 +3010,7 @@ def handle_emergency_save_requests_from_query():
     query_params = st.query_params
     event = query_params.get("event")
     session_id = query_params.get("session_id")
-    reason = query_params.get("reason", "unknown") # Extract reason
+    reason = query_params.get("reason", "unknown")
 
     if event == "emergency_close" and session_id:
         logger.info("=" * 80)
@@ -3056,13 +3030,13 @@ def handle_emergency_save_requests_from_query():
             del st.query_params["reason"]
         
         try:
-            success = process_emergency_save_from_query(session_id, reason) # Pass reason
+            success = process_emergency_save_from_query(session_id, reason)
             
             if success:
                 st.success("✅ Emergency save completed successfully!")
                 logger.info("✅ Emergency save completed via query parameter successfully.")
             else:
-                st.info("ℹ️ Emergency save completed (no CRM save needed or failed).") # Changed to info, as deactivation still happens if it's a close event
+                st.info("ℹ️ Emergency save completed (no CRM save needed or failed).")
                 logger.info("ℹ️ Emergency save completed via query parameter (not eligible for CRM save or internal error).")
                 
         except Exception as e:
@@ -3078,7 +3052,7 @@ def handle_emergency_save_requests_from_query():
 # UI COMPONENTS (INTEGRATED & ENHANCED)
 # =============================================================================
 
-def render_welcome_page(session_manager: 'SessionManager'): # Forward reference 'SessionManager'
+def render_welcome_page(session_manager: 'SessionManager'):
     """Renders the application's welcome page, including sign-in and guest options."""
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
@@ -3135,11 +3109,11 @@ def render_welcome_page(session_manager: 'SessionManager'): # Forward reference 
                             authenticated_session = session_manager.authenticate_with_wordpress(username, password)
                             
                         if authenticated_session:
-                            st.balloons() # Visual celebration for successful login
+                            st.balloons()
                             st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
-                            time.sleep(1) # Small delay for user to read the message
-                            st.session_state.page = "chat" # Change application page
-                            st.rerun() # Force a rerun to switch to the chat interface
+                            time.sleep(1)
+                            st.session_state.page = "chat"
+                            st.rerun()
             
             # Add registration link
             st.markdown("---")
@@ -3160,10 +3134,10 @@ def render_welcome_page(session_manager: 'SessionManager'): # Forward reference 
         col1, col2, col3 = st.columns(3)
         with col2:
             if st.button("👤 Start as Guest", use_container_width=True):
-                st.session_state.page = "chat" # Change application page
-                st.rerun() # Force a rerun to switch to the chat interface
+                st.session_state.page = "chat"
+                st.rerun()
 
-def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter): # Forward reference
+def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Renders the application's sidebar, displaying session information, user status, and action buttons."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
@@ -3176,7 +3150,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.markdown(f"**Email:** {session.email}")
             
             st.markdown(f"**Questions Today:** {session.total_question_count}/40")
-            # FIX: Added min(..., 1.0) for progress bars
             if session.total_question_count <= 20:
                 st.progress(min(session.total_question_count / 20, 1.0), text="Tier 1 (up to 20 questions)")
             else:
@@ -3189,7 +3162,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.markdown(f"**Email:** {session.email}")
             
             st.markdown(f"**Daily Questions:** {session.daily_question_count}/10")
-            # FIX: Added min(..., 1.0) for progress bars
             st.progress(min(session.daily_question_count / 10, 1.0))
             
             if session.last_question_time:
@@ -3197,7 +3169,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 time_to_reset = next_reset - datetime.now()
                 if time_to_reset.total_seconds() > 0:
                     hours = int(time_to_reset.total_seconds() // 3600)
-                    minutes = int((time_to_reset.total_seconds() % 3600) // 60) # CRITICAL FIX: Corrected syntax error here
+                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
                     st.caption(f"Resets in: {hours}h {minutes}m")
                 else:
                     st.caption("Daily questions have reset!")
@@ -3205,7 +3177,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         else: # UserType.GUEST.value
             st.warning("👤 **Guest User**")
             st.markdown(f"**Questions:** {session.daily_question_count}/4")
-            # FIX: Added min(..., 1.0) for progress bars
             st.progress(min(session.daily_question_count / 4, 1.0))
             st.caption("Email verification unlocks 10 questions/day.")
         
@@ -3272,7 +3243,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat automatically saves to CRM after 15 minutes of inactivity.")
 
-def render_email_verification_dialog(session_manager: 'SessionManager', session: UserSession): # Forward reference
+def render_email_verification_dialog(session_manager: 'SessionManager', session: UserSession):
     """
     Renders the email verification dialog for guest users who have hit their
     initial question limit (4 questions).
@@ -3393,8 +3364,7 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                         st.error(result['message'])
                 else:
                     st.error("Please enter the verification code you received.")
-            
-# FIX 5: Updated render_chat_interface to use html components
+
 def render_chat_interface(session_manager: 'SessionManager', session: UserSession):
     """Simplified chat interface with direct fingerprinting."""
     
@@ -3403,35 +3373,26 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     
     # Simple diagnostic panel
     if st.checkbox("🔬 Show Fingerprinting Diagnostics", key="show_fp_diagnostics"):
-        render_simplified_fingerprint_diagnostics(session_manager, session) # Use simplified version
+        render_simplified_fingerprint_diagnostics(session_manager, session)
     
     # Test button for direct fingerprinting
     if st.button("🔬 Test Direct Fingerprinting"):
         with st.spinner("Getting fingerprint..."):
-            # This call will also update the session if a new FP is generated
             result = session_manager.fingerprinting.get_fingerprint_directly(session.session_id) 
             if result and result.get('success'):
                 st.success("✅ Direct fingerprinting working!")
                 st.json(result)
-                # No need to manually rerun, get_session already handles it if FP updates
             else:
                 st.error("❌ Direct fingerprinting failed or returned no data")
                 if result: st.json(result)
 
-    # Note: global_message_channel_error_handler is kept as it's a general Streamlit error handler,
-    # not specific to the removed fingerprint postMessage system.
-    global_message_channel_error_handler() 
-    
-    # Removed all the complex message listener and component code as per instructions.
-    # The fingerprinting now happens automatically in get_session().
+    global_message_channel_error_handler()
 
     if session.user_type.value == UserType.REGISTERED_USER.value:
         try:
-            # FIX 5: Use the enhanced version instead of simplified
             render_browser_close_detection_enhanced(session.session_id)
         except Exception as e:
             logger.error(f"Failed to render enhanced browser close detection for {session.session_id[:8]}: {e}", exc_info=True)
-            # Fallback to simplified version
             try:
                 render_browser_close_detection_simplified(session.session_id)
             except Exception as fallback_e:
@@ -3523,13 +3484,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
         st.rerun()
 
 # =============================================================================
-# DIAGNOSTIC TOOLS (Simplified/Removed obsolete ones)
-# =============================================================================
-
-# Removed debug_component_messages as it's obsolete
-
-# =============================================================================
-# SIMPLIFIED REAL-TIME FINGERPRINTING DIAGNOSTIC TOOL
+# DIAGNOSTIC TOOLS
 # =============================================================================
 
 def render_simplified_fingerprint_diagnostics(session_manager: 'SessionManager', session: UserSession):
@@ -3581,8 +3536,6 @@ def render_simplified_fingerprint_diagnostics(session_manager: 'SessionManager',
             st.info("Monitoring fingerprint status (auto-refresh enabled)...")
             time.sleep(2)
             st.rerun()
-
-# Removed the old render_fingerprint_diagnostic_panel and add_fingerprint_diagnostic_to_chat_interface.
 
 # =============================================================================
 # CRITICAL FIXES FOR APP STARTUP ISSUES
@@ -3662,7 +3615,7 @@ def ensure_initialization_fixed():
             init_progress.progress(0.7)
             
             rate_limiter = RateLimiter()
-            fingerprinting_manager = FingerprintingManager() # Use the new FingerprintingManager
+            fingerprinting_manager = FingerprintingManager()
             
             init_progress.progress(0.8)
             
@@ -3721,7 +3674,6 @@ def ensure_initialization_fixed():
     
     return True
 
-# FIX 4: Simplified main function with error boundaries
 def main_fixed():
     """
     Fixed main entry point with better error handling and timeout prevention
@@ -3801,7 +3753,6 @@ def main_fixed():
                 session = session_manager.get_session()
                 
                 if session and session.active:
-                    # Use the fixed render_sidebar function (which includes the syntax fix)
                     render_sidebar(session_manager, session, st.session_state.pdf_exporter)
                     render_chat_interface(session_manager, session)
                 else:
@@ -3819,7 +3770,6 @@ def main_fixed():
         logger.error(f"Page routing error: {page_error}", exc_info=True)
         st.error("⚠️ Page error occurred. Please reset the app.")
 
-# FIX 5: Added minimal diagnostic page
 def render_diagnostic_page():
     """Minimal diagnostic page for testing"""
     st.title("🔧 FiFi AI Diagnostics")
