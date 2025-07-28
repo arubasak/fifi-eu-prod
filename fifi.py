@@ -3504,7 +3504,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             if session.ban_end_time:
                 time_remaining = session.ban_end_time - datetime.now()
                 hours = int(time_remaining.total_seconds() // 3600)
-                minutes = int((time_remaining.total_seconds() % 3600) // 60))
+                minutes = int((time_remaining.total_seconds() % 3600) // 60)
                 st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
             st.markdown(f"Reason: {session.ban_reason or 'Usage policy violation'}")
         elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: 
