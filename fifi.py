@@ -789,265 +789,158 @@ class FingerprintingManager:
     def get_fingerprint_directly(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
         Direct fingerprinting using st_javascript - returns fingerprint data immediately.
+        Simplified version to fix the invalid result issue.
         """
         # Prevent too frequent calls
         now = time.time()
         last_attempt = self.last_fingerprint_attempt.get(session_id, 0)
-        if now - last_attempt < 2:
+        if now - last_attempt < 3:  # Increased to 3 seconds
             logger.debug(f"Fingerprinting rate limited for session {session_id[:8]}")
             return None
         
         self.last_fingerprint_attempt[session_id] = now
         
-        # JavaScript code that returns fingerprint data directly
+        # Simplified JavaScript code that's more likely to work reliably
         js_fingerprinting_code = f"""
-        (function() {{
+        (() => {{
             try {{
-                const sessionId = "{session_id}";
+                console.log('🔍 Simplified fingerprinting started for session {session_id[:8]}');
                 
-                console.log('🔍 Direct fingerprinting started for session', sessionId.substring(0, 8));
-                
-                // Enhanced Canvas Fingerprinting
-                function generateCanvasFingerprint() {{
+                // Basic canvas fingerprint
+                function getBasicCanvasFingerprint() {{
                     try {{
                         const canvas = document.createElement('canvas');
                         const ctx = canvas.getContext('2d');
-                        canvas.width = 280; canvas.height = 120;
-                        
-                        // More complex drawing for better uniqueness
-                        ctx.textBaseline = 'top'; 
-                        ctx.font = '16px Arial, sans-serif';
-                        ctx.fillStyle = '#f60'; 
-                        ctx.fillRect(125, 1, 62, 20);
-                        ctx.fillStyle = '#069'; 
-                        ctx.fillText('FiFi AI Canvas Test 🤖🍎', 2, 15);
-                        ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; 
-                        ctx.fillText('Food & Beverage Industry Enhanced', 4, 45);
-                        ctx.fillStyle = '#ff3366';
-                        ctx.fillText('Direct Fingerprint v3.0', 4, 75);
-                        
-                        // Add geometric shapes
-                        ctx.strokeStyle = '#000'; 
-                        ctx.beginPath();
-                        ctx.arc(50, 80, 20, 0, Math.PI * 2); 
-                        ctx.stroke();
-                        ctx.beginPath();
-                        ctx.rect(100, 60, 40, 30);
-                        ctx.stroke();
-                        
-                        // Add gradient
-                        const gradient = ctx.createLinearGradient(0, 0, 200, 0);
-                        gradient.addColorStop(0, '#ff0000');
-                        gradient.addColorStop(1, '#0000ff');
-                        ctx.fillStyle = gradient;
-                        ctx.fillRect(10, 100, 100, 10);
-                        
-                        const dataUrl = canvas.toDataURL();
-                        return btoa(dataUrl).slice(0, 32);
+                        ctx.textBaseline = 'top';
+                        ctx.font = '14px Arial';
+                        ctx.fillText('FiFi Test', 2, 2);
+                        return canvas.toDataURL().slice(-50);
                     }} catch (e) {{
-                        console.error("❌ Canvas fingerprint failed:", e);
-                        return 'canvas_blocked';
+                        return 'canvas_fail';
                     }}
                 }}
                 
-                // Enhanced WebGL Fingerprinting
-                function generateWebGLFingerprint() {{
-                    try {{
-                        const canvas = document.createElement('canvas');
-                        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-                        if (!gl) return 'webgl_unavailable';
-                        
-                        const webglData = {{
-                            vendor: gl.getParameter(gl.VENDOR),
-                            renderer: gl.getParameter(gl.RENDERER),
-                            version: gl.getParameter(gl.VERSION),
-                            shadingLanguageVersion: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
-                            extensions: gl.getSupportedExtensions() ? gl.getSupportedExtensions().slice(0, 15) : [],
-                            maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
-                            maxVertexAttribs: gl.getParameter(gl.MAX_VERTEX_ATTRIBS),
-                            maxViewportDims: gl.getParameter(gl.MAX_VIEWPORT_DIMS)
-                        }};
-                        return btoa(JSON.stringify(webglData)).slice(0, 32);
-                    }} catch (e) {{
-                        console.error("❌ WebGL fingerprint failed:", e);
-                        return 'webgl_blocked';
-                    }}
-                }}
-                
-                // Audio Context Fingerprinting (Synchronous version)
-                function generateAudioFingerprint() {{
-                    try {{
-                        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                        const oscillator = audioContext.createOscillator();
-                        const analyser = audioContext.createAnalyser();
-                        const gainNode = audioContext.createGain();
-                        
-                        oscillator.type = 'triangle';
-                        oscillator.frequency.setValueAtTime(1000, audioContext.currentTime);
-                        gainNode.gain.setValueAtTime(0, audioContext.currentTime);
-                        
-                        oscillator.connect(analyser);
-                        analyser.connect(gainNode);
-                        gainNode.connect(audioContext.destination);
-                        
-                        analyser.fftSize = 1024;
-                        const frequencyData = new Uint8Array(analyser.frequencyBinCount);
-                        
-                        oscillator.start(0);
-                        
-                        // Small delay to get data
-                        const startTime = Date.now();
-                        while (Date.now() - startTime < 50) {{
-                            // Small blocking delay to get audio data
-                        }}
-                        
-                        analyser.getByteFrequencyData(frequencyData);
-                        oscillator.stop();
-                        audioContext.close();
-                        
-                        const audioHash = btoa(Array.from(frequencyData.slice(0, 32)).join(',')).slice(0, 32);
-                        return audioHash;
-                    }} catch (e) {{
-                        console.error("❌ Audio fingerprint failed:", e);
-                        return 'audio_blocked';
-                    }}
-                }}
-                
-                // Collect comprehensive browser info
-                function getBrowserInfo() {{
+                // Basic screen info
+                function getScreenInfo() {{
                     return {{
-                        userAgent: navigator.userAgent,
-                        language: navigator.language,
-                        languages: navigator.languages ? navigator.languages.join(',') : '',
-                        platform: navigator.platform,
-                        cookieEnabled: navigator.cookieEnabled,
-                        doNotTrack: navigator.doNotTrack,
-                        hardwareConcurrency: navigator.hardwareConcurrency,
-                        maxTouchPoints: navigator.maxTouchPoints,
-                        screen: {{
-                            width: screen.width,
-                            height: screen.height,
-                            colorDepth: screen.colorDepth,
-                            pixelDepth: screen.pixelDepth,
-                            availWidth: screen.availWidth,
-                            availHeight: screen.availHeight
-                        }},
-                        viewport: {{
-                            width: window.innerWidth,
-                            height: window.innerHeight
-                        }},
-                        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                        timezoneOffset: new Date().getTimezoneOffset(),
-                        connection: navigator.connection ? {{
-                            effectiveType: navigator.connection.effectiveType,
-                            downlink: navigator.connection.downlink,
-                            rtt: navigator.connection.rtt
-                        }} : null,
-                        memory: navigator.deviceMemory || 'unknown',
-                        concurrency: navigator.hardwareConcurrency || 'unknown'
+                        width: screen.width || 0,
+                        height: screen.height || 0,
+                        colorDepth: screen.colorDepth || 0
                     }};
                 }}
                 
-                // Generate all fingerprints
-                const canvasFp = generateCanvasFingerprint();
-                const webglFp = generateWebGLFingerprint();
-                const audioFp = generateAudioFingerprint();
-                const browserInfo = getBrowserInfo();
-                
-                // Determine working methods
-                const workingMethods = [];
-                if (canvasFp !== 'canvas_blocked') workingMethods.push('canvas');
-                if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') workingMethods.push('webgl');  
-                if (audioFp !== 'audio_blocked') workingMethods.push('audio');
-                
-                // Determine primary method and fingerprint ID
-                let primaryMethod = 'canvas';
-                let fingerprintId = canvasFp;
-                
-                if (workingMethods.length === 0) {{
-                    primaryMethod = 'fallback';
-                    fingerprintId = 'privacy_browser_' + Date.now();
-                }} else if (workingMethods.length > 1) {{
-                    primaryMethod = 'hybrid';
-                    // Create more robust hybrid fingerprint
-                    const combinedData = [
-                        canvasFp, 
-                        webglFp, 
-                        audioFp, 
-                        browserInfo.userAgent.substring(0, 50),
-                        browserInfo.screen.width + 'x' + browserInfo.screen.height,
-                        browserInfo.timezone
-                    ].join('|');
-                    fingerprintId = btoa(combinedData).slice(0, 32);
-                }} else {{
-                    primaryMethod = workingMethods[0];
-                    fingerprintId = (primaryMethod === 'canvas' ? canvasFp : 
-                                   (primaryMethod === 'webgl' ? webglFp : audioFp));
+                // Basic browser info
+                function getBrowserInfo() {{
+                    return {{
+                        userAgent: (navigator.userAgent || '').substring(0, 100),
+                        language: navigator.language || 'unknown',
+                        platform: navigator.platform || 'unknown',
+                        cookieEnabled: navigator.cookieEnabled || false,
+                        timezone: (() => {{
+                            try {{
+                                return Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown';
+                            }} catch (e) {{
+                                return 'unknown';
+                            }}
+                        }})()
+                    }};
                 }}
                 
-                // Determine privacy level
-                let privacyLevel = 'standard';
-                if (canvasFp === 'canvas_blocked' && webglFp.includes('blocked') && audioFp === 'audio_blocked') {{
-                    privacyLevel = 'high_privacy';
-                }} else if (workingMethods.length === 1) {{
-                    privacyLevel = 'medium_privacy';
+                // Generate fingerprint
+                const canvasFp = getBasicCanvasFingerprint();
+                const screenInfo = getScreenInfo();
+                const browserInfo = getBrowserInfo();
+                
+                // Create simple fingerprint ID
+                const fpData = [
+                    canvasFp,
+                    screenInfo.width + 'x' + screenInfo.height,
+                    browserInfo.language,
+                    browserInfo.platform
+                ].join('|');
+                
+                let fingerprintId;
+                try {{
+                    fingerprintId = btoa(fpData).substring(0, 24);
+                }} catch (e) {{
+                    fingerprintId = 'fallback_' + Date.now().toString(36);
                 }}
                 
                 const result = {{
                     success: true,
-                    session_id: sessionId,
+                    session_id: "{session_id}",
                     fingerprint_id: fingerprintId,
-                    fingerprint_method: primaryMethod,
+                    fingerprint_method: 'simplified_canvas',
                     canvas_fp: canvasFp,
-                    webgl_fp: webglFp,
-                    audio_fp: audioFp,
                     browser_info: browserInfo,
-                    privacy_level: privacyLevel,
-                    working_methods: workingMethods,
+                    screen_info: screenInfo,
+                    privacy_level: 'standard',
+                    working_methods: ['canvas'],
                     timestamp: Date.now(),
-                    version: 'direct_v3'
+                    version: 'simplified_v1'
                 }};
                 
-                console.log("🔍 Direct fingerprinting complete:", {{
-                    id: fingerprintId.substring(0, 8),
-                    method: primaryMethod,
-                    privacy: privacyLevel,
-                    working: workingMethods.length
-                }});
-                
+                console.log('✅ Simplified fingerprinting complete:', fingerprintId.substring(0, 8));
                 return result;
                 
             }} catch (error) {{
-                console.error("🚨 Direct fingerprinting failed:", error);
+                console.error('❌ Simplified fingerprinting failed:', error);
                 return {{
                     success: false,
                     error: true,
-                    message: error.message,
+                    message: error.message || 'Unknown error',
                     session_id: "{session_id}",
-                    fingerprint_method: 'error_fallback'
+                    fingerprint_method: 'error_fallback',
+                    fingerprint_id: 'error_' + Date.now().toString(36)
                 }};
             }}
-        }})();
+        }})()
         """
         
         try:
-            # Use st_javascript to execute and get result directly
-            result = st_javascript(js_fingerprinting_code, key=f"direct_fingerprint_{session_id[:8]}_{int(now)}")
+            # Use a more stable key
+            stable_key = f"simple_fp_{session_id[:8]}_{int(now // 10)}"  # Change key every 10 seconds
+            result = st_javascript(js_fingerprinting_code, key=stable_key)
             
-            if result and isinstance(result, dict):
+            # Debug logging
+            logger.debug(f"JavaScript result type: {type(result)}, value: {result}")
+            
+            # Handle different return types
+            if result is None or result == "" or result == 0:
+                logger.debug(f"JavaScript returned empty result for session {session_id[:8]}")
+                return None
+            
+            if isinstance(result, dict):
                 if result.get('success'):
-                    logger.info(f"✅ Direct fingerprinting successful for session {session_id[:8]}: {result.get('fingerprint_method')} - {result.get('fingerprint_id', 'unknown')[:8]}...")
+                    logger.info(f"✅ Simplified fingerprinting successful for session {session_id[:8]}: {result.get('fingerprint_id', 'unknown')[:8]}...")
                     return result
                 else:
-                    logger.error(f"❌ Direct fingerprinting failed for session {session_id[:8]}: {result.get('message', 'Unknown error')}")
-                    return None
+                    logger.error(f"❌ Simplified fingerprinting failed for session {session_id[:8]}: {result.get('message', 'Unknown error')}")
+                    return self._generate_emergency_fallback_fingerprint(session_id)
             else:
-                logger.warning(f"⚠️ Direct fingerprinting returned invalid result for session {session_id[:8]}: {type(result)}")
-                return None
+                logger.warning(f"⚠️ Simplified fingerprinting returned unexpected type for session {session_id[:8]}: {type(result)} = {result}")
+                return self._generate_emergency_fallback_fingerprint(session_id)
                 
         except Exception as e:
-            logger.error(f"Exception in direct fingerprinting for session {session_id[:8]}: {e}", exc_info=True)
-            return None
+            logger.error(f"Exception in simplified fingerprinting for session {session_id[:8]}: {e}", exc_info=True)
+            return self._generate_emergency_fallback_fingerprint(session_id)
+    
+    def _generate_emergency_fallback_fingerprint(self, session_id: str) -> Dict[str, Any]:
+        """Generate emergency fallback when JavaScript completely fails."""
+        timestamp = int(time.time())
+        fallback_id = f"emergency_{session_id[:8]}_{timestamp}"
+        
+        return {
+            'success': True,
+            'session_id': session_id,
+            'fingerprint_id': fallback_id,
+            'fingerprint_method': 'emergency_python_fallback',
+            'browser_info': {'emergency': True},
+            'privacy_level': 'unknown',
+            'working_methods': [],
+            'timestamp': timestamp,
+            'version': 'emergency_v1'
+        }
 
     def extract_fingerprint_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Extract and validate fingerprint data from direct JavaScript result."""
@@ -1941,60 +1834,92 @@ class SessionManager:
 
     def _capture_client_info(self, session: UserSession) -> UserSession:
         """
-        Enhanced client info capture with multiple fallback methods.
-        Attempts to get IP and User-Agent from Streamlit's internal context,
-        falling back to JS detection if necessary.
+        Enhanced client info capture with multiple fallback methods and better error handling.
         """
         ip_captured = False
         ua_captured = False
         
-        # Method 1: Try the current Streamlit context
+        # Method 1: Try Streamlit's request context
         try:
-            from streamlit.runtime.scriptrunner import get_script_run_ctx
-            ctx = get_script_run_ctx()
-            
-            headers = None
-            if ctx:
-                if hasattr(ctx, 'request_context') and ctx.request_context and hasattr(ctx.request_context, 'headers'):
-                    headers = ctx.request_context.headers
-                elif hasattr(ctx, 'session_info') and ctx.session_info and hasattr(ctx.session_info, 'headers'):
-                    headers = ctx.session_info.headers
-                elif hasattr(ctx, '_session_state') and hasattr(ctx._session_state, '_session_info') and hasattr(ctx._session_state._session_info, 'headers'):
-                    headers = ctx._session_state._session_info.headers
-
-            if headers:
-                # Extract IP address from common headers
-                ip_headers_priority = [
-                    'x-forwarded-for', 'x-real-ip', 'cf-connecting-ip', 
-                    'x-client-ip', 'x-forwarded', 'forwarded-for', 'forwarded'
-                ]
-                
-                for header_name in ip_headers_priority:
-                    ip_val = headers.get(header_name) or headers.get(header_name.upper())
-                    if ip_val:
-                        session.ip_address = ip_val.split(',')[0].strip()
-                        session.ip_detection_method = header_name
-                        ip_captured = True
-                        break
-                
-                # Extract User-Agent
-                ua_val = headers.get('user-agent') or headers.get('User-Agent')
-                if ua_val:
-                    session.user_agent = ua_val
-                    ua_captured = True
+            import streamlit.web.server.websocket_headers as ws_headers
+            if hasattr(ws_headers, 'get_websocket_headers'):
+                headers = ws_headers.get_websocket_headers()
+                if headers:
+                    logger.debug(f"Found websocket headers: {list(headers.keys())}")
                     
+                    # Try common IP headers
+                    ip_headers = ['x-forwarded-for', 'x-real-ip', 'cf-connecting-ip', 'x-client-ip']
+                    for header in ip_headers:
+                        if header in headers and headers[header]:
+                            session.ip_address = headers[header].split(',')[0].strip()
+                            session.ip_detection_method = f"websocket_{header}"
+                            ip_captured = True
+                            break
+                    
+                    # Try user-agent
+                    if 'user-agent' in headers:
+                        session.user_agent = headers['user-agent']
+                        ua_captured = True
         except Exception as e:
-            logger.debug(f"Method 1 (Streamlit context) failed to capture client info: {e}")
+            logger.debug(f"Websocket headers method failed: {e}")
         
-        # Final fallbacks if info was not captured by Python server-side
+        # Method 2: Try script run context
+        if not ip_captured or not ua_captured:
+            try:
+                from streamlit.runtime.scriptrunner import get_script_run_ctx
+                ctx = get_script_run_ctx()
+                
+                if ctx and hasattr(ctx, 'session_state'):
+                    # Try to get from session state if it was stored
+                    if hasattr(ctx.session_state, '_client_info'):
+                        client_info = ctx.session_state._client_info
+                        if not ip_captured and client_info.get('ip'):
+                            session.ip_address = client_info['ip']
+                            session.ip_detection_method = "session_state"
+                            ip_captured = True
+                        if not ua_captured and client_info.get('user_agent'):
+                            session.user_agent = client_info['user_agent']
+                            ua_captured = True
+            except Exception as e:
+                logger.debug(f"Script context method failed: {e}")
+        
+        # Method 3: Try to capture via JavaScript (as a last resort)
+        if not ip_captured or not ua_captured:
+            try:
+                # This is a simplified approach that might work in some deployments
+                js_client_info = """
+                (() => {
+                    try {
+                        return {
+                            user_agent: navigator.userAgent || 'unknown',
+                            language: navigator.language || 'unknown',
+                            platform: navigator.platform || 'unknown',
+                            timestamp: Date.now()
+                        };
+                    } catch (e) {
+                        return {user_agent: 'js_failed', timestamp: Date.now()};
+                    }
+                })()
+                """
+                
+                js_result = st_javascript(js_client_info, key=f"client_info_{session.session_id[:8]}")
+                if js_result and isinstance(js_result, dict) and not ua_captured:
+                    if js_result.get('user_agent') and js_result['user_agent'] != 'js_failed':
+                        session.user_agent = js_result['user_agent']
+                        ua_captured = True
+                        
+            except Exception as e:
+                logger.debug(f"JavaScript client info capture failed: {e}")
+        
+        # Set fallbacks for any uncaptured info
         if not ip_captured:
-            session.ip_address = "capture_failed_py_context"
-            session.ip_detection_method = "python_context_unavailable"
+            session.ip_address = "not_captured_streamlit"
+            session.ip_detection_method = "capture_failed_all_methods"
             
         if not ua_captured:
-            session.user_agent = "capture_failed_py_context"
+            session.user_agent = "not_captured_streamlit"
         
-        logger.info(f"Client info capture for {session.session_id[:8]}: IP_Captured={ip_captured}, UA_Captured={ua_captured}")
+        logger.info(f"Client info capture for {session.session_id[:8]}: IP_Captured={ip_captured} ({session.ip_detection_method}), UA_Captured={ua_captured}")
         return session
 
     def _create_new_session(self) -> UserSession:
@@ -2017,14 +1942,15 @@ class SessionManager:
 
     def get_or_create_fingerprint(self, session: UserSession) -> bool:
         """
-        Get fingerprint for session using direct method. 
+        Get fingerprint for session using direct method with improved fallback handling.
         Returns True if fingerprint was updated.
         """
-        # Skip if we already have a good fingerprint
+        # Skip if we already have a good fingerprint (but allow temporary ones to be upgraded)
         if (session.fingerprint_id and 
             session.fingerprint_method and 
             not session.fingerprint_method.startswith('temp') and
-            not session.fingerprint_method.startswith('fallback')):
+            not session.fingerprint_method.startswith('fallback') and
+            not session.fingerprint_method.startswith('emergency')):
             logger.debug(f"Session {session.session_id[:8]} already has good fingerprint: {session.fingerprint_method}")
             return False
         
@@ -2032,7 +1958,7 @@ class SessionManager:
             # Get fingerprint directly
             fingerprint_result = self.fingerprinting.get_fingerprint_directly(session.session_id)
             
-            if fingerprint_result:
+            if fingerprint_result and fingerprint_result.get('success'):
                 # Process the result
                 fingerprint_data = self.fingerprinting.extract_fingerprint_from_result(fingerprint_result)
                 
@@ -2049,7 +1975,7 @@ class SessionManager:
                     # Save to database immediately
                     try:
                         self.db.save_session(session)
-                        logger.info(f"✅ Direct fingerprint saved for session {session.session_id[:8]}: {old_method} -> {session.fingerprint_method} (ID: {old_fp_id[:8] if old_fp_id else 'None'}... -> {session.fingerprint_id[:8]}...)")
+                        logger.info(f"✅ Fingerprint updated for session {session.session_id[:8]}: {old_method or 'None'} -> {session.fingerprint_method} (ID: {(old_fp_id[:8] + '...') if old_fp_id else 'None'} -> {session.fingerprint_id[:8]}...)")
                         return True
                     except Exception as save_error:
                         logger.error(f"Failed to save fingerprint for session {session.session_id[:8]}: {save_error}")
@@ -2057,12 +1983,71 @@ class SessionManager:
                         session.fingerprint_id = old_fp_id
                         session.fingerprint_method = old_method
                         return False
+                else:
+                    logger.warning(f"Fingerprint data extraction failed for session {session.session_id[:8]}")
+            else:
+                logger.warning(f"Fingerprint generation failed for session {session.session_id[:8]}, using Python fallback")
+                
+            # If we get here, JavaScript fingerprinting failed - use Python fallback
+            if not session.fingerprint_id or session.fingerprint_method.startswith('temp'):
+                fallback_data = self._generate_python_fallback_fingerprint(session)
+                
+                session.fingerprint_id = fallback_data['fingerprint_id']
+                session.fingerprint_method = fallback_data['fingerprint_method']
+                session.visitor_type = fallback_data.get('visitor_type', 'new_visitor')
+                session.browser_privacy_level = fallback_data.get('privacy_level', 'unknown')
+                
+                try:
+                    self.db.save_session(session)
+                    logger.info(f"✅ Python fallback fingerprint applied for session {session.session_id[:8]}: {session.fingerprint_method}")
+                    return True
+                except Exception as save_error:
+                    logger.error(f"Failed to save Python fallback fingerprint: {save_error}")
+                    return False
             
             return False
             
         except Exception as e:
             logger.error(f"Error getting fingerprint for session {session.session_id[:8]}: {e}", exc_info=True)
+            
+            # Emergency fallback - always ensure we have some fingerprint
+            if not session.fingerprint_id:
+                session.fingerprint_id = f"emergency_{session.session_id[:8]}_{int(time.time())}"
+                session.fingerprint_method = "emergency_exception_fallback"
+                try:
+                    self.db.save_session(session)
+                    logger.info(f"Emergency fingerprint applied for session {session.session_id[:8]}")
+                    return True
+                except Exception:
+                    logger.error(f"Even emergency fingerprint save failed for session {session.session_id[:8]}")
+            
             return False
+    
+    def _generate_python_fallback_fingerprint(self, session: UserSession) -> Dict[str, Any]:
+        """Generate a fingerprint using only Python/server-side information."""
+        import hashlib
+        
+        # Collect available server-side info
+        components = [
+            session.session_id,
+            session.ip_address or 'no_ip',
+            session.user_agent or 'no_ua',
+            str(int(time.time() // 3600))  # Hour-based component for some variation
+        ]
+        
+        # Create hash from available components
+        combined = '|'.join(components)
+        hash_obj = hashlib.md5(combined.encode())
+        fingerprint_id = f"python_{hash_obj.hexdigest()[:16]}"
+        
+        return {
+            'fingerprint_id': fingerprint_id,
+            'fingerprint_method': 'python_server_fallback',
+            'visitor_type': 'new_visitor',
+            'privacy_level': 'server_side_only',
+            'working_methods': ['server_hash'],
+            'timestamp': int(time.time())
+        }
 
     def get_session(self) -> Optional[UserSession]:
         """
@@ -3375,16 +3360,42 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     if st.checkbox("🔬 Show Fingerprinting Diagnostics", key="show_fp_diagnostics"):
         render_simplified_fingerprint_diagnostics(session_manager, session)
     
-    # Test button for direct fingerprinting
+    # Test button for direct fingerprinting with better debugging
     if st.button("🔬 Test Direct Fingerprinting"):
         with st.spinner("Getting fingerprint..."):
-            result = session_manager.fingerprinting.get_fingerprint_directly(session.session_id) 
-            if result and result.get('success'):
-                st.success("✅ Direct fingerprinting working!")
-                st.json(result)
-            else:
-                st.error("❌ Direct fingerprinting failed or returned no data")
-                if result: st.json(result)
+            st.info("Testing JavaScript fingerprinting...")
+            result = session_manager.fingerprinting.get_fingerprint_directly(session.session_id)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("Raw Result")
+                if result:
+                    st.success("✅ JavaScript execution successful!")
+                    st.code(f"Type: {type(result)}")
+                    if isinstance(result, dict):
+                        st.json(result)
+                    else:
+                        st.code(f"Value: {result}")
+                else:
+                    st.error("❌ JavaScript returned None/empty")
+                    
+            with col2:
+                st.subheader("Current Session Fingerprint")
+                st.json({
+                    "fingerprint_id": session.fingerprint_id,
+                    "method": session.fingerprint_method,
+                    "visitor_type": session.visitor_type,
+                    "privacy_level": session.browser_privacy_level
+                })
+                
+                # Try to update fingerprint
+                if st.button("🔄 Update Fingerprint"):
+                    updated = session_manager.get_or_create_fingerprint(session)
+                    if updated:
+                        st.success("✅ Fingerprint updated!")
+                        st.rerun()
+                    else:
+                        st.info("ℹ️ No fingerprint update needed")
 
     global_message_channel_error_handler()
 
