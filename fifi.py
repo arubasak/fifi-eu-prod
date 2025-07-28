@@ -1514,7 +1514,6 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
         return {"flagged": False}
     
     return {"flagged": False}
-`_init_database_folders_and_files()`: This helper function ensures that the necessary local directories and files for the database are created if they don't already exist. This prevents `FileNotFoundError` or similar issues when the application tries to access the database.
 
 2. **Establish the database connection.**
 
