@@ -3790,7 +3790,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
                         if response.get('time_remaining'):
                             time_remaining = response['time_remaining']
                             hours = int(time_remaining.total_seconds() // 3600)
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60))
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.rerun()
                     elif response.get('evasion_penalty'):
