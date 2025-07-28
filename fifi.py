@@ -31,7 +31,7 @@ import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
 # =============================================================================
-# FINAL INTEGRATED FIFI AI - ALL FEATURES IMPLEMENTED (CLEANED & COMPLETE)
+# FINAL INTEGRATED FIFI AI - ALL FEATURES IMPLEMENTED (COMPREHENSIVELY FIXED)
 # - All previous fixes including enum comparison.
 # - OpenAI content moderation model name corrected.
 # - All temporary debug logging removed for production use.
@@ -42,6 +42,9 @@ from streamlit_javascript import st_javascript
 # - FIX: Database initialization hang (signal module issue) resolved by removing timeout mechanism.
 # - FIX: CRM save on signout properly re-integrated.
 # - FIX: Messages saving to SQLite database and activity updates reinforced.
+# - FIX: Corrected session saving order in get_ai_response to prevent message loss.
+# - FIX: Removed inappropriate ban for registered users at 20 questions.
+# - FIX: Ensured get_session returns existing session even if banned, retaining chat history.
 # =============================================================================
 
 # Setup logging
@@ -427,8 +430,7 @@ class DatabaseManager:
                     "zoho_contact_id": s.zoho_contact_id,
                     "created_at": s.created_at.isoformat(),
                     "last_activity": s.last_activity.isoformat(),
-                    # FIX: Explicitly handle messages serialization, although json.dumps([]) is also "[]"
-                    "messages": json.dumps(s.messages) if s.messages is not None else "[]",
+                    "messages": json.dumps(s.messages) if s.messages is not None else "[]", # FIX: Defensive serialization
                     "active": int(s.active),
                     "wp_token": s.wp_token,
                     "timeout_saved_to_crm": int(s.timeout_saved_to_crm),
@@ -891,20 +893,14 @@ class QuestionLimitManager:
                 }
         
         elif session.user_type.value == UserType.REGISTERED_USER.value:
-            if session.total_question_count >= user_limit:
+            if session.total_question_count >= user_limit: # This is the 40-question absolute limit
                 self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user total limit reached")
                 return {
                     'allowed': False,
                     'reason': 'total_limit',
                     'message': "Usage limit reached. Please retry in 24 hours as we are giving preference to others in the queue."
                 }
-            elif session.total_question_count >= 20 and session.ban_status.value == BanStatus.NONE.value:
-                self._apply_ban(session, BanStatus.ONE_HOUR, "Registered user first tier limit reached")
-                return {
-                    'allowed': False,
-                    'reason': 'first_tier_limit',
-                    'message': "Usage limit reached. Please retry in 1 hour as we are giving preference to others in the queue."
-                }
+            # REMOVED: The problematic 'if session.total_question_count >= 20' ban check
         
         return {'allowed': True}
     
@@ -950,6 +946,7 @@ class QuestionLimitManager:
         if session.ban_status.value == BanStatus.EVASION_BLOCK.value:
             return "Usage limit reached due to detected unusual activity. Please try again later."
         elif session.user_type.value == UserType.REGISTERED_USER.value:
+            # Revert to a softer message if no longer banning at 20, keeping 1-hour ban general.
             return "Usage limit reached. Please retry in 1 hour as we are giving preference to others in the queue."
         else:
             return self._get_email_verified_limit_message()
@@ -1185,7 +1182,7 @@ class ZohoCRMManager:
             if response.status_code == 401:
                 logger.warning("Zoho token expired, attempting refresh for _add_note...")
                 access_token = self._get_access_token(force_refresh=True)
-                if not access_token: return False
+                if not access_token: return None
                 headers['Authorization'] = f'Zoho-oauthtoken {access_token}'
                 response = requests.post(f"{self.base_url}/Notes", headers=headers, json=note_data, timeout=15)
             
@@ -2152,11 +2149,15 @@ class SessionManager:
                         st.error(f"Time remaining: {hours}h {minutes}m")
                     st.info(message)
                     logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
+                    # FIX: If banned, return the session object with its current state and messages.
+                    # Don't try to create a new session or fall through to guest creation.
+                    self._update_activity(session) # Still update activity timestamp even if banned.
                     return session
                 
                 self._update_activity(session)
                 return session
         
+        # This block is only reached if no active session was found or session_id was None.
         logger.info("No active session found or current session is invalid. Creating a new guest session.")
         new_session = self._create_guest_session()
         if not new_session.fingerprint_id:
@@ -2166,8 +2167,8 @@ class SessionManager:
             self.db.save_session(new_session)
             logger.info(f"Applied temporary fingerprint to NEW session {new_session.session_id[:8]}")
         
-        limit_check = self.question_limits.is_within_limits(new_session)
-        
+        # limit_check on new_session is redundant here, as new sessions are always allowed to start.
+        # It's primarily for *existing* sessions to check their current status.
         return self._validate_session(new_session)
 
     @handle_api_errors("Authentication", "WordPress Login")
@@ -2287,13 +2288,10 @@ class SessionManager:
                 "penalty_hours": penalty_hours
             }
 
-        # 4. Update Activity: User is now active, so update their last_activity timestamp.
-        self._update_activity(session)
-
-        # 5. Sanitize Input: Clean the user's prompt to prevent potential XSS or injection.
+        # 4. Sanitize Input: Clean the user's prompt to prevent potential XSS or injection.
         sanitized_prompt = sanitize_input(prompt)
         
-        # 6. Content Moderation: Check if the prompt violates any safety policies.
+        # 5. Content Moderation: Check if the prompt violates any safety policies.
         moderation_result = check_content_moderation(sanitized_prompt, self.ai.openai_client)
         if moderation_result and moderation_result.get("flagged"):
             session.messages.append({"role": "user", "content": sanitized_prompt, "timestamp": datetime.now().isoformat()})
@@ -2305,20 +2303,19 @@ class SessionManager:
                 "source": "Content Safety"
             }
 
-        # 7. Record Question: Increment the question count for the current session and tier.
+        # 6. Record Question: Increment the question count for the current session and tier.
         self.question_limits.record_question(session)
 
-        # 8. Get AI Response: Call the underlying AI system to generate a response.
+        # 7. Get AI Response: Call the underlying AI system to generate a response.
         ai_response = self.ai.get_response(sanitized_prompt, session.messages)
         
-        # 9. Append Messages: Add both the user's prompt and the AI's response to chat history.
+        # 8. Append Messages: Add both the user's prompt and the AI's response to chat history.
         session.messages.append({
             "role": "user", 
             "content": sanitized_prompt,
             "timestamp": datetime.now().isoformat()
         })
         
-        # Prepare the assistant's message with content and metadata
         response_message = {
             "role": "assistant",
             "content": ai_response.get("content", "No response generated."),
@@ -2326,7 +2323,6 @@ class SessionManager:
             "timestamp": datetime.now().isoformat()
         }
         
-        # Add any additional metadata flags from the AI response (e.g., if search or Pinecone was used)
         for flag in ["used_search", "used_pinecone", "has_citations", "has_inline_citations", "safety_override"]:
             if ai_response.get(flag):
                 response_message[flag] = True
@@ -2334,13 +2330,24 @@ class SessionManager:
         session.messages.append(response_message)
         session.messages = session.messages[-100:]
         
-        # 10. Save Session: Persist the updated session (with new messages and question counts) to the database.
-        logger.debug(f"Session {session.session_id[:8]} now has {len(session.messages)} messages before final save in get_ai_response.") # FIX: Added debug
-        try: # FIX: Added try-except for session save
+        # 9. Save Session (with messages) and Update Activity Timestamp
+        logger.debug(f"Session {session.session_id[:8]} now has {len(session.messages)} messages before final save in get_ai_response.")
+        try:
+            # First, save the session with updated messages
             self.db.save_session(session)
-            logger.debug(f"Successfully saved session {session.session_id[:8]} with {len(session.messages)} messages to database in get_ai_response.") # FIX: Added debug
+            logger.debug(f"Successfully saved session {session.session_id[:8]} with {len(session.messages)} messages to database in get_ai_response.")
+
+            # Then, update activity timestamp and save again (this is what _update_activity does)
+            session.last_activity = datetime.now()
+            # If a timeout save was triggered earlier in this session run, reset the flag now that activity is detected
+            if session.timeout_saved_to_crm:
+                session.timeout_saved_to_crm = False
+                logger.info(f"Reset 'timeout_saved_to_crm' flag for session {session.session_id[:8]} due to new activity after AI response.")
+            self.db.save_session(session) # Save again with updated last_activity
+            logger.debug(f"Activity timestamp updated for session {session.session_id[:8]} after AI response.")
+
         except Exception as e:
-            logger.error(f"Failed to save session {session.session_id[:8]} to database in get_ai_response: {e}", exc_info=True) # FIX: Added error log
+            logger.error(f"Failed to save session {session.session_id[:8]} to database (including activity update) in get_ai_response: {e}", exc_info=True)
             
         return ai_response
 
@@ -2932,6 +2939,8 @@ def main():
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
             render_chat_interface(session_manager, session)
         else:
+            # If get_session returns inactive/banned, it's already displayed a message.
+            # Clear page state to redirect to welcome on next rerun.
             if 'page' in st.session_state:
                 del st.session_state['page']
             st.rerun()
