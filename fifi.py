@@ -1994,7 +1994,7 @@ class SessionManager:
                         st.error(f"🚫 **Access Restricted**")
                         if time_remaining:
                             hours = max(0, int(time_remaining.total_seconds() // 3600))
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60))
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.info(message)
                         logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
