@@ -2145,12 +2145,21 @@ class SessionManager:
             logger.debug(f"Calling st_javascript with key: {dynamic_key}") # ADDED
             messages = st_javascript(js_get_messages, key=dynamic_key) # MODIFIED: Dynamic key, REMOVED timeout
 
-            if messages is None: # ADDED: Check for None (e.g., if JS execution returned nothing)
-                logger.warning(f"st_javascript call for messages returned None (JS possibly failed or returned null) for session {session.session_id[:8]}.") # ADDED
+            # MODIFIED: Handle case where st_javascript returns 0 or None instead of an empty list
+            if messages is None:
+                logger.warning(f"st_javascript call for messages returned None (JS possibly failed or returned null) for session {session.session_id[:8]}.")
                 return False
             
-            if not isinstance(messages, list): # ADDED: Robustness check
-                logger.error(f"st_javascript returned non-list type for messages: {type(messages)}. Value: {messages}") # ADDED
+            # ADDED: Explicitly handle integer 0 as an empty list
+            if messages == 0:
+                messages = [] # Treat 0 as an empty list, meaning no messages found
+                logger.debug(f"st_javascript returned 0, treating as empty list for session {session.session_id[:8]}.")
+            elif not isinstance(messages, list): # Continue to check if it's not a list (and not 0)
+                logger.error(f"st_javascript returned unexpected non-list type: {type(messages)}. Value: {messages} for session {session.session_id[:8]}.") # MODIFIED log message
+                return False # Still return False for truly unexpected types
+            
+            if not messages: # Now, messages will either be an empty list or a populated list
+                logger.debug(f"No new component messages received for session {session.session_id[:8]}.")
                 return False
             
             if not messages:
