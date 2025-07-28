@@ -1723,7 +1723,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
         
         if result.flagged:
             flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
-            logger.warning(f"Input flagged by moderation for: {', '.اهر'.join(flagged_categories)}")
+logger.warning(f"Input flagged by moderation for: {', '.join(flagged_categories)}")
             return {
                 "flagged": True, 
                 "message": "Your message violates our content policy and cannot be processed.",
