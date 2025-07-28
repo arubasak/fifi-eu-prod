@@ -47,9 +47,8 @@ from streamlit_javascript import st_javascript
 # - FIX: Ensured get_session returns existing session even if banned, retaining chat history.
 # - FIX: Supabase OTP vs Magic Link issue addressed with explicit OTP calls.
 # - FIX: Enhanced IP/User-Agent capture with multiple fallbacks for Streamlit context variations.
-# - FIX: Missing `fingerprinting_manager` instantiation in `ensure_initialization`.
-# - FIX: Removed all extraneous conversational text causing SyntaxErrors.
-# - FIX: Corrected database message loading issue, Zoho API response parsing, and _mask_email logic.
+# - FIX: Missing `fingerprinting_manager` instantiation in `ensure_initialization` (corrected).
+# - FIX: Syntax errors in QuestionLimitManager and database methods corrected.
 # - NEW: Added diagnostic page for troubleshooting.
 # =============================================================================
 
@@ -424,7 +423,8 @@ class DatabaseManager:
             try:
                 # Get the actual column names from the database table at runtime
                 cursor = self.conn.execute("PRAGMA table_info(sessions)")
-                db_column_names = [row[1] for row in cursor.fetchall()] # row[1] is the column name
+                table_info = cursor.fetchall()
+                db_column_names = [row[1] for row in table_info] # row[1] is the column name
                 
                 # Map UserSession attributes to a dictionary for easy lookup by column name
                 s = session
@@ -494,18 +494,15 @@ class DatabaseManager:
             if self.db_type == "memory":
                 return copy.deepcopy(self.local_sessions.get(session_id))
             try:
-                if self.db_type == "file": self.conn.row_factory = sqlite3.Row
-                else: self.conn.row_factory = None
-
                 cursor = self.conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
                 row = cursor.fetchone()
                 if not row:
                     logger.debug(f"No active session found for ID {session_id[:8]}.")
                     return None
-                
-                # FIX: Ensure column names are correctly accessed from cursor.description for non-sqlite3.Row types
-                # This ensures row_dict is correctly formed for both sqlite3.Row and raw tuple results.
-                row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
+
+                # SQLite Cloud specific: row is a tuple, cursor.description gives column info
+                column_names = [desc[0] for desc in cursor.description]
+                row_dict = dict(zip(column_names, row))
                 
                 session_params = {}
                 session_params['session_id'] = row_dict.get('session_id', session_id)
@@ -543,14 +540,9 @@ class DatabaseManager:
         json_list_keys = ['messages', 'email_addresses_used']
         if key in json_list_keys and isinstance(value, str):
             try:
-                # FIX: Add specific debug to see what value is before json.loads
-                logger.debug(f"Converting JSON for key '{key}': raw value='{value[:50]}...' (len={len(value)})")
                 return json.loads(value)
-            except json.JSONDecodeError as jde: # FIX: Catch specific JSONDecodeError
-                logger.warning(f"Could not decode JSON for {key}: '{value[:50]}...' Error: {jde}. Returning empty list.")
-                return []
-            except Exception as e: # Catch other potential errors during JSON conversion
-                logger.warning(f"Unexpected error converting JSON for {key}: '{value[:50]}...' Error: {e}. Returning empty list.")
+            except json.JSONDecodeError:
+                logger.warning(f"Could not decode JSON for {key}: '{value}'. Returning empty list.")
                 return []
         
         if key == 'user_type' and isinstance(value, str):
@@ -564,7 +556,7 @@ class DatabaseManager:
                 return BanStatus(value)
             except ValueError:
                 logger.warning(f"Invalid ban_status '{value}'. Defaulting to NONE.")
-                return BanStatus.NONE # Ensure a valid Enum is returned even if error
+                return BanStatus.NONE
         
         bool_keys = ['active', 'timeout_saved_to_crm', 'question_limit_reached', 'registration_prompted', 'registration_link_clicked']
         if key in bool_keys:
@@ -579,13 +571,11 @@ class DatabaseManager:
             if self.db_type == "memory":
                 return [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fingerprint_id]
             try:
-                if self.db_type == "file": self.conn.row_factory = sqlite3.Row
-                else: self.conn.row_factory = None
-
                 cursor = self.conn.execute("SELECT * FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
                 sessions = []
+                column_names = [desc[0] for desc in cursor.description]
                 for row in cursor.fetchall():
-                    row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
+                    row_dict = dict(zip(column_names, row))
                     session_params = {}
                     session_params['session_id'] = row_dict.get('session_id', str(uuid.uuid4()))
                     for key, value in row_dict.items():
@@ -605,13 +595,11 @@ class DatabaseManager:
             if self.db_type == "memory":
                 return [copy.deepcopy(s) for s in self.local_sessions.values() if s.email == email]
             try:
-                if self.db_type == "file": self.conn.row_factory = sqlite3.Row
-                else: self.conn.row_factory = None
-                
                 cursor = self.conn.execute("SELECT * FROM sessions WHERE email = ? ORDER BY last_activity DESC", (email,))
                 sessions = []
+                column_names = [desc[0] for desc in cursor.description]
                 for row in cursor.fetchall():
-                    row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
+                    row_dict = dict(zip(column_names, row))
                     session_params = {}
                     session_params['session_id'] = row_dict.get('session_id', str(uuid.uuid4()))
                     for key, value in row_dict.items():
@@ -823,7 +811,10 @@ class EmailVerificationManager:
                 'email': email,
                 'options': {
                     'should_create_user': True,
-                    'email_redirect_to': None, # Disable magic link redirect
+                    'email_redirect_to': None,
+                    'data': { # This 'data' payload might not be directly used by all Supabase versions for OTP type.
+                        'verification_type': 'email_otp' # Explicitly request OTP (best effort)
+                    }
                 }
             })
             
@@ -1016,7 +1007,6 @@ class QuestionLimitManager:
                     'reason': 'total_limit',
                     'message': "Usage limit reached. Please retry in 24 hours as we are giving preference to others in the queue."
                 }
-            # FIX: Removed the problematic 'if session.total_question_count >= 20' ban check
         
         return {'allowed': True}
     
@@ -1062,7 +1052,6 @@ class QuestionLimitManager:
         if session.ban_status.value == BanStatus.EVASION_BLOCK.value:
             return "Usage limit reached due to detected unusual activity. Please try again later."
         elif session.user_type.value == UserType.REGISTERED_USER.value:
-            # Revert to a softer message if no longer banning at 20, keeping 1-hour ban general.
             return "Usage limit reached. Please retry in 1 hour as we are giving preference to others in the queue."
         else:
             return self._get_email_verified_limit_message()
@@ -1178,8 +1167,8 @@ class ZohoCRMManager:
             response.raise_for_status()
             data = response.json()
             
-            if 'data' in data and data['data']: # Ensure 'data' exists and is not empty
-                contact_id = data['data'][0]['id'] # FIX: Access the first element of the 'data' list
+            if 'data' in data and data['data']:
+                contact_id = data['data'][0]['id']
                 logger.info(f"Found existing Zoho contact: {contact_id}")
                 return contact_id
                 
@@ -1216,8 +1205,8 @@ class ZohoCRMManager:
             response.raise_for_status()
             data = response.json()
             
-            if 'data' in data and data['data'] and data['data'][0]['code'] == 'SUCCESS': # Ensure data[0] exists
-                contact_id = data['data'][0]['details']['id'] # FIX: Access the first element of the 'data' list
+            if 'data' in data and data['data'][0]['code'] == 'SUCCESS':
+                contact_id = data['data'][0]['details']['id']
                 logger.info(f"Created new Zoho contact: {contact_id}")
                 return contact_id
                 
@@ -1256,7 +1245,7 @@ class ZohoCRMManager:
                 response.raise_for_status()
                 data = response.json()
                 
-                if 'data' in data and data['data'] and data['data'][0]['code'] == 'SUCCESS': # Ensure data[0] exists
+                if 'data' in data and data['data'][0]['code'] == 'SUCCESS':
                     logger.info(f"Successfully uploaded attachment: {filename}")
                     return True
                 else:
@@ -1305,7 +1294,7 @@ class ZohoCRMManager:
             response.raise_for_status()
             data = response.json()
             
-            if 'data' in data and data['data'] and data['data'][0]['code'] == 'SUCCESS': # Ensure data[0] exists
+            if 'data' in data and data['data'][0]['code'] == 'SUCCESS':
                 logger.info(f"Successfully added Zoho note: {note_title}")
                 return True
             else:
@@ -1505,7 +1494,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     try:
         response = client.moderations.create(model="omni-moderation-latest", input=prompt)
-        result = response.results[0] # Access the first item in the results list
+        result = response.results[0] # Note: results is a list, get the first item
         
         if result.flagged:
             flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
@@ -2022,8 +2011,7 @@ class SessionManager:
                 for header_name in ip_headers_priority:
                     ip_val = headers.get(header_name) or headers.get(header_name.upper()) # Check both cases
                     if ip_val:
-                        # FIX: Ensure strip() is called after splitting, to remove whitespace around IP
-                        session.ip_address = ip_val.split(',')[0].strip() 
+                        session.ip_address = ip_val.split(',')[0].strip()
                         session.ip_detection_method = header_name
                         ip_captured = True
                         break
@@ -2081,10 +2069,10 @@ class SessionManager:
                 session.ban_status = BanStatus(session.ban_status)
             except ValueError:
                 logger.error(f"Invalid ban_status string '{session.ban_status}' for session {session.session_id[:8]}. Defaulting to NONE.")
-                session.ban_status = BanStatus.NONE # Ensure a valid Enum is returned even if error
+                session.ban_status = BanStatus.NONE
         
         if not isinstance(session.messages, list):
-            logger.warning(f"Messages field corrupted for session {session.session_id[:8]}, preserving as empty list.")
+            logger.warning(f"Session {session.session_id[:8]} messages field is not a list. Resetting to empty list.")
             session.messages = []
         
         if not isinstance(session.email_addresses_used, list):
@@ -2101,7 +2089,6 @@ class SessionManager:
         
         local_part, domain_part = email.split('@', 1)
         
-        # FIX: Corrected masking logic for local_part and domain_part for various lengths
         if len(local_part) <= 2:
             masked_local = local_part[0] + '*' * (len(local_part) - 1)
         else:
@@ -2109,12 +2096,10 @@ class SessionManager:
         
         domain_segments = domain_part.split('.')
         if len(domain_segments) > 1:
-            # Mask first part of domain (e.g., 'example' in 'example.com')
-            masked_domain_first_part = domain_segments[0][0] + '*' * (len(domain_segments[0]) - 1)
+            masked_domain_first_part = '*' * len(domain_segments[0])
             masked_domain = masked_domain_first_part + '.' + '.'.join(domain_segments[1:])
         else:
-            # If no dots in domain (e.g., 'localhost'), mask entire domain part
-            masked_domain = '*' * len(domain_part) 
+            masked_domain = '*' * len(domain_part)
         
         return f"{masked_local}@{masked_domain}"
 
@@ -2201,7 +2186,7 @@ class SessionManager:
         """
         Initiates the email verification process for a guest user.
         """
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$' 
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
         if not re.match(email_pattern, email):
             return {'success': False, 'message': 'Please enter a valid email address.'}
         
@@ -2558,10 +2543,10 @@ class SessionManager:
             with st.spinner("💾 Saving chat to Zoho CRM..."):
                 success = self._save_to_crm_timeout(session, "Manual Save to Zoho CRM")
             if success:
-                st.success("✅ Chat manually saved to CRM!")
+                st.success("✅ Chat manually saved to Zoho CRM!")
                 self._update_activity(session)
             else:
-                st.error("❌ Failed to manually save chat to CRM. Please check logs for details.")
+                st.error("❌ Failed to manually save chat to Zoho CRM. Please check logs for details.")
         else:
             st.warning("Cannot save to CRM: Only registered users with a chat history can manually save.")
 
@@ -2614,7 +2599,7 @@ def render_welcome_page(session_manager: SessionManager):
                 # Add some spacing
                 st.markdown("")
                 
-                col1, col2, col3 = st.columns([1, 2, 1])
+                col1, col2, col3 = st.columns(3)
                 with col2:
                     submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
                 
@@ -2648,7 +2633,7 @@ def render_welcome_page(session_manager: SessionManager):
         """)
         
         st.markdown("")
-        col1, col2, col3 = st.columns([1, 2, 1])
+        col1, col2, col3 = st.columns(3)
         with col2:
             if st.button("👤 Start as Guest", use_container_width=True):
                 st.session_state.page = "chat" # Change application page
@@ -2928,34 +2913,6 @@ def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
             }};
         }}
         
-        // FIX: Try to get IP address from external service if possible (client-side)
-        // This is not guaranteed and requires an external API, so commenting out for now.
-        // if (clientInfo.ip_address === undefined) {{
-        //     fetch('https://api.ipify.org?format=json')
-        //         .then(response => response.json())
-        //         .then(data => {{
-        //             clientInfo.ip_address = data.ip;
-        //             clientInfo.ip_detection_method = 'js_ipify';
-        //         }})
-        //         .catch(e => {{
-        //             console.error('IPify fetch failed:', e);
-        //             clientInfo.ip_address = 'js_ip_fetch_failed';
-        //         }})
-        //         .finally(() => {{
-        //             window.streamlitReports.send_message({{
-        //                 event: 'fifi_client_info_updated',
-        //                 session_id: sessionId,
-        //                 client_info: clientInfo
-        //             }});
-        //         }});
-        // }} else {{
-        //     window.streamlitReports.send_message({{
-        //         event: 'fifi_client_info_updated',
-        //         session_id: sessionId,
-        //         client_info: clientInfo
-        //     }});
-        // }}
-
         console.log('FiFi Client Info Detected:', clientInfo);
         
         // Return data directly to Streamlit via st_javascript
@@ -2980,7 +2937,7 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
     """Renders the main chat interface."""
     
     st.title("🤖 FiFi AI Assistant")
-    st.caption("Your intelligent food & Beverage Sourcing Companion with universal fingerprinting.")
+    st.caption("Your intelligent food & beverage sourcing companion with universal fingerprinting.")
     
     global_message_channel_error_handler()
 
@@ -2999,13 +2956,6 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
             if session.user_agent == "capture_failed_py_context" and client_info.get('userAgent'):
                 session.user_agent = client_info['userAgent']
                 logger.info(f"Session {session.session_id[:8]}: User-Agent updated from JS: {session.user_agent[:50]}...")
-                updated_session = True
-
-            # Update IP address from JS if Python-side failed
-            if session.ip_address == "capture_failed_py_context" and client_info.get('ip_address'): # 'ip_address' would come from JS if integrated
-                session.ip_address = client_info['ip_address']
-                session.ip_detection_method = client_info.get('ip_detection_method', 'js_fallback')
-                logger.info(f"Session {session.session_id[:8]}: IP updated from JS: {session.ip_address}")
                 updated_session = True
 
             # Update browser privacy level if provided by JS
@@ -3189,19 +3139,9 @@ def render_diagnostic_page():
             st.markdown("#### JavaScript Component Capture (Client-side Fallback)")
             client_info_js_result = render_client_info_detector(session_id="diagnostic_js_test")
             if client_info_js_result and client_info_js_result.get('client_info'):
-                # Simulate how render_chat_interface would use it for display/update
-                js_captured_info = client_info_js_result['client_info']
-                display_js_info = {
-                    "userAgent": js_captured_info.get('userAgent', 'N/A'),
-                    "language": js_captured_info.get('language', 'N/A'),
-                    "platform": js_captured_info.get('platform', 'N/A'),
-                    "timezone": js_captured_info.get('timezone', 'N/A'),
-                    "screen_width": js_captured_info.get('screen', {}).get('width', 'N/A'),
-                    "ip_address_from_js": js_captured_info.get('ip_address', 'N/A') # Would be available if fetch used
-                }
-                st.json(display_js_info)
+                st.json(client_info_js_result['client_info'])
             else:
-                st.info("No JavaScript client info result yet (may need re-run or be blocked by browser/extension).")
+                st.info("No JavaScript client info result yet (may need re-run or be blocked).")
         else:
             st.warning("Session Manager not initialized. Please ensure app is running normally.")
     
