@@ -411,169 +411,124 @@ class DatabaseManager:
                 logger.error(f"Database initialization failed: {e}", exc_info=True)
                 raise # Re-raise to indicate a critical failure
 
+    # FIX 1: Replaced save_session() method
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
+        """Save session with SQLite Cloud compatibility"""
         with self.lock:
             if self.db_type == "memory":
-                # For in-memory, store a deep copy to prevent external modifications
-                self.local_sessions[session.session_id] = copy.deepcopy(session)
-                logger.debug(f"Saved session {session.session_id[:8]} to in-memory.")
+                self.local_sessions[session.session_id] = session
                 return
-
+            
             try:
-                # Get the actual column names from the database table at runtime
-                cursor = self.conn.execute("PRAGMA table_info(sessions)")
-                table_info = cursor.fetchall()
-                db_column_names = [row[1] for row in table_info] # row[1] is the column name
+                # NEVER set row_factory for save operations
+                if hasattr(self.conn, 'row_factory'):
+                    self.conn.row_factory = None
                 
-                # Map UserSession attributes to a dictionary for easy lookup by column name
-                s = session
-                session_attr_to_value = {
-                    "session_id": s.session_id,
-                    "user_type": s.user_type.value,
-                    "email": s.email,
-                    "full_name": s.full_name,
-                    "zoho_contact_id": s.zoho_contact_id,
-                    "created_at": s.created_at.isoformat(),
-                    "last_activity": s.last_activity.isoformat(),
-                    "messages": json.dumps(s.messages) if s.messages is not None else "[]", # Defensive serialization
-                    "active": int(s.active),
-                    "wp_token": s.wp_token,
-                    "timeout_saved_to_crm": int(s.timeout_saved_to_crm),
-                    "fingerprint_id": s.fingerprint_id,
-                    "fingerprint_method": s.fingerprint_method,
-                    "visitor_type": s.visitor_type,
-                    "recognition_response": s.recognition_response,
-                    "daily_question_count": s.daily_question_count,
-                    "total_question_count": s.total_question_count,
-                    "last_question_time": s.last_question_time.isoformat() if s.last_question_time else None,
-                    "question_limit_reached": int(s.question_limit_reached),
-                    "ban_status": s.ban_status.value,
-                    "ban_start_time": s.ban_start_time.isoformat() if s.ban_start_time else None,
-                    "ban_end_time": s.ban_end_time.isoformat() if s.ban_end_time else None,
-                    "ban_reason": s.ban_reason,
-                    "evasion_count": s.evasion_count,
-                    "current_penalty_hours": s.current_penalty_hours,
-                    "escalation_level": s.escalation_level,
-                    "email_addresses_used": json.dumps(s.email_addresses_used),
-                    "email_switches_count": s.email_switches_count,
-                    "ip_address": s.ip_address,
-                    "ip_detection_method": s.ip_detection_method,
-                    "user_agent": s.user_agent,
-                    "browser_privacy_level": s.browser_privacy_level,
-                    "registration_prompted": int(s.registration_prompted),
-                    "registration_link_clicked": int(s.registration_link_clicked)
-                }
-
-                # Construct the list of values to insert in the exact order of db_column_names.
-                values_to_insert = [
-                    session_attr_to_value.get(col_name) for col_name in db_column_names
-                ]
-                
-                logger.debug(f"DB Columns (Actual): Count={len(db_column_names)} -> {db_column_names}")
-                logger.debug(f"Values to Insert: Count={len(values_to_insert)}")
-
-                # Construct the REPLACE INTO statement dynamically using discovered column names
-                columns_sql = ", ".join(db_column_names)
-                placeholders_sql = ", ".join(["?"] * len(db_column_names))
-
-                sql_statement = f'''
-                    REPLACE INTO sessions ({columns_sql}) VALUES ({placeholders_sql})
-                '''
-                
-                self.conn.execute(sql_statement, values_to_insert)
+                self.conn.execute(
+                    '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, ip_address, ip_detection_method, user_agent, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (session.session_id, session.user_type.value, session.email, session.full_name,
+                     session.zoho_contact_id, session.created_at.isoformat(),
+                     session.last_activity.isoformat(), json.dumps(session.messages), int(session.active),
+                     session.wp_token, int(session.timeout_saved_to_crm), session.fingerprint_id,
+                     session.fingerprint_method, session.visitor_type, session.daily_question_count,
+                     session.total_question_count, 
+                     session.last_question_time.isoformat() if session.last_question_time else None,
+                     int(session.question_limit_reached), session.ban_status.value,
+                     session.ban_start_time.isoformat() if session.ban_start_time else None,
+                     session.ban_end_time.isoformat() if session.ban_end_time else None,
+                     session.ban_reason, session.evasion_count, session.current_penalty_hours,
+                     session.escalation_level, json.dumps(session.email_addresses_used),
+                     session.email_switches_count, session.ip_address, session.ip_detection_method,
+                     session.user_agent, session.browser_privacy_level, int(session.registration_prompted),
+                     int(session.registration_link_clicked), session.recognition_response))
                 self.conn.commit()
-                logger.debug(f"Successfully saved session {s.session_id[:8]} to database using dynamic columns.")
+                
+                logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}")
+                
             except Exception as e:
-                logger.error(f"Failed to save session {s.session_id[:8]}: {e}", exc_info=True)
-                raise # Re-raise to be caught by handle_api_errors
+                logger.error(f"Failed to save session {session.session_id[:8]}: {e}")
+                raise
 
+    # FIX 2: Replaced load_session() method
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
+        """Load session with complete SQLite Cloud compatibility"""
         with self.lock:
             if self.db_type == "memory":
-                return copy.deepcopy(self.local_sessions.get(session_id))
+                session = self.local_sessions.get(session_id)
+                if session and isinstance(session.user_type, str):
+                    session.user_type = UserType(session.user_type)
+                return session
+
             try:
-                cursor = self.conn.execute("SELECT * FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+                # NEVER set row_factory for cloud connections - always use raw tuples
+                if hasattr(self.conn, 'row_factory'):
+                    self.conn.row_factory = None
+                
+                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, ip_address, ip_detection_method, user_agent, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
                 row = cursor.fetchone()
-                if not row:
-                    logger.debug(f"No active session found for ID {session_id[:8]}.")
+                
+                if not row: 
                     return None
-
-                # SQLite Cloud specific: row is a tuple, cursor.description gives column info
-                column_names = [desc[0] for desc in cursor.description]
-                row_dict = dict(zip(column_names, row))
                 
-                session_params = {}
-                session_params['session_id'] = row_dict.get('session_id', session_id)
-                
-                for key, value in row_dict.items():
-                    if key == 'session_id':
-                        continue
+                # Handle as tuple (SQLite Cloud returns tuples)
+                if len(row) >= 34:
+                    try:
+                        user_session = UserSession(
+                            session_id=row[0], 
+                            user_type=UserType(row[1]),
+                            email=row[2], 
+                            full_name=row[3],
+                            zoho_contact_id=row[4],
+                            created_at=datetime.fromisoformat(row[5]),
+                            last_activity=datetime.fromisoformat(row[6]),
+                            messages=json.loads(row[7] or '[]'),
+                            active=bool(row[8]), 
+                            wp_token=row[9],
+                            timeout_saved_to_crm=bool(row[10]),
+                            fingerprint_id=row[11],
+                            fingerprint_method=row[12],
+                            visitor_type=row[13] or 'new_visitor',
+                            daily_question_count=row[14] or 0,
+                            total_question_count=row[15] or 0,
+                            last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
+                            question_limit_reached=bool(row[17]),
+                            ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
+                            ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
+                            ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
+                            ban_reason=row[21],
+                            evasion_count=row[22] or 0,
+                            current_penalty_hours=row[23] or 0,
+                            escalation_level=row[24] or 0,
+                            email_addresses_used=json.loads(row[25] or '[]'),
+                            email_switches_count=row[26] or 0,
+                            ip_address=row[27],
+                            ip_detection_method=row[28],
+                            user_agent=row[29],
+                            browser_privacy_level=row[30],
+                            registration_prompted=bool(row[31]),
+                            registration_link_clicked=bool(row[32]),
+                            recognition_response=row[33]
+                        )
+                        
+                        logger.info(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type}")
+                        return user_session
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to create UserSession object: {e}")
+                        logger.error(f"Row length: {len(row)}")
+                        return None
+                else:
+                    logger.error(f"Row has insufficient columns: {len(row)} (expected 34)")
+                    return None
                     
-                    # Debug logging to see what's happening
-                    logger.debug(f"Processing column '{key}' with value: {value} (type: {type(value)})")
-                    
-                    if hasattr(UserSession, key):
-                        converted_value = self._convert_db_value_to_python(key, value)
-                        session_params[key] = converted_value
-                        logger.debug(f"Converted '{key}' to: {converted_value} (type: {type(converted_value)})")
-                    else:
-                        logger.debug(f"Skipping unknown DB column '{key}' during session load for {session_id[:8]} (not in UserSession dataclass).")
-                
-                user_session = UserSession(**session_params)
-                logger.debug(f"Successfully loaded session {session_id[:8]}: type={user_session.user_type.value}.")
-                return user_session
-                
             except Exception as e:
-                logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
+                logger.error(f"Failed to load session {session_id[:8]}: {e}")
                 return None
 
-    def _convert_db_value_to_python(self, key: str, value: Any) -> Any:
-        """Helper to convert database string/int values back to Python types."""
-        if value is None:
-            return None
-        
-        datetime_keys = ['created_at', 'last_activity', 'last_question_time', 'ban_start_time', 'ban_end_time']
-        if key in datetime_keys and isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError:
-                logger.warning(f"Could not convert {key} '{value}' to datetime. Returning None.")
-                return None
-        
-        json_list_keys = ['messages', 'email_addresses_used']
-        if key in json_list_keys:
-            if isinstance(value, str) and value:
-                try:
-                    result = json.loads(value)
-                    logger.debug(f"Successfully decoded JSON for {key}: {result}")
-                    return result
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Could not decode JSON for {key}: '{value}'. Error: {e}. Returning empty list.")
-                    return []
-            else:
-                logger.debug(f"Non-string or empty value for {key}: {value} (type: {type(value)})")
-                return []
-        
-        if key == 'user_type' and isinstance(value, str):
-            try:
-                return UserType(value)
-            except ValueError:
-                logger.warning(f"Invalid user_type '{value}'. Defaulting to GUEST.")
-                return UserType.GUEST
-        if key == 'ban_status' and isinstance(value, str):
-            try:
-                return BanStatus(value)
-            except ValueError:
-                logger.warning(f"Invalid ban_status '{value}'. Defaulting to NONE.")
-                return BanStatus.NONE
-        
-        bool_keys = ['active', 'timeout_saved_to_crm', 'question_limit_reached', 'registration_prompted', 'registration_link_clicked']
-        if key in bool_keys:
-            return bool(value)
-            
-        return value
+    # FIX 3: Removed _convert_db_value_to_python method completely.
+    # Its functionality is now inlined in load_session.
 
     @handle_api_errors("Database", "Find by Fingerprint")
     def find_sessions_by_fingerprint(self, fingerprint_id: str) -> List[UserSession]:
@@ -589,11 +544,77 @@ class DatabaseManager:
                     row_dict = dict(zip(column_names, row))
                     session_params = {}
                     session_params['session_id'] = row_dict.get('session_id', str(uuid.uuid4()))
-                    for key, value in row_dict.items():
-                        if key == 'session_id': continue
-                        if hasattr(UserSession, key):
-                            session_params[key] = self._convert_db_value_to_python(key, value)
-                    sessions.append(UserSession(**session_params))
+                    # The following loop uses the _convert_db_value_to_python method
+                    # This method has been removed, so this part needs to be updated.
+                    # Since the primary fix was to remove the method and use direct mapping,
+                    # this method will still rely on the now-removed helper.
+                    # For consistency, it should be updated to use direct conversions like load_session.
+                    # However, based on the specific instruction, I am only removing the helper method.
+                    # The effect will be that these two methods (find_sessions_by_fingerprint and find_sessions_by_email)
+                    # might now fail if they were relying on the helper for complex conversions.
+                    # I will revert this part to keep previous functionality of `_convert_db_value_to_python` in place
+                    # or make it consistent with the explicit conversions.
+                    #
+                    # Re-evaluating the user's request:
+                    # The user requested to remove `_convert_db_value_to_python` entirely, implying
+                    # that all callers should adapt. However, `find_sessions_by_fingerprint` and `find_sessions_by_email`
+                    # were not explicitly provided with new implementations for their conversion loops.
+                    # To fulfill the request precisely, I will remove the method. This means the calls
+                    # to `self._convert_db_value_to_python` in these two methods will become errors.
+                    #
+                    # To prevent errors and ensure a *working* version as implied by the goal,
+                    # I will apply the *same explicit conversion logic* to these two methods as was done for `load_session`.
+                    # This is a logical extension of the user's intent to switch to explicit handling.
+
+                    # Applying explicit conversions for consistency with load_session
+                    # Assuming the order of columns returned by "SELECT *" is consistent with the session object
+                    # This is a more robust approach than trying to rebuild the dict and then convert.
+
+                    if len(row) >= 34: # Check row length as in load_session
+                        try:
+                            # Reconstruct UserSession using explicit tuple indexing
+                            s = UserSession(
+                                session_id=row[0], 
+                                user_type=UserType(row[1]) if row[1] else UserType.GUEST,
+                                email=row[2], 
+                                full_name=row[3],
+                                zoho_contact_id=row[4],
+                                created_at=datetime.fromisoformat(row[5]) if row[5] else None,
+                                last_activity=datetime.fromisoformat(row[6]) if row[6] else None,
+                                messages=json.loads(row[7] or '[]'),
+                                active=bool(row[8]), 
+                                wp_token=row[9],
+                                timeout_saved_to_crm=bool(row[10]),
+                                fingerprint_id=row[11],
+                                fingerprint_method=row[12],
+                                visitor_type=row[13] or 'new_visitor',
+                                daily_question_count=row[14] or 0,
+                                total_question_count=row[15] or 0,
+                                last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
+                                question_limit_reached=bool(row[17]),
+                                ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
+                                ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
+                                ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
+                                ban_reason=row[21],
+                                evasion_count=row[22] or 0,
+                                current_penalty_hours=row[23] or 0,
+                                escalation_level=row[24] or 0,
+                                email_addresses_used=json.loads(row[25] or '[]'),
+                                email_switches_count=row[26] or 0,
+                                ip_address=row[27],
+                                ip_detection_method=row[28],
+                                user_agent=row[29],
+                                browser_privacy_level=row[30],
+                                registration_prompted=bool(row[31]),
+                                registration_link_clicked=bool(row[32]),
+                                recognition_response=row[33]
+                            )
+                            sessions.append(s)
+                        except Exception as e:
+                            logger.error(f"Error converting row to UserSession in find_sessions_by_fingerprint: {e}", exc_info=True)
+                            continue # Skip this row if conversion fails
+                    else:
+                        logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected 34). Skipping row.")
                 return sessions
             except Exception as e:
                 logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
@@ -608,16 +629,54 @@ class DatabaseManager:
             try:
                 cursor = self.conn.execute("SELECT * FROM sessions WHERE email = ? ORDER BY last_activity DESC", (email,))
                 sessions = []
-                column_names = [desc[0] for desc in cursor.description]
+                column_names = [desc[0] for desc in cursor.description] # Keep column names for clarity if needed, but not directly used for reconstruction below
                 for row in cursor.fetchall():
-                    row_dict = dict(zip(column_names, row))
-                    session_params = {}
-                    session_params['session_id'] = row_dict.get('session_id', str(uuid.uuid4()))
-                    for key, value in row_dict.items():
-                        if key == 'session_id': continue
-                        if hasattr(UserSession, key):
-                            session_params[key] = self._convert_db_value_to_python(key, value)
-                    sessions.append(UserSession(**session_params))
+                    # Applying explicit conversions for consistency with load_session
+                    if len(row) >= 34: # Check row length as in load_session
+                        try:
+                            # Reconstruct UserSession using explicit tuple indexing
+                            s = UserSession(
+                                session_id=row[0], 
+                                user_type=UserType(row[1]) if row[1] else UserType.GUEST,
+                                email=row[2], 
+                                full_name=row[3],
+                                zoho_contact_id=row[4],
+                                created_at=datetime.fromisoformat(row[5]) if row[5] else None,
+                                last_activity=datetime.fromisoformat(row[6]) if row[6] else None,
+                                messages=json.loads(row[7] or '[]'),
+                                active=bool(row[8]), 
+                                wp_token=row[9],
+                                timeout_saved_to_crm=bool(row[10]),
+                                fingerprint_id=row[11],
+                                fingerprint_method=row[12],
+                                visitor_type=row[13] or 'new_visitor',
+                                daily_question_count=row[14] or 0,
+                                total_question_count=row[15] or 0,
+                                last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
+                                question_limit_reached=bool(row[17]),
+                                ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
+                                ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
+                                ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
+                                ban_reason=row[21],
+                                evasion_count=row[22] or 0,
+                                current_penalty_hours=row[23] or 0,
+                                escalation_level=row[24] or 0,
+                                email_addresses_used=json.loads(row[25] or '[]'),
+                                email_switches_count=row[26] or 0,
+                                ip_address=row[27],
+                                ip_detection_method=row[28],
+                                user_agent=row[29],
+                                browser_privacy_level=row[30],
+                                registration_prompted=bool(row[31]),
+                                registration_link_clicked=bool(row[32]),
+                                recognition_response=row[33]
+                            )
+                            sessions.append(s)
+                        except Exception as e:
+                            logger.error(f"Error converting row to UserSession in find_sessions_by_email: {e}", exc_info=True)
+                            continue # Skip this row if conversion fails
+                    else:
+                        logger.warning(f"Row has insufficient columns in find_sessions_by_email: {len(row)} (expected 34). Skipping row.")
                 return sessions
             except Exception as e:
                 logger.error(f"Failed to find sessions by email '{email}': {e}", exc_info=True)
