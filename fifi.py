@@ -467,6 +467,7 @@ class DatabaseManager:
             
             # Attempt reconnection
             if self.db_type == "cloud" and SQLITECLOUD_AVAILABLE:
+                # Need to get config.SQLITE_CLOUD_CONNECTION dynamically
                 self.conn, _ = self._try_sqlite_cloud(config_instance.SQLITE_CLOUD_CONNECTION)
             elif self.db_type == "file":
                 self.conn, _ = self._try_local_sqlite()
@@ -799,122 +800,133 @@ class FingerprintingManager:
         """
         js_code = f"""
         (() => {{
-            const sessionId = "{session_id}";
-            console.log("🔍 FiFi Fingerprinting: Starting 3-layer device identification.");
-
-            // Layer 1: Canvas Fingerprinting (Primary)
-            function generateCanvasFingerprint() {{
-                try {{
-                    const canvas = document.createElement('canvas');
-                    const ctx = canvas.getContext('2d');
-                    canvas.width = 220; canvas.height = 100;
-                    ctx.textBaseline = 'top'; ctx.font = '14px Arial';
-                    ctx.fillStyle = '#f60'; ctx.fillRect(125, 1, 62, 20);
-                    ctx.fillStyle = '#069'; ctx.fillText('FiFi AI Canvas Test 🤖', 2, 15);
-                    ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; ctx.fillText('Food & Beverage Industry', 4, 45);
-                    ctx.strokeStyle = '#000'; ctx.beginPath();
-                    ctx.arc(50, 50, 20, 0, Math.PI * 2); ctx.stroke();
-                    return btoa(canvas.toDataURL()).slice(0, 32); // Base64 and truncate for consistency
-                }} catch (e) {{
-                    console.error("❌ Canvas fingerprint failed:", e);
-                    return 'canvas_blocked';
+            try {{
+                const sessionId = "{session_id}";
+                
+                // Layer 1: Canvas Fingerprinting (Primary)
+                function generateCanvasFingerprint() {{
+                    try {{
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        canvas.width = 220; canvas.height = 100;
+                        ctx.textBaseline = 'top'; ctx.font = '14px Arial';
+                        ctx.fillStyle = '#f60'; ctx.fillRect(125, 1, 62, 20);
+                        ctx.fillStyle = '#069'; ctx.fillText('FiFi AI Canvas Test 🤖', 2, 15);
+                        ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; ctx.fillText('Food & Beverage Industry', 4, 45);
+                        ctx.strokeStyle = '#000'; ctx.beginPath();
+                        ctx.arc(50, 50, 20, 0, Math.PI * 2); ctx.stroke();
+                        return btoa(canvas.toDataURL()).slice(0, 32); // Base64 and truncate for consistency
+                    }} catch (e) {{
+                        console.error("❌ Canvas fingerprint failed:", e);
+                        return 'canvas_blocked';
+                    }}
                 }}
-            }}
-            
-            // Layer 2: WebGL Fingerprinting (Secondary)
-            function generateWebGLFingerprint() {{
-                try {{
-                    const canvas = document.createElement('canvas');
-                    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-                    if (!gl) {{ return 'webgl_unavailable'; }}
-                    const webglData = {{
-                        vendor: gl.getParameter(gl.VENDOR),
-                        renderer: gl.getParameter(gl.RENDERER),
-                        version: gl.getParameter(gl.VERSION),
-                        extensions: gl.getSupportedExtensions() ? gl.getSupportedExtensions().slice(0, 10) : []
+                
+                // Layer 2: WebGL Fingerprinting (Secondary)
+                function generateWebGLFingerprint() {{
+                    try {{
+                        const canvas = document.createElement('canvas');
+                        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                        if (!gl) {{ return 'webgl_unavailable'; }}
+                        const webglData = {{
+                            vendor: gl.getParameter(gl.VENDOR),
+                            renderer: gl.getParameter(gl.RENDERER),
+                            version: gl.getParameter(gl.VERSION),
+                            extensions: gl.getSupportedExtensions() ? gl.getSupportedExtensions().slice(0, 10) : []
+                        }};
+                        return btoa(JSON.stringify(webglData)).slice(0, 32);
+                    }} catch (e) {{
+                        console.error("❌ WebGL fingerprint failed:", e);
+                        return 'webgl_blocked';
+                    }}
+                }}
+                
+                // Layer 3: Audio Context Fingerprinting (Tertiary)
+                function generateAudioFingerprint() {{
+                    try {{
+                        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        const oscillator = audioContext.createOscillator();
+                        const analyser = audioContext.createAnalyser();
+                        const gainNode = audioContext.createGain();
+                        oscillator.type = 'triangle'; oscillator.frequency.value = 1000; gainNode.gain.value = 0;
+                        oscillator.connect(analyser); analyser.connect(gainNode); gainNode.connect(audioContext.destination);
+                        oscillator.start(0);
+                        const frequencyData = new Uint8Array(analyser.frequencyBinCount);
+                        analyser.getByteFrequencyData(frequencyData);
+                        oscillator.stop(); audioContext.close();
+                        return btoa(Array.from(frequencyData.slice(0, 32)).join(',')).slice(0, 32);
+                    }} catch (e) {{
+                        console.error("❌ Audio fingerprint failed:", e);
+                        return 'audio_blocked';
+                    }}
+                }}
+                
+                // Collect general browser and system information
+                function getBrowserInfo() {{
+                    return {{
+                        userAgent: navigator.userAgent, language: navigator.language, platform: navigator.platform,
+                        cookieEnabled: navigator.cookieEnabled, doNotTrack: navigator.doNotTrack,
+                        hardwareConcurrency: navigator.hardwareConcurrency, maxTouchPoints: navigator.maxTouchPoints,
+                        screen: {{ width: screen.width, height: screen.height, colorDepth: screen.colorDepth, pixelDepth: screen.pixelDepth }},
+                        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
                     }};
-                    return btoa(JSON.stringify(webglData)).slice(0, 32);
-                }} catch (e) {{
-                    console.error("❌ WebGL fingerprint failed:", e);
-                    return 'webgl_blocked';
                 }}
-            }}
-            
-            // Layer 3: Audio Context Fingerprinting (Tertiary)
-            function generateAudioFingerprint() {{
-                try {{
-                    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                    const oscillator = audioContext.createOscillator();
-                    const analyser = audioContext.createAnalyser();
-                    const gainNode = audioContext.createGain();
-                    oscillator.type = 'triangle'; oscillator.frequency.value = 1000; gainNode.gain.value = 0;
-                    oscillator.connect(analyser); analyser.connect(gainNode); gainNode.connect(audioContext.destination);
-                    oscillator.start(0);
-                    const frequencyData = new Uint8Array(analyser.frequencyBinCount);
-                    analyser.getByteFrequencyData(frequencyData);
-                    oscillator.stop(); audioContext.close();
-                    return btoa(Array.from(frequencyData.slice(0, 32)).join(',')).slice(0, 32);
-                }} catch (e) {{
-                    console.error("❌ Audio fingerprint failed:", e);
-                    return 'audio_blocked';
+                
+                const canvasFp = generateCanvasFingerprint();
+                const webglFp = generateWebGLFingerprint();
+                const audioFp = generateAudioFingerprint();
+                const browserInfo = getBrowserInfo();
+                
+                let primaryMethod = 'canvas'; let fingerprintId = canvasFp;
+                const workingMethods = [];
+                if (canvasFp !== 'canvas_blocked') workingMethods.push('canvas');
+                if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') workingMethods.push('webgl');
+                if (audioFp !== 'audio_blocked') workingMethods.push('audio');
+                
+                if (workingMethods.length === 0) {{
+                    primaryMethod = 'fallback';
+                    fingerprintId = 'privacy_browser_' + Date.now();
+                }} else if (workingMethods.length > 1) {{
+                    primaryMethod = 'hybrid';
+                    fingerprintId = btoa([canvasFp, webglFp, audioFp].join('|')).slice(0, 32);
+                }} else {{
+                    primaryMethod = workingMethods[0];
+                    fingerprintId = (primaryMethod === 'canvas' ? canvasFp : (primaryMethod === 'webgl' ? webglFp : audioFp));
                 }}
-            }}
-            
-            // Collect general browser and system information
-            function getBrowserInfo() {{
-                return {{
-                    userAgent: navigator.userAgent, language: navigator.language, platform: navigator.platform,
-                    cookieEnabled: navigator.cookieEnabled, doNotTrack: navigator.doNotTrack,
-                    hardwareConcurrency: navigator.hardwareConcurrency, maxTouchPoints: navigator.maxTouchPoints,
-                    screen: {{ width: screen.width, height: screen.height, colorDepth: screen.colorDepth, pixelDepth: screen.pixelDepth }},
-                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+                
+                let privacyLevel = 'standard';
+                if (canvasFp === 'canvas_blocked' && webglFp.includes('blocked') && audioFp === 'audio_blocked') {{
+                    privacyLevel = 'high_privacy';
+                }}
+                
+                const fingerprintResult = {{
+                    session_id: sessionId,
+                    fingerprint_id: fingerprintId,
+                    fingerprint_method: primaryMethod,
+                    canvas_fp: canvasFp,
+                    webgl_fp: webglFp,
+                    audio_fp: audioFp,
+                    browser_info: browserInfo,
+                    privacy_level: privacyLevel,
+                    working_methods: workingMethods,
+                    timestamp: Date.now()
                 }};
+                
+                console.log("🔍 Fingerprinting complete:", {{
+                    id: fingerprintId, method: primaryMethod, privacy: privacyLevel, working: workingMethods.length
+                }});
+                return JSON.stringify(fingerprintResult); # Explicitly stringify the result
+            }} catch (error) {{
+                console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
+                // Return a structured JSON error string
+                return JSON.stringify({{
+                    error: true,
+                    message: error.message,
+                    name: error.name,
+                    session_id: "{session_id}",
+                    capture_method: 'javascript_error_fingerprinting'
+                }});
             }}
-            
-            const canvasFp = generateCanvasFingerprint();
-            const webglFp = generateWebGLFingerprint();
-            const audioFp = generateAudioFingerprint();
-            const browserInfo = getBrowserInfo();
-            
-            let primaryMethod = 'canvas'; let fingerprintId = canvasFp;
-            const workingMethods = [];
-            if (canvasFp !== 'canvas_blocked') workingMethods.push('canvas');
-            if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') workingMethods.push('webgl');
-            if (audioFp !== 'audio_blocked') workingMethods.push('audio');
-            
-            if (workingMethods.length === 0) {{
-                primaryMethod = 'fallback';
-                fingerprintId = 'privacy_browser_' + Date.now();
-            }} else if (workingMethods.length > 1) {{
-                primaryMethod = 'hybrid';
-                fingerprintId = btoa([canvasFp, webglFp, audioFp].join('|')).slice(0, 32);
-            }} else {{
-                primaryMethod = workingMethods[0];
-                fingerprintId = (primaryMethod === 'canvas' ? canvasFp : (primaryMethod === 'webgl' ? webglFp : audioFp));
-            }}
-            
-            let privacyLevel = 'standard';
-            if (canvasFp === 'canvas_blocked' && webglFp.includes('blocked') && audioFp === 'audio_blocked') {{
-                privacyLevel = 'high_privacy';
-            }}
-            
-            const fingerprintResult = {{
-                session_id: sessionId,
-                fingerprint_id: fingerprintId,
-                fingerprint_method: primaryMethod,
-                canvas_fp: canvasFp,
-                webgl_fp: webglFp,
-                audio_fp: audioFp,
-                browser_info: browserInfo,
-                privacy_level: privacyLevel,
-                working_methods: workingMethods,
-                timestamp: Date.now()
-            }};
-            
-            console.log("🔍 Fingerprinting complete:", {{
-                id: fingerprintId, method: primaryMethod, privacy: privacyLevel, working: workingMethods.length
-            }});
-            return fingerprintResult;
         }})()
         """
         return js_code
@@ -1681,713 +1693,6 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
-# SESSION MANAGER (INTEGRATED & REFINED)
-# =============================================================================
-
-class SessionManager:
-    """
-    Manages user sessions, orchestrating interactions between database, CRM,
-    AI, and various feature managers.
-    """
-    def __init__(self, config: Config, db_manager: DatabaseManager, zoho_manager: ZohoCRMManager, 
-                 ai_system: EnhancedAI, rate_limiter: RateLimiter, fingerprinting_manager: FingerprintingManager,
-                 email_verification_manager: EmailVerificationManager, question_limit_manager: QuestionLimitManager):
-        self.config = config
-        self.db = db_manager
-        self.zoho = zoho_manager
-        self.ai = ai_system
-        self.rate_limiter = rate_limiter
-        self.fingerprinting = fingerprinting_manager
-        self.email_verification = email_verification_manager
-        self.question_limits = question_limit_manager
-        self._save_lock = threading.Lock()
-        self._cleanup_interval = timedelta(hours=1)  # Cleanup every hour (Fix 6)
-        self._last_cleanup = datetime.now() # (Fix 6)
-
-    def get_session_timeout_minutes(self) -> int:
-        """Returns the configured session timeout duration in minutes."""
-        return 15
-    
-    # Added for memory management (Fix 6)
-    def _periodic_cleanup(self):
-        """Perform periodic cleanup of memory and resources"""
-        now = datetime.now()
-        if now - self._last_cleanup < self._cleanup_interval:
-            return
-            
-        try:
-            # Clean up fingerprinting cache
-            if hasattr(self.fingerprinting, 'fingerprint_cache'):
-                old_entries = []
-                for fp_id, data in self.fingerprinting.fingerprint_cache.items():
-                    if now - data.get('last_seen', now) > timedelta(hours=24):
-                        old_entries.append(fp_id)
-                
-                for old_fp in old_entries:
-                    del self.fingerprinting.fingerprint_cache[old_fp]
-                
-                if old_entries:
-                    logger.info(f"Cleaned up {len(old_entries)} old fingerprint cache entries")
-            
-            # Clean up rate limiter
-            if hasattr(self.rate_limiter, 'requests'):
-                old_limit_entries = []
-                for identifier, timestamps in self.rate_limiter.requests.items():
-                    # Remove timestamps older than the window
-                    cutoff = time.time() - self.rate_limiter.window_seconds
-                    self.rate_limiter.requests[identifier] = [t for t in timestamps if t > cutoff]
-                    
-                    if not self.rate_limiter.requests[identifier]:
-                        old_limit_entries.append(identifier)
-                
-                for old_id in old_limit_entries:
-                    del self.rate_limiter.requests[old_id]
-                
-                if old_limit_entries:
-                    logger.info(f"Cleaned up {len(old_limit_entries)} old rate limiter entries")
-            
-            # Clean up error history (assuming self.error_handler is available in SessionManager,
-            # which it is via st.session_state)
-            if hasattr(st.session_state, 'error_handler') and hasattr(st.session_state.error_handler, 'error_history') and len(st.session_state.error_handler.error_history) > 100:
-                st.session_state.error_handler.error_history = st.session_state.error_handler.error_history[-50:]  # Keep last 50
-                logger.info("Cleaned up error history")
-            
-            self._last_cleanup = now
-            logger.debug("Periodic cleanup completed")
-            
-        except Exception as e:
-            logger.error(f"Error during periodic cleanup: {e}", exc_info=True)
-
-
-    def _update_activity(self, session: UserSession):
-        """
-        Updates the session's last activity timestamp and saves it to the DB.
-        Also resets the `timeout_saved_to_crm` flag if the user becomes active again.
-        """
-        session.last_activity = datetime.now()
-        
-        if session.timeout_saved_to_crm:
-            session.timeout_saved_to_crm = False
-            logger.info(f"Reset 'timeout_saved_to_crm' flag for session {session.session_id[:8]} due to new activity.")
-        
-        if isinstance(session.user_type, str):
-            session.user_type = UserType(session.user_type)
-        
-        # FIX: Ensure messages list integrity before saving (already present, but good)
-        if not isinstance(session.messages, list):
-            logger.warning(f"Messages field corrupted for session {session.session_id[:8]}, preserving as empty list")
-            session.messages = []
-
-        try:
-            self.db.save_session(session)
-            logger.debug(f"Activity update saved for {session.session_id[:8]} with {len(session.messages)} messages")
-        except Exception as e:
-            logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
-
-    def _capture_client_info(self, session: UserSession) -> UserSession:
-        """
-        Enhanced client info capture with multiple fallback methods.
-        Attempts to get IP and User-Agent from Streamlit's internal context,
-        falling back to JS detection if necessary.
-        """
-        ip_captured = False
-        ua_captured = False
-        
-        # Method 1: Try the current Streamlit context (most reliable if available)
-        try:
-            from streamlit.runtime.scriptrunner import get_script_run_ctx
-            ctx = get_script_run_ctx()
-            
-            headers = None
-            if ctx:
-                if hasattr(ctx, 'request_context') and ctx.request_context and hasattr(ctx.request_context, 'headers'):
-                    headers = ctx.request_context.headers # Older Streamlit versions
-                elif hasattr(ctx, 'session_info') and ctx.session_info and hasattr(ctx.session_info, 'headers'):
-                    headers = ctx.session_info.headers # Newer Streamlit versions
-                elif hasattr(ctx, '_session_state') and hasattr(ctx._session_state, '_session_info') and hasattr(ctx._session_state._session_info, 'headers'):
-                    # Fallback for some specific deployments/versions
-                    headers = ctx._session_state._session_info.headers
-
-            if headers:
-                # Extract IP address from common headers
-                ip_headers_priority = [
-                    'x-forwarded-for', 'x-real-ip', 'cf-connecting-ip', 
-                    'x-client-ip', 'x-forwarded', 'forwarded-for', 'forwarded'
-                ]
-                
-                for header_name in ip_headers_priority:
-                    ip_val = headers.get(header_name) or headers.get(header_name.upper()) # Check both cases
-                    if ip_val:
-                        session.ip_address = ip_val.split(',')[0].strip()
-                        session.ip_detection_method = header_name
-                        ip_captured = True
-                        break
-                
-                # Extract User-Agent
-                ua_val = headers.get('user-agent') or headers.get('User-Agent')
-                if ua_val:
-                    session.user_agent = ua_val
-                    ua_captured = True
-                    
-        except Exception as e:
-            logger.debug(f"Method 1 (Streamlit context) failed to capture client info: {e}")
-        
-        # Final fallbacks if info was not captured by Python server-side
-        if not ip_captured:
-            session.ip_address = "capture_failed_py_context"
-            session.ip_detection_method = "python_context_unavailable"
-            
-        if not ua_captured:
-            session.user_agent = "capture_failed_py_context"
-        
-        logger.info(f"Client info capture for {session.session_id[:8]}: IP_Captured={ip_captured}, UA_Captured={ua_captured}")
-        return session
-
-    def _create_guest_session(self) -> UserSession:
-        """
-        Creates a new guest user session with enhanced client info capture.
-        """
-        session = UserSession(session_id=str(uuid.uuid4()))
-        
-        # Use the enhanced client info capture
-        session = self._capture_client_info(session)
-        
-        self.db.save_session(session)
-        st.session_state.current_session_id = session.session_id
-        logger.info(f"Created new guest session: {session.session_id[:8]}.")
-        return session
-
-    def _validate_session(self, session: UserSession) -> UserSession:
-        """
-        Ensures the `UserSession` object's Enum fields are correctly typed
-        and other defaults/conversions are applied.
-        """
-        if not session: return session
-            
-        if isinstance(session.user_type, str):
-            try:
-                session.user_type = UserType(session.user_type)
-            except ValueError:
-                logger.error(f"Invalid user_type string '{session.user_type}' for session {session.session_id[:8]}. Defaulting to GUEST.")
-                session.user_type = UserType.GUEST
-        
-        if isinstance(session.ban_status, str):
-            try:
-                session.ban_status = BanStatus(session.ban_status)
-            except ValueError:
-                logger.error(f"Invalid ban_status string '{session.ban_status}' for session {session.session_id[:8]}. Defaulting to NONE.")
-                session.ban_status = BanStatus.NONE
-        
-        if not isinstance(session.messages, list):
-            logger.warning(f"Session {session.session_id[:8]} messages field is not a list. Resetting to empty list.")
-            session.messages = []
-        
-        if not isinstance(session.email_addresses_used, list):
-            logger.warning(f"Session {session.session_id[:8]} email_addresses_used field is not a list. Resetting to empty list.")
-            session.email_addresses_used = []
-            
-        return session
-
-    def _mask_email(self, email: str) -> str:
-        """
-        Masks an email address for display in the UI, preserving privacy.
-        """
-        if '@' not in email: return email
-        
-        local_part, domain_part = email.split('@', 1)
-        
-        if len(local_part) <= 2:
-            masked_local = local_part[0] + '*' * (len(local_part) - 1)
-        else:
-            masked_local = local_part[0] + '*' * (len(local_part) - 2) + local_part[-1]
-        
-        domain_segments = domain_part.split('.')
-        if len(domain_segments) > 1:
-            masked_domain_first_part = '*' * len(domain_segments[0])
-            masked_domain = masked_domain_first_part + '.' + '.'.join(domain_segments[1:])
-        else:
-            masked_domain = '*' * len(domain_part)
-        
-        return f"{masked_local}@{masked_domain}"
-
-    def _save_to_crm_timeout(self, session: UserSession, trigger_reason: str):
-        """
-        Internal method to initiate a CRM save, specifically for scenarios like
-        inactivity timeout or emergency browser close.
-        """
-        with self._save_lock:
-            logger.info(f"=== INITIATING CRM SAVE (Internal from SessionManager) ===")
-            logger.info(f"Trigger: '{trigger_reason}', Session ID: {session.session_id[:8]}.")
-            
-            if (session.user_type.value != UserType.REGISTERED_USER.value or 
-                not session.email or 
-                not session.messages or 
-                not self.config.ZOHO_ENABLED):
-                logger.info(f"CRM save skipped: Not eligible. (UserType: {session.user_type.value}, Email: {bool(session.email)}, Messages: {bool(session.messages)}, Zoho Enabled: {self.config.ZOHO_ENABLED})")
-                return False
-            if session.timeout_saved_to_crm and "timeout" in trigger_reason.lower():
-                logger.info("CRM save skipped: Session already marked as saved for this timeout period.")
-                return False 
-            
-            try:
-                success = self.zoho.save_chat_transcript_sync(session, trigger_reason)
-                if success:
-                    logger.info("CRM save (internal) completed successfully.")
-                    session.timeout_saved_to_crm = True
-                    self.db.save_session(session)
-                    return True
-                else:
-                    logger.error("CRM save (internal) failed. See ZohoCRMManager logs for details.")
-                    return False
-            except Exception as e:
-                logger.error(f"CRM save (internal) encountered an unexpected exception: {e}", exc_info=True)
-                return False
-            finally:
-                logger.info(f"=== CRM SAVE (Internal from SessionManager) ENDED ===\n")
-
-    def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]):
-        """
-        Applies collected fingerprinting data (from JavaScript component) to the current session.
-        """
-        session.fingerprint_id = fingerprint_data.get('fingerprint_id')
-        session.fingerprint_method = fingerprint_data.get('fingerprint_method')
-        session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor')
-        session.browser_privacy_level = fingerprint_data.get('privacy_level', 'standard')
-        
-        browser_info = fingerprint_data.get('browser_info', {})
-        if browser_info.get('userAgent'):
-            session.user_agent = browser_info['userAgent']
-        
-        logger.info(f"Applied fingerprint to session {session.session_id[:8]}: ID={session.fingerprint_id[:8]}..., Method={session.fingerprint_method}.")
-        self.db.save_session(session)
-
-    def check_fingerprint_history(self, fingerprint_id: str) -> Dict[str, Any]:
-        """
-        Checks the database to see if a given fingerprint ID has been seen before.
-        """
-        try:
-            sessions_with_same_fp = self.db.find_sessions_by_fingerprint(fingerprint_id)
-            
-            if sessions_with_same_fp:
-                email_sessions = [s for s in sessions_with_same_fp if s.email]
-                
-                if email_sessions:
-                    latest_email_session = max(email_sessions, key=lambda x: x.last_activity)
-                    
-                    return {
-                        'has_history': True,
-                        'email': latest_email_session.email,
-                        'full_name': latest_email_session.full_name,
-                        'last_seen': latest_email_session.last_activity,
-                        'session_count': len(sessions_with_same_fp)
-                    }
-            
-            return {'has_history': False}
-            
-        except Exception as e:
-            logger.error(f"Error checking fingerprint history for '{fingerprint_id[:8]}...': {e}", exc_info=True)
-            error_handler.log_error(error_handler.handle_api_error("Fingerprinting", "Check History", e))
-            return {'has_history': False}
-
-    def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
-        """
-        Initiates the email verification process for a guest user.
-        """
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, email):
-            return {'success': False, 'message': 'Please enter a valid email address.'}
-        
-        verification_sent = self.email_verification.send_verification_code(email)
-        
-        if verification_sent:
-            session.email = email
-            if email not in session.email_addresses_used:
-                session.email_addresses_used.append(email) 
-            
-            self.db.save_session(session)
-            
-            return {
-                'success': True, 
-                'message': f'Verification code sent to {email}. Please check your inbox (and spam folder).'
-            }
-        else:
-            return {'success': False, 'message': 'Failed to send verification code. Please try again or contact support.'}
-
-    def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
-        """
-        Verifies the email code provided by the user. If successful, it upgrades
-        the user's tier.
-        """
-        if not session.email:
-            return {'success': False, 'message': 'No email address is set for verification in this session.'}
-        
-        verification_success = self.email_verification.verify_code(session.email, code)
-        
-        if verification_success:
-            session.user_type = UserType.EMAIL_VERIFIED_GUEST
-            session.daily_question_count = 0
-            session.question_limit_reached = False
-            
-            session.ban_status = BanStatus.NONE
-            session.ban_start_time = None
-            session.ban_end_time = None
-            session.ban_reason = None
-            
-            self.db.save_session(session)
-            
-            logger.info(f"Session {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST for email: {session.email}.")
-            
-            return {
-                'success': True,
-                'message': f'Email verified! You are now an Email Verified Guest with 10 questions per day.'
-            }
-        else:
-            return {'success': False, 'message': 'Invalid verification code. Please check the code and try again.'}
-
-    def detect_evasion(self, session: UserSession) -> bool:
-        """
-        Detects potential evasion attempts based on heuristics.
-        """
-        if not session.fingerprint_id:
-            logger.debug("Cannot detect evasion: Session has no fingerprint ID.")
-            return False
-        
-        recent_cutoff = datetime.now() - timedelta(hours=48)
-        sessions_from_same_fingerprint = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
-        
-        for s in sessions_from_same_fingerprint:
-            if s.session_id != session.session_id and s.last_activity and s.last_activity > recent_cutoff:
-                if s.question_limit_reached or s.ban_status.value != BanStatus.NONE.value:
-                    logger.warning(f"Evasion detected: Fingerprint {session.fingerprint_id[:8]}... has recent limited/banned session {s.session_id[:8]}. Triggering evasion penalty.")
-                    return True 
-
-        if session.email_switches_count > 1:
-            logger.warning(f"Evasion detected: Session {session.session_id[:8]} has switched emails {session.email_switches_count} times. Triggering evasion penalty.")
-            return True
-            
-        return False
-
-    # Updated get_session for memory management and cleanup (Fix 6)
-    def get_session(self) -> UserSession:
-        """
-        Retrieves the current user session.
-        """
-        # Perform periodic cleanup
-        self._periodic_cleanup()
-        
-        session_id = st.session_state.get('current_session_id')
-        
-        if session_id:
-            session = self.db.load_session(session_id)
-            if session and session.active:
-                session = self._validate_session(session)
-                
-                # Enhanced session recovery
-                if not session: # If load_session failed or returned None unexpectedly
-                    logger.warning(f"Session validation failed for {session_id[:8]}, creating new session.")
-                    if 'current_session_id' in st.session_state:
-                        del st.session_state['current_session_id']
-                    return self._create_guest_session() # Recreate a fresh session
-
-                # Apply temporary fingerprint if missing
-                if not session.fingerprint_id:
-                    session.fingerprint_id = f"temp_fp_{session.session_id[:8]}"
-                    session.fingerprint_method = "temporary_fallback_python"
-                    session.visitor_type = "new_visitor_fallback"
-                    try:
-                        self.db.save_session(session)
-                        logger.info(f"Applied temporary fallback fingerprint to session {session.session_id[:8]}.")
-                    except Exception as e:
-                        logger.error(f"Failed to save temporary fingerprint for session {session.session_id[:8]}: {e}", exc_info=True)
-                
-                # Check limits and handle bans
-                limit_check = self.question_limits.is_within_limits(session)
-                if not limit_check.get('allowed', True):
-                    ban_type = limit_check.get('ban_type', 'unknown')
-                    message = limit_check.get('message', 'Access restricted due to usage policy.')
-                    time_remaining = limit_check.get('time_remaining')
-                    
-                    st.error(f"🚫 **Access Restricted**")
-                    if time_remaining:
-                        # Ensure time remaining is non-negative
-                        hours = max(0, int(time_remaining.total_seconds() // 3600))
-                        minutes = max(0, int((time_remaining.total_seconds() % 3600) // 60))
-                        st.error(f"Time remaining: {hours}h {minutes}m")
-                    st.info(message)
-                    logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
-                    
-                    # Still update activity even if banned (important for ban expiry)
-                    try:
-                        self._update_activity(session)
-                    except Exception as e:
-                        logger.error(f"Failed to update activity for banned session {session.session_id[:8]}: {e}", exc_info=True)
-                    
-                    return session # Return the banned session to show history
-
-                # Update activity for allowed sessions
-                try:
-                    self._update_activity(session)
-                except Exception as e:
-                    logger.error(f"Failed to update session activity for {session.session_id[:8]}: {e}", exc_info=True)
-                    # Continue anyway
-                
-                return session
-        
-        # Create new session if no valid session found
-        logger.info("No active session found or current session is invalid. Creating a new guest session.")
-        try:
-            new_session = self._create_guest_session()
-            return self._validate_session(new_session)
-        except Exception as e:
-            logger.error(f"Failed to create new guest session during get_session: {e}", exc_info=True)
-            # Return a minimal session as last resort to prevent app crash
-            fallback_session = UserSession(session_id=str(uuid.uuid4()))
-            fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
-            st.error("⚠️ Failed to create a new session. Operating in emergency fallback mode. Chat history may not persist.")
-            return fallback_session
-
-    @handle_api_errors("Authentication", "WordPress Login")
-    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        """
-        Authenticates a user against the configured WordPress site using JWT.
-        """
-        if not self.config.WORDPRESS_URL:
-            st.error("Authentication service (WordPress URL) is not configured in secrets.")
-            return None
-        if not self.rate_limiter.is_allowed(f"auth_login_attempt_{username}"):
-            st.error("Too many login attempts. Please wait a moment before trying again.")
-            return None
-
-        clean_username = username.strip()
-        clean_password = password.strip()
-
-        try:
-            logger.info(f"Attempting WordPress authentication for user: '{clean_username}'.")
-            response = requests.post(
-                f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token",
-                json={'username': clean_username, 'password': clean_password},
-                headers={'Content-Type': 'application/json'},
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                logger.info(f"WordPress authentication successful for '{clean_username}'.")
-                
-                current_session = self.get_session() # Use get_session to retrieve current session
-                
-                display_name = (
-                    data.get('user_display_name') or 
-                    data.get('displayName') or 
-                    data.get('name') or 
-                    data.get('user_nicename') or 
-                    data.get('first_name') or
-                    data.get('nickname') or
-                    clean_username
-                )
-
-                current_session.user_type = UserType.REGISTERED_USER
-                current_session.email = data.get('user_email')
-                current_session.full_name = display_name
-                current_session.wp_token = data.get('token')
-                current_session.last_activity = datetime.now()
-                current_session.timeout_saved_to_crm = False
-
-                current_session.daily_question_count = 0
-                current_session.total_question_count = 0
-                current_session.question_limit_reached = False
-                current_session.ban_status = BanStatus.NONE
-                current_session.ban_start_time = None
-                current_session.ban_end_time = None
-                current_session.ban_reason = None
-                
-                if current_session.email and current_session.email not in current_session.email_addresses_used:
-                    current_session.email_addresses_used.append(current_session.email)
-                
-                try:
-                    self.db.save_session(current_session)
-                    logger.info(f"Authenticated session {current_session.session_id[:8]} saved as REGISTERED_USER.")
-                    st.session_state.current_session_id = current_session.session_id
-                    st.success(f"🎉 Welcome back, {current_session.full_name}!")
-                    return current_session
-                except Exception as e:
-                    logger.error(f"Failed to save authenticated session {current_session.session_id[:8]} to DB: {e}", exc_info=True)
-                    st.error("Authentication successful, but failed to save session details. Please try again.")
-                    return None
-                
-            else:
-                error_message = f"Invalid username or password (HTTP Status Code: {response.status_code})."
-                try:
-                    error_data = response.json()
-                    error_message = error_data.get('message', error_message)
-                except json.JSONDecodeError:
-                    pass
-                
-                st.error(error_message)
-                logger.warning(f"WordPress authentication failed for '{clean_username}': {error_message}")
-                return None
-                
-        except requests.exceptions.RequestException as e:
-            st.error(f"A network error occurred during authentication. Please check your internet connection or try again later.")
-            logger.error(f"WordPress authentication network exception for '{clean_username}': {e}", exc_info=True)
-            return None
-
-    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-        """
-        Handles the entire AI response generation process for a user prompt.
-        """
-        # 1. Rate Limiting: Prevent rapid-fire requests from a single session.
-        if not self.rate_limiter.is_allowed(session.session_id):
-            return {"content": "You are sending requests too quickly. Please wait a moment and try again.", "success": False, "source": "Rate Limiter"}
-
-        # 2. Validate session and check for active bans. This is a critical first step.
-        session = self._validate_session(session)
-        limit_check = self.question_limits.is_within_limits(session)
-        if not limit_check.get('allowed', True):
-            return {
-                "content": limit_check.get('message', 'Access restricted due to usage policy.'),
-                "success": False,
-                "banned": True,
-                "reason": limit_check.get('reason'),
-                "time_remaining": limit_check.get('time_remaining')
-            }
-        
-        # 3. Evasion Detection: Check if the user is trying to bypass limits.
-        if self.detect_evasion(session):
-            penalty_hours = self.question_limits.apply_evasion_penalty(session)
-            self.db.save_session(session)
-            return {
-                "content": "Unusual activity detected. Your access has been temporarily restricted. Please try again later.",
-                "success": False,
-                "evasion_penalty": True,
-                "penalty_hours": penalty_hours
-            }
-
-        # 4. Sanitize Input: Clean the user's prompt to prevent potential XSS or injection.
-        sanitized_prompt = sanitize_input(prompt)
-        
-        # 5. Content Moderation: Check if the prompt violates any safety policies.
-        moderation_result = check_content_moderation(sanitized_prompt, self.ai.openai_client)
-        if moderation_result and moderation_result.get("flagged"):
-            session.messages.append({"role": "user", "content": sanitized_prompt, "timestamp": datetime.now().isoformat()})
-            session.messages.append({"role": "assistant", "content": moderation_result["message"], "source": "Content Safety Policy", "timestamp": datetime.now().isoformat()})
-            self.db.save_session(session)
-            return {
-                "content": moderation_result["message"], 
-                "success": False, 
-                "source": "Content Safety"
-            }
-
-        # 6. Record Question: Increment the question count for the current session and tier.
-        self.question_limits.record_question(session)
-
-        # 7. Get AI Response: Call the underlying AI system to generate a response.
-        ai_response = self.ai.get_response(sanitized_prompt, session.messages)
-        
-        # 8. Append Messages: Add both the user's prompt and the AI's response to chat history.
-        session.messages.append({
-            "role": "user", 
-            "content": sanitized_prompt,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        response_message = {
-            "role": "assistant",
-            "content": ai_response.get("content", "No response generated."),
-            "source": ai_response.get("source", "Unknown"),
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        for flag in ["used_search", "used_pinecone", "has_citations", "has_inline_citations", "safety_override"]:
-            if ai_response.get(flag):
-                response_message[flag] = True
-            
-        session.messages.append(response_message)
-        session.messages = session.messages[-100:]
-        
-        # FIX: Moved activity update and final save to ensure messages are included.
-        # 9. Save Session (with messages) and Update Activity Timestamp
-        logger.debug(f"Session {session.session_id[:8]} now has {len(session.messages)} messages before final save in get_ai_response.")
-        try:
-            # First, save the session with updated messages
-            self.db.save_session(session)
-            logger.debug(f"Successfully saved session {session.session_id[:8]} with {len(session.messages)} messages to database in get_ai_response.")
-
-            # Then, update activity timestamp and save again (this is what _update_activity does)
-            session.last_activity = datetime.now()
-            # If a timeout save was triggered earlier in this session run, reset the flag now that activity is detected
-            if session.timeout_saved_to_crm:
-                session.timeout_saved_to_crm = False
-                logger.info(f"Reset 'timeout_saved_to_crm' flag for session {session.session_id[:8]} due to new activity after AI response.")
-            self.db.save_session(session) # Save again with updated last_activity
-            logger.debug(f"Activity timestamp updated for session {session.session_id[:8]} after AI response.")
-
-        except Exception as e:
-            logger.error(f"Failed to save session {session.session_id[:8]} to database (including activity update) in get_ai_response: {e}", exc_info=True)
-            
-        return ai_response
-
-    def clear_chat_history(self, session: UserSession):
-        """Clears the chat history for the current session."""
-        session = self._validate_session(session)
-        session.messages = []
-        session.timeout_saved_to_crm = False
-        self._update_activity(session)
-
-    def end_session(self, session: UserSession):
-        """
-        Ends the current user session.
-        """
-        session = self._validate_session(session)
-        
-        # FIX: Replaced _save_to_crm_timeout with direct save_chat_transcript_sync call and error handling
-        if (session.user_type.value == UserType.REGISTERED_USER.value and 
-            session.email and 
-            session.messages and 
-            self.zoho.config.ZOHO_ENABLED):
-            
-            logger.info(f"Attempting CRM save for manual sign-out of session {session.session_id[:8]}.")
-            try:
-                success = self.zoho.save_chat_transcript_sync(session, "Manual Sign Out")
-                if success:
-                    logger.info(f"CRM save successful for session {session.session_id[:8]} during sign out.")
-                else:
-                    logger.error(f"CRM save failed for session {session.session_id[:8]} during sign out (ZohoManager returned False).")
-            except Exception as e:
-                logger.error(f"CRM save exception during sign out for session {session.session_id[:8]}: {e}", exc_info=True)
-        
-        session.active = False
-        try:
-            self.db.save_session(session)
-        except Exception as e:
-            logger.error(f"Failed to mark session {session.session_id[:8]} as inactive in DB during end_session: {e}", exc_info=True)
-        
-        keys_to_clear = ['current_session_id', 'page', 'verification_stage', 'verification_email']
-        for key in keys_to_clear:
-            if key in st.session_state:
-                del st.session_state[key]
-        logger.info(f"Session {session.session_id[:8]} ended. Redirecting to welcome page.")
-
-    def manual_save_to_crm(self, session: UserSession):
-        """Allows registered users to manually save their current chat transcript to Zoho CRM."""
-        session = self._validate_session(session)
-        
-        if (session.user_type.value == UserType.REGISTERED_USER.value and 
-            session.email and 
-            session.messages and 
-            self.zoho.config.ZOHO_ENABLED):
-            
-            with st.spinner("💾 Saving chat to Zoho CRM..."):
-                success = self._save_to_crm_timeout(session, "Manual Save to Zoho CRM")
-            if success:
-                st.success("✅ Chat manually saved to Zoho CRM!")
-                self._update_activity(session)
-            else:
-                st.error("❌ Failed to manually save chat to Zoho CRM. Please check logs for details.")
-        else:
-            st.warning("Cannot save to CRM: Only registered users with a chat history can manually save.")
-
-# =============================================================================
 # JAVASCRIPT COMPONENTS & EVENT HANDLING
 # =============================================================================
 
@@ -2820,59 +2125,94 @@ def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
     """
     js_code = f"""
     (() => {{
-        const sessionId = "{session_id}";
-        
-        // Ensure this script only runs once per component instance
-        if (window.fifi_client_info_sent_{session_id}) return null;
-        window.fifi_client_info_sent_{session_id} = true;
+        try {{
+            const sessionId = "{session_id}";
+            
+            // Ensure this script only runs once per component instance
+            if (window.fifi_client_info_sent_{session_id}) return null;
+            window.fifi_client_info_sent_{session_id} = true;
 
-        // Collect client information
-        const clientInfo = {{
-            userAgent: navigator.userAgent,
-            language: navigator.language,
-            languages: navigator.languages ? navigator.languages.join(',') : '',
-            platform: navigator.platform,
-            cookieEnabled: navigator.cookieEnabled,
-            doNotTrack: navigator.doNotTrack,
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            screen: {{
-                width: screen.width,
-                height: screen.height,
-                colorDepth: screen.colorDepth
-            }},
-            viewport: {{
-                width: window.innerWidth,
-                height: window.innerHeight
-            }},
-            timestamp: Date.now()
-        }};
-        
-        // Try to get more detailed network info if available
-        if (navigator.connection) {{
-            clientInfo.connection = {{
-                effectiveType: navigator.connection.effectiveType,
-                downlink: navigator.connection.downlink,
-                rtt: navigator.connection.rtt
+            // Collect client information
+            const clientInfo = {{
+                userAgent: navigator.userAgent,
+                language: navigator.language,
+                languages: navigator.languages ? navigator.languages.join(',') : '',
+                platform: navigator.platform,
+                cookieEnabled: navigator.cookieEnabled,
+                doNotTrack: navigator.doNotTrack,
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                screen: {{
+                    width: screen.width,
+                    height: screen.height,
+                    colorDepth: screen.colorDepth
+                }},
+                viewport: {{
+                    width: window.innerWidth,
+                    height: window.innerHeight
+                }},
+                timestamp: Date.now()
             }};
+            
+            // Try to get more detailed network info if available
+            if (navigator.connection) {{
+                clientInfo.connection = {{
+                    effectiveType: navigator.connection.effectiveType,
+                    downlink: navigator.connection.downlink,
+                    rtt: navigator.connection.rtt
+                }};
+            }}
+            
+            const resultObject = {{
+                session_id: sessionId,
+                client_info: clientInfo,
+                capture_method: 'javascript_component_return'
+            }};
+
+            console.log('FiFi Client Info Detected:', resultObject);
+            // Explicitly stringify the result object as st_javascript expects JSON string or primitive
+            return JSON.stringify(resultObject);
+        }} catch (error) {{
+            console.error("🚨 FiFi Client Info Detector caught a critical error:", error);
+            // Return a structured JSON error string if JS fails
+            return JSON.stringify({{
+                error: true,
+                message: error.message,
+                name: error.name,
+                stack: error.stack,
+                session_id: "{session_id}",
+                capture_method: 'javascript_error'
+            }});
         }}
-        
-        console.log('FiFi Client Info Detected:', clientInfo);
-        
-        // Return data directly to Streamlit via st_javascript
-        return {{
-            session_id: sessionId,
-            client_info: clientInfo,
-            capture_method: 'javascript_component_return'
-        }};
     }})()
     """
     
     try:
-        # FIX 1: Removed height=0 parameter
-        result = st_javascript(js_code, key=f"client_info_{session_id[:8]}")
-        return result
+        raw_result = st_javascript(js_code, key=f"client_info_{session_id[:8]}")
+
+        # Attempt to parse the raw_result. It should now always be a JSON string.
+        if isinstance(raw_result, str):
+            parsed_result = safe_json_loads(raw_result)
+            if isinstance(parsed_result, dict):
+                if parsed_result.get('error'):
+                    logger.error(f"JS Client Info Detector reported error: {parsed_result.get('message', 'Unknown JS error')}")
+                    return None # Return None if JS reported an error
+                return parsed_result
+            else:
+                logger.error(f"st_javascript returned non-dict from JSON.stringify: {raw_result[:100]}...")
+                return None
+        elif raw_result is None: # Happens on initial render or if JS didn't return anything yet
+            return None
+        else: # Unexpected type (e.g., an implicit object from st_javascript's auto-conversion in older versions)
+            logger.warning(f"Unexpected type returned by st_javascript for client info: {type(raw_result)}. Assuming it's a dict if it looks like one.")
+            if isinstance(raw_result, dict):
+                if raw_result.get('error'):
+                    logger.error(f"JS Client Info Detector reported error in dict format: {raw_result.get('message', 'Unknown JS error')}")
+                    return None
+                return raw_result
+            return None
+
     except Exception as e:
-        logger.error(f"JavaScript client info detection failed: {e}")
+        logger.error(f"Python-side parsing or execution error for JavaScript client info: {e}", exc_info=True)
         return None
 
 def handle_timer_event(timer_result: Dict[str, Any], session_manager, session: UserSession) -> bool:
@@ -3021,7 +2361,7 @@ def handle_emergency_save_requests_from_query():
 # UI COMPONENTS (INTEGRATED & ENHANCED)
 # =============================================================================
 
-def render_welcome_page(session_manager: SessionManager):
+def render_welcome_page(session_manager: 'SessionManager'): # Forward reference 'SessionManager'
     """Renders the application's welcome page, including sign-in and guest options."""
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
@@ -3106,7 +2446,7 @@ def render_welcome_page(session_manager: SessionManager):
                 st.session_state.page = "chat" # Change application page
                 st.rerun() # Force a rerun to switch to the chat interface
 
-def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_exporter: PDFExporter):
+def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter): # Forward reference
     """Renders the application's sidebar, displaying session information, user status, and action buttons."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
@@ -3215,7 +2555,7 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat automatically saves to CRM after 15 minutes of inactivity.")
 
-def render_email_verification_dialog(session_manager: SessionManager, session: UserSession):
+def render_email_verification_dialog(session_manager: 'SessionManager', session: UserSession): # Forward reference
     """
     Renders the email verification dialog for guest users who have hit their
     initial question limit (4 questions).
@@ -3337,7 +2677,7 @@ def render_email_verification_dialog(session_manager: SessionManager, session: U
                 else:
                     st.error("Please enter the verification code you received.")
             
-def render_chat_interface(session_manager: SessionManager, session: UserSession):
+def render_chat_interface(session_manager: 'SessionManager', session: UserSession): # Forward reference
     """Renders the main chat interface."""
     
     st.title("🤖 FiFi AI Assistant")
@@ -3352,7 +2692,8 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
         ):
         
         client_info_result = render_client_info_detector(session.session_id)
-        if client_info_result and client_info_result.get('client_info'):
+        # FIX: Robustly check client_info_result type and content
+        if isinstance(client_info_result, dict) and client_info_result.get('client_info'):
             client_info = client_info_result['client_info']
             updated_session = False
             
@@ -3371,21 +2712,34 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
             if updated_session:
                 session_manager.db.save_session(session) # Persist the updated client info
                 st.rerun() # Rerun to apply latest session data
+        elif client_info_result is not None: # Log if it's not None but also not a valid dict, for debugging
+            logger.debug(f"Client info detector returned unexpected type or missing data: {client_info_result} (type: {type(client_info_result)})")
+
 
     # Original fingerprinting call (can remain as it handles overall FP ID)
     if not session.fingerprint_id or session.fingerprint_method == "temporary_fallback_python":
         fingerprint_js_code = session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
-        fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id[:8]}")
+        raw_fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id[:8]}")
         
-        if fp_result:
+        # FIX: Robustly parse and check raw_fp_result from st_javascript
+        fp_result = None
+        if isinstance(raw_fp_result, str):
+            fp_result = safe_json_loads(raw_fp_result)
+        elif isinstance(raw_fp_result, dict): # st_javascript might sometimes return dict directly
+            fp_result = raw_fp_result
+
+        if isinstance(fp_result, dict) and not fp_result.get('error'): # Ensure it's a dict and not an error
             extracted_fp_data = session_manager.fingerprinting.extract_fingerprint_from_result(fp_result)
             if extracted_fp_data.get('fingerprint_method') not in ["fallback", "canvas_blocked", "webgl_blocked", "audio_blocked"]:
                 session_manager.apply_fingerprinting(session, extracted_fp_data)
                 st.rerun()
             else:
                 logger.debug(f"JS Fingerprint returned a fallback/blocked result: {extracted_fp_data.get('fingerprint_method')}. Retaining Python fallback if present.")
+        elif fp_result is not None:
+            logger.debug(f"Fingerprinting component returned unexpected data or error: {fp_result}. Will try again.")
         else:
             logger.debug(f"Fingerprinting component for session {session.session_id[:8]} did not return result on this run. Will try again.")
+
 
     if session.user_type.value == UserType.REGISTERED_USER.value:
         try:
@@ -3548,7 +2902,7 @@ def render_diagnostic_page():
             
             st.markdown("#### JavaScript Component Capture (Client-side Fallback)")
             client_info_js_result = render_client_info_detector(session_id="diagnostic_js_test")
-            if client_info_js_result and client_info_js_result.get('client_info'):
+            if isinstance(client_info_js_result, dict) and client_info_js_result.get('client_info'):
                 st.json(client_info_js_result['client_info'])
             else:
                 st.info("No JavaScript client info result yet (may need re-run or be blocked).")
