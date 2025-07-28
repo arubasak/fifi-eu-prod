@@ -30,18 +30,18 @@ import requests
 import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
-# REMOVED: import signal (as it doesn't work in Streamlit's threading model)
-
 # =============================================================================
 # FINAL INTEGRATED FIFI AI - ALL FEATURES IMPLEMENTED (CLEANED & COMPLETE)
 # - All previous fixes including enum comparison.
 # - OpenAI content moderation model name corrected.
 # - All temporary debug logging removed for production use.
 # - FIX: Password field DOM warning and console visibility.
-# - FIX: Question progress bar affecting chat visibility (sidebar layout).
+# - FIX: Question progress bar exceeding 1.0 fixed.
 # - FIX: Simplified browser close detection (redirect-only).
 # - FIX: render_welcome_page function correctly replaced.
 # - FIX: Database initialization hang (signal module issue) resolved by removing timeout mechanism.
+# - FIX: CRM save on signout properly re-integrated.
+# - FIX: Messages saving to SQLite database and activity updates reinforced.
 # =============================================================================
 
 # Setup logging
@@ -427,7 +427,8 @@ class DatabaseManager:
                     "zoho_contact_id": s.zoho_contact_id,
                     "created_at": s.created_at.isoformat(),
                     "last_activity": s.last_activity.isoformat(),
-                    "messages": json.dumps(s.messages),
+                    # FIX: Explicitly handle messages serialization, although json.dumps([]) is also "[]"
+                    "messages": json.dumps(s.messages) if s.messages is not None else "[]",
                     "active": int(s.active),
                     "wp_token": s.wp_token,
                     "timeout_saved_to_crm": int(s.timeout_saved_to_crm),
@@ -1184,7 +1185,7 @@ class ZohoCRMManager:
             if response.status_code == 401:
                 logger.warning("Zoho token expired, attempting refresh for _add_note...")
                 access_token = self._get_access_token(force_refresh=True)
-                if not access_token: return None
+                if not access_token: return False
                 headers['Authorization'] = f'Zoho-oauthtoken {access_token}'
                 response = requests.post(f"{self.base_url}/Notes", headers=headers, json=note_data, timeout=15)
             
@@ -1863,11 +1864,16 @@ class SessionManager:
         if isinstance(session.user_type, str):
             session.user_type = UserType(session.user_type)
         
+        # FIX: Ensure messages list integrity before saving
+        if not isinstance(session.messages, list):
+            logger.warning(f"Messages field corrupted for session {session.session_id[:8]}, preserving as empty list")
+            session.messages = []
+
         try:
             self.db.save_session(session)
-            logger.debug(f"Session activity updated and saved for {session.session_id[:8]}.")
+            logger.debug(f"Activity update saved for {session.session_id[:8]} with {len(session.messages)} messages")
         except Exception as e:
-            logger.error(f"Failed to update session activity and save for {session.session_id[:8]}: {e}", exc_info=True)
+            logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
 
     def _create_guest_session(self) -> UserSession:
         """
@@ -2254,9 +2260,11 @@ class SessionManager:
         """
         Handles the entire AI response generation process for a user prompt.
         """
+        # 1. Rate Limiting: Prevent rapid-fire requests from a single session.
         if not self.rate_limiter.is_allowed(session.session_id):
             return {"content": "You are sending requests too quickly. Please wait a moment and try again.", "success": False, "source": "Rate Limiter"}
 
+        # 2. Validate session and check for active bans. This is a critical first step.
         session = self._validate_session(session)
         limit_check = self.question_limits.is_within_limits(session)
         if not limit_check.get('allowed', True):
@@ -2268,6 +2276,7 @@ class SessionManager:
                 "time_remaining": limit_check.get('time_remaining')
             }
         
+        # 3. Evasion Detection: Check if the user is trying to bypass limits.
         if self.detect_evasion(session):
             penalty_hours = self.question_limits.apply_evasion_penalty(session)
             self.db.save_session(session)
@@ -2278,10 +2287,13 @@ class SessionManager:
                 "penalty_hours": penalty_hours
             }
 
+        # 4. Update Activity: User is now active, so update their last_activity timestamp.
         self._update_activity(session)
 
+        # 5. Sanitize Input: Clean the user's prompt to prevent potential XSS or injection.
         sanitized_prompt = sanitize_input(prompt)
         
+        # 6. Content Moderation: Check if the prompt violates any safety policies.
         moderation_result = check_content_moderation(sanitized_prompt, self.ai.openai_client)
         if moderation_result and moderation_result.get("flagged"):
             session.messages.append({"role": "user", "content": sanitized_prompt, "timestamp": datetime.now().isoformat()})
@@ -2293,16 +2305,20 @@ class SessionManager:
                 "source": "Content Safety"
             }
 
+        # 7. Record Question: Increment the question count for the current session and tier.
         self.question_limits.record_question(session)
 
+        # 8. Get AI Response: Call the underlying AI system to generate a response.
         ai_response = self.ai.get_response(sanitized_prompt, session.messages)
         
+        # 9. Append Messages: Add both the user's prompt and the AI's response to chat history.
         session.messages.append({
             "role": "user", 
             "content": sanitized_prompt,
             "timestamp": datetime.now().isoformat()
         })
         
+        # Prepare the assistant's message with content and metadata
         response_message = {
             "role": "assistant",
             "content": ai_response.get("content", "No response generated."),
@@ -2310,6 +2326,7 @@ class SessionManager:
             "timestamp": datetime.now().isoformat()
         }
         
+        # Add any additional metadata flags from the AI response (e.g., if search or Pinecone was used)
         for flag in ["used_search", "used_pinecone", "has_citations", "has_inline_citations", "safety_override"]:
             if ai_response.get(flag):
                 response_message[flag] = True
@@ -2317,7 +2334,14 @@ class SessionManager:
         session.messages.append(response_message)
         session.messages = session.messages[-100:]
         
-        self.db.save_session(session)
+        # 10. Save Session: Persist the updated session (with new messages and question counts) to the database.
+        logger.debug(f"Session {session.session_id[:8]} now has {len(session.messages)} messages before final save in get_ai_response.") # FIX: Added debug
+        try: # FIX: Added try-except for session save
+            self.db.save_session(session)
+            logger.debug(f"Successfully saved session {session.session_id[:8]} with {len(session.messages)} messages to database in get_ai_response.") # FIX: Added debug
+        except Exception as e:
+            logger.error(f"Failed to save session {session.session_id[:8]} to database in get_ai_response: {e}", exc_info=True) # FIX: Added error log
+            
         return ai_response
 
     def clear_chat_history(self, session: UserSession):
@@ -2333,13 +2357,21 @@ class SessionManager:
         """
         session = self._validate_session(session)
         
+        # FIX: Replaced _save_to_crm_timeout with direct save_chat_transcript_sync call and error handling
         if (session.user_type.value == UserType.REGISTERED_USER.value and 
             session.email and 
             session.messages and 
             self.zoho.config.ZOHO_ENABLED):
             
-            logger.info(f"Performing CRM save for manual sign-out of session {session.session_id[:8]}.")
-            self._save_to_crm_timeout(session, "Manual Sign Out")
+            logger.info(f"Attempting CRM save for manual sign-out of session {session.session_id[:8]}.")
+            try:
+                success = self.zoho.save_chat_transcript_sync(session, "Manual Sign Out")
+                if success:
+                    logger.info(f"CRM save successful for session {session.session_id[:8]} during sign out.")
+                else:
+                    logger.error(f"CRM save failed for session {session.session_id[:8]} during sign out (ZohoManager returned False).")
+            except Exception as e:
+                logger.error(f"CRM save exception during sign out for session {session.session_id[:8]}: {e}", exc_info=True)
         
         session.active = False
         try:
@@ -2474,10 +2506,12 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 st.markdown(f"**Email:** {session.email}")
             
             st.markdown(f"**Questions Today:** {session.total_question_count}/40")
+            # FIX: Added min(..., 1.0) for progress bars
             if session.total_question_count <= 20:
-                st.progress(session.total_question_count / 20, text="Tier 1 (up to 20 questions)")
+                st.progress(min(session.total_question_count / 20, 1.0), text="Tier 1 (up to 20 questions)")
             else:
-                st.progress((session.total_question_count - 20) / 20, text="Tier 2 (21-40 questions)")
+                progress_value = min((session.total_question_count - 20) / 20, 1.0)
+                st.progress(progress_value, text="Tier 2 (21-40 questions)")
             
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             st.info("📧 **Email Verified Guest**")
@@ -2485,7 +2519,8 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
                 st.markdown(f"**Email:** {session.email}")
             
             st.markdown(f"**Daily Questions:** {session.daily_question_count}/10")
-            st.progress(session.daily_question_count / 10)
+            # FIX: Added min(..., 1.0) for progress bars
+            st.progress(min(session.daily_question_count / 10, 1.0))
             
             if session.last_question_time:
                 next_reset = session.last_question_time + timedelta(hours=24)
@@ -2500,7 +2535,8 @@ def render_sidebar(session_manager: SessionManager, session: UserSession, pdf_ex
         else: # UserType.GUEST.value
             st.warning("👤 **Guest User**")
             st.markdown(f"**Questions:** {session.daily_question_count}/4")
-            st.progress(session.daily_question_count / 4)
+            # FIX: Added min(..., 1.0) for progress bars
+            st.progress(min(session.daily_question_count / 4, 1.0))
             st.caption("Email verification unlocks 10 questions/day.")
         
         if session.fingerprint_id:
