@@ -833,7 +833,7 @@ class FingerprintingManager:
                         ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; ctx.fillText('Food & Beverage Industry', 4, 45);
                         ctx.strokeStyle = '#000'; ctx.beginPath();
                         ctx.arc(50, 50, 20, 0, Math.PI * 2); ctx.stroke();
-                        return btoa(canvas.toDataURL()).slice(0, 32);
+                        return btoa(canvas.toDataURL()).slice(0, 32); // Base64 and truncate for consistency
                     }} catch (e) {{
                         console.error("❌ Canvas fingerprint failed:", e);
                         return 'canvas_blocked';
@@ -1723,7 +1723,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
         
         if result.flagged:
             flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
-            logger.warning(f"Input flagged by moderation for: {', '.join(flagged_categories)}")  # <- This line fixed
+            logger.warning(f"Input flagged by moderation for: {', '.اهر'.join(flagged_categories)}")
             return {
                 "flagged": True, 
                 "message": "Your message violates our content policy and cannot be processed.",
@@ -2120,28 +2120,44 @@ class SessionManager:
                     # Extract fingerprint data
                     fingerprint_data = self.fingerprinting.extract_fingerprint_from_result(msg)
                     if fingerprint_data:
-                        self.apply_fingerprinting(session, fingerprint_data)
+                        # Apply fingerprinting with proper save
+                        old_fp = session.fingerprint_id
+                        old_method = session.fingerprint_method
+                        
+                        session.fingerprint_id = fingerprint_data.get('fingerprint_id')
+                        session.fingerprint_method = fingerprint_data.get('fingerprint_method')
+                        session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor')
+                        session.browser_privacy_level = fingerprint_data.get('privacy_level', 'standard')
+                        
+                        # Save to database immediately
+                        self.db.save_session(session)
                         fingerprint_updated = True
-                        logger.info(f"Fingerprint applied from component: {fingerprint_data.get('fingerprint_method')} for session {session.session_id[:8]}")
+                        
+                        logger.info(f"✅ Fingerprint updated in database for session {session.session_id[:8]}: {old_method} -> {session.fingerprint_method} (ID: {old_fp[:8] if old_fp else 'None'}... -> {session.fingerprint_id[:8]}...)")
                     
                 elif msg_type == 'fingerprint_error':
                     logger.error(f"Fingerprinting error from component for session {session.session_id[:8]}: {msg.get('message', 'Unknown error')}")
-                    # Apply fallback fingerprint
-                    fallback_data = self.fingerprinting._generate_fallback_fingerprint()
-                    self.apply_fingerprinting(session, fallback_data)
-                    fingerprint_updated = True
+                    # Apply fallback fingerprint only if current one is temporary
+                    if session.fingerprint_method == "temporary_fallback_python":
+                        fallback_data = self.fingerprinting._generate_fallback_fingerprint()
+                        session.fingerprint_id = fallback_data.get('fingerprint_id')
+                        session.fingerprint_method = fallback_data.get('fingerprint_method')
+                        session.visitor_type = fallback_data.get('visitor_type', 'new_visitor')
+                        session.browser_privacy_level = fallback_data.get('privacy_level', 'high_privacy')
+                        self.db.save_session(session)
+                        fingerprint_updated = True
+                        logger.info(f"Applied fallback fingerprint for session {session.session_id[:8]}")
                     
                 elif msg_type == 'client_info_result':
                     # Update session with enhanced client info from JavaScript
                     client_info = msg.get('client_info', {})
                     if client_info:
                         # Only update if current info is from failed Python capture
-                        if session.ip_address == "capture_failed_py_context":
-                            # We can't directly get IP from client-side JavaScript for security reasons
-                            # but we can update other info
-                            session.user_agent = client_info.get('userAgent', session.user_agent)
+                        if session.user_agent == "capture_failed_py_context":
+                            session.user_agent = client_info.get('userAgent', session.user_agent)[:500]  # Limit length
+                            self.db.save_session(session)
                             logger.info(f"Updated client info from JavaScript component for session {session.session_id[:8]}")
-                        
+                    
                         # Save additional browser info for fingerprinting enhancement
                         browser_info = {
                             'language': client_info.get('language'),
@@ -2419,14 +2435,6 @@ def add_message_listener():
     from HTML components (fingerprinting, client info, etc.)
     """
     js_listener_code = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body { margin: 0; padding: 0; }
-        </style>
-    </head>
-    <body>
     <script>
     (function() {
         // Prevent multiple listener registrations
@@ -2488,8 +2496,6 @@ def add_message_listener():
         console.log('✅ FiFi message listener initialized successfully');
     })();
     </script>
-    </body>
-    </html>
     """
     
     try:
@@ -3030,10 +3036,7 @@ def render_client_info_detector(session_id: str) -> None:
                 console.error('Failed to send error message:', e);
             }}
         }}
-    }})();
-    </script>
-    </body>
-    </html>
+    }})()
     """
     
     # Render the component (NO KEY PARAMETER!)
@@ -3074,7 +3077,9 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
                 if save_success:
                     st.success("✅ Chat automatically saved to CRM!")
                     session.timeout_saved_to_crm = True
-                    session.last_activity = datetime.now() 
+                    session.last_activity = datetime.now()
+                    # IMPORTANT: Don't deactivate session on 15-min timeout - let user continue
+                    # Only deactivate on actual browser close (emergency save)
                     session_manager.db.save_session(session)
                 else:
                     st.warning("⚠️ Auto-save to CRM failed. Please check your credentials or contact support if issue persists.")
@@ -3093,12 +3098,14 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
             
     except Exception as e:
         logger.error(f"❌ Error processing timer event '{event}' for session {session_id[:8]}: {e}", exc_info=True)
-        st.error(f"⚠️ An internal error occurred while processing activity. Please try refreshing if issues persist.")
+        st.error(f"⚠️ An internal error occurred while processing activity. Please try refreshing if issues persists.")
         return False
 
-def process_emergency_save_from_query(session_id: str) -> bool:
+# FIX 1 (part of new functionality): process_emergency_save_from_query for deactivating session based on reason
+def process_emergency_save_from_query(session_id: str, reason: str) -> bool: # Added 'reason' parameter
     """
     Processes an emergency save request initiated by the browser close beacon/reload.
+    Conditionally deactivates session based on the 'reason'.
     """
     try:
         session_manager = st.session_state.get('session_manager')
@@ -3113,7 +3120,16 @@ def process_emergency_save_from_query(session_id: str) -> bool:
         
         session = session_manager._validate_session(session)
         
-        logger.info(f"✅ Emergency save processing for session '{session_id[:8]}': UserType={session.user_type.value}, Email={session.email}, Messages={len(session.messages)}.")
+        logger.info(f"✅ Emergency save processing for session '{session_id[:8]}': UserType={session.user_type.value}, Email={session.email}, Messages={len(session.messages)}, Reason='{reason}'.")
+        
+        # Define reasons that indicate a definitive closure
+        definitive_close_reasons = [
+            'beforeunload', 'unload',
+            'parent_beforeunload', 'parent_unload'
+        ]
+
+        # Determine if the session should be marked inactive based on reason
+        should_deactivate = reason in definitive_close_reasons
         
         if (session.user_type.value == UserType.REGISTERED_USER.value and
             session.email and 
@@ -3123,22 +3139,40 @@ def process_emergency_save_from_query(session_id: str) -> bool:
             logger.info(f"✅ Session '{session_id[:8]}' is eligible for emergency CRM save.")
             
             session.last_activity = datetime.now()
-            session_manager.db.save_session(session)
             
-            success = session_manager.zoho.save_chat_transcript_sync(session, "Emergency Save (Browser Close/Unload)")
-            if success:
+            save_success = session_manager.zoho.save_chat_transcript_sync(session, f"Emergency Save ({reason})")
+            if save_success:
                 session.timeout_saved_to_crm = True
-                session_manager.db.save_session(session)
-            return success
-        else:
-            logger.info(f"❌ Session '{session_id[:8]}' not eligible for emergency save (e.g., Guest, no email, no messages, or already saved by timer).")
-            return False
+                logger.info(f"✅ CRM save successful for session '{session_id[:8]}' (reason: {reason}).")
+            else:
+                logger.warning(f"⚠️ Emergency save to CRM failed for session '{session_id[:8]}' (reason: {reason}).")
+
+            if should_deactivate:
+                session.active = False
+                logger.info(f"✅ Session '{session_id[:8]}' explicitly marked as inactive due to definitive close reason: {reason}.")
+            else:
+                logger.info(f"ℹ️ Session '{session_id[:8]}' remains active (not a definitive close reason: {reason}).")
+
+            session_manager.db.save_session(session) # Save status update
+            return save_success # Return success of CRM save
+
+        else: # Not eligible for CRM save (e.g., Guest, no email, no messages, or already saved by timer)
+            logger.info(f"❌ Session '{session_id[:8]}' not eligible for CRM save (UserType={session.user_type.value}, Email={bool(session.email)}, Messages={len(session.messages)}, Saved Status={session.timeout_saved_to_crm}).")
             
+            if should_deactivate:
+                session.active = False
+                session_manager.db.save_session(session)
+                logger.info(f"ℹ️ Session '{session_id[:8]}' marked as inactive (emergency close reason: {reason}, but not CRM eligible).")
+            else:
+                logger.info(f"ℹ️ Session '{session_id[:8]}' remains active (emergency close but not a definitive close reason: {reason}).")
+            return False # No CRM save performed
+
     except Exception as e:
         logger.error(f"❌ Emergency save processing failed for session '{session_id[:8]}': {e}", exc_info=True)
         error_handler.log_error(error_handler.handle_api_error("System", "Emergency Save Process (Query)", e))
         return False
 
+# Modified to pass 'reason' to process_emergency_save_from_query
 def handle_emergency_save_requests_from_query():
     """
     Checks for and processes emergency save requests sent via URL query parameters.
@@ -3148,30 +3182,34 @@ def handle_emergency_save_requests_from_query():
     query_params = st.query_params
     event = query_params.get("event")
     session_id = query_params.get("session_id")
-    
+    reason = query_params.get("reason", "unknown") # Extract reason
+
     if event == "emergency_close" and session_id:
         logger.info("=" * 80)
         logger.info("🚨 EMERGENCY SAVE REQUEST DETECTED VIA URL QUERY PARAMETERS!")
-        logger.info(f"Session ID: {session_id}, Event: {event}")
+        logger.info(f"Session ID: {session_id}, Event: {event}, Reason: {reason}")
         logger.info("=" * 80)
         
         st.error("🚨 **Emergency Save Detected** - Processing browser close save...")
         st.info("Please wait, your conversation is being saved...")
         
+        # Clear query parameters to prevent re-triggering on rerun
         if "event" in st.query_params:
             del st.query_params["event"]
         if "session_id" in st.query_params:
             del st.query_params["session_id"]
+        if "reason" in st.query_params:
+            del st.query_params["reason"]
         
         try:
-            success = process_emergency_save_from_query(session_id)
+            success = process_emergency_save_from_query(session_id, reason) # Pass reason
             
             if success:
                 st.success("✅ Emergency save completed successfully!")
                 logger.info("✅ Emergency save completed via query parameter successfully.")
             else:
-                st.error("❌ Emergency save failed or was not eligible for saving.")
-                logger.error("❌ Emergency save failed via query parameter (not eligible or internal error).")
+                st.info("ℹ️ Emergency save completed (no CRM save needed or failed).") # Changed to info, as deactivation still happens if it's a close event
+                logger.info("ℹ️ Emergency save completed via query parameter (not eligible for CRM save or internal error).")
                 
         except Exception as e:
             st.error(f"❌ An unexpected error occurred during emergency save: {str(e)}")
@@ -3305,7 +3343,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 time_to_reset = next_reset - datetime.now()
                 if time_to_reset.total_seconds() > 0:
                     hours = int(time_to_reset.total_seconds() // 3600)
-                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
+                    minutes = int((time_to_रोज़econds() % 3600) // 60)
                     st.caption(f"Resets in: {hours}h {minutes}m")
                 else:
                     st.caption("Daily questions have reset!")
@@ -3509,28 +3547,51 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion with universal fingerprinting.")
     
+    # TEMPORARY DEBUG: Show current fingerprint status
+    with st.expander("🔍 Debug: Fingerprint Status", expanded=False):
+        st.write(f"**Session ID:** {session.session_id[:8]}...")
+        st.write(f"**Current Fingerprint ID:** {session.fingerprint_id}")
+        st.write(f"**Current Method:** {session.fingerprint_method}")
+        st.write(f"**Visitor Type:** {session.visitor_type}")
+        st.write(f"**Privacy Level:** {session.browser_privacy_level}")
+        
+        # Manual refresh button for testing
+        if st.button("🔄 Force Check Messages"):
+            try:
+                updated = session_manager.check_component_messages(session)
+                st.write(f"**Messages Processed:** {updated}")
+                if updated:
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+    
     global_message_channel_error_handler()
+    add_message_listener() # Call the listener function
     
-    # Add message listener for component communication (Fix 3)
-    add_message_listener()
-    
-    # Check for component messages first (Fix 3)
-    # This processes any messages sent from the HTML components since the last rerun
-    fingerprint_updated = session_manager.check_component_messages(session)
-    if fingerprint_updated:
-        # If fingerprint was just updated, rerun to reflect it immediately
-        st.rerun()
+    # Process component messages with enhanced logging
+    try:
+        logger.info(f"About to check component messages for session {session.session_id[:8]}")
+        fingerprint_updated = session_manager.check_component_messages(session)
+        logger.info(f"Component message check result for session {session.session_id[:8]}: fingerprint_updated={fingerprint_updated}")
+        
+        if fingerprint_updated:
+            logger.info(f"Fingerprint was updated for session {session.session_id[:8]}, triggering rerun...")
+            time.sleep(0.1) # Small delay to ensure database save completes
+            st.rerun()
+    except Exception as e:
+        logger.error(f"Error processing component messages: {e}", exc_info=True)
+        st.error(f"Debug: Error processing component messages: {e}")
     
     # Render client info detector if needed
-    # It now uses st.components.v1.html and sends data via postMessage
     if (session.ip_address == "capture_failed_py_context" or 
         session.user_agent == "capture_failed_py_context"):
         render_client_info_detector(session.session_id)
     
     # Render fingerprinting component if needed
-    # It now uses st.components.v1.html and sends data via postMessage
-    if not session.fingerprint_id or session.fingerprint_method == "temporary_fallback_python":
+    if (not session.fingerprint_id or 
+        session.fingerprint_method == "temporary_fallback_python"):
         session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
+        logger.info(f"Rendered fingerprinting component for session {session.session_id[:8]} (current method: {session.fingerprint_method})")
 
 
     if session.user_type.value == UserType.REGISTERED_USER.value:
@@ -3633,6 +3694,46 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
 # =============================================================================
 # DIAGNOSTIC TOOLS
 # =============================================================================
+
+# Add this JavaScript debug function to see what messages are in the queue:
+def debug_component_messages():
+    """Debug function to show component messages in console"""
+    js_debug = """
+    (function() {
+        console.log('🔍 Debug: Component Messages Queue');
+        if (window.fifi_component_messages) {
+            console.log('Total messages:', window.fifi_component_messages.length);
+            window.fifi_component_messages.forEach((msg, index) => {
+                console.log(`Message ${index}:`, {
+                    type: msg.type,
+                    session_id: msg.session_id ? msg.session_id.substring(0, 8) : 'None',
+                    processed: msg.processed,
+                    timestamp: new Date(msg.timestamp).toLocaleTimeString()
+                });
+            });
+        } else {
+            console.log('No component messages queue found');
+        }
+        
+        // Also log the fingerprint data if available
+        if (window.fifi_component_messages) {
+            const fpMessages = window.fifi_component_messages.filter(msg => 
+                msg.type === 'fingerprint_result' && !msg.processed
+            );
+            if (fpMessages.length > 0) {
+                console.log('🔍 Unprocessed fingerprint messages:', fpMessages);
+            }
+        }
+        
+        return window.fifi_component_messages ? window.fifi_component_messages.length : 0;
+    })();
+    """
+    
+    try:
+        return st_javascript(js_debug, key=f"debug_messages_{int(time.time())}")
+    except Exception as e:
+        logger.error(f"Debug component messages failed: {e}")
+        return 0
 
 def render_diagnostic_page():
     """Diagnostic page for troubleshooting."""
