@@ -1876,36 +1876,101 @@ class SessionManager:
         logger.info(f"Created new session {session_id[:8]} with user type {session.user_type.value}")
         return session
 
+    def get_session(self) -> Optional[UserSession]:
+        """
+        Gets or creates the current user session.
+        """
+        # Perform periodic cleanup
+        self._periodic_cleanup() # Call cleanup (Fix 6)
+
+        try:
+            # Try to get existing session from Streamlit session state
+            session_id = st.session_state.get('current_session_id') # Corrected key to current_session_id
+            
+            if session_id:
+                session = self.db.load_session(session_id)
+                if session and session.active:
+                    session = self._validate_session(session)
+                    
+                    # Enhanced session recovery (Fix 6)
+                    if not session.fingerprint_id: # If fingerprint is missing, apply temporary fallback
+                        session.fingerprint_id = f"temp_fp_{session.session_id[:8]}"
+                        session.fingerprint_method = "temporary_fallback_python"
+                        session.visitor_type = "new_visitor_fallback"
+                        try:
+                            self.db.save_session(session)
+                            logger.info(f"Applied temporary fallback fingerprint to session {session.session_id[:8]}.")
+                        except Exception as e:
+                            logger.error(f"Failed to save temporary fingerprint for session {session.session_id[:8]}: {e}", exc_info=True)
+
+                    # Check limits and handle bans
+                    limit_check = self.question_limits.is_within_limits(session)
+                    if not limit_check.get('allowed', True):
+                        ban_type = limit_check.get('ban_type', 'unknown')
+                        message = limit_check.get('message', 'Access restricted due to usage policy.')
+                        time_remaining = limit_check.get('time_remaining')
+                        
+                        st.error(f"🚫 **Access Restricted**")
+                        if time_remaining:
+                            hours = max(0, int(time_remaining.total_seconds() // 3600))
+                            minutes = max(0, int((time_remaining.total_seconds() % 3600) // 60))
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.info(message)
+                        logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
+                        
+                        # Still update activity even if banned (important for ban expiry)
+                        try:
+                            self._update_activity(session)
+                        except Exception as e:
+                            logger.error(f"Failed to update activity for banned session {session.session_id[:8]}: {e}", exc_info=True)
+                        
+                        return session # Return the banned session to show history
+                    
+                    # Update activity for allowed sessions
+                    try:
+                        self._update_activity(session)
+                    except Exception as e:
+                        logger.error(f"Failed to update session activity for {session.session_id[:8]}: {e}", exc_info=True)
+                    
+                    return session # Return the valid, active session
+                else:
+                    logger.info(f"Session {session_id[:8]} not found or inactive. Creating new session.")
+                    # Clear stale session_id from state if session is inactive/not found
+                    if 'current_session_id' in st.session_state:
+                        del st.session_state['current_session_id']
+
+            # Create new session if no valid session found or loaded
+            new_session = self._create_new_session()
+            st.session_state.current_session_id = new_session.session_id # Corrected key
+            return self._validate_session(new_session) # Validate new session
+            
+        except Exception as e:
+            logger.error(f"Failed to get/create session: {e}", exc_info=True)
+            # Create fallback session in case of critical failure
+            fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST)
+            fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
+            st.session_state.current_session_id = fallback_session.session_id # Corrected key
+            st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
+            return fallback_session
+
 
     def _validate_session(self, session: UserSession) -> UserSession:
-        """
-        Ensures the `UserSession` object's Enum fields are correctly typed
-        and other defaults/conversions are applied.
-        """
-        if not session: return session
-            
-        if isinstance(session.user_type, str):
-            try:
-                session.user_type = UserType(session.user_type)
-            except ValueError:
-                logger.error(f"Invalid user_type string '{session.user_type}' for session {session.session_id[:8]}. Defaulting to GUEST.")
-                session.user_type = UserType.GUEST
+        """Validates and updates session activity."""
+        session.last_activity = datetime.now()
         
-        if isinstance(session.ban_status, str):
-            try:
-                session.ban_status = BanStatus(session.ban_status)
-            except ValueError:
-                logger.error(f"Invalid ban_status string '{session.ban_status}' for session {session.session_id[:8]}. Defaulting to NONE.")
-                session.ban_status = BanStatus.NONE
+        # Check for ban expiry
+        if (session.ban_status != BanStatus.NONE and 
+            session.ban_end_time and 
+            datetime.now() >= session.ban_end_time):
+            logger.info(f"Ban expired for session {session.session_id[:8]}")
+            session.ban_status = BanStatus.NONE
+            session.ban_start_time = None
+            session.ban_end_time = None
+            session.ban_reason = None
+            session.question_limit_reached = False
         
-        if not isinstance(session.messages, list):
-            logger.warning(f"Session {session.session_id[:8]} messages field is not a list. Resetting to empty list.")
-            session.messages = []
-        
-        if not isinstance(session.email_addresses_used, list):
-            logger.warning(f"Session {session.session_id[:8]} email_addresses_used field is not a list. Resetting to empty list.")
-            session.email_addresses_used = []
-            
+        # Save updated session
+        self.db.save_session(session)
         return session
 
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]):
@@ -2161,8 +2226,8 @@ class SessionManager:
             self.db.save_session(session)
             
             # Clear Streamlit session state
-            if 'current_session' in st.session_state:
-                del st.session_state['current_session']
+            if 'current_session_id' in st.session_state: # Corrected key
+                del st.session_state['current_session_id']
             if 'page' in st.session_state:
                 del st.session_state['page']
             
