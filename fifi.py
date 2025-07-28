@@ -30,8 +30,7 @@ import requests
 import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
-# Import signal for timeout functionality
-import signal
+# REMOVED: import signal (as it doesn't work in Streamlit's threading model)
 
 # =============================================================================
 # FINAL INTEGRATED FIFI AI - ALL FEATURES IMPLEMENTED (CLEANED & COMPLETE)
@@ -42,7 +41,7 @@ import signal
 # - FIX: Question progress bar affecting chat visibility (sidebar layout).
 # - FIX: Simplified browser close detection (redirect-only).
 # - FIX: render_welcome_page function correctly replaced.
-# - FIX: Database initialization hanging issue addressed with comprehensive schema creation and timeout.
+# - FIX: Database initialization hang (signal module issue) resolved by removing timeout mechanism.
 # =============================================================================
 
 # Setup logging
@@ -309,27 +308,13 @@ class DatabaseManager:
             self.db_type = "memory"
             self.local_sessions = {} # For in-memory storage
         
-        # NEW: Add timeout for database initialization
+        # Initialize database schema (SIMPLIFIED - no signal timeout needed)
         if self.conn: # Only attempt if a connection was established
             try:
-                # Set up a signal handler for timeout
-                def timeout_handler(signum, frame):
-                    raise TimeoutError("Database initialization timed out")
-                
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(10)  # 10 second timeout for _init_complete_database
-                
                 self._init_complete_database()
-                
-                signal.alarm(0)  # Cancel the alarm if initialization finishes in time
-                logger.info("✅ Database initialization completed within timeout")
+                logger.info("✅ Database initialization completed successfully")
                 error_handler.mark_component_healthy("Database")
                 
-            except TimeoutError:
-                logger.error("❌ Database initialization timed out - using in-memory fallback")
-                self.conn = None
-                self.db_type = "memory"
-                self.local_sessions = {}
             except Exception as e:
                 logger.error(f"Database initialization failed: {e}", exc_info=True)
                 self.conn = None
@@ -2831,17 +2816,15 @@ def ensure_initialization():
             config = Config()
             pdf_exporter = PDFExporter()
             
-            # DatabaseManager initialization already handles its own persistence in st.session_state
-            # and includes the new timeout logic internally.
+            # DatabaseManager initialization handles its own persistence and falls back to in-memory on failure.
             if 'db_manager' not in st.session_state:
                 st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
             
             db_manager = st.session_state.db_manager
             
-            # If DB initialization failed and it fell back to in-memory, we should proceed,
-            # but log a warning if it's strictly in-memory.
-            if db_manager.db_type == "memory":
-                logger.warning("DatabaseManager is operating in in-memory mode due to prior connection/initialization failure. Data will not persist.")
+            if db_manager.conn is None: # Check if connection is None after DatabaseManager.__init__
+                logger.error("Database connection failed, operating in non-persistent in-memory mode. Data will not persist across reruns or browser closes.")
+                st.error("⚠️ Database connection failed. Operating in limited, non-persistent mode. Please contact support.")
 
             zoho_manager = ZohoCRMManager(config, pdf_exporter)
             ai_system = EnhancedAI(config)
