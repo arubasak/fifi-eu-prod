@@ -3107,7 +3107,7 @@ def render_diagnostic_page():
                     email_manager = EmailVerificationManagerDirect(config)
 
             st.info(f"Testing OTP send via {type(email_manager).__name__}...")
-            test_email = "test@example.com" # Using a dummy email for test, usually you'd input one
+            test_email = "arunava.basak@yahoo.co.in" # Using a dummy email for test, usually you'd input one
             
             send_success = email_manager.send_verification_code(test_email)
             if send_success:
