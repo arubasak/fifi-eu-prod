@@ -915,7 +915,7 @@ class FingerprintingManager:
                 console.log("🔍 Fingerprinting complete:", {{
                     id: fingerprintId, method: primaryMethod, privacy: privacyLevel, working: workingMethods.length
                 }});
-                return JSON.stringify(fingerprintResult); # Explicitly stringify the result
+                return JSON.stringify(fingerprintResult); // Explicitly stringify the result
             }} catch (error) {{
                 console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
                 // Return a structured JSON error string
@@ -2268,6 +2268,9 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
     if not session_id:
         return None
     
+    # Corrected JavaScript variable name for session ID by replacing dashes with underscores
+    safe_session_id_js = session_id.replace('-', '_')
+    
     js_timer_code = f"""
     (() => {{
         try {{
@@ -2276,10 +2279,12 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             
             console.log("🕐 FiFi 15-Minute Timer: Checking session", sessionId.substring(0, 8));
             
-            if (typeof window.fifi_timer_state === 'undefined' || window.fifi_timer_state === null || window.fifi_timer_state.sessionId !== sessionId) {{
+            // Corrected JavaScript variable name here
+            if (typeof window.fifi_timer_state_{safe_session_id_js} === 'undefined' || window.fifi_timer_state_{safe_session_id_js} === null || window.fifi_timer_state_{safe_session_id_js}.sessionId !== sessionId) {{
                 console.clear();
                 console.log("🆕 FiFi 15-Minute Timer: Starting/Resetting for session", sessionId.substring(0, 8)); 
-                window.fifi_timer_state = {{
+                // Corrected JavaScript variable name here
+                window.fifi_timer_state_{safe_session_id_js} = {{
                     lastActivityTime: Date.now(),
                     expired: false,
                     listenersInitialized: false,
@@ -2288,7 +2293,8 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                 console.log("🆕 FiFi 15-Minute Timer state initialized.");
             }}
             
-            const state = window.fifi_timer_state;
+            // Corrected JavaScript variable name here
+            const state = window.fifi_timer_state_{safe_session_id_js};
             
             if (!state.listenersInitialized) {{
                 console.log("👂 Setting up FiFi 15-Minute activity listeners...");
@@ -2424,10 +2430,13 @@ def render_browser_close_detection_simplified(session_id: str):
     if not session_id:
         return
 
+    # Corrected JavaScript variable name for scriptIdentifier
+    safe_session_id_js = session_id.replace('-', '_')
+
     js_code = f"""
     <script>
     (function() {{
-        const scriptIdentifier = 'fifi_close_simple_' + '{session_id}';
+        const scriptIdentifier = 'fifi_close_simple_' + '{safe_session_id_js}'; // Corrected here
         if (window[scriptIdentifier]) return;
         window[scriptIdentifier] = true;
         
@@ -2510,10 +2519,13 @@ def render_browser_close_detection_enhanced(session_id: str):
     if not session_id:
         return
 
+    # Corrected JavaScript variable name for scriptIdentifier
+    safe_session_id_js = session_id.replace('-', '_')
+
     js_code = f"""
     <script>
     (function() {{
-        const scriptIdentifier = 'fifi_close_enhanced_' + '{session_id}';
+        const scriptIdentifier = 'fifi_close_enhanced_' + '{safe_session_id_js}'; // Corrected here
         if (window[scriptIdentifier]) return;
         window[scriptIdentifier] = true;
         
@@ -2531,7 +2543,7 @@ def render_browser_close_detection_enhanced(session_id: str):
                     return window.parent.location.origin + window.parent.location.pathname;
                 }}
             }} catch (e) {{
-                console.debug("Parent window access failed, using current window");
+                console.warn("Using current window location as fallback");
             }}
             return window.location.origin + window.location.pathname;
         }}
@@ -2687,14 +2699,17 @@ def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
     JavaScript component to detect client information when Streamlit context fails.
     This component will post a message to its parent window if successful.
     """
+    # Corrected JavaScript variable name for scriptIdentifier
+    safe_session_id_js = session_id.replace('-', '_')
+
     js_code = f"""
     (() => {{
         try {{
             const sessionId = "{session_id}";
             
             // Ensure this script only runs once per component instance
-            if (window.fifi_client_info_sent_{session_id}) return null;
-            window.fifi_client_info_sent_{session_id} = true;
+            if (window.fifi_client_info_sent_{safe_session_id_js}) return null; // Corrected here
+            window.fifi_client_info_sent_{safe_session_id_js} = true; // Corrected here
 
             // Collect client information
             const clientInfo = {{
@@ -2733,11 +2748,11 @@ def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
             }};
 
             console.log('FiFi Client Info Detected:', resultObject);
-            // Explicitly stringify the result object as st_javascript expects JSON string or primitive
+            // Return JSON string for st_javascript
             return JSON.stringify(resultObject);
         }} catch (error) {{
             console.error("🚨 FiFi Client Info Detector caught a critical error:", error);
-            // Return a structured JSON error string if JS fails
+            // Return structured JSON error string
             return JSON.stringify({{
                 error: true,
                 message: error.message,
@@ -2751,22 +2766,24 @@ def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
     """
     
     try:
-        raw_result = st_javascript(js_code, key=f"client_info_{session_id[:8]}")
+        # Use a safer key generation that avoids dashes
+        safe_session_key = session_id.replace('-', '_')[:8]
+        raw_result = st_javascript(js_code, key=f"client_info_{safe_session_key}")
 
-        # Attempt to parse the raw_result. It should now always be a JSON string.
+        # Handle the result safely
         if isinstance(raw_result, str):
             parsed_result = safe_json_loads(raw_result)
             if isinstance(parsed_result, dict):
                 if parsed_result.get('error'):
                     logger.error(f"JS Client Info Detector reported error: {parsed_result.get('message', 'Unknown JS error')}")
-                    return None # Return None if JS reported an error
+                    return None
                 return parsed_result
             else:
                 logger.error(f"st_javascript returned non-dict from JSON.stringify: {raw_result[:100]}...")
                 return None
-        elif raw_result is None: # Happens on initial render or if JS didn't return anything yet
+        elif raw_result is None:
             return None
-        else: # Unexpected type (e.g., an implicit object from st_javascript's auto-conversion in older versions)
+        else:
             logger.warning(f"Unexpected type returned by st_javascript for client info: {type(raw_result)}. Assuming it's a dict if it looks like one.")
             if isinstance(raw_result, dict):
                 if raw_result.get('error'):
@@ -3283,7 +3300,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     # Original fingerprinting call (can remain as it handles overall FP ID)
     if not session.fingerprint_id or session.fingerprint_method == "temporary_fallback_python":
         fingerprint_js_code = session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
-        raw_fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id[:8]}")
+        raw_fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id.replace('-', '_')[:8]}") # Corrected key generation
         
         # FIX: Robustly parse and check raw_fp_result from st_javascript
         fp_result = None
