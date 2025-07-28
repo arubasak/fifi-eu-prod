@@ -793,6 +793,7 @@ class FingerprintingManager:
     def __init__(self):
         self.fingerprint_cache = {}
 
+    # FIX 1: Replaced with corrected JavaScript comments and return stringification
     def generate_fingerprint_component(self, session_id: str) -> str:
         """
         Generates JavaScript code to collect 3-layer browser fingerprints
@@ -880,7 +881,7 @@ class FingerprintingManager:
                 let primaryMethod = 'canvas'; let fingerprintId = canvasFp;
                 const workingMethods = [];
                 if (canvasFp !== 'canvas_blocked') workingMethods.push('canvas');
-                if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') workingMethods.push('webgl');
+                if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') workingMethods.push('webgl');  
                 if (audioFp !== 'audio_blocked') workingMethods.push('audio');
                 
                 if (workingMethods.length === 0) {{
@@ -2697,7 +2698,6 @@ def global_message_channel_error_handler():
 def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
     """
     JavaScript component to detect client information when Streamlit context fails.
-    This component will post a message to its parent window if successful.
     """
     # Corrected JavaScript variable name for scriptIdentifier
     safe_session_id_js = session_id.replace('-', '_')
@@ -2708,8 +2708,9 @@ def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
             const sessionId = "{session_id}";
             
             // Ensure this script only runs once per component instance
-            if (window.fifi_client_info_sent_{safe_session_id_js}) return null; // Corrected here
-            window.fifi_client_info_sent_{safe_session_id_js} = true; // Corrected here
+            const safeSessionId = sessionId.replace(/-/g, '_'); // Fix for dashes in variable names
+            if (window['fifi_client_info_sent_' + safeSessionId]) return null;
+            window['fifi_client_info_sent_' + safeSessionId] = true;
 
             // Collect client information
             const clientInfo = {{
