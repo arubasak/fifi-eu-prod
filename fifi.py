@@ -1723,7 +1723,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
         
         if result.flagged:
             flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
-            logger.warning(f"Input flagged by moderation for: {', '.join(flagged_categories)}")
+            logger.warning(f"Input flagged by moderation for: {', '.اهر'.join(flagged_categories)}")
             return {
                 "flagged": True, 
                 "message": "Your message violates our content policy and cannot be processed.",
@@ -2291,7 +2291,7 @@ class SessionManager:
             else:
                 return {
                     'success': False,
-                    'message': "Invalid verification code. Please try again."
+                    'message': "Invalid verification code. Please check the code and try again."
                 }
                 
         except Exception as e:
@@ -3036,7 +3036,10 @@ def render_client_info_detector(session_id: str) -> None:
                 console.error('Failed to send error message:', e);
             }}
         }}
-    }})()
+    }})();
+    </script>
+    </body>
+    </html>
     """
     
     # Render the component (NO KEY PARAMETER!)
@@ -3098,7 +3101,7 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
             
     except Exception as e:
         logger.error(f"❌ Error processing timer event '{event}' for session {session_id[:8]}: {e}", exc_info=True)
-        st.error(f"⚠️ An internal error occurred while processing activity. Please try refreshing if issues persists.")
+        st.error(f"⚠️ An internal error occurred while processing activity. Please try refreshing if issues persist.")
         return False
 
 # FIX 1 (part of new functionality): process_emergency_save_from_query for deactivating session based on reason
@@ -3343,7 +3346,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 time_to_reset = next_reset - datetime.now()
                 if time_to_reset.total_seconds() > 0:
                     hours = int(time_to_reset.total_seconds() // 3600)
-                    minutes = int((time_to_रोज़econds() % 3600) // 60)
+                    minutes = int((time_to_روزeconds() % 3600) // 60)
                     st.caption(f"Resets in: {hours}h {minutes}m")
                 else:
                     st.caption("Daily questions have reset!")
@@ -3564,7 +3567,11 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
                     st.rerun()
             except Exception as e:
                 st.error(f"Error: {e}")
-    
+
+    # Temporary Debug: Add diagnostic panel for fingerprinting (as requested)
+    if st.checkbox("🔬 Show Fingerprinting Diagnostics", key="show_fp_diagnostics"):
+        render_fingerprint_diagnostic_panel(session_manager, session)
+        
     global_message_channel_error_handler()
     add_message_listener() # Call the listener function
     
@@ -3735,335 +3742,269 @@ def debug_component_messages():
         logger.error(f"Debug component messages failed: {e}")
         return 0
 
-def render_diagnostic_page():
-    """Diagnostic page for troubleshooting."""
-    st.title("🔧 FiFi AI Diagnostics")
-    
-    st.subheader("1. Supabase Configuration & Email OTP Test")
-    if st.button("🔍 Test Supabase Configuration"):
-        config = Config()
-        
-        if not config.SUPABASE_ENABLED:
-            st.error("❌ Supabase is not enabled (missing URL or key in secrets.toml)")
-            return
-        
-        try:
-            # Use the already initialized EmailVerificationManager from session_state
-            email_manager = st.session_state.get('email_verification_manager')
-            if not email_manager: # Fallback if diagnostics accessed without main app init
-                email_manager = EmailVerificationManager(config)
-                if not hasattr(email_manager, 'supabase') or not email_manager.supabase:
-                    email_manager = EmailVerificationManagerDirect(config)
-
-            st.info(f"Testing OTP send via {type(email_manager).__name__}...")
-            test_email = "test@example.com" # Using a dummy email for test, usually you'd input one
-            
-            send_success = email_manager.send_verification_code(test_email)
-            if send_success:
-                st.success(f"✅ OTP send test to {test_email} completed. Check logs for details (and {test_email}'s inbox).")
-            else:
-                st.error(f"❌ OTP send test to {test_email} failed. See logs for specific errors.")
-            
-            st.write("---")
-            st.info("Supabase client status:")
-            if hasattr(email_manager, 'supabase') and email_manager.supabase:
-                st.write(f"SDK Client URL: {email_manager.supabase.supabase_url}")
-                st.write(f"SDK Client Key present: {bool(email_manager.supabase.supabase_key)}")
-            elif hasattr(email_manager, 'supabase_url') and email_manager.supabase_url:
-                 st.write(f"Direct API URL: {email_manager.supabase_url}")
-                 st.write(f"Direct API Key present: {bool(email_manager.supabase_key)}")
-            else:
-                st.write("No Supabase client initialized.")
-
-        except Exception as e:
-            st.error(f"❌ Supabase test encountered an unexpected error: {e}")
-            st.code(str(e))
-    
-    st.subheader("2. Client Info Detection")
-    if st.button("🔍 Test Client Info Capture"):
-        session_manager_diag = st.session_state.get('session_manager')
-        if session_manager_diag:
-            test_session = UserSession(session_id="diagnostic_test_client_info")
-            
-            st.markdown("#### Python-side Capture (Server-side)")
-            captured_session_python = session_manager_diag._capture_client_info(test_session)
-            st.json({
-                "ip_address": captured_session_python.ip_address,
-                "ip_detection_method": captured_session_python.ip_detection_method,
-                "user_agent": captured_session_python.user_agent[:100] + "..." if captured_session_python.user_agent and len(captured_session_python.user_agent) > 100 else captured_session_python.user_agent,
-            })
-            
-            st.markdown("#### JavaScript Component Capture (Client-side Fallback)")
-            # When testing in diagnostics, the message listener isn't active by default.
-            # For this to work in diagnostics, either explicitly call add_message_listener(),
-            # or mock the message passing. For simplicity, just render the component.
-            render_client_info_detector(session_id="diagnostic_js_test")
-            st.info("Check browser console for 'FiFi Client Info Detected' and python logs for processing.")
-        else:
-            st.warning("Session Manager not initialized. Please ensure app is running normally.")
-    
-    st.subheader("3. Database Connection & Messages")
-    if st.button("🔍 Test Database Persistence"):
-        db_manager = st.session_state.get('db_manager')
-        if db_manager:
-            st.json({
-                "db_type": db_manager.db_type,
-                "connection_status": "connected" if db_manager.conn else "failed",
-                "local_sessions_count": len(getattr(db_manager, 'local_sessions', {}))
-            })
-
-            if db_manager.conn:
-                st.markdown("#### Test Message Save & Load:")
-                test_session_id = "test_db_persistence_" + str(uuid.uuid4())[:8]
-                test_session = UserSession(session_id=test_session_id)
-                test_session.messages.append({"role": "user", "content": "Hello DB!"})
-                test_session.messages.append({"role": "assistant", "content": "DB Test OK"})
-                test_session.user_type = UserType.REGISTERED_USER # Make it a registered user for CRM save eligibility
-                test_session.email = "test@example.com"
-
-                try:
-                    db_manager.save_session(test_session)
-                    st.success(f"✅ Session '{test_session_id}' saved to DB with {len(test_session.messages)} messages.")
-                    
-                    loaded_session = db_manager.load_session(test_session_id)
-                    if loaded_session and len(loaded_session.messages) == len(test_session.messages):
-                        st.success("✅ Messages correctly loaded from DB!")
-                        st.json(loaded_session.messages)
-                    else:
-                        st.error(f"❌ Message count mismatch on load! Expected {len(test_session.messages)}, got {len(loaded_session.messages) if loaded_session else 'None'}.")
-                        if loaded_session: st.json(loaded_session.messages)
-                        
-                except Exception as e:
-                    st.error(f"❌ Database save/load test failed: {e}")
-                    st.code(str(e))
-            else:
-                st.warning("Cannot test persistence: Database connection is not active.")
-        else:
-            st.warning("Database Manager not initialized.")
-
-
 # =============================================================================
-# MAIN APPLICATION FLOW
+# REAL-TIME FINGERPRINTING DIAGNOSTIC TOOL
 # =============================================================================
 
-def ensure_initialization():
+def render_fingerprint_diagnostic_panel(session_manager: 'SessionManager', session: UserSession):
     """
-    Ensures all necessary application components and managers are initialized and
-    stored in Streamlit's session state.
+    Real-time diagnostic panel for fingerprinting issues.
+    Add this to your chat interface for debugging.
     """
-    if 'initialized' not in st.session_state or not st.session_state.initialized:
-        logger.info("Starting application initialization sequence...")
+    with st.expander("🔬 Fingerprinting Diagnostics (Debug Mode)", expanded=True):
         
-        # Clear any corrupted session state (Fix 6)
-        corrupted_keys = []
-        for key in list(st.session_state.keys()): # Iterate over a copy to allow deletion
-            try:
-                _ = st.session_state[key]
-            except Exception:
-                corrupted_keys.append(key)
+        # Current session state
+        col1, col2 = st.columns(2)
         
-        for key in corrupted_keys:
-            logger.warning(f"Clearing corrupted session state key: {key}")
-            try:
-                del st.session_state[key]
-            except Exception as e:
-                logger.error(f"Failed to delete corrupted session state key {key}: {e}")
-
-        try:
-            config = Config()
-            pdf_exporter = PDFExporter()
-            
-            # Initialize database manager with enhanced error handling (Fix 6)
-            if 'db_manager' not in st.session_state:
-                try:
-                    st.session_state.db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
-                except Exception as db_e:
-                    logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
-                    # Create a fallback in-memory database manager
-                    st.session_state.db_manager = type('FallbackDatabaseManager', (object,), {
-                        'db_type': 'memory',
-                        'conn': None, # No actual connection
-                        'local_sessions': {}, # In-memory storage
-                        'save_session': lambda self, session: setattr(self.local_sessions, session.session_id, copy.deepcopy(session)),
-                        'load_session': lambda self, session_id: copy.deepcopy(self.local_sessions.get(session_id)),
-                        'find_sessions_by_fingerprint': lambda self, fp_id: [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fp_id],
-                        'find_sessions_by_email': lambda self, email: [copy.deepcopy(s) for s in self.local_sessions.values() if s.email == email]
-                    })()
-                    st.error("⚠️ Database connection failed. Operating in limited, non-persistent mode.")
-            
-            db_manager = st.session_state.db_manager
-            
-            # Rest of initialization with error handling
-            try:
-                zoho_manager = ZohoCRMManager(config, pdf_exporter)
-            except Exception as e:
-                logger.error(f"Zoho manager initialization failed: {e}", exc_info=True)
-                zoho_manager = type('FallbackZohoCRMManager', (object,), {
-                    'config': config, # Needs config to prevent attribute errors
-                    'save_chat_transcript_sync': lambda self, session, reason: (logger.warning("Zoho CRM is disabled or failed to initialize."), False)
-                })(config, pdf_exporter) # Pass dummy pdf_exporter
-            
-            try:
-                ai_system = EnhancedAI(config)
-            except Exception as e:
-                logger.error(f"AI system initialization failed: {e}", exc_info=True)
-                ai_system = type('FallbackAI', (object,), {
-                    'openai_client': None, # Ensure client is None if AI fails
-                    'get_response': lambda self, prompt, history=None: {
-                        "content": "AI system is temporarily unavailable. Please try again later.",
-                        "success": False,
-                        "source": "AI System Error"
+        with col1:
+            st.subheader("📊 Current Session State")
+            st.json({
+                "session_id": session.session_id[:8] + "...",
+                "fingerprint_id": session.fingerprint_id,
+                "fingerprint_method": session.fingerprint_method,
+                "visitor_type": session.visitor_type,
+                "privacy_level": session.browser_privacy_level,
+                "last_activity": session.last_activity.isoformat() if session.last_activity else None
+            })
+        
+        with col2:
+            st.subheader("🌐 JavaScript Message Queue")
+            if st.button("🔍 Check Message Queue", key="check_queue_btn"):
+                queue_check_js = """
+                (function() {
+                    if (!window.fifi_component_messages) {
+                        return {
+                            queue_exists: false,
+                            total_messages: 0,
+                            unprocessed_messages: 0,
+                            message_types: []
+                        };
                     }
-                })(config) # Pass config instance to FallbackAI
-            
-            rate_limiter = RateLimiter()
-            fingerprinting_manager = FingerprintingManager()
-            
-            # Email verification with fallback
-            try:
-                email_verification_manager = EmailVerificationManager(config)
-                # Check if SDK client failed init (if it has a supabase attribute which is None)
-                if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
-                    logger.warning("Supabase SDK client failed to initialize, attempting to use direct API EmailVerificationManager.")
-                    email_verification_manager = EmailVerificationManagerDirect(config)
-            except Exception as e:
-                logger.error(f"Email verification manager initialization failed: {e}", exc_info=True)
-                # Create dummy manager that always returns False
-                email_verification_manager = type('DummyEmailManager', (object,), {
-                    'send_verification_code': lambda self, email: (st.error("Email verification is currently disabled."), False),
-                    'verify_code': lambda self, email, code: (st.error("Email verification is currently disabled."), False)
-                })(config) # Pass config
-                st.warning("Email verification feature is disabled due to initialization issues.")
-            
-            question_limit_manager = QuestionLimitManager()
-
-            # Initialize session manager with all components
-            st.session_state.session_manager = SessionManager(
-                config, db_manager, zoho_manager, ai_system, rate_limiter,
-                fingerprinting_manager, email_verification_manager, question_limit_manager
-            )
-            
-            # Store other components for diagnostics
-            st.session_state.pdf_exporter = pdf_exporter
-            st.session_state.error_handler = error_handler # This should be directly handled by error_handler instance
-            st.session_state.fingerprinting_manager = fingerprinting_manager
-            st.session_state.email_verification_manager = email_verification_manager
-            st.session_state.question_limit_manager = question_limit_manager
-
-            st.session_state.initialized = True
-            logger.info("✅ Application initialized successfully with enhanced error handling.")
-            return True
-            
-        except Exception as e:
-            st.error("💥 A critical error occurred during application startup and initialization. The application cannot run.")
-            st.error(f"Error details: {str(e)}")
-            logger.critical(f"CRITICAL: Application initialization failed: {e}", exc_info=True)
-            
-            # Try to continue with minimal functionality
-            try:
-                st.session_state.initialized = False  # Mark as NOT fully initialized to prevent loops if critical state persists
-                return False
-            except Exception as inner_e:
-                logger.critical(f"Failed to set initialized state during critical failure: {inner_e}")
-                return False
-    
-    return True
-
-# Enhanced main function with better error boundaries (Fix 6)
-def main():
-    """
-    Enhanced main entry point with better error handling
-    """
-    try:
-        st.set_page_config(
-            page_title="FiFi AI Assistant - Complete Integration", 
-            page_icon="🤖", 
-            layout="wide"
-        )
-    except Exception as e:
-        logger.error(f"Failed to set page config: {e}", exc_info=True)
-        # Continue anyway, Streamlit might render without proper config
-
-    try:
-        global_message_channel_error_handler()
-    except Exception as e:
-        logger.error(f"Failed to initialize global error handler: {e}", exc_info=True)
-
-    # Emergency reset button (keep this visible)
-    if st.button("🔄 Fresh Start (Dev)", key="emergency_clear_state_btn", 
-                 help="Clears all session state and restarts the app. Use only for development or if the app is stuck."):
-        logger.warning("User initiated 'Fresh Start (Dev)' button action.")
-        try:
-            st.session_state.clear()
-            st.rerun()
-        except Exception as e:
-            logger.error(f"Failed to clear session state during Fresh Start: {e}", exc_info=True)
-            # Force page reload as last resort
-            st.markdown('<meta http-equiv="refresh" content="0">', unsafe_allow_html=True)
-            st.stop() # Stop further execution to ensure reload
-
-    # Diagnostics button
-    try:
-        if st.button("🔧 Diagnostics", key="diagnostics_btn", 
-                    help="Access troubleshooting tools for database, API, and client info."):
-            st.session_state['page'] = 'diagnostics'
-            st.rerun()
-    except Exception as e:
-        logger.error(f"Failed to render diagnostics button: {e}", exc_info=True)
-
-    # Initialize application
-    if not ensure_initialization():
-        st.error("⚠️ Application initialization incomplete. Some features may not work properly.")
-        logger.error("Application running in degraded mode due to initialization issues.")
-        # If initialization is incomplete, do not proceed with features that rely on it
-        # However, the user wants the app to still try and run, so we proceed carefully.
-
-    # Handle emergency saves
-    try:
-        handle_emergency_save_requests_from_query()
-    except Exception as e:
-        logger.error(f"Emergency save handling failed: {e}", exc_info=True)
-
-    # Get session manager
-    session_manager = st.session_state.get('session_manager')
-    if not session_manager:
-        st.error("Fatal: Session Manager failed to initialize. Please refresh the page.")
-        logger.critical("Fatal: Session Manager not found after initialization. Stopping application.")
-        st.stop() # Stop if session manager is critically missing
-
-    # Route to appropriate page
-    current_page = st.session_state.get('page')
-    
-    try:
-        if current_page == "diagnostics":
-            render_diagnostic_page()
-            if st.button("⬅️ Back to Home"):
-                st.session_state['page'] = None
-                st.rerun()
-        elif current_page != "chat":
-            render_welcome_page(session_manager)
-        else:
-            session = session_manager.get_session() 
-            
-            if session and session.active:
-                render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-                render_chat_interface(session_manager, session)
-            else:
-                # If get_session returns inactive/banned, it's already displayed a message.
-                # Clear page state to redirect to welcome on next rerun.
-                if 'page' in st.session_state:
-                    del st.session_state['page']
-                st.rerun()
+                    
+                    const unprocessed = window.fifi_component_messages.filter(msg => !msg.processed);
+                    const messageTypes = [...new Set(window.fifi_component_messages.map(msg => msg.type))];
+                    
+                    return {
+                        queue_exists: true,
+                        total_messages: window.fifi_component_messages.length,
+                        unprocessed_messages: unprocessed.length,
+                        message_types: messageTypes,
+                        latest_messages: window.fifi_component_messages.slice(-3).map(msg => ({
+                            type: msg.type,
+                            session_id: msg.session_id ? msg.session_id.substring(0, 8) : 'unknown',
+                            processed: msg.processed,
+                            timestamp: new Date(msg.timestamp || msg.received_timestamp).toLocaleTimeString()
+                        }))
+                    };
+                })();
+                """
                 
-    except Exception as e:
-        logger.error(f"Error in main page routing: {e}", exc_info=True)
-        st.error("An unexpected error occurred while loading the page. Please refresh.")
-        st.error(f"Technical details: {str(e)}")
+                try:
+                    queue_info = st_javascript(queue_check_js, key=f"queue_check_{int(time.time())}")
+                    if queue_info:
+                        st.json(queue_info)
+                        
+                        if queue_info.get('unprocessed_messages', 0) > 0:
+                            st.success(f"✅ Found {queue_info['unprocessed_messages']} unprocessed messages!")
+                        else:
+                            st.info("ℹ️ No unprocessed messages in queue")
+                    else:
+                        st.warning("⚠️ Unable to check message queue")
+                except Exception as e:
+                    st.error(f"❌ Queue check failed: {e}")
+        
+        # Manual fingerprint trigger
+        st.subheader("🔄 Manual Actions")
+        
+        col3, col4, col5 = st.columns(3)
+        
+        with col3:
+            if st.button("🧬 Force Fingerprint", key="force_fp_btn"):
+                st.info("Rendering new fingerprint component...")
+                session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
+                st.success("Fingerprint component rendered!")
+        
+        with col4:
+            if st.button("📨 Process Messages", key="process_msgs_btn"):
+                try:
+                    updated = session_manager.check_component_messages(session)
+                    if updated:
+                        st.success("✅ Fingerprint updated! Rerunning...")
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.info("ℹ️ No fingerprint updates found")
+                except Exception as e:
+                    st.error(f"❌ Message processing failed: {e}")
+        
+        with col5:
+            if st.button("🗑️ Clear Queue", key="clear_queue_btn"):
+                clear_queue_js = """
+                (function() {
+                    if (window.fifi_component_messages) {
+                        const count = window.fifi_component_messages.length;
+                        window.fifi_component_messages = [];
+                        return { cleared: count };
+                    }
+                    return { cleared: 0 };
+                })();
+                """
+                
+                try:
+                    result = st_javascript(clear_queue_js, key=f"clear_queue_{int(time.time())}")
+                    if result:
+                        st.success(f"🗑️ Cleared {result.get('cleared', 0)} messages from queue")
+                except Exception as e:
+                    st.error(f"❌ Queue clear failed: {e}")
+        
+        # Real-time monitoring
+        st.subheader("⚡ Real-time Monitoring")
+        
+        if st.checkbox("Enable Auto-refresh", key="auto_refresh_checkbox"):
+            # Auto-refresh every 3 seconds
+            time.sleep(3)
+            st.rerun()
+        
+        # Console log viewer
+        st.subheader("📋 Browser Console Logs")
+        if st.button("📖 Get Console Logs", key="get_logs_btn"):
+            console_logs_js = """
+            (function() {
+                // Capture console logs related to fingerprinting
+                if (!window.fifi_console_logs) {
+                    window.fifi_console_logs = [];
+                    
+                    // Override console.log to capture logs
+                    const originalLog = console.log;
+                    console.log = function(...args) {
+                        const message = args.join(' ');
+                        if (message.includes('FiFi') || message.includes('🔍') || message.includes('fingerprint')) {
+                            window.fifi_console_logs.push({
+                                message: message,
+                                timestamp: new Date().toLocaleTimeString(),
+                                type: 'log'
+                            });
+                            
+                            // Keep only last 20 logs
+                            if (window.fifi_console_logs.length > 20) {
+                                window.fifi_console_logs = window.fifi_console_logs.slice(-20);
+                            }
+                        }
+                        originalLog.apply(console, args);
+                    };
+                }
+                
+                return window.fifi_console_logs.slice(-10); // Return last 10 logs
+            })();
+            """
+            
+            try:
+                logs = st_javascript(console_logs_js, key=f"console_logs_{int(time.time())}")
+                if logs and len(logs) > 0:
+                    for log in logs:
+                        st.code(f"[{log['timestamp']}] {log['message']}")
+                else:
+                    st.info("No fingerprinting-related console logs found")
+            except Exception as e:
+                st.error(f"❌ Console log retrieval failed: {e}")
+        
+        # Database verification
+        st.subheader("💾 Database Verification")
+        if st.button("🔍 Verify DB Save", key="verify_db_btn"):
+            try:
+                # Reload session from database
+                fresh_session = session_manager.db.load_session(session.session_id)
+                if fresh_session:
+                    st.success("✅ Session found in database")
+                    
+                    # Compare fingerprints
+                    if fresh_session.fingerprint_id != session.fingerprint_id:
+                        st.warning("⚠️ Fingerprint mismatch between memory and database!")
+                        st.json({
+                            "memory_fingerprint": session.fingerprint_id,
+                            "database_fingerprint": fresh_session.fingerprint_id,
+                            "memory_method": session.fingerprint_method,
+                            "database_method": fresh_session.fingerprint_method
+                        })
+                    else:
+                        st.success("✅ Fingerprints match between memory and database")
+                else:
+                    st.error("❌ Session not found in database!")
+            except Exception as e:
+                st.error(f"❌ Database verification failed: {e}")
+        
+        # Step-by-step diagnostic
+        st.subheader("🚦 Step-by-step Diagnostic")
+        
+        diagnostic_steps = [
+            ("1. Message Listener", "Check if message listener is initialized"),
+            ("2. Fingerprint Component", "Verify fingerprint component execution"),
+            ("3. Message Queue", "Check if messages are being queued"),
+            ("4. Message Processing", "Verify Python can read messages"),
+            ("5. Database Save", "Confirm fingerprint is saved to database")
+        ]
+        
+        for step_name, step_desc in diagnostic_steps:
+            with st.expander(f"🔍 {step_name}: {step_desc}"):
+                if "Message Listener" in step_name:
+                    listener_check_js = """
+                    (function() {
+                        return {
+                            listener_initialized: !!window.fifi_message_listener_initialized,
+                            queue_exists: !!window.fifi_component_messages,
+                            debug_function_exists: typeof window.debugFiFiMessages === 'function'
+                        };
+                    })();
+                    """
+                    listener_status = st_javascript(listener_check_js, key=f"listener_check_{step_name.replace(' ', '_')}_{int(time.time())}")
+                    if listener_status:
+                        st.json(listener_status)
+                
+                elif "Fingerprint Component" in step_name:
+                    fp_check_js = f"""
+                    (function() {{
+                        const sessionId = "{session.session_id}";
+                        const safeSessionId = sessionId.replace(/-/g, '_');
+                        
+                        return {{
+                            component_executed: !!window['fifi_fp_executed_' + safeSessionId],
+                            session_id: sessionId.substring(0, 8)
+                        }};
+                    }})();
+                    """
+                    fp_status = st_javascript(fp_check_js, key=f"fp_check_{step_name.replace(' ', '_')}_{int(time.time())}")
+                    if fp_status:
+                        st.json(fp_status)
+                
+                elif "Message Queue" in step_name:
+                    # Already covered above
+                    st.info("Use the 'Check Message Queue' button above")
+                
+                elif "Message Processing" in step_name:
+                    if st.button(f"Test {step_name}", key=f"test_{step_name.replace(' ', '_')}_{int(time.time())}"):
+                        try:
+                            updated = session_manager.check_component_messages(session)
+                            st.json({"messages_processed": updated})
+                        except Exception as e:
+                            st.error(f"Processing failed: {e}")
+                
+                elif "Database Save" in step_name:
+                    if st.button(f"Test {step_name}", key=f"test_{step_name.replace(' ', '_')}_{int(time.time())}"):
+                        try:
+                            session_manager.db.save_session(session)
+                            st.success("✅ Session saved to database")
+                        except Exception as e:
+                            st.error(f"Database save failed: {e}")
 
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logger.critical(f"Critical error in main execution loop: {e}", exc_info=True)
-        st.error("💥 A critical, unhandled error occurred in the application. Please refresh the page.")
-        st.error(f"Error details: {str(e)}")
+# =============================================================================
+# SIMPLE INTEGRATION FUNCTION
+# =============================================================================
+
+def add_fingerprint_diagnostic_to_chat_interface(session_manager, session):
+    """
+    Simple function to add the diagnostic panel to your existing chat interface.
+    Just call this function in your render_chat_interface() method.
+    """
+    # Only show in debug mode or for specific users
+    if st.checkbox("🔬 Show Fingerprinting Diagnostics", key="show_fp_diagnostics"):
+        render_fingerprint_diagnostic_panel(session_manager, session)
