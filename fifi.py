@@ -2611,7 +2611,7 @@ def render_browser_close_detection_enhanced(session_id: str):
                 if (document.visibilityState === 'hidden') {{
                     // Delay the save trigger to avoid false positives
                     setTimeout(() => {{
-                        if (document.visibilityState === 'hidden') {{
+                        if (document.hidden) {{
                             triggerEmergencySave('visibility_hidden');
                         }}
                     }}, 2000);
@@ -2771,13 +2771,16 @@ def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
         safe_session_key = session_id.replace('-', '_')[:8]
         raw_result = st_javascript(js_code, key=f"client_info_{safe_session_key}")
 
+        # Add debug logging here (as requested by user)
+        logger.info(f"🔍 raw_client_info_result type: {type(raw_result)}, value: {raw_result}")
+
         # Handle the result safely
         if isinstance(raw_result, str):
             parsed_result = safe_json_loads(raw_result)
             if isinstance(parsed_result, dict):
                 if parsed_result.get('error'):
                     logger.error(f"JS Client Info Detector reported error: {parsed_result.get('message', 'Unknown JS error')}")
-                    return None
+                    return None # Return None if JS reported an error
                 return parsed_result
             else:
                 logger.error(f"st_javascript returned non-dict from JSON.stringify: {raw_result[:100]}...")
@@ -3274,6 +3277,9 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
         ):
         
         client_info_result = render_client_info_detector(session.session_id)
+        # Add debug logging here (as requested by user)
+        logger.info(f"🔍 raw_client_info_result type: {type(client_info_result)}, value: {client_info_result}")
+
         # FIX: Robustly check client_info_result type and content
         if isinstance(client_info_result, dict) and client_info_result.get('client_info'):
             client_info = client_info_result['client_info']
@@ -3303,6 +3309,9 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
         fingerprint_js_code = session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
         raw_fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id.replace('-', '_')[:8]}") # Corrected key generation
         
+        # Add debug logging here (as requested by user)
+        logger.info(f"🔍 raw_fp_result type: {type(raw_fp_result)}, value: {raw_fp_result}")
+
         # FIX: Robustly parse and check raw_fp_result from st_javascript
         fp_result = None
         if isinstance(raw_fp_result, str):
@@ -3316,7 +3325,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
                 session_manager.apply_fingerprinting(session, extracted_fp_data)
                 st.rerun()
             else:
-                logger.debug(f"JS Fingerprint returned a fallback/blocked result: {extracted_fp_data.get('fingerprint_method')}. Retaining Python fallback if present.")
+                logger.debug(f"JS Fingerprinting component returned a fallback/blocked result: {extracted_fp_data.get('fingerprint_method')}. Retaining Python fallback if present.")
         elif fp_result is not None:
             logger.debug(f"Fingerprinting component returned unexpected data or error: {fp_result}. Will try again.")
         else:
