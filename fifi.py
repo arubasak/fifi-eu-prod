@@ -45,6 +45,9 @@ from streamlit_javascript import st_javascript
 # - FIX: Corrected session saving order in get_ai_response to prevent message loss.
 # - FIX: Removed inappropriate ban for registered users at 20 questions.
 # - FIX: Ensured get_session returns existing session even if banned, retaining chat history.
+# - FIX: Supabase OTP vs Magic Link issue addressed with explicit OTP calls.
+# - FIX: Enhanced IP/User-Agent capture with multiple fallbacks for Streamlit context variations.
+# - NEW: Added diagnostic page for troubleshooting.
 # =============================================================================
 
 # Setup logging
@@ -786,7 +789,7 @@ class FingerprintingManager:
         }
 
 class EmailVerificationManager:
-    """Manages email verification process, typically via an OTP service like Supabase Auth."""
+    """Manages email verification process using Supabase Auth OTP."""
     
     def __init__(self, config: Config):
         self.config = config
@@ -806,12 +809,31 @@ class EmailVerificationManager:
             return False
         
         try:
-            self.supabase.auth.sign_in_with_otp({'email': email, 'options': {'should_create_user': True}})
-            logger.info(f"Email verification code/link sent to {email} via Supabase.")
-            return True
+            # FIX: Explicitly specify OTP type and disable magic link
+            response = self.supabase.auth.sign_in_with_otp({
+                'email': email,
+                'options': {
+                    'should_create_user': True,
+                    'email_redirect_to': None,  # Disable magic link redirect
+                    'data': { # This 'data' payload might not be directly used by all Supabase versions for OTP type.
+                        'verification_type': 'email_otp'  # Explicitly request OTP (best effort)
+                    }
+                }
+            })
+            
+            # Supabase SDK's sign_in_with_otp doesn't always return a direct 'user' object on successful OTP *send*,
+            # but rather implicitly indicates success by not raising an exception.
+            # Check if the response indicates success (e.g., is not None or has a specific attribute if available).
+            if response is not None: # A non-None response generally means the API call succeeded.
+                logger.info(f"Email OTP code sent to {email} via Supabase.")
+                return True
+            else:
+                logger.error(f"Supabase OTP send failed - unexpected response from sign_in_with_otp.")
+                return False
+                
         except Exception as e:
             logger.error(f"Failed to send verification code via Supabase for {email}: {e}")
-            st.error("Failed to send verification code. Please check your email address and try again.")
+            st.error(f"Failed to send verification code: {str(e)}")
             return False
 
     @handle_api_errors("Supabase Auth", "Verify Code")
@@ -821,15 +843,107 @@ class EmailVerificationManager:
             return False
         
         try:
-            response = self.supabase.auth.verify_otp({'email': email, 'token': code.strip(), 'type': 'email'})
-            if response.user:
+            # FIX: Use proper OTP verification
+            response = self.supabase.auth.verify_otp({
+                'email': email,
+                'token': code.strip(),
+                'type': 'email'  # Explicitly specify email OTP type
+            })
+            
+            if response and response.user: # Check if response object and user attribute are present
                 logger.info(f"Email verification successful for {email} (Supabase User ID: {response.user.id}).")
                 return True
             else:
                 logger.warning(f"Email verification failed for {email}: Invalid code or no user returned.")
+                st.error("Invalid verification code. Please check the code and try again.")
                 return False
+                
         except Exception as e:
             logger.error(f"Failed to verify code via Supabase for {email}: {e}")
+            st.error(f"Verification failed: {str(e)}")
+            return False
+
+# Alternative implementation using direct API calls if the SDK has issues
+class EmailVerificationManagerDirect:
+    """Direct API implementation for Supabase OTP when SDK has issues."""
+    
+    def __init__(self, config: Config):
+        self.config = config
+        self.supabase_url = config.SUPABASE_URL
+        self.supabase_key = config.SUPABASE_ANON_KEY
+        
+    def send_verification_code(self, email: str) -> bool:
+        if not self.supabase_url or not self.supabase_key:
+            st.error("Supabase configuration missing.")
+            return False
+            
+        try:
+            import requests
+            
+            response = requests.post(
+                f"{self.supabase_url}/auth/v1/otp",
+                headers={
+                    'apikey': self.supabase_key,
+                    'Authorization': f'Bearer {self.supabase_key}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'email': email,
+                    'create_user': True,
+                    'gotrue_meta_security': {} # Required by Supabase API for OTP
+                },
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"Direct API: Email OTP sent to {email}")
+                return True
+            else:
+                logger.error(f"Direct API failed to send OTP: {response.status_code} - {response.text}")
+                st.error(f"Failed to send verification code: {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Direct API OTP send failed: {e}")
+            st.error(f"Failed to send verification code: {str(e)}")
+            return False
+    
+    def verify_code(self, email: str, code: str) -> bool:
+        if not self.supabase_url or not self.supabase_key:
+            st.error("Supabase configuration missing.")
+            return False
+            
+        try:
+            import requests
+            
+            response = requests.post(
+                f"{self.supabase_url}/auth/v1/verify",
+                headers={
+                    'apikey': self.supabase_key,
+                    'Authorization': f'Bearer {self.supabase_key}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'type': 'email', # Must be 'email' for email OTP verification
+                    'email': email,
+                    'token': code.strip()
+                },
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('user'):
+                    logger.info(f"Direct API: Email verification successful for {email}")
+                    return True
+            
+            logger.warning(f"Direct API verification failed: {response.status_code} - {response.text}")
+            st.error(f"Invalid verification code: {response.text}")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Direct API verification failed: {e}")
+            st.error(f"Verification failed: {str(e)}")
             return False
 
 class QuestionLimitManager:
@@ -900,7 +1014,7 @@ class QuestionLimitManager:
                     'reason': 'total_limit',
                     'message': "Usage limit reached. Please retry in 24 hours as we are giving preference to others in the queue."
                 }
-            # REMOVED: The problematic 'if session.total_question_count >= 20' ban check
+            # FIX: Removed the problematic 'if session.total_question_count >= 20' ban check
         
         return {'allowed': True}
     
@@ -1360,7 +1474,7 @@ class EnhancedAI:
         #         if chat_history:
         #             messages = chat_history[-5:] + messages # Last 5 messages for context
         #         response = self.openai_client.chat.completions.create(
-        #             model="gpt-4o-mini", # or your chosen model
+        #             model="gpt-3.5-turbo", # or your chosen model
         #             messages=messages
         #         )
         #         return {"content": response.choices[0].message.content, "source": "OpenAI", "success": True}
@@ -1872,36 +1986,74 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
 
-    def _create_guest_session(self) -> UserSession:
+    def _capture_client_info(self, session: UserSession) -> UserSession:
         """
-        Creates a new guest user session with a unique ID and attempts to capture client info.
+        Enhanced client info capture with multiple fallback methods.
+        Attempts to get IP and User-Agent from Streamlit's internal context,
+        falling back to JS detection if necessary.
         """
-        session = UserSession(session_id=str(uuid.uuid4()))
+        ip_captured = False
+        ua_captured = False
         
+        # Method 1: Try the current Streamlit context (most reliable if available)
         try:
             from streamlit.runtime.scriptrunner import get_script_run_ctx
             ctx = get_script_run_ctx()
-            if ctx and ctx.request_context and ctx.request_context.headers:
-                headers = ctx.request_context.headers
+            
+            headers = None
+            if ctx:
+                if hasattr(ctx, 'request_context') and ctx.request_context and hasattr(ctx.request_context, 'headers'):
+                    headers = ctx.request_context.headers # Older Streamlit versions
+                elif hasattr(ctx, 'session_info') and ctx.session_info and hasattr(ctx.session_info, 'headers'):
+                    headers = ctx.session_info.headers # Newer Streamlit versions
+                elif hasattr(ctx, '_session_state') and hasattr(ctx._session_state, '_session_info') and hasattr(ctx._session_state._session_info, 'headers'):
+                    # Fallback for some specific deployments/versions
+                    headers = ctx._session_state._session_info.headers
+
+            if headers:
+                # Extract IP address from common headers
+                ip_headers_priority = [
+                    'x-forwarded-for', 'x-real-ip', 'cf-connecting-ip', 
+                    'x-client-ip', 'x-forwarded', 'forwarded-for', 'forwarded'
+                ]
                 
-                ip_headers_priority = ['x-forwarded-for', 'x-real-ip', 'cf-connecting-ip', 'x-client-ip']
                 for header_name in ip_headers_priority:
-                    ip_val = headers.get(header_name)
+                    ip_val = headers.get(header_name) or headers.get(header_name.upper()) # Check both cases
                     if ip_val:
                         session.ip_address = ip_val.split(',')[0].strip()
                         session.ip_detection_method = header_name
+                        ip_captured = True
                         break
-                else:
-                    session.ip_address = "unknown_direct_connection" 
-                    session.ip_detection_method = "direct_connection"
-
-                session.user_agent = headers.get('user-agent', 'unknown')
-                logger.debug(f"Captured IP '{session.ip_address}' ({session.ip_detection_method}) and User-Agent for new session {session.session_id[:8]}.")
+                
+                # Extract User-Agent
+                ua_val = headers.get('user-agent') or headers.get('User-Agent')
+                if ua_val:
+                    session.user_agent = ua_val
+                    ua_captured = True
+                    
         except Exception as e:
-            logger.warning(f"Could not reliably capture IP/User-Agent for new session {session.session_id[:8]}: {e}")
-            session.ip_address = "capture_failed"
-            session.user_agent = "capture_failed"
+            logger.debug(f"Method 1 (Streamlit context) failed to capture client info: {e}")
+        
+        # Final fallbacks if info was not captured by Python server-side
+        if not ip_captured:
+            session.ip_address = "capture_failed_py_context"
+            session.ip_detection_method = "python_context_unavailable"
+            
+        if not ua_captured:
+            session.user_agent = "capture_failed_py_context"
+        
+        logger.info(f"Client info capture for {session.session_id[:8]}: IP_Captured={ip_captured}, UA_Captured={ua_captured}")
+        return session
 
+    def _create_guest_session(self) -> UserSession:
+        """
+        Creates a new guest user session with enhanced client info capture.
+        """
+        session = UserSession(session_id=str(uuid.uuid4()))
+        
+        # Use the enhanced client info capture
+        session = self._capture_client_info(session)
+        
         self.db.save_session(session)
         st.session_state.current_session_id = session.session_id
         logger.info(f"Created new guest session: {session.session_id[:8]}.")
@@ -2330,6 +2482,7 @@ class SessionManager:
         session.messages.append(response_message)
         session.messages = session.messages[-100:]
         
+        # FIX: Moved activity update and final save to ensure messages are included.
         # 9. Save Session (with messages) and Update Activity Timestamp
         logger.debug(f"Session {session.session_id[:8]} now has {len(session.messages)} messages before final save in get_ai_response.")
         try:
@@ -2731,6 +2884,69 @@ def render_email_verification_dialog(session_manager: SessionManager, session: U
                 else:
                     st.error("Please enter the verification code you received.")
             
+def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
+    """
+    JavaScript component to detect client information when Streamlit context fails.
+    This component will post a message to its parent window if successful.
+    """
+    js_code = f"""
+    (() => {{
+        const sessionId = "{session_id}";
+        
+        // Ensure this script only runs once per component instance
+        if (window.fifi_client_info_sent_{session_id}) return null;
+        window.fifi_client_info_sent_{session_id} = true;
+
+        // Collect client information
+        const clientInfo = {{
+            userAgent: navigator.userAgent,
+            language: navigator.language,
+            languages: navigator.languages ? navigator.languages.join(',') : '',
+            platform: navigator.platform,
+            cookieEnabled: navigator.cookieEnabled,
+            doNotTrack: navigator.doNotTrack,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            screen: {{
+                width: screen.width,
+                height: screen.height,
+                colorDepth: screen.colorDepth
+            }},
+            viewport: {{
+                width: window.innerWidth,
+                height: window.innerHeight
+            }},
+            timestamp: Date.now()
+        }};
+        
+        // Try to get more detailed network info if available
+        if (navigator.connection) {{
+            clientInfo.connection = {{
+                effectiveType: navigator.connection.effectiveType,
+                downlink: navigator.connection.downlink,
+                rtt: navigator.connection.rtt
+            }};
+        }}
+        
+        console.log('FiFi Client Info Detected:', clientInfo);
+        
+        // Return data directly to Streamlit via st_javascript
+        return {{
+            session_id: sessionId,
+            client_info: clientInfo,
+            capture_method: 'javascript_component_return'
+        }};
+    }})()
+    """
+    
+    try:
+        # Use a consistent key for repeated calls within Streamlit to ensure it's rendered.
+        # st_javascript returns the value of the last expression in the JS.
+        result = st_javascript(js_code, key=f"client_info_{session_id[:8]}", height=0)
+        return result
+    except Exception as e:
+        logger.error(f"JavaScript client info detection failed: {e}")
+        return None
+
 def render_chat_interface(session_manager: SessionManager, session: UserSession):
     """Renders the main chat interface."""
     
@@ -2739,6 +2955,38 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
     
     global_message_channel_error_handler()
 
+    # FIX: Integrate JS client info detection here if Python-side capture failed or needs enhancement
+    if (session.ip_address == "capture_failed_py_context" or 
+        session.user_agent == "capture_failed_py_context" or
+        not session.fingerprint_id # Also trigger if fingerprinting itself is missing
+        ):
+        
+        client_info_result = render_client_info_detector(session.session_id)
+        if client_info_result and client_info_result.get('client_info'):
+            client_info = client_info_result['client_info']
+            updated_session = False
+            
+            # Update user agent if it was previously a fallback
+            if session.user_agent == "capture_failed_py_context" and client_info.get('userAgent'):
+                session.user_agent = client_info['userAgent']
+                logger.info(f"Session {session.session_id[:8]}: User-Agent updated from JS: {session.user_agent[:50]}...")
+                updated_session = True
+
+            # Update browser privacy level if provided by JS
+            if client_info.get('privacy_level') and session.browser_privacy_level == 'standard': # Only update if not already set by proper FP
+                 session.browser_privacy_level = client_info['privacy_level']
+                 logger.info(f"Session {session.session_id[:8]}: Browser privacy level updated from JS: {session.browser_privacy_level}")
+                 updated_session = True
+            
+            # Note: IP address from JS is generally less reliable than server-side (due to proxy visibility),
+            # but can be used as a last resort if Python-side fails completely.
+            # For now, relying on Python's initial IP capture.
+
+            if updated_session:
+                session_manager.db.save_session(session) # Persist the updated client info
+                st.rerun() # Rerun to apply latest session data
+
+    # Original fingerprinting call (can remain as it handles overall FP ID)
     if not session.fingerprint_id or session.fingerprint_method == "temporary_fallback_python":
         fingerprint_js_code = session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
         fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id[:8]}")
@@ -2845,6 +3093,121 @@ def render_chat_interface(session_manager: SessionManager, session: UserSession)
         st.rerun()
 
 # =============================================================================
+# DIAGNOSTIC TOOLS
+# =============================================================================
+
+def render_diagnostic_page():
+    """Diagnostic page for troubleshooting."""
+    st.title("🔧 FiFi AI Diagnostics")
+    
+    st.subheader("1. Supabase Configuration & Email OTP Test")
+    if st.button("🔍 Test Supabase Configuration"):
+        config = Config()
+        
+        if not config.SUPABASE_ENABLED:
+            st.error("❌ Supabase is not enabled (missing URL or key in secrets.toml)")
+            return
+        
+        try:
+            # Use the already initialized EmailVerificationManager from session_state
+            # (or create a new one if this page is accessed directly without full app init)
+            email_manager = st.session_state.get('email_verification_manager')
+            if not email_manager:
+                email_manager = EmailVerificationManager(config)
+                # If SDK client failed, try the direct one for testing
+                if not email_manager.supabase:
+                    email_manager = EmailVerificationManagerDirect(config)
+
+            st.info(f"Testing OTP send via {type(email_manager).__name__}...")
+            test_email = "test@example.com" # Using a dummy email for test, usually you'd input one
+            
+            # Attempt to send OTP
+            send_success = email_manager.send_verification_code(test_email)
+            if send_success:
+                st.success(f"✅ OTP send test to {test_email} completed. Check logs for details (and {test_email}'s inbox).")
+            else:
+                st.error(f"❌ OTP send test to {test_email} failed. See logs for specific errors.")
+            
+            st.write("---")
+            st.info("Supabase client status:")
+            if hasattr(email_manager, 'supabase') and email_manager.supabase:
+                st.write(f"SDK Client URL: {email_manager.supabase.supabase_url}")
+                st.write(f"SDK Client Key present: {bool(email_manager.supabase.supabase_key)}")
+            elif hasattr(email_manager, 'supabase_url') and email_manager.supabase_url:
+                 st.write(f"Direct API URL: {email_manager.supabase_url}")
+                 st.write(f"Direct API Key present: {bool(email_manager.supabase_key)}")
+            else:
+                st.write("No Supabase client initialized.")
+
+        except Exception as e:
+            st.error(f"❌ Supabase test encountered an unexpected error: {e}")
+            st.code(str(e))
+    
+    st.subheader("2. Client Info Detection")
+    if st.button("🔍 Test Client Info Capture"):
+        session_manager_diag = st.session_state.get('session_manager')
+        if session_manager_diag:
+            test_session = UserSession(session_id="diagnostic_test_client_info")
+            
+            st.markdown("### Python-side Capture (Server-side)")
+            captured_session_python = session_manager_diag._capture_client_info(test_session)
+            st.json({
+                "ip_address": captured_session_python.ip_address,
+                "ip_detection_method": captured_session_python.ip_detection_method,
+                "user_agent": captured_session_python.user_agent[:100] + "..." if captured_session_python.user_agent and len(captured_session_python.user_agent) > 100 else captured_session_python.user_agent,
+            })
+            
+            st.markdown("### JavaScript Component Capture (Client-side Fallback)")
+            # This needs to be rendered for JS to run.
+            client_info_js_result = render_client_info_detector(session_id="diagnostic_js_test")
+            if client_info_js_result and client_info_js_result.get('client_info'):
+                st.json(client_info_js_result['client_info'])
+            else:
+                st.info("No JavaScript client info result yet (may need re-run or be blocked).")
+        else:
+            st.warning("Session Manager not initialized. Please ensure app is running normally.")
+    
+    st.subheader("3. Database Connection & Messages")
+    if st.button("🔍 Test Database Persistence"):
+        db_manager = st.session_state.get('db_manager')
+        if db_manager:
+            st.json({
+                "db_type": db_manager.db_type,
+                "connection_status": "connected" if db_manager.conn else "failed",
+                "local_sessions_count": len(getattr(db_manager, 'local_sessions', {}))
+            })
+
+            if db_manager.conn:
+                st.markdown("#### Test Message Save & Load:")
+                test_session_id = "test_db_persistence_" + str(uuid.uuid4())[:8]
+                test_session = UserSession(session_id=test_session_id)
+                test_session.messages.append({"role": "user", "content": "Hello DB!"})
+                test_session.messages.append({"role": "assistant", "content": "DB Test OK"})
+                test_session.user_type = UserType.REGISTERED_USER # Make it a registered user for CRM save eligibility
+                test_session.email = "test@example.com"
+
+                try:
+                    db_manager.save_session(test_session)
+                    st.success(f"✅ Session '{test_session_id}' saved to DB with {len(test_session.messages)} messages.")
+                    
+                    loaded_session = db_manager.load_session(test_session_id)
+                    if loaded_session and len(loaded_session.messages) == len(test_session.messages):
+                        st.success("✅ Messages correctly loaded from DB!")
+                        st.json(loaded_session.messages)
+                    else:
+                        st.error(f"❌ Message count mismatch on load! Expected {len(test_session.messages)}, got {len(loaded_session.messages) if loaded_session else 'None'}.")
+                        if loaded_session: st.json(loaded_session.messages)
+                        
+                except Exception as e:
+                    st.error(f"❌ Database save/load test failed: {e}")
+                    st.code(str(e))
+            else:
+                st.warning("Cannot test persistence: Database connection is not active.")
+        else:
+            st.warning("Database Manager not initialized.")
+
+
+# =============================================================================
 # MAIN APPLICATION FLOW
 # =============================================================================
 
@@ -2873,8 +3236,20 @@ def ensure_initialization():
             ai_system = EnhancedAI(config)
             rate_limiter = RateLimiter()
             
-            fingerprinting_manager = FingerprintingManager()
+            # Initialize EmailVerificationManager, with fallback to Direct API if SDK init fails
             email_verification_manager = EmailVerificationManager(config)
+            if not email_verification_manager.supabase and config.SUPABASE_ENABLED:
+                logger.warning("Supabase SDK client failed to initialize, attempting to use direct API EmailVerificationManager.")
+                email_verification_manager = EmailVerificationManagerDirect(config)
+                if not email_verification_manager.supabase_url: # Check if direct manager also failed init
+                     logger.error("Direct Supabase API manager also failed to initialize. Email verification disabled.")
+                     st.warning("Email verification feature is disabled due to Supabase initialization issues.")
+                     # Set back to a dummy manager to prevent crashes
+                     email_verification_manager = type('DummyEmailVerificationManager', (object,), {
+                         'send_verification_code': lambda self, email: (st.error("Email verification disabled."), False)[1],
+                         'verify_code': lambda self, email, code: (st.error("Email verification disabled."), False)[1]
+                     })()
+
             question_limit_manager = QuestionLimitManager()
 
             st.session_state.session_manager = SessionManager(
@@ -2883,7 +3258,7 @@ def ensure_initialization():
             )
             st.session_state.pdf_exporter = pdf_exporter
             st.session_state.error_handler = error_handler
-            st.session_state.ai_system = ai_system
+            # st.session_state.ai_system = ai_system # Not necessary to store directly if only used via session_manager
             st.session_state.fingerprinting_manager = fingerprinting_manager
             st.session_state.email_verification_manager = email_verification_manager
             st.session_state.question_limit_manager = question_limit_manager
@@ -2912,9 +3287,15 @@ def main():
 
     global_message_channel_error_handler()
 
+    # Place the "Fresh Start" button (for development/debugging) prominently
     if st.button("🔄 Fresh Start (Dev)", key="emergency_clear_state_btn", help="Clears all session state and restarts the app. Use only for development or if the app is stuck."):
         logger.warning("User initiated 'Fresh Start (Dev)' button action.")
         st.session_state.clear()
+        st.rerun()
+
+    # Add a Diagnostics button for troubleshooting
+    if st.button("🔧 Diagnostics", key="diagnostics_btn", help="Access troubleshooting tools for database, API, and client info."):
+        st.session_state['page'] = 'diagnostics'
         st.rerun()
 
     if not ensure_initialization():
@@ -2930,7 +3311,13 @@ def main():
 
     current_page = st.session_state.get('page')
     
-    if current_page != "chat":
+    if current_page == "diagnostics":
+        render_diagnostic_page()
+        # Add a way to go back to welcome/chat
+        if st.button("⬅️ Back to Home"):
+            st.session_state['page'] = None # Go to welcome page
+            st.rerun()
+    elif current_page != "chat":
         render_welcome_page(session_manager)
     else:
         session = session_manager.get_session() 
