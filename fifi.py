@@ -790,7 +790,7 @@ class FingerprintingManager:
     def __init__(self):
         self.fingerprint_cache = {}
 
-    # FIX 1: Replaced FingerprintingManager.generate_fingerprint_component method with st.components.v1.html version
+    # FIX 1: Corrected generate_fingerprint_component for st.components.v1.html and no 'key'
     def generate_fingerprint_component(self, session_id: str) -> None:
         """
         Renders fingerprinting component using st.components.v1.html with postMessage.
@@ -833,7 +833,7 @@ class FingerprintingManager:
                         ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; ctx.fillText('Food & Beverage Industry', 4, 45);
                         ctx.strokeStyle = '#000'; ctx.beginPath();
                         ctx.arc(50, 50, 20, 0, Math.PI * 2); ctx.stroke();
-                        return btoa(canvas.toDataURL()).slice(0, 32); // Base64 and truncate for consistency
+                        return btoa(canvas.toDataURL()).slice(0, 32);
                     }} catch (e) {{
                         console.error("❌ Canvas fingerprint failed:", e);
                         return 'canvas_blocked';
@@ -971,7 +971,7 @@ class FingerprintingManager:
         """
         
         # Render the component (NO KEY PARAMETER!)
-        st.components.v1.html(html_code, height=0, width=0, key=f"fifi_fp_init_{safe_session_id}")
+        st.components.v1.html(html_code, height=0, width=0)
 
 
     def extract_fingerprint_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -1723,7 +1723,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
         
         if result.flagged:
             flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
-            logger.warning(f"Input flagged by moderation for: {', '.join(flagged_categories)}")
+            logger.warning(f"Input flagged by moderation for: {', '.اهر'.join(flagged_categories)}")
             return {
                 "flagged": True, 
                 "message": "Your message violates our content policy and cannot be processed.",
@@ -2059,6 +2059,112 @@ class SessionManager:
         
         return {'has_history': False}
 
+    # FIX 2 (part of new functionality): check_component_messages method for SessionManager
+    def check_component_messages(self, session: UserSession) -> bool:
+        """
+        Checks for and processes messages from HTML components.
+        Returns True if fingerprint was updated (requiring a rerun).
+        """
+        try:
+            # Get messages from JavaScript component storage
+            js_get_messages = """
+            (function() {
+                if (!window.fifi_component_messages) {
+                    return [];
+                }
+                
+                // Get unprocessed messages
+                const unprocessed = window.fifi_component_messages.filter(msg => !msg.processed);
+                
+                // Mark as processed
+                window.fifi_component_messages.forEach(msg => {
+                    if (!msg.processed) {
+                        msg.processed = true;
+                    }
+                });
+                
+                // Clean up old messages (keep last 10)
+                if (window.fifi_component_messages.length > 10) {
+                    window.fifi_component_messages = window.fifi_component_messages.slice(-10);
+                }
+                
+                return unprocessed;
+            })();
+            """
+            
+            # Use st_javascript to retrieve messages from the browser's window object
+            # Provide a unique key for st_javascript
+            messages = st_javascript(js_get_messages, key=f"check_messages_js_{session.session_id[:8]}_{int(time.time())}")
+            
+            if not messages or not isinstance(messages, list):
+                return False
+            
+            fingerprint_updated = False
+            
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    logger.warning(f"Skipping non-dict message from component: {msg}")
+                    continue
+                    
+                msg_type = msg.get('type')
+                msg_session_id = msg.get('session_id')
+                
+                # Verify session ID matches
+                if msg_session_id != session.session_id:
+                    logger.warning(f"Message session ID mismatch: expected {session.session_id[:8]}, got {msg_session_id[:8] if msg_session_id else 'None'}")
+                    continue
+                
+                logger.info(f"Processing component message: {msg_type} for session {session.session_id[:8]}")
+                
+                if msg_type == 'fingerprint_result':
+                    # Extract fingerprint data
+                    fingerprint_data = self.fingerprinting.extract_fingerprint_from_result(msg)
+                    if fingerprint_data:
+                        self.apply_fingerprinting(session, fingerprint_data)
+                        fingerprint_updated = True
+                        logger.info(f"Fingerprint applied from component: {fingerprint_data.get('fingerprint_method')} for session {session.session_id[:8]}")
+                    
+                elif msg_type == 'fingerprint_error':
+                    logger.error(f"Fingerprinting error from component for session {session.session_id[:8]}: {msg.get('message', 'Unknown error')}")
+                    # Apply fallback fingerprint
+                    fallback_data = self.fingerprinting._generate_fallback_fingerprint()
+                    self.apply_fingerprinting(session, fallback_data)
+                    fingerprint_updated = True
+                    
+                elif msg_type == 'client_info_result':
+                    # Update session with enhanced client info from JavaScript
+                    client_info = msg.get('client_info', {})
+                    if client_info:
+                        # Only update if current info is from failed Python capture
+                        if session.ip_address == "capture_failed_py_context":
+                            # We can't directly get IP from client-side JavaScript for security reasons
+                            # but we can update other info
+                            session.user_agent = client_info.get('userAgent', session.user_agent)
+                            logger.info(f"Updated client info from JavaScript component for session {session.session_id[:8]}")
+                        
+                        # Save additional browser info for fingerprinting enhancement
+                        browser_info = {
+                            'language': client_info.get('language'),
+                            'platform': client_info.get('platform'),
+                            'timezone': client_info.get('timezone'),
+                            'screen': client_info.get('screen', {}),
+                            'viewport': client_info.get('viewport', {})
+                        }
+                        
+                        # Store this info in the session for potential use (if not already existing)
+                        if not hasattr(session, 'browser_info_js') or not session.browser_info_js:
+                            session.browser_info_js = browser_info
+                            self.db.save_session(session) # Save changes if client info updated
+                    
+                elif msg_type == 'client_info_error':
+                    logger.error(f"Client info error from component for session {session.session_id[:8]}: {msg.get('message', 'Unknown error')}")
+            
+            return fingerprint_updated
+            
+        except Exception as e:
+            logger.error(f"Error checking component messages for session {session.session_id[:8]}: {e}", exc_info=True)
+            return False
+
     def _mask_email(self, email: str) -> str:
         """Masks an email address for privacy."""
         if '@' not in email:
@@ -2305,6 +2411,92 @@ class SessionManager:
 # =============================================================================
 # JAVASCRIPT COMPONENTS & EVENT HANDLING
 # =============================================================================
+
+# FIX 3: Added the missing add_message_listener function
+def add_message_listener():
+    """
+    Adds a JavaScript message listener to handle postMessage communication 
+    from HTML components (fingerprinting, client info, etc.)
+    """
+    js_listener_code = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body { margin: 0; padding: 0; }
+        </style>
+    </head>
+    <body>
+    <script>
+    (function() {
+        // Prevent multiple listener registrations
+        if (window.fifi_message_listener_initialized) {
+            return;
+        }
+        window.fifi_message_listener_initialized = true;
+        
+        console.log('🎧 Initializing FiFi message listener for component communication');
+        
+        // Initialize message storage if not exists
+        if (!window.fifi_component_messages) {
+            window.fifi_component_messages = [];
+        }
+        
+        function handleComponentMessage(event) {
+            try {
+                const data = event.data;
+                
+                // Validate message structure
+                if (!data || typeof data !== 'object') {
+                    return;
+                }
+                
+                // Check if it's a FiFi component message
+                const validTypes = [
+                    'fingerprint_result', 
+                    'fingerprint_error',
+                    'client_info_result', 
+                    'client_info_error'
+                ];
+                
+                if (!validTypes.includes(data.type)) {
+                    return;
+                }
+                
+                console.log('📨 Received component message:', data.type, 'for session:', data.session_id ? data.session_id.substring(0, 8) : 'unknown');
+                
+                // Store message for Streamlit to process
+                window.fifi_component_messages.push({
+                    ...data,
+                    timestamp: Date.now(),
+                    processed: false
+                });
+                
+                // Limit message queue size
+                if (window.fifi_component_messages.length > 50) {
+                    window.fifi_component_messages = window.fifi_component_messages.slice(-25);
+                }
+                
+            } catch (error) {
+                console.error('❌ Error handling component message:', error);
+            }
+        }
+        
+        // Add the message listener
+        window.addEventListener('message', handleComponentMessage, false);
+        
+        console.log('✅ FiFi message listener initialized successfully');
+    })();
+    </script>
+    </body>
+    </html>
+    """
+    
+    try:
+        st.components.v1.html(js_listener_code, height=0, width=0)
+    except Exception as e:
+        logger.error(f"Failed to initialize message listener: {e}", exc_info=True)
+
 
 def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str, Any]]:
     """
@@ -2631,9 +2823,8 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }}
         
-        // Enhanced event listeners
-        const unloadEvents = ['beforeunload', 'pagehide', 'unload'];
-        unloadEvents.forEach(eventType => {{
+        const events = ['beforeunload', 'pagehide', 'unload'];
+        events.forEach(eventType => {{
             try {{
                 // Add to both current window and parent
                 window.addEventListener(eventType, () => triggerEmergencySave(eventType), {{ 
@@ -2740,7 +2931,7 @@ def global_message_channel_error_handler():
     except Exception as e:
         logger.error(f"Failed to initialize global message channel error handler: {e}", exc_info=True)
 
-# FIX 2: Replaced render_client_info_detector function
+# FIX 2: Replaced render_client_info_detector function (no 'key' parameter)
 def render_client_info_detector(session_id: str) -> None:
     """
     Renders client info detector using st.components.v1.html with postMessage.
@@ -2846,7 +3037,7 @@ def render_client_info_detector(session_id: str) -> None:
     """
     
     # Render the component (NO KEY PARAMETER!)
-    st.components.v1.html(html_code, height=0, width=0, key=f"client_info_{safe_session_id}")
+    st.components.v1.html(html_code, height=0, width=0)
 
 
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool: # Forward reference
