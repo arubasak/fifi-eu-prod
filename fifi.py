@@ -47,8 +47,8 @@ from streamlit_javascript import st_javascript
 # - FIX: Ensured get_session returns existing session even if banned, retaining chat history.
 # - FIX: Supabase OTP vs Magic Link issue addressed with explicit OTP calls.
 # - FIX: Enhanced IP/User-Agent capture with multiple fallbacks for Streamlit context variations.
-# - FIX: Missing `fingerprinting_manager` instantiation in `ensure_initialization`.
-# - FIX: Removed all extraneous conversational text causing SyntaxErrors.
+# - FIX: Missing `fingerprinting_manager` instantiation in `ensure_initialization` (corrected).
+# - FIX: Syntax errors in QuestionLimitManager and database methods corrected.
 # - NEW: Added diagnostic page for troubleshooting.
 # =============================================================================
 
@@ -502,7 +502,7 @@ class DatabaseManager:
                     logger.debug(f"No active session found for ID {session_id[:8]}.")
                     return None
                 
-                row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row)) # d[0] is column name
+                row_dict = dict(row) if hasattr(row, 'keys') else dict(zip([d[0] for d in cursor.description], row))
                 
                 session_params = {}
                 session_params['session_id'] = row_dict.get('session_id', session_id)
@@ -556,7 +556,7 @@ class DatabaseManager:
                 return BanStatus(value)
             except ValueError:
                 logger.warning(f"Invalid ban_status '{value}'. Defaulting to NONE.")
-                return BanStatus.NONE # Ensure a valid Enum is returned even if error
+                return BanStatus.NONE
         
         bool_keys = ['active', 'timeout_saved_to_crm', 'question_limit_reached', 'registration_prompted', 'registration_link_clicked']
         if key in bool_keys:
@@ -952,7 +952,7 @@ class QuestionLimitManager:
             UserType.EMAIL_VERIFIED_GUEST.value: 10,
             UserType.REGISTERED_USER.value: 40
         }
-        self.evasion_penalties = [24, 48, 96, 192, 336] # Example values; these were left without an assignment in previous versions, fixed to be assigned properly.
+        self.evasion_penalties = [24, 48, 96, 192, 336]
     
     def is_within_limits(self, session: UserSession) -> Dict[str, Any]:
         """
@@ -1011,7 +1011,6 @@ class QuestionLimitManager:
                     'reason': 'total_limit',
                     'message': "Usage limit reached. Please retry in 24 hours as we are giving preference to others in the queue."
                 }
-            # FIX: Removed the problematic 'if session.total_question_count >= 20' ban check
         
         return {'allowed': True}
     
@@ -1057,7 +1056,6 @@ class QuestionLimitManager:
         if session.ban_status.value == BanStatus.EVASION_BLOCK.value:
             return "Usage limit reached due to detected unusual activity. Please try again later."
         elif session.user_type.value == UserType.REGISTERED_USER.value:
-            # Revert to a softer message if no longer banning at 20, keeping 1-hour ban general.
             return "Usage limit reached. Please retry in 1 hour as we are giving preference to others in the queue."
         else:
             return self._get_email_verified_limit_message()
@@ -1174,7 +1172,7 @@ class ZohoCRMManager:
             data = response.json()
             
             if 'data' in data and data['data']:
-                contact_id = data['data'][0]['id'] # FIX: Access list item if data is a list
+                contact_id = data['data'][0]['id']
                 logger.info(f"Found existing Zoho contact: {contact_id}")
                 return contact_id
                 
@@ -1211,8 +1209,8 @@ class ZohoCRMManager:
             response.raise_for_status()
             data = response.json()
             
-            if 'data' in data and data['data'][0]['code'] == 'SUCCESS': # FIX: Access list item if data is a list
-                contact_id = data['data'][0]['details']['id'] # FIX: Access list item if data is a list
+            if 'data' in data and data['data'][0]['code'] == 'SUCCESS':
+                contact_id = data['data'][0]['details']['id']
                 logger.info(f"Created new Zoho contact: {contact_id}")
                 return contact_id
                 
@@ -1251,7 +1249,7 @@ class ZohoCRMManager:
                 response.raise_for_status()
                 data = response.json()
                 
-                if 'data' in data and data['data'][0]['code'] == 'SUCCESS': # FIX: Access list item if data is a list
+                if 'data' in data and data['data'][0]['code'] == 'SUCCESS':
                     logger.info(f"Successfully uploaded attachment: {filename}")
                     return True
                 else:
@@ -1300,7 +1298,7 @@ class ZohoCRMManager:
             response.raise_for_status()
             data = response.json()
             
-            if 'data' in data and data['data'][0]['code'] == 'SUCCESS': # FIX: Access list item if data is a list
+            if 'data' in data and data['data'][0]['code'] == 'SUCCESS':
                 logger.info(f"Successfully added Zoho note: {note_title}")
                 return True
             else:
@@ -1474,7 +1472,7 @@ class EnhancedAI:
         #             model="gpt-3.5-turbo", # or your chosen model
         #             messages=messages
         #         )
-        #         return {"content": response.choices[0].message.content, "source": "OpenAI", "success": True} # FIX: Access choices[0].message.content
+        #         return {"content": response.choices[0].message.content, "source": "OpenAI", "success": True}
         #     except Exception as e:
         #         logger.error(f"OpenAI API call failed: {e}")
         #         # Fallback to generic response
@@ -1500,7 +1498,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     try:
         response = client.moderations.create(model="omni-moderation-latest", input=prompt)
-        result = response.results[0] # FIX: Access results as a list and get the first item
+        result = response.results[0] # Note: results is a list, get the first item
         
         if result.flagged:
             flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
@@ -2017,7 +2015,6 @@ class SessionManager:
                 for header_name in ip_headers_priority:
                     ip_val = headers.get(header_name) or headers.get(header_name.upper()) # Check both cases
                     if ip_val:
-                        # FIX: Use .split(',')[0].strip() to get the first IP in a comma-separated list
                         session.ip_address = ip_val.split(',')[0].strip()
                         session.ip_detection_method = header_name
                         ip_captured = True
@@ -2076,7 +2073,7 @@ class SessionManager:
                 session.ban_status = BanStatus(session.ban_status)
             except ValueError:
                 logger.error(f"Invalid ban_status string '{session.ban_status}' for session {session.session_id[:8]}. Defaulting to NONE.")
-                session.ban_status = BanStatus.NONE # FIX: Assign the default Enum member, not just its value.
+                session.ban_status = BanStatus.NONE
         
         if not isinstance(session.messages, list):
             logger.warning(f"Session {session.session_id[:8]} messages field is not a list. Resetting to empty list.")
@@ -2096,7 +2093,6 @@ class SessionManager:
         
         local_part, domain_part = email.split('@', 1)
         
-        # FIX: Corrected masking logic for local_part and domain_part
         if len(local_part) <= 2:
             masked_local = local_part[0] + '*' * (len(local_part) - 1)
         else:
@@ -2104,10 +2100,10 @@ class SessionManager:
         
         domain_segments = domain_part.split('.')
         if len(domain_segments) > 1:
-            masked_domain_first_part = domain_segments[0][0] + '*' * (len(domain_segments[0]) - 1)
+            masked_domain_first_part = '*' * len(domain_segments[0])
             masked_domain = masked_domain_first_part + '.' + '.'.join(domain_segments[1:])
-        else: # Handle cases like 'example.com' where domain_segments is just ['example']
-            masked_domain = '*' * len(domain_part) 
+        else:
+            masked_domain = '*' * len(domain_part)
         
         return f"{masked_local}@{masked_domain}"
 
@@ -2194,7 +2190,7 @@ class SessionManager:
         """
         Initiates the email verification process for a guest user.
         """
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$' 
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,} 
         if not re.match(email_pattern, email):
             return {'success': False, 'message': 'Please enter a valid email address.'}
         
@@ -2607,7 +2603,7 @@ def render_welcome_page(session_manager: SessionManager):
                 # Add some spacing
                 st.markdown("")
                 
-                col1, col2, col3 = st.columns([1, 2, 1])
+                col1, col2, col3 = st.columns(3)
                 with col2:
                     submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
                 
@@ -2641,7 +2637,7 @@ def render_welcome_page(session_manager: SessionManager):
         """)
         
         st.markdown("")
-        col1, col2, col3 = st.columns([1, 2, 1])
+        col1, col2, col3 = st.columns(3)
         with col2:
             if st.button("👤 Start as Guest", use_container_width=True):
                 st.session_state.page = "chat" # Change application page
@@ -3107,7 +3103,7 @@ def render_diagnostic_page():
                     email_manager = EmailVerificationManagerDirect(config)
 
             st.info(f"Testing OTP send via {type(email_manager).__name__}...")
-            test_email = "arunava.basak@yahoo.co.in" # Using a dummy email for test, usually you'd input one
+            test_email = "test@example.com" # Using a dummy email for test, usually you'd input one
             
             send_success = email_manager.send_verification_code(test_email)
             if send_success:
