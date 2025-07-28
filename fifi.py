@@ -1360,7 +1360,7 @@ class EnhancedAI:
         #         if chat_history:
         #             messages = chat_history[-5:] + messages # Last 5 messages for context
         #         response = self.openai_client.chat.completions.create(
-        #             model="gpt-3.5-turbo", # or your chosen model
+        #             model="gpt-4o-mini", # or your chosen model
         #             messages=messages
         #         )
         #         return {"content": response.choices[0].message.content, "source": "OpenAI", "success": True}
