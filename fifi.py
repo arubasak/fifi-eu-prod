@@ -437,10 +437,8 @@ class DatabaseManager:
             
         try:
             if self.db_type == "cloud":
-                # For SQLite Cloud, test with a simple query
                 self.conn.execute("SELECT 1").fetchone()
             else:
-                # For local SQLite, test connection
                 self.conn.execute("SELECT 1").fetchone()
             
             self._last_health_check = now
@@ -467,7 +465,6 @@ class DatabaseManager:
             
             # Attempt reconnection
             if self.db_type == "cloud" and SQLITECLOUD_AVAILABLE:
-                # Need to get config.SQLITE_CLOUD_CONNECTION dynamically
                 self.conn, _ = self._try_sqlite_cloud(config_instance.SQLITE_CLOUD_CONNECTION)
             elif self.db_type == "file":
                 self.conn, _ = self._try_local_sqlite()
@@ -793,16 +790,36 @@ class FingerprintingManager:
     def __init__(self):
         self.fingerprint_cache = {}
 
-    # FIX 1: Replaced with corrected JavaScript comments and return stringification
-    def generate_fingerprint_component(self, session_id: str) -> str:
+    # FIX 1: Replaced FingerprintingManager.generate_fingerprint_component method with st.components.v1.html version
+    def generate_fingerprint_component(self, session_id: str) -> None:
         """
-        Generates JavaScript code to collect 3-layer browser fingerprints
-        (Canvas, WebGL, AudioContext) and other browser/system info.
+        Renders fingerprinting component using st.components.v1.html with postMessage.
         """
-        js_code = f"""
-        (() => {{
+        safe_session_id = session_id.replace('-', '_')
+        
+        html_code = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ margin: 0; padding: 0; }}
+            </style>
+        </head>
+        <body>
+        <script>
+        (function() {{
             try {{
                 const sessionId = "{session_id}";
+                const safeSessionId = "{safe_session_id}";
+                
+                // Prevent multiple executions
+                if (window['fifi_fp_executed_' + safeSessionId]) {{
+                    console.log('🔍 Fingerprinting already executed for session', sessionId.substring(0, 8));
+                    return;
+                }}
+                window['fifi_fp_executed_' + safeSessionId] = true;
+                
+                console.log('🔍 Starting fingerprinting for session', sessionId.substring(0, 8));
                 
                 // Layer 1: Canvas Fingerprinting (Primary)
                 function generateCanvasFingerprint() {{
@@ -901,6 +918,7 @@ class FingerprintingManager:
                 }}
                 
                 const fingerprintResult = {{
+                    type: 'fingerprint_result',
                     session_id: sessionId,
                     fingerprint_id: fingerprintId,
                     fingerprint_method: primaryMethod,
@@ -916,21 +934,46 @@ class FingerprintingManager:
                 console.log("🔍 Fingerprinting complete:", {{
                     id: fingerprintId, method: primaryMethod, privacy: privacyLevel, working: workingMethods.length
                 }});
-                return JSON.stringify(fingerprintResult); // Explicitly stringify the result
+                
+                // Send result to parent window
+                try {{
+                    if (window.parent && window.parent !== window) {{
+                        window.parent.postMessage(fingerprintResult, '*');
+                        console.log('✅ Fingerprint result sent to parent window');
+                    }}
+                }} catch (e) {{
+                    console.error('❌ Failed to send fingerprint result:', e);
+                }}
+                
             }} catch (error) {{
                 console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
-                // Return a structured JSON error string
-                return JSON.stringify({{
+                // Send error to parent
+                const errorResult = {{
+                    type: 'fingerprint_error',
+                    session_id: "{session_id}",
                     error: true,
                     message: error.message,
                     name: error.name,
-                    session_id: "{session_id}",
-                    capture_method: 'javascript_error_fingerprinting'
-                }});
+                    capture_method: 'html_component_error'
+                }};
+                
+                try {{
+                    if (window.parent && window.parent !== window) {{
+                        window.parent.postMessage(errorResult, '*');
+                    }}
+                }} catch (e) {{
+                    console.error('Failed to send error message:', e);
+                }}
             }}
-        }})()
+        }})();
+        </script>
+        </body>
+        </html>
         """
-        return js_code
+        
+        # Render the component
+        st.components.v1.html(html_code, height=0, width=0, key=f"fifi_fp_init_{safe_session_id}")
+
 
     def extract_fingerprint_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Extracts and validates fingerprint data from the JavaScript component's return."""
@@ -1114,7 +1157,7 @@ class EmailVerificationManagerDirect:
                     return True
             
             logger.warning(f"Direct API verification failed: {response.status_code} - {response.text}")
-            st.error(f"Invalid verification code: {response.text}")
+            st.error(f"Invalid verification code. Please check the code and try again.")
             return False
             
         except Exception as e:
@@ -1717,6 +1760,10 @@ class SessionManager:
         self.question_limits = question_limit_manager
         self._cleanup_interval = timedelta(hours=1)  # Cleanup every hour (Fix 6)
         self._last_cleanup = datetime.now() # (Fix 6)
+        
+        # Initialize message storage for component communication (Fix 3)
+        if 'component_messages' not in st.session_state:
+            st.session_state.component_messages = []
         
         logger.info("✅ SessionManager initialized with all component managers.")
 
@@ -2695,22 +2742,36 @@ def global_message_channel_error_handler():
     except Exception as e:
         logger.error(f"Failed to initialize global message channel error handler: {e}", exc_info=True)
 
-def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
+# FIX 2: Replaced render_client_info_detector function
+def render_client_info_detector(session_id: str) -> None:
     """
-    JavaScript component to detect client information when Streamlit context fails.
+    Renders client info detector using st.components.v1.html with postMessage.
     """
-    # Corrected JavaScript variable name for scriptIdentifier
-    safe_session_id_js = session_id.replace('-', '_')
-
-    js_code = f"""
-    (() => {{
+    safe_session_id = session_id.replace('-', '_')
+    
+    html_code = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{ margin: 0; padding: 0; }}
+        </style>
+    </head>
+    <body>
+    <script>
+    (function() {{
         try {{
             const sessionId = "{session_id}";
+            const safeSessionId = "{safe_session_id}";
             
-            // Ensure this script only runs once per component instance
-            const safeSessionId = sessionId.replace(/-/g, '_'); // Fix for dashes in variable names
-            if (window['fifi_client_info_sent_' + safeSessionId]) return null;
+            // Prevent multiple executions
+            if (window['fifi_client_info_sent_' + safeSessionId]) {{
+                console.log('Client info already sent for session', sessionId.substring(0, 8));
+                return;
+            }}
             window['fifi_client_info_sent_' + safeSessionId] = true;
+            
+            console.log('🔍 Collecting client info for session', sessionId.substring(0, 8));
 
             // Collect client information
             const clientInfo = {{
@@ -2743,62 +2804,53 @@ def render_client_info_detector(session_id: str) -> Optional[Dict[str, Any]]:
             }}
             
             const resultObject = {{
+                type: 'client_info_result',
                 session_id: sessionId,
                 client_info: clientInfo,
-                capture_method: 'javascript_component_return'
+                capture_method: 'html_component'
             }};
 
             console.log('FiFi Client Info Detected:', resultObject);
-            // Return JSON string for st_javascript
-            return JSON.stringify(resultObject);
+            
+            // Send result to parent window
+            try {{
+                if (window.parent && window.parent !== window) {{
+                    window.parent.postMessage(resultObject, '*');
+                    console.log('✅ Client info sent to parent window');
+                }}
+            }} catch (e) {{
+                console.error('❌ Failed to send client info:', e);
+            }}
+            
         }} catch (error) {{
             console.error("🚨 FiFi Client Info Detector caught a critical error:", error);
-            // Return structured JSON error string
-            return JSON.stringify({{
+            // Send error to parent
+            const errorResult = {{
+                type: 'client_info_error',
+                session_id: "{session_id}",
                 error: true,
                 message: error.message,
                 name: error.name,
-                stack: error.stack,
-                session_id: "{session_id}",
-                capture_method: 'javascript_error'
-            }});
+                capture_method: 'html_component_error'
+            }};
+            
+            try {{
+                if (window.parent && window.parent !== window) {{
+                    window.parent.postMessage(errorResult, '*');
+                }}
+            }} catch (e) {{
+                console.error('Failed to send error message:', e);
+            }}
         }}
-    }})()
+    }})();
+    </script>
+    </body>
+    </html>
     """
     
-    try:
-        # Use a safer key generation that avoids dashes
-        safe_session_key = session_id.replace('-', '_')[:8]
-        raw_result = st_javascript(js_code, key=f"client_info_{safe_session_key}")
+    # Render the component
+    st.components.v1.html(html_code, height=0, width=0, key=f"client_info_{safe_session_id}")
 
-        # Add debug logging here (as requested by user)
-        logger.info(f"🔍 raw_client_info_result type: {type(raw_result)}, value: {raw_result}")
-
-        # Handle the result safely
-        if isinstance(raw_result, str):
-            parsed_result = safe_json_loads(raw_result)
-            if isinstance(parsed_result, dict):
-                if parsed_result.get('error'):
-                    logger.error(f"JS Client Info Detector reported error: {parsed_result.get('message', 'Unknown JS error')}")
-                    return None # Return None if JS reported an error
-                return parsed_result
-            else:
-                logger.error(f"st_javascript returned non-dict from JSON.stringify: {raw_result[:100]}...")
-                return None
-        elif raw_result is None:
-            return None
-        else:
-            logger.warning(f"Unexpected type returned by st_javascript for client info: {type(raw_result)}. Assuming it's a dict if it looks like one.")
-            if isinstance(raw_result, dict):
-                if raw_result.get('error'):
-                    logger.error(f"JS Client Info Detector reported error in dict format: {raw_result.get('message', 'Unknown JS error')}")
-                    return None
-                return raw_result
-            return None
-
-    except Exception as e:
-        logger.error(f"Python-side parsing or execution error for JavaScript client info: {e}", exc_info=True)
-        return None
 
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool: # Forward reference
     """
@@ -3015,7 +3067,7 @@ def render_welcome_page(session_manager: 'SessionManager'): # Forward reference 
     
     with tab2:
         st.markdown("""
-        **Continue as a guest** to get a quick start and try FiFi AI Assistant without signing in.
+        **Continue as a guest** to to get a quick start and try FiFi AI Assistant without signing in.
         
         ℹ️ **What to expect as a Guest:**
         - You get an initial allowance of **4 questions** to explore FiFi AI's capabilities.
@@ -3262,6 +3314,7 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                 else:
                     st.error("Please enter the verification code you received.")
             
+# FIX 5: Updated render_chat_interface to use html components
 def render_chat_interface(session_manager: 'SessionManager', session: UserSession): # Forward reference
     """Renders the main chat interface."""
     
@@ -3269,68 +3322,31 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     st.caption("Your intelligent food & beverage sourcing companion with universal fingerprinting.")
     
     global_message_channel_error_handler()
-
-    # FIX: Integrate JS client info detection here if Python-side capture failed or needs enhancement
+    
+    # Add message listener for component communication (Fix 4)
+    add_message_listener()
+    
+    # Check for component messages first (Fix 3)
+    # This processes any messages sent from the HTML components since the last rerun
+    fingerprint_updated = session_manager.check_component_messages(session)
+    if fingerprint_updated:
+        # If fingerprint was just updated, rerun to reflect it immediately
+        st.rerun()
+    
+    # Render client info detector if needed
+    # It now uses st.components.v1.html and sends data via postMessage
     if (session.ip_address == "capture_failed_py_context" or 
-        session.user_agent == "capture_failed_py_context" or
-        not session.fingerprint_id # Also trigger if fingerprinting itself is missing
-        ):
-        
-        client_info_result = render_client_info_detector(session.session_id)
-        # Add debug logging here (as requested by user)
-        logger.info(f"🔍 raw_client_info_result type: {type(client_info_result)}, value: {client_info_result}")
-
-        # FIX: Robustly check client_info_result type and content
-        if isinstance(client_info_result, dict) and client_info_result.get('client_info'):
-            client_info = client_info_result['client_info']
-            updated_session = False
-            
-            # Update user agent if it was previously a fallback
-            if session.user_agent == "capture_failed_py_context" and client_info.get('userAgent'):
-                session.user_agent = client_info['userAgent']
-                logger.info(f"Session {session.session_id[:8]}: User-Agent updated from JS: {session.user_agent[:50]}...")
-                updated_session = True
-
-            # Update browser privacy level if provided by JS
-            if client_info.get('privacy_level') and session.browser_privacy_level == 'standard': # Only update if not already set by proper FP
-                 session.browser_privacy_level = client_info['privacy_level']
-                 logger.info(f"Session {session.session_id[:8]}: Browser privacy level updated from JS: {session.browser_privacy_level}")
-                 updated_session = True
-            
-            if updated_session:
-                session_manager.db.save_session(session) # Persist the updated client info
-                st.rerun() # Rerun to apply latest session data
-        elif client_info_result is not None: # Log if it's not None but also not a valid dict, for debugging
-            logger.debug(f"Client info detector returned unexpected type or missing data: {client_info_result} (type: {type(client_info_result)})")
-
-
-    # Original fingerprinting call (can remain as it handles overall FP ID)
+        session.user_agent == "capture_failed_py_context"):
+        render_client_info_detector(session.session_id)
+    
+    # Render fingerprinting component if needed
+    # It now uses st.components.v1.html and sends data via postMessage
     if not session.fingerprint_id or session.fingerprint_method == "temporary_fallback_python":
-        fingerprint_js_code = session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
-        raw_fp_result = st_javascript(fingerprint_js_code, key=f"fifi_fp_init_{session.session_id.replace('-', '_')[:8]}") # Corrected key generation
-        
-        # Add debug logging here (as requested by user)
-        logger.info(f"🔍 raw_fp_result type: {type(raw_fp_result)}, value: {raw_fp_result}")
+        session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
 
-        # FIX: Robustly parse and check raw_fp_result from st_javascript
-        fp_result = None
-        if isinstance(raw_fp_result, str):
-            fp_result = safe_json_loads(raw_fp_result)
-        elif isinstance(raw_fp_result, dict): # st_javascript might sometimes return dict directly
-            fp_result = raw_fp_result
-
-        if isinstance(fp_result, dict) and not fp_result.get('error'): # Ensure it's a dict and not an error
-            extracted_fp_data = session_manager.fingerprinting.extract_fingerprint_from_result(fp_result)
-            if extracted_fp_data.get('fingerprint_method') not in ["fallback", "canvas_blocked", "webgl_blocked", "audio_blocked"]:
-                session_manager.apply_fingerprinting(session, extracted_fp_data)
-                st.rerun()
-            else:
-                logger.debug(f"JS Fingerprinting component returned a fallback/blocked result: {extracted_fp_data.get('fingerprint_method')}. Retaining Python fallback if present.")
-        elif fp_result is not None:
-            logger.debug(f"Fingerprinting component returned unexpected data or error: {fp_result}. Will try again.")
-        else:
-            logger.debug(f"Fingerprinting component for session {session.session_id[:8]} did not return result on this run. Will try again.")
-
+    # The previous logger.info(f"🔍 raw_fp_result type: ...") and logger.info(f"🔍 raw_client_info_result type: ...")
+    # were part of debugging st_javascript returns and are no longer needed
+    # as the components now communicate via postMessage and check_component_messages handles parsing.
 
     if session.user_type.value == UserType.REGISTERED_USER.value:
         try:
@@ -3492,11 +3508,11 @@ def render_diagnostic_page():
             })
             
             st.markdown("#### JavaScript Component Capture (Client-side Fallback)")
-            client_info_js_result = render_client_info_detector(session_id="diagnostic_js_test")
-            if isinstance(client_info_js_result, dict) and client_info_js_result.get('client_info'):
-                st.json(client_info_js_result['client_info'])
-            else:
-                st.info("No JavaScript client info result yet (may need re-run or be blocked).")
+            # When testing in diagnostics, the message listener isn't active by default.
+            # For this to work in diagnostics, either explicitly call add_message_listener(),
+            # or mock the message passing. For simplicity, just render the component.
+            render_client_info_detector(session_id="diagnostic_js_test")
+            st.info("Check browser console for 'FiFi Client Info Detected' and python logs for processing.")
         else:
             st.warning("Session Manager not initialized. Please ensure app is running normally.")
     
