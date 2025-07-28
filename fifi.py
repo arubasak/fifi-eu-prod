@@ -2190,7 +2190,7 @@ class SessionManager:
         """
         Initiates the email verification process for a guest user.
         """
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,} 
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
         if not re.match(email_pattern, email):
             return {'success': False, 'message': 'Please enter a valid email address.'}
         
