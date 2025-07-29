@@ -98,7 +98,8 @@
                 const workingMethods = [];
                 
                 if (canvasFp !== 'canvas_blocked') workingMethods.push('canvas');
-                if (webglFp !== 'webgl_blocked' && webglFwgl !== 'webgl_unavailable') workingMethods.push('webgl');  
+                // ✅ FIXED: Changed webglFwgl to webglFp (typo fix)
+                if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') workingMethods.push('webgl');  
                 if (audioFp !== 'audio_blocked') workingMethods.push('audio');
                 
                 if (workingMethods.length === 0) {
@@ -116,6 +117,8 @@
                 let privacy = 'standard';
                 if (canvasFp === 'canvas_blocked' && webglFp.includes('blocked') && audioFp === 'audio_blocked') {
                     privacy = 'high_privacy';
+                } else if (workingMethods.length === 1) {
+                    privacy = 'medium_privacy';
                 }
                 
                 // Prepare result object with EXACT keys you need
@@ -129,19 +132,17 @@
                 };
                 
                 console.log("🔍 Fingerprinting complete:", {
-                    id: fingerprintId,
+                    id: fingerprintId.substring(0, 8) + '...',
                     method: method,
                     privacy: privacy,
-                    working: workingMethods.length
+                    workingCount: workingMethods.length,
+                    working: workingMethods
                 });
                 
-                // Additional debugging
-                console.log("🔍 FiFi Fingerprinting: Sending data to Python:", fingerprintResult);
-
                 // Send data back to Python
                 Streamlit.setComponentValue(fingerprintResult);
 
-                console.log("🔍 FiFi Fingerprinting: Data sent successfully");
+                console.log("🔍 FiFi Fingerprinting: Data sent successfully to Python");
                 
             } catch (error) {
                 console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
@@ -157,6 +158,20 @@
                 });
             }
         });
+    } else {
+        console.error("🚨 Streamlit library not available for fingerprinting component");
+        
+        // Fallback mechanism
+        setTimeout(function() {
+            if (window.parent && window.parent.postMessage) {
+                window.parent.postMessage({
+                    type: 'fingerprint_fallback',
+                    session_id: "{SESSION_ID}",
+                    error: true,
+                    message: "Streamlit library unavailable"
+                }, '*');
+            }
+        }, 1000);
     }
 })();
 </script>
