@@ -1787,8 +1787,8 @@ class SessionManager:
 
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]):
         """Applies fingerprinting data from custom component to the session."""
-        session.fingerprint_id = fingerprint_data.get('id')
-        session.fingerprint_method = fingerprint_data.get('method')
+        session.fingerprint_id = fingerprint_data.get('id') # Use 'id' key from JS
+        session.fingerprint_method = fingerprint_data.get('method') # Use 'method' key from JS
         session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor')
         session.browser_privacy_level = fingerprint_data.get('privacy', 'standard') # Use 'privacy' key from JS
         
@@ -2224,7 +2224,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                 logger.info(f"✅ Valid 15-min timer event received: {timer_result.get('event')} for session {session_id[:8]}.")
                 return timer_result
             else:
-                logger.warning(f"⚠️ Timer event session ID mismatch: expected {session_id[:8]}, got {timer_result.get('session_id', 'None')}. Event ignored.")
+                logger.warning(f"⚠️ Timer event session ID mismatch: expected {session_id[:8]}, got {timer_result.get('session_id', 'None')[:8]}. Event ignored.")
                 return None
         else:
             logger.debug(f"Received non-event timer result: {timer_result} (type: {type(timer_result)}).")
@@ -2600,6 +2600,11 @@ def process_emergency_save_from_query(session_id: str, reason: str) -> bool: # A
             else:
                 logger.info(f"ℹ️ Session '{session_id[:8]}' remains active (emergency close but not a definitive close reason: {reason}).")
             return False # No CRM save performed
+
+    except Exception as e:
+        logger.error(f"❌ Emergency save processing failed for session '{session_id[:8]}': {e}", exc_info=True)
+        error_handler.log_error(error_handler.handle_api_error("System", "Emergency Save Process (Query)", e))
+        return False
 
 # Modified to pass 'reason' to process_emergency_save_from_query
 def handle_emergency_save_requests_from_query():
@@ -3028,7 +3033,9 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     if st.checkbox("🔬 Show Fingerprinting Diagnostics", key="show_fp_diagnostics"):
         render_fingerprint_diagnostic_panel(session_manager, session)
         
-    global_message_channel_error_handler() # Keep this for general JS error handling
+    # Removed global_message_channel_error_handler() call as it's not needed with the new component approach
+    # and to prevent any potential interaction issues.
+    # If you find other JS issues, you can re-evaluate adding a specific global error handler.
     
     if session.user_type.value == UserType.REGISTERED_USER.value:
         try:
