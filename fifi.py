@@ -4,7 +4,7 @@ import uuid
 import json
 import logging
 import re
-import time # <-- ENSURE THIS IS PRESENT
+import time
 import functools
 import io
 import html
@@ -54,7 +54,7 @@ from streamlit_javascript import st_javascript
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO, # Ensure this is INFO or DEBUG to see detailed logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -166,6 +166,7 @@ class ErrorSeverity(Enum):
 class ErrorContext:
     component: str
     operation: str
+
     error_type: str
     severity: ErrorSeverity
     user_message: str
@@ -1009,7 +1010,7 @@ class FingerprintingManager:
     def extract_fingerprint_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Extracts and validates fingerprint data from the JavaScript component's return."""
         # Check for the new 'id' key
-        if not result or not isinstance(result, dict) or result.get('id') == 'ZXJyb3I=': # MODIFIED: checked 'id'
+        if not result or not isinstance(result, dict) or result.get('id') == 'ZXJyb3I=':
             logger.warning("Fingerprint JavaScript returned error or null/invalid 'id'. Using fallback.")
             return self._generate_fallback_fingerprint()
         
@@ -1017,8 +1018,9 @@ class FingerprintingManager:
         fingerprint_id = result.get('id')
         fingerprint_method = result.get('method', 'unknown')
         
-        if not fingerprint_id or fingerprint_id.startswith('privacy_browser_'):
-            logger.info("Fingerprint ID indicates privacy browser or fallback. Generating new fallback.")
+        # ADDED: Check if fingerprint_id or fingerprint_method are None/empty strings after retrieval
+        if not fingerprint_id or not fingerprint_method or fingerprint_id.startswith('privacy_browser_'):
+            logger.info(f"Fingerprint ID ({fingerprint_id}) or method ({fingerprint_method}) indicates privacy browser/empty/fallback. Generating new fallback.")
             return self._generate_fallback_fingerprint()
         
         visitor_type = "returning_visitor" if fingerprint_id in self.fingerprint_cache else "new_visitor"
@@ -1994,7 +1996,7 @@ class SessionManager:
                         st.error(f"🚫 **Access Restricted**")
                         if time_remaining:
                             hours = max(0, int(time_remaining.total_seconds() // 3600))
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60) # SYNTAX FIX
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.info(message)
                         logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
@@ -2155,10 +2157,13 @@ class SessionManager:
             elif not isinstance(messages, list): # Continue to check if it's not a list (and not 0)
                 logger.error(f"st_javascript returned unexpected non-list type: {type(messages)}. Value: {messages} for session {session.session_id[:8]}.")
                 return False # Still return False for truly unexpected types
-            
-            if not messages: # Now, messages will either be an empty list or a populated list
-                logger.debug(f"No new component messages received for session {session.session_id[:8]}.")
-                return False
+
+            # ADDED: Log the raw messages received from st_javascript for debugging
+            if messages:
+                # Log first message (truncated to avoid huge console output)
+                logger.info(f"Received {len(messages)} messages from JS for session {session.session_id[:8]}. First message (truncated): {str(messages[0])[:500]}...")
+            else:
+                logger.debug(f"No new component messages received (after type handling) for session {session.session_id[:8]}.")
             
             fingerprint_updated = False
             
@@ -2170,6 +2175,9 @@ class SessionManager:
                 msg_type = msg.get('type')
                 msg_session_id = msg.get('session_id')
                 
+                # ADDED: Log the current message being processed for debugging
+                logger.debug(f"Processing message in Python loop. Type: {msg_type}, Session ID: {msg_session_id[:8] if msg_session_id else 'None'}, Full message: {str(msg)[:500]}...")
+
                 # Verify session ID matches to prevent processing messages from other sessions
                 if msg_session_id != session.session_id:
                     logger.warning(f"Message session ID mismatch: expected {session.session_id[:8]}, got {msg_session_id[:8] if msg_session_id else 'None'}. Message ignored.")
@@ -2203,7 +2211,7 @@ class SessionManager:
                                 self.db.save_session(session)
                                 fingerprint_updated = True
                                 
-                                logger.info(f"✅ Fingerprint successfully updated and saved: {old_method} -> {session.fingerprint_method} (ID: {old_fp[:8] if old_fp else 'None'}... -> {session.fingerprint_id[:8]}...)")
+                                logger.info(f"✅ Fingerprint successfully updated and saved: {old_method} -> {session.fingerprint_method} (ID: {new_fp_id[:8]}...) for session {session.session_id[:8]}.") # MODIFIED log message
                             except Exception as save_error:
                                 logger.error(f"Failed to save updated fingerprint for session {session.session_id[:8]}: {save_error}")
                                 # Revert changes if save failed to maintain consistency with DB
@@ -2237,15 +2245,14 @@ class SessionManager:
                         logger.info(f"Not applying fallback fingerprint for session {session.session_id[:8]} as a valid fingerprint already exists.") 
                     
                 elif msg_type == 'client_info_result':
-                    # Update session with enhanced client info from JavaScript
                     client_info = msg.get('client_info', {})
                     if client_info:
                         # Only update if current info is from failed Python capture or is missing
                         if (session.user_agent == "capture_failed_py_context" or not session.user_agent or
                             session.ip_address == "capture_failed_py_context" or not session.ip_address):
                             
-                            session.user_agent = client_info.get('userAgent', session.user_agent)[:500]  # Limit length
-                            # Added: Logic to potentially update IP if client_info contains it AND it's not a dummy from Python
+                            session.user_agent = client_info.get('userAgent', session.user_agent)[:500]
+                            # Logic to potentially update IP if client_info contains it AND it's not a dummy from Python
                             if client_info.get('ipAddress') and session.ip_address == "capture_failed_py_context":
                                 session.ip_address = client_info.get('ipAddress')
                                 session.ip_detection_method = client_info.get('ipDetectionMethod', 'javascript')
@@ -2548,7 +2555,8 @@ def add_message_listener():
             function handleComponentMessage(event) {
                 try { // ADDED: Inner try-catch for robustness
                     const data = event.data;
-                    
+                    console.log('📨 Raw message data received by listener:', data); // ADDED: Crucial debug log
+
                     // Validate message structure and source (optional but good practice for security)
                     // If you know the origin, you can check event.origin
                     // For now, check essential fields
@@ -2573,11 +2581,10 @@ def add_message_listener():
                     console.log('📨 Received component message:', data.type, 'for session:', data.session_id ? data.session_id.substring(0, 8) : 'unknown'); // MODIFIED log
                     
                     // Store message for Streamlit to process
-                    # Double-check that fifi_component_messages is still an array before pushing
-                    if (Array.isArray(window.fifi_component_messages)) { # ADDED check
+                    if (Array.isArray(window.fifi_component_messages)) { // ADDED check
                         window.fifi_component_messages.push({
                             ...data,
-                            received_timestamp: Date.now(), # MODIFIED: Used a distinct timestamp name
+                            received_timestamp: Date.now(), // MODIFIED: Used a distinct timestamp name
                             processed: false # Mark as unprocessed for Python to pick up
                         });
                         
@@ -3504,7 +3511,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             if session.ban_end_time:
                 time_remaining = session.ban_end_time - datetime.now()
                 hours = int(time_remaining.total_seconds() // 3600)
-                minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                minutes = int((time_remaining.total_seconds() % 3600) // 60) # SYNTAX FIX
                 st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
             st.markdown(f"Reason: {session.ban_reason or 'Usage policy violation'}")
         elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: 
@@ -3790,7 +3797,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
                         if response.get('time_remaining'):
                             time_remaining = response['time_remaining']
                             hours = int(time_remaining.total_seconds() // 3600)
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60) # SYNTAX FIX
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.rerun()
                     elif response.get('evasion_penalty'):
