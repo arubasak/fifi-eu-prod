@@ -730,7 +730,7 @@ class FingerprintingManager:
         self.component_attempts = defaultdict(int)
 
     def render_fingerprint_component(self, session_id: str):
-        """Renders fingerprinting component using custom component."""
+        """Renders fingerprinting component silently (invisible)."""
         try:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
@@ -740,20 +740,12 @@ class FingerprintingManager:
             
             html_content = html_content.replace('{SESSION_ID}', session_id)
             
-            # FIXED: Remove the 'key' parameter that's not supported
-            fingerprint_data = st.components.v1.html(
-                html_content, 
-                height=200,  # Make it visible for debugging
-                width=None, 
-                scrolling=False
-            )
+            # SILENT: height=0, no visible elements
+            st.components.v1.html(html_content, height=0, width=0, scrolling=False)
             
-            logger.debug(f"Fingerprint component rendered for session {session_id[:8]}, received: {fingerprint_data}")
-            return fingerprint_data
+            logger.debug(f"Silent fingerprint component rendered for session {session_id[:8]}")
+            return None  # Always return None since data comes via redirect
             
-        except FileNotFoundError:
-            logger.error("fingerprint_component.html not found. Using fallback fingerprint.")
-            return self._generate_fallback_fingerprint()
         except Exception as e:
             logger.error(f"Failed to render fingerprint component: {e}")
             return self._generate_fallback_fingerprint()
@@ -2514,25 +2506,15 @@ def handle_fingerprint_requests_from_query():
             st.rerun()
             return
         
-        st.success("🔍 **Fingerprint Data Received** - Processing device fingerprint...")
-        st.info("Please wait while we save your device fingerprint...")
-        
+        # Process silently - NO user messages, NO st.rerun()
         try:
             success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
-            
-            if success:
-                st.success("✅ Device fingerprinting completed successfully!")
-                logger.info("✅ Fingerprint processing completed via query parameter successfully.")
-            else:
-                st.warning("⚠️ Fingerprint processing completed with warnings.")
-                logger.info("⚠️ Fingerprint processing completed via query parameter with warnings.")
-                
+            logger.info(f"✅ Silent fingerprint processing: {success}")
         except Exception as e:
-            st.error(f"❌ An unexpected error occurred during fingerprint processing: {str(e)}")
-            logger.critical(f"Fingerprint processing crashed from query parameter: {e}", exc_info=True)
+            logger.error(f"Silent fingerprint processing failed: {e}")
         
-        time.sleep(2)
-        st.rerun()
+        # NO st.rerun() here - let normal flow continue
+        return
     else:
         logger.info("ℹ️ No fingerprint requests found in current URL query parameters.")
 
@@ -2693,6 +2675,12 @@ def render_debug_info_panel(session: UserSession, session_manager: 'SessionManag
                     st.success("Session saved successfully!")
                 except Exception as e:
                     st.error(f"Save failed: {str(e)}")
+        
+        # Emergency bypass (temporary)
+        if st.button("🚨 Skip Fingerprinting (Emergency)"):
+            st.session_state.skip_fingerprinting = True
+            st.rerun()
+
 
 # =============================================================================
 # IMPROVED ERROR RECOVERY
@@ -2818,7 +2806,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 st.rerun()
 
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
-    """Renders the application's sidebar, displaying session information, user status, and action buttons."""
+    """Renders the application's sidebar."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
@@ -2860,8 +2848,13 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             st.progress(min(session.daily_question_count / 4, 1.0))
             st.caption("Email verification unlocks 10 questions/day.")
         
+        # FIXED: Show real fingerprint ID
         if session.fingerprint_id:
-            st.markdown(f"**Device ID:** `{session.fingerprint_id[:8]}...`")
+            # Show real fingerprint instead of fallback
+            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                st.markdown(f"**Device ID:** Identifying...")
+            else:
+                st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
             st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
         
         if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value == UserType.REGISTERED_USER.value:
@@ -3046,124 +3039,31 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     """Renders the main chat interface."""
     
     st.title("🤖 FiFi AI Assistant")
-    st.caption("Your intelligent food & beverage sourcing companion with universal fingerprinting.")
+    st.caption("Your intelligent food & beverage sourcing companion.")
     
     # Render debug info panel at the top of the chat interface
     render_debug_info_panel(session, session_manager)
 
-    # Enhanced fingerprinting logic with better debugging
+    # Silent fingerprinting - no user feedback
     fingerprint_needed = (
         not session.fingerprint_id or
         session.fingerprint_method == "temporary_fallback_python" or
-        st.session_state.get('force_fingerprint_rerun', False)
+        session.fingerprint_id.startswith("temp_py_") # Added condition for temp_py_
     )
     
-    if fingerprint_needed:
+    if fingerprint_needed and not st.session_state.get('skip_fingerprinting', False): # Added skip_fingerprinting condition
         logger.info(f"🔄 Fingerprinting needed for session {session.session_id[:8]}")
-        logger.debug(f"Fingerprint details: ID={session.fingerprint_id}, Method={session.fingerprint_method}, Force={st.session_state.get('force_fingerprint_rerun', False)}")
         
-        # Increment attempt counter for the session
-        attempt_key = f"fp_{session.session_id}"
-        session_manager.fingerprinting.component_attempts[attempt_key] += 1
-        current_attempts = session_manager.fingerprinting.component_attempts[attempt_key]
-
-        # Max attempts to prevent infinite loops
-        MAX_FP_ATTEMPTS = 3
-        if current_attempts > MAX_FP_ATTEMPTS:
-            logger.error(f"❌ Max fingerprint attempts ({MAX_FP_ATTEMPTS}) reached for session {session.session_id[:8]}. Applying fallback.")
-            st.error("⚠️ Automatic device recognition failed multiple times. Using a generic identifier. Please contact support if issues persist.")
-            # Apply fallback fingerprint
-            fallback_data = session_manager.fingerprinting._generate_fallback_fingerprint()
-            session_manager.apply_fingerprinting(session, fallback_data)
-            # Clear force rerun flag
-            if 'force_fingerprint_rerun' in st.session_state:
-                del st.session_state['force_fingerprint_rerun']
-            st.rerun() # Rerun to reflect the fallback immediately
-            return # Exit function, don't proceed with other chat elements until fingerprint is settled
-
-        # Show status to user
-        with st.container():
-            st.info(f"🔍 Initializing device fingerprinting (Attempt {current_attempts}/{MAX_FP_ATTEMPTS})...")
-            fingerprint_start_time = time.time()
+        # We don't show user messages here for fingerprinting anymore, it's a silent process.
+        # The redirection takes care of the 'page reload' for data transfer.
         
-        # Render component and get result
-        try:
-            fingerprint_result = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-            
-            # Check for timeout (10 seconds for component to return data)
-            if time.time() - fingerprint_start_time > 10:
-                logger.error(f"❌ Fingerprinting component timed out for session {session.session_id[:8]}. Attempt {current_attempts}.")
-                st.error("⚠️ Device recognition timed out. Retrying or using fallback. Please wait...")
-                recover_from_component_failure(session_manager, session, "component_timeout")
-                st.rerun()
-                return
+        # Render component and exit the current script execution.
+        # The data will be processed on the next run after the redirect.
+        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+        # We don't need to explicitly check for results or rerun here,
+        # the URL parameter handler will catch the redirect.
+        return # IMPORTANT: Exit current run to allow redirect to happen cleanly
 
-            # Debug output (only show in development mode or if explicitly requested)
-            # You might control `debug_mode` via st.secrets or an admin panel
-            if st.session_state.get('debug_mode', False):
-                st.write("**Debug - Fingerprint Result (raw):**", fingerprint_result)
-            
-            # Process result if received
-            if fingerprint_result and isinstance(fingerprint_result, dict):
-                if fingerprint_result.get('session_id') == session.session_id:
-                    if not fingerprint_result.get('error'):
-                        processed_data = session_manager.fingerprinting.process_fingerprint_data(fingerprint_result)
-                        session_manager.apply_fingerprinting(session, processed_data)
-                        
-                        logger.info(f"✅ Fingerprint applied: ID={session.fingerprint_id[:8]}..., Method={session.fingerprint_method}")
-                        
-                        # Clear flags and reset attempt counter on success
-                        if 'force_fingerprint_rerun' in st.session_state:
-                            del st.session_state['force_fingerprint_rerun']
-                        if attempt_key in session_manager.fingerprinting.component_attempts:
-                            del session_manager.fingerprinting.component_attempts[attempt_key]
-                        
-                        st.success("✅ Device fingerprinting completed!")
-                        time.sleep(1)
-                        st.rerun() # Rerun to update the UI with the final fingerprint
-                        return # Exit function, successful completion
-                    else:
-                        st.error(f"❌ Fingerprinting error: {fingerprint_result.get('message', 'Unknown error')}")
-                        logger.error(f"Fingerprinting component error for session {session.session_id[:8]}: {fingerprint_result}")
-                        recover_from_component_failure(session_manager, session, "fingerprint_failure")
-                        st.rerun() # Rerun to apply fallback and re-render
-                        return # Exit function
-                else:
-                    logger.warning(f"Session ID mismatch in fingerprint result: expected {session.session_id[:8]}, got {fingerprint_result.get('session_id', 'None')[:8]}. Retrying.")
-                    st.warning("⚠️ Received mismatched fingerprint data. Retrying device recognition.")
-                    # Do not call recover_from_component_failure here, let the next rerun handle it
-                    # by checking `fingerprint_needed` again.
-                    time.sleep(0.5)
-                    st.rerun()
-                    return
-            else:
-                logger.debug(f"No valid fingerprint result received on this run (yet?): {type(fingerprint_result)}")
-                # If no result, let the next rerun (triggered by general Streamlit lifecycle)
-                # re-render the component and potentially get data.
-                # Do not re-run explicitly here to avoid infinite loops if component is genuinely stuck.
-                pass # Allow Streamlit to re-run normally if no data yet
-
-        except Exception as fp_error:
-            logger.error(f"Fingerprinting component execution failed for session {session.session_id[:8]}: {fp_error}", exc_info=True)
-            st.warning("⚠️ Device fingerprinting failed due to an unexpected error. Using fallback method.")
-            recover_from_component_failure(session_manager, session, "fingerprint_failure")
-            st.rerun() # Rerun to apply fallback and re-render
-            return # Exit function
-        
-        # If we reached here and fingerprint is still needed, it means previous attempts failed
-        # and we need to wait for the next Streamlit rerun.
-        # Show current fingerprint status while waiting for component or manual refresh
-        st.info(f"Current device identifier: {session.fingerprint_id or 'Pending...'}")
-        if session.fingerprint_method == "temporary_fallback_python":
-             st.caption("This is a temporary identifier. Attempting to get a more accurate device fingerprint.")
-        elif session.fingerprint_method == "fallback":
-             st.caption("Unable to get accurate device fingerprint. Using a generic identifier.")
-        
-        # If fingerprinting is still needed and we haven't exhausted attempts,
-        # we might want to tell Streamlit to re-run after a short delay
-        # to re-check the component output. This can be tricky with Streamlit's lifecycle.
-        # For now, let's rely on user interaction or Streamlit's natural re-runs.
-        return # Block further chat interface rendering until fingerprinting is resolved for guest users
 
     global_message_channel_error_handler()
     
