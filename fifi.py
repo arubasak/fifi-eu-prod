@@ -1403,7 +1403,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
             logger.warning(f"Input flagged by moderation for: {', '.join(flagged_categories)}")
             return {
                 "flagged": True, 
-                "message": "Your message violates our content policy and cannot be processed.",
+                "message": "Your message violates our content policy.",
                 "categories": flagged_categories
             }
     except Exception as e:
@@ -2485,46 +2485,51 @@ def handle_fingerprint_requests_from_query():
     event = query_params.get("event")
     session_id = query_params.get("session_id")
     
-    if event in ["fingerprint_complete", "fingerprint_error"] and session_id:
+    if event == "fingerprint_complete" and session_id:
         logger.info("=" * 80)
         logger.info("🔍 FINGERPRINT DATA DETECTED VIA URL QUERY PARAMETERS!")
         logger.info(f"Session ID: {session_id}, Event: {event}")
         logger.info("=" * 80)
         
-        # Clear query parameters to prevent re-triggering
-        params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp", "error"]
+        # EXTRACT PARAMETERS BEFORE CLEARING THEM
+        fingerprint_id = query_params.get("fingerprint_id")
+        method = query_params.get("method")
+        privacy = query_params.get("privacy")
+        working_methods = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
+        
+        # DEBUG: Log what we extracted
+        logger.info(f"Extracted - ID: {fingerprint_id}, Method: {method}, Privacy: {privacy}, Working Methods: {working_methods}")
+        
+        # Clear query parameters AFTER extraction
+        params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
         for param in params_to_clear:
             if param in st.query_params:
                 del st.query_params[param]
         
-        if event == "fingerprint_complete":
-            fingerprint_id = query_params.get("fingerprint_id")
-            method = query_params.get("method")
-            privacy = query_params.get("privacy")
-            working_methods = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
+        # Validate we have the required data
+        if not fingerprint_id or not method:
+            st.error("❌ **Fingerprint Error** - Missing required data in redirect")
+            logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
+            time.sleep(2) # Give user time to read the error
+            st.rerun()
+            return
+        
+        st.success("🔍 **Fingerprint Data Received** - Processing device fingerprint...")
+        st.info("Please wait while we save your device fingerprint...")
+        
+        try:
+            success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
             
-            st.success("🔍 **Fingerprint Data Received** - Processing device fingerprint...")
-            st.info("Please wait while we save your device fingerprint...")
-            
-            try:
-                success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
+            if success:
+                st.success("✅ Device fingerprinting completed successfully!")
+                logger.info("✅ Fingerprint processing completed via query parameter successfully.")
+            else:
+                st.warning("⚠️ Fingerprint processing completed with warnings.")
+                logger.info("⚠️ Fingerprint processing completed via query parameter with warnings.")
                 
-                if success:
-                    st.success("✅ Device fingerprinting completed successfully!")
-                    logger.info("✅ Fingerprint processing completed via query parameter successfully.")
-                else:
-                    st.warning("⚠️ Fingerprint processing completed with warnings.")
-                    logger.info("⚠️ Fingerprint processing completed via query parameter with warnings.")
-                    
-            except Exception as e:
-                st.error(f"❌ An unexpected error occurred during fingerprint processing: {str(e)}")
-                logger.critical(f"Fingerprint processing crashed from query parameter: {e}", exc_info=True)
-                
-        elif event == "fingerprint_error":
-            error_message = query_params.get("error", "Unknown error")
-            st.warning(f"⚠️ **Fingerprint Error** - {error_message}")
-            st.info("Using fallback fingerprint method...")
-            logger.warning(f"Fingerprint error via query parameter: {error_message}")
+        except Exception as e:
+            st.error(f"❌ An unexpected error occurred during fingerprint processing: {str(e)}")
+            logger.critical(f"Fingerprint processing crashed from query parameter: {e}", exc_info=True)
         
         time.sleep(2)
         st.rerun()
