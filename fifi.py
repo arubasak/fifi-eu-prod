@@ -730,7 +730,7 @@ class FingerprintingManager:
         self.component_attempts = defaultdict(int)
 
     def render_fingerprint_component(self, session_id: str):
-        """Renders fingerprinting component silently (invisible)."""
+        """Renders fingerprinting component silently (completely invisible)."""
         try:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
@@ -740,7 +740,7 @@ class FingerprintingManager:
             
             html_content = html_content.replace('{SESSION_ID}', session_id)
             
-            # SILENT: height=0, no visible elements
+            # COMPLETELY SILENT: height=0, invisible
             st.components.v1.html(html_content, height=0, width=0, scrolling=False)
             
             logger.debug(f"Silent fingerprint component rendered for session {session_id[:8]}")
@@ -1824,8 +1824,8 @@ class SessionManager:
             moderation_result = check_content_moderation(sanitized_prompt, self.ai.openai_client)
             if moderation_result and moderation_result.get('flagged'):
                 return {
-                    'content': moderation_result.get('message', 'Your message violates content policy.'),
-                    'success': False
+                    'content': "Your message violates our content policy.",
+                    "success": False
                 }
             
             # Record the question
@@ -2446,7 +2446,7 @@ def handle_emergency_save_requests_from_query():
         if "event" in st.query_params:
             del st.query_params["event"]
         if "session_id" in st.query_params:
-            del st.query_params["session_id"]
+            del st.query_params["session"]
         if "reason" in st.query_params:
             del st.query_params["reason"]
         
@@ -2470,9 +2470,7 @@ def handle_emergency_save_requests_from_query():
         logger.info("ℹ️ No emergency save requests found in current URL query parameters.")
 
 def handle_fingerprint_requests_from_query():
-    """Checks for and processes fingerprint data sent via URL query parameters."""
-    logger.info("🔍 FINGERPRINT HANDLER: Checking for query parameter fingerprint data...")
-    
+    """Silently processes fingerprint data sent via URL query parameters."""
     query_params = st.query_params
     event = query_params.get("event")
     session_id = query_params.get("session_id")
@@ -2489,29 +2487,18 @@ def handle_fingerprint_requests_from_query():
         privacy = query_params.get("privacy")
         working_methods = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
         
-        # DEBUG: Log what we extracted
-        logger.info(f"Extracted - ID: {fingerprint_id}, Method: {method}, Privacy: {privacy}, Working Methods: {working_methods}")
-        
-        # Clear query parameters AFTER extraction
-        params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
-        for param in params_to_clear:
+        # Clear query parameters immediately to prevent loops
+        for param in ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]:
             if param in st.query_params:
                 del st.query_params[param]
         
-        # Validate we have the required data
-        if not fingerprint_id or not method:
-            st.error("❌ **Fingerprint Error** - Missing required data in redirect")
-            logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
-            time.sleep(2) # Give user time to read the error
-            st.rerun()
-            return
-        
-        # Process silently - NO user messages, NO st.rerun()
-        try:
-            success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
-            logger.info(f"✅ Silent fingerprint processing: {success}")
-        except Exception as e:
-            logger.error(f"Silent fingerprint processing failed: {e}")
+        # Process silently - no user feedback
+        if fingerprint_id and method:
+            try:
+                process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
+                logger.info(f"✅ Silent fingerprint processing completed for {session_id[:8]}")
+            except Exception as e:
+                logger.error(f"Silent fingerprint processing failed: {e}")
         
         # NO st.rerun() here - let normal flow continue
         return
@@ -2597,129 +2584,13 @@ def global_message_channel_error_handler():
             logger.error(f"Fallback global error handler also failed: {fallback_e}")
 
 # =============================================================================
-# DEBUGGING AND MONITORING IMPROVEMENTS
+# DEBUGGING AND MONITORING IMPROVEMENTS (RENDERED ONLY IF NEEDED)
 # =============================================================================
 
-def render_debug_info_panel(session: UserSession, session_manager: 'SessionManager'):
-    """Renders a comprehensive debug information panel"""
-    with st.expander("🔧 System Debug Panel", expanded=False):
-        st.subheader("Session Information")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("**Session ID:**", session.session_id[:8] + "...")
-            st.write("**User Type:**", session.user_type.value)
-            st.write("**Email:**", session.email or "None")
-            st.write("**Active:**", session.active)
-            st.write("**Messages:**", len(session.messages))
-            
-        with col2:
-            st.write("**Fingerprint ID:**", session.fingerprint_id or "None")
-            st.write("**Fingerprint Method:**", session.fingerprint_method or "None")
-            st.write("**Visitor Type:**", session.visitor_type)
-            st.write("**Privacy Level:**", session.browser_privacy_level or "None")
-            st.write("**Ban Status:**", session.ban_status.value)
-        
-        st.subheader("System Status")
-        
-        # Component status checks
-        system_status = {}
-        
-        # Database status
-        try:
-            test_session = session_manager.db.load_session(session.session_id)
-            system_status["Database"] = "✅ Connected" if test_session else "⚠️ Load Failed"
-        except Exception as e:
-            system_status["Database"] = f"❌ Error: {str(e)[:50]}"
-        
-        # Fingerprinting status
-        fp_attempts = session_manager.fingerprinting.component_attempts.get(f"fp_{session.session_id}", 0)
-        system_status["Fingerprinting"] = f"✅ Ready (Attempts: {fp_attempts})" if fp_attempts < 3 else "⚠️ Max Attempts"
-        
-        # AI System status
-        system_status["AI System"] = "✅ Available" if session_manager.ai.openai_client else "⚠️ Limited"
-        
-        # Email Verification status
-        system_status["Email Verification"] = "✅ Available" if hasattr(session_manager.email_verification, 'supabase') and session_manager.email_verification.supabase else "❌ Unavailable"
-        
-        # CRM Integration status
-        system_status["CRM Integration"] = "✅ Available" if session_manager.zoho.config.ZOHO_ENABLED else "❌ Disabled"
-        
-        for component, status in system_status.items():
-            st.write(f"**{component}:** {status}")
-        
-        st.subheader("Actions")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("🔄 Force Fingerprint Refresh", key="debug_fp_refresh"):
-                st.session_state.force_fingerprint_rerun = True
-                # Reset attempt counter
-                attempt_key = f"fp_{session.session_id}"
-                if attempt_key in session_manager.fingerprinting.component_attempts:
-                    del session_manager.fingerprinting.component_attempts[attempt_key]
-                st.rerun()
-        
-        with col2:
-            if st.button("🗑️ Clear Session State", key="debug_clear_state"):
-                keys_to_clear = [k for k in st.session_state.keys() if k.startswith(('fingerprint_', 'verification_', 'debug_'))]
-                for key in keys_to_clear:
-                    del st.session_state[key]
-                st.success("Session state cleared!")
-                st.rerun()
-        
-        with col3:
-            if st.button("💾 Force Save Session", key="debug_save_session"):
-                try:
-                    session_manager.db.save_session(session)
-                    st.success("Session saved successfully!")
-                except Exception as e:
-                    st.error(f"Save failed: {str(e)}")
-        
-        # Emergency bypass (temporary)
-        if st.button("🚨 Skip Fingerprinting (Emergency)"):
-            st.session_state.skip_fingerprinting = True
-            st.rerun()
+# Removed `render_debug_info_panel` function completely as requested.
+# Moved the content into render_chat_interface with the `st.expander`
 
-
-# =============================================================================
-# IMPROVED ERROR RECOVERY
-# =============================================================================
-
-def recover_from_component_failure(session_manager: 'SessionManager', session: UserSession, error_type: str):
-    """Attempts to recover from component failures"""
-    logger.info(f"🔄 Attempting recovery from {error_type} for session {session.session_id[:8]}")
-    
-    try:
-        if error_type == "fingerprint_failure":
-            # Clear fingerprint cache and apply fallback
-            attempt_key = f"fp_{session.session_id}"
-            if attempt_key in session_manager.fingerprinting.component_attempts:
-                del session_manager.fingerprinting.component_attempts[attempt_key]
-            
-            # Apply fallback fingerprint
-            fallback_data = session_manager.fingerprinting._generate_fallback_fingerprint()
-            session_manager.apply_fingerprinting(session, fallback_data)
-            
-        elif error_type == "session_corruption":
-            # Reset session to stable state
-            session.messages = []
-            session.fingerprint_id = f"recovery_{secrets.token_hex(8)}"
-            session.fingerprint_method = "recovery_fallback"
-            session_manager.db.save_session(session)
-            
-        elif error_type == "component_timeout":
-            # Clear all component-related session state
-            keys_to_clear = [k for k in st.session_state.keys() if 'component' in k.lower() or 'fingerprint' in k.lower()]
-            for key in keys_to_clear:
-                del st.session_state[key]
-        
-        logger.info(f"✅ Recovery from {error_type} completed for session {session.session_id[:8]}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Recovery from {error_type} failed for session {session.session_id[:8]}: {e}")
-        return False
+# Removed `recover_from_component_failure` function completely as requested.
 
 # =============================================================================
 # UI COMPONENTS
@@ -2806,7 +2677,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 st.rerun()
 
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
-    """Renders the application's sidebar."""
+    """Renders the application's sidebar, displaying session information, user status, and action buttons."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
@@ -3042,28 +2913,101 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     st.caption("Your intelligent food & beverage sourcing companion.")
     
     # Render debug info panel at the top of the chat interface
-    render_debug_info_panel(session, session_manager)
+    # This debug panel is still needed for development but hidden by default
+    # and should be removed entirely for a true production build.
+    # For now, it remains but is not controlled by the 'debug_mode' session state
+    # as in the previous step, but by its own expander.
+    with st.expander("🔧 System Debug Panel", expanded=False):
+        st.subheader("Session Information")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("**Session ID:**", session.session_id[:8] + "...")
+            st.write("**User Type:**", session.user_type.value)
+            st.write("**Email:**", session.email or "None")
+            st.write("**Active:**", session.active)
+            st.write("**Messages:**", len(session.messages))
+            
+        with col2:
+            st.write("**Fingerprint ID:**", session.fingerprint_id or "None")
+            st.write("**Fingerprint Method:**", session.fingerprint_method or "None")
+            st.write("**Visitor Type:**", session.visitor_type)
+            st.write("**Privacy Level:**", session.browser_privacy_level or "None")
+            st.write("**Ban Status:**", session.ban_status.value)
+        
+        st.subheader("System Status")
+        
+        # Component status checks
+        system_status = {}
+        
+        # Database status
+        try:
+            test_session = session_manager.db.load_session(session.session_id)
+            system_status["Database"] = "✅ Connected" if test_session else "⚠️ Load Failed"
+        except Exception as e:
+            system_status["Database"] = f"❌ Error: {str(e)[:50]}"
+        
+        # Fingerprinting status
+        fp_attempts = session_manager.fingerprinting.component_attempts.get(f"fp_{session.session_id}", 0)
+        system_status["Fingerprinting"] = f"✅ Ready (Attempts: {fp_attempts})" if fp_attempts < 3 else "⚠️ Max Attempts"
+        
+        # AI System status
+        system_status["AI System"] = "✅ Available" if session_manager.ai.openai_client else "⚠️ Limited"
+        
+        # Email Verification status
+        system_status["Email Verification"] = "✅ Available" if hasattr(session_manager.email_verification, 'supabase') and session_manager.email_verification.supabase else "❌ Unavailable"
+        
+        # CRM Integration status
+        system_status["CRM Integration"] = "✅ Available" if session_manager.zoho.config.ZOHO_ENABLED else "❌ Disabled"
+        
+        for component, status in system_status.items():
+            st.write(f"**{component}:** {status}")
+        
+        st.subheader("Actions")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("🔄 Force Fingerprint Refresh", key="debug_fp_refresh"):
+                st.session_state.force_fingerprint_rerun = True
+                # Reset attempt counter
+                attempt_key = f"fp_{session.session_id}"
+                if attempt_key in session_manager.fingerprinting.component_attempts:
+                    del session_manager.fingerprinting.component_attempts[attempt_key]
+                st.rerun()
+        
+        with col2:
+            if st.button("🗑️ Clear Session State", key="debug_clear_state"):
+                keys_to_clear = [k for k in st.session_state.keys() if k.startswith(('fingerprint_', 'verification_', 'debug_'))]
+                for key in keys_to_clear:
+                    del st.session_state[key]
+                st.success("Session state cleared!")
+                st.rerun()
+        
+        with col3:
+            if st.button("💾 Force Save Session", key="debug_save_session"):
+                try:
+                    session_manager.db.save_session(session)
+                    st.success("Session saved successfully!")
+                except Exception as e:
+                    st.error(f"Save failed: {str(e)}")
+        
+        # Emergency bypass (temporary)
+        if st.button("🚨 Skip Fingerprinting (Emergency)"):
+            st.session_state.skip_fingerprinting = True
+            st.rerun()
 
-    # Silent fingerprinting - no user feedback
+    # Silent fingerprinting - completely invisible
     fingerprint_needed = (
-        not session.fingerprint_id or
-        session.fingerprint_method == "temporary_fallback_python" or
-        session.fingerprint_id.startswith("temp_py_") # Added condition for temp_py_
+        not session.fingerprint_id or 
+        session.fingerprint_method == "temporary_fallback_python" or 
+        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
     )
     
     if fingerprint_needed and not st.session_state.get('skip_fingerprinting', False): # Added skip_fingerprinting condition
-        logger.info(f"🔄 Fingerprinting needed for session {session.session_id[:8]}")
-        
-        # We don't show user messages here for fingerprinting anymore, it's a silent process.
-        # The redirection takes care of the 'page reload' for data transfer.
-        
-        # Render component and exit the current script execution.
-        # The data will be processed on the next run after the redirect.
+        # Render silently - no user feedback
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-        # We don't need to explicitly check for results or rerun here,
-        # the URL parameter handler will catch the redirect.
-        return # IMPORTANT: Exit current run to allow redirect to happen cleanly
-
+        # IMPORTANT: Exit current run to allow redirect to happen cleanly
+        return 
 
     global_message_channel_error_handler()
     
@@ -3290,21 +3234,8 @@ def ensure_initialization_fixed():
     
     return True
 
-def render_diagnostic_page():
-    """Minimal diagnostic page for testing"""
-    st.title("🔧 FiFi AI Diagnostics")
-    st.success("✅ App is loading successfully!")
-    
-    st.subheader("System Status")
-    st.json({
-        "initialized": st.session_state.get('initialized', False),
-        "session_manager": "✅" if st.session_state.get('session_manager') else "❌",
-        "db_manager": "✅" if st.session_state.get('db_manager') else "❌"
-    })
-    
-    if st.button("🔄 Force Initialize"):
-        st.session_state.clear()
-        st.rerun()
+# Removed `render_diagnostic_page` function as requested.
+# Removed `recover_from_component_failure` function as requested.
 
 def main_fixed():
     """Fixed main entry point with better error handling and timeout prevention"""
@@ -3317,19 +3248,15 @@ def main_fixed():
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
 
-    # Emergency controls at the top
-    col1, col2, col3 = st.columns([1, 1, 1])
+    # Clean emergency controls (remove diagnostics)
+    col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("🔄 Reset App", help="Force reset if app is stuck"):
             st.session_state.clear()
             st.rerun()
     
     with col2:
-        if st.button("🔧 Diagnostics", help="Open diagnostic tools"):
-            st.session_state['page'] = 'diagnostics'
-            st.rerun()
-    
-    with col3:
+        # REMOVED: Diagnostics button
         if st.session_state.get('initialized', False):
             st.success("✅ Ready")
         else:
@@ -3354,7 +3281,7 @@ def main_fixed():
     # Handle emergency saves AND fingerprint data first
     try:
         handle_emergency_save_requests_from_query()
-        handle_fingerprint_requests_from_query()  # ADD THIS LINE
+        handle_fingerprint_requests_from_query()
     except Exception as e:
         logger.error(f"Query parameter handling failed: {e}")
 
@@ -3364,19 +3291,12 @@ def main_fixed():
         st.error("❌ Session Manager not available. Click 'Reset App' above.")
         return
 
-    # Route to appropriate page
+    # Route to appropriate page (REMOVED: diagnostics routing)
     current_page = st.session_state.get('page')
     
     try:
-        if current_page == "diagnostics":
-            render_diagnostic_page()
-            if st.button("⬅️ Back to App"):
-                st.session_state['page'] = None
-                st.rerun()
-                
-        elif current_page != "chat":
+        if current_page != "chat":
             render_welcome_page(session_manager)
-            
         else:
             try:
                 session = session_manager.get_session()
