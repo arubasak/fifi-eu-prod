@@ -1,10 +1,10 @@
+import time
 import streamlit as st
 import os
 import uuid
 import json
 import logging
 import re
-import time
 import functools
 import io
 import html
@@ -738,9 +738,16 @@ class FingerprintingManager:
             
             html_content = html_content.replace('{SESSION_ID}', session_id)
             
-            fingerprint_data = st.components.v1.html(html_content, height=0, width=0, scrolling=False)
+            # CRITICAL FIX: Use proper height and unique key
+            fingerprint_data = st.components.v1.html(
+                html_content, 
+                height=200,  # Changed from 0 to 200
+                width=None, 
+                scrolling=False,
+                key=f"fingerprint_{session_id[:8]}"  # Added unique key
+            )
             
-            logger.debug(f"Fingerprint component rendered for session {session_id[:8]}")
+            logger.debug(f"Fingerprint component rendered for session {session_id[:8]}, received: {fingerprint_data}")
             return fingerprint_data
             
         except FileNotFoundError:
@@ -2038,7 +2045,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                 logger.info(f"✅ Valid 15-min timer event received: {timer_result.get('event')} for session {session_id[:8]}.")
                 return timer_result
             else:
-                logger.warning(f"⚠️ Timer event session ID mismatch: expected {session_id[:8]}, got {timer_result.get('session_id', 'None')}. Event ignored.")
+                logger.warning(f"⚠️ Timer event session ID mismatch: expected {session_id[:8]}, got {timer_result.get('session_id', 'None')[:8]}. Event ignored.")
                 return None
         else:
             logger.debug(f"Received non-event timer result: {timer_result} (type: {type(timer_result)}).")
@@ -2775,42 +2782,60 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion with universal fingerprinting.")
     
-    # Render fingerprinting component if needed and process result
-    if (not session.fingerprint_id or 
+    # Enhanced fingerprinting logic with better debugging
+    fingerprint_needed = (
+        not session.fingerprint_id or 
         session.fingerprint_method == "temporary_fallback_python" or 
-        st.session_state.get('force_fingerprint_rerun', False)):
+        st.session_state.get('force_fingerprint_rerun', False)
+    )
+    
+    if fingerprint_needed:
+        logger.info(f"🔄 Fingerprinting needed for session {session.session_id[:8]}")
         
-        logger.info(f"Rendering custom fingerprint component for session {session.session_id[:8]}")
+        # Show status to user
+        with st.container():
+            st.info("🔍 Initializing device fingerprinting...")
         
+        # Render component and get result
         fingerprint_result = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
         
-        if fingerprint_result and isinstance(fingerprint_result, dict):
-            logger.info(f"Received fingerprint data for session {session.session_id[:8]}: {fingerprint_result}")
-            
-            if fingerprint_result.get('session_id') == session.session_id:
-                processed_data = session_manager.fingerprinting.process_fingerprint_data(fingerprint_result)
-                session_manager.apply_fingerprinting(session, processed_data)
-                
-                logger.info(f"✅ Fingerprint applied: ID={session.fingerprint_id[:8]}..., Method={session.fingerprint_method}")
-                
-                if 'force_fingerprint_rerun' in st.session_state:
-                    del st.session_state['force_fingerprint_rerun']
-
-                st.rerun()
-            else:
-                logger.warning(f"Session ID mismatch in fingerprint result. Expected {session.session_id[:8]}, got {fingerprint_result.get('session_id', 'None')[:8]}.")
-        else:
-            logger.debug(f"No fingerprint data received yet for session {session.session_id[:8]}")
-    
-    # Debug panel
-    with st.expander("🔍 Debug: Fingerprint Status", expanded=False):
-        st.write(f"**Session ID:** {session.session_id[:8]}...")
-        st.write(f"**Current Fingerprint ID:** {session.fingerprint_id}")
-        st.write(f"**Current Method:** {session.fingerprint_method}")
-        st.write(f"**Visitor Type:** {session.visitor_type}")
-        st.write(f"**Privacy Level:** {session.browser_privacy_level}")
+        # Debug output
+        st.write("**Debug - Fingerprint Result:**", fingerprint_result)
         
-        if st.button("🔄 Force Rerun Fingerprint"):
+        # Process result if received
+        if fingerprint_result and isinstance(fingerprint_result, dict):
+            if fingerprint_result.get('session_id') == session.session_id:
+                if not fingerprint_result.get('error'):
+                    processed_data = session_manager.fingerprinting.process_fingerprint_data(fingerprint_result)
+                    session_manager.apply_fingerprinting(session, processed_data)
+                    
+                    logger.info(f"✅ Fingerprint applied: ID={session.fingerprint_id[:8]}..., Method={session.fingerprint_method}")
+                    
+                    # Clear flags and rerun
+                    if 'force_fingerprint_rerun' in st.session_state:
+                        del st.session_state['force_fingerprint_rerun']
+                    
+                    st.success("✅ Device fingerprinting completed!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(f"❌ Fingerprinting error: {fingerprint_result.get('message', 'Unknown error')}")
+            else:
+                logger.warning(f"Session ID mismatch in fingerprint result")
+        
+        # Show current fingerprint status
+        st.info(f"Current fingerprint: {session.fingerprint_id}")
+    
+    # Add this in render_chat_interface after the title
+    with st.expander("🔧 Fingerprint Debug Panel", expanded=False): # Changed to False for initial collapsed state
+        st.write("**Current Session:**", session.session_id[:8])
+        st.write("**Current Fingerprint ID:**", session.fingerprint_id)
+        st.write("**Current Method:**", session.fingerprint_method)
+        st.write("**Visitor Type:**", session.visitor_type)
+        st.write("**Privacy Level:**", session.browser_privacy_level)
+        st.write("**Fingerprint Needed (Internal State):**", fingerprint_needed) # Added this for clarity
+        
+        if st.button("🔄 Force Fingerprint Refresh"):
             st.session_state.force_fingerprint_rerun = True
             st.rerun()
         
