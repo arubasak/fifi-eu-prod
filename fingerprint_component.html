@@ -129,14 +129,19 @@
                 };
                 
                 console.log("🔍 Fingerprinting complete:", {
-                    id: fingerprintId, 
-                    method: method, 
-                    privacy: privacy, 
+                    id: fingerprintId,
+                    method: method,
+                    privacy: privacy,
                     working: workingMethods.length
                 });
                 
-                // Send to Python via Streamlit Custom Component API
+                // Additional debugging
+                console.log("🔍 FiFi Fingerprinting: Sending data to Python:", fingerprintResult);
+
+                // Send data back to Python
                 Streamlit.setComponentValue(fingerprintResult);
+
+                console.log("🔍 FiFi Fingerprinting: Data sent successfully");
                 
             } catch (error) {
                 console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
