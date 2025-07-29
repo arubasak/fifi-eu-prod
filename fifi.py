@@ -727,135 +727,148 @@ class FingerprintingManager:
     def __init__(self):
         self.fingerprint_cache = {}
 
-    def render_silent_fingerprint_component(self, session_id: str) -> None:
-        """Renders a completely invisible fingerprinting component that works via HTML/JS."""
-        try:
-            fingerprint_html = f"""
-            <div id="fifi-fingerprint-{session_id[:8]}" style="display:none;"></div>
-            <script>
-            (function() {{
-                const sessionId = '{session_id}';
-                
-                function generateFingerprint() {{
-                    try {{
-                        // Create canvas fingerprint
-                        const canvas = document.createElement('canvas');
-                        const ctx = canvas.getContext('2d');
-                        ctx.textBaseline = 'top';
-                        ctx.font = '14px Arial';
-                        ctx.fillText('FiFi-fingerprint-test-{session_id[:8]}', 2, 2);
-                        const canvasData = canvas.toDataURL().substring(0, 50);
-                        
-                        // Collect browser properties
-                        const props = [
-                            navigator.userAgent || '',
-                            navigator.language || '',
-                            navigator.platform || '',
-                            screen.width + 'x' + screen.height,
-                            (new Date()).getTimezoneOffset(),
-                            navigator.hardwareConcurrency || '0',
-                            navigator.maxTouchPoints || '0',
-                            canvasData
-                        ];
-                        
-                        // Create hash
-                        let hash = 0;
-                        const str = props.join('|');
-                        for (let i = 0; i < str.length; i++) {{
-                            const char = str.charCodeAt(i);
-                            hash = ((hash << 5) - hash) + char;
-                            hash = hash & hash; // Convert to 32-bit integer
-                        }}
-                        
-                        // Convert to positive hex
-                        const fingerprintId = Math.abs(hash).toString(16).substring(0, 12).padStart(12, '0');
-                        
-                        // Privacy detection
-                        let privacyLevel = 'standard';
-                        if (navigator.doNotTrack === '1' || window.navigator.globalPrivacyControl) {{
-                            privacyLevel = 'high_privacy';
-                        }} else if (!navigator.cookieEnabled) {{
-                            privacyLevel = 'medium_privacy';
-                        }}
-                        
-                        // Store in window for immediate access
-                        window.fifiFingerprint_{session_id.replace('-', '_')} = {{
-                            fingerprint_id: fingerprintId,
-                            fingerprint_method: 'canvas_hash_hybrid',
-                            browser_privacy_level: privacyLevel,
-                            working_methods: ['canvas', 'navigator', 'screen'],
-                            success: true
-                        }};
-                        
-                        console.log('✅ FiFi fingerprint generated:', fingerprintId);
-                        
-                    }} catch (error) {{
-                        console.error('Fingerprinting error:', error);
-                        
-                        // Simple fallback
-                        const simpleHash = (navigator.userAgent + screen.width + screen.height + Date.now()).slice(-12);
-                        window.fifiFingerprint_{session_id.replace('-', '_')} = {{
-                            fingerprint_id: simpleHash,
-                            fingerprint_method: 'simple_fallback',
-                            browser_privacy_level: 'unknown',
-                            working_methods: ['basic'],
-                            success: false
-                        }};
-                    }}
+    def get_fingerprint_with_streamlit_js(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Uses Streamlit's native JavaScript execution for immediate fingerprinting."""
+        
+        fingerprint_js = f"""
+        (() => {{
+            try {{
+                // Enhanced fingerprinting with multiple methods
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                if (ctx) {{
+                    ctx.textBaseline = 'top';
+                    ctx.font = '14px Arial, sans-serif';
+                    ctx.fillStyle = '#f60';
+                    ctx.fillRect(125, 1, 62, 20);
+                    ctx.fillStyle = '#069';
+                    ctx.fillText('FiFi 🤖 {session_id[:8]}', 2, 2);
+                    ctx.fillStyle = 'rgba(102, 204, 0, 0.7)';
+                    ctx.fillText('Canvas fingerprint', 4, 17);
                 }}
+                const canvasData = canvas.toDataURL();
                 
-                // Generate immediately
-                generateFingerprint();
-                
-                // Also generate after DOM ready as backup
-                if (document.readyState === 'loading') {{
-                    document.addEventListener('DOMContentLoaded', generateFingerprint);
-                }} else {{
-                    setTimeout(generateFingerprint, 100);
-                }}
-            }})();
-            </script>
-            """
-            
-            # Render completely invisible component
-            st.components.v1.html(fingerprint_html, width=0, height=0)
-            
-            # Try to get the result immediately
-            get_result_js = f"""
-            (() => {{
+                // WebGL fingerprinting
+                let webglInfo = 'none';
                 try {{
-                    const result = window.fifiFingerprint_{session_id.replace('-', '_')};
-                    if (result && result.fingerprint_id) {{
-                        console.log('📡 Retrieved fingerprint:', result.fingerprint_id);
-                        return result;
+                    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                    if (gl) {{
+                        const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+                        if (debugInfo) {{
+                            webglInfo = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) + '|' + 
+                                       gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+                        }}
                     }}
-                    return null;
                 }} catch (e) {{
-                    console.error('Error retrieving fingerprint:', e);
-                    return null;
+                    webglInfo = 'error';
                 }}
-            }})()
-            """
+                
+                // Collect comprehensive browser data
+                const fingerData = {{
+                    userAgent: navigator.userAgent || '',
+                    language: navigator.language || '',
+                    languages: (navigator.languages || []).join(','),
+                    platform: navigator.platform || '',
+                    screen: screen.width + 'x' + screen.height + 'x' + screen.colorDepth,
+                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+                    canvas: canvasData.substring(canvasData.length - 50), // Last 50 chars
+                    webgl: webglInfo,
+                    hardwareConcurrency: navigator.hardwareConcurrency || 0,
+                    deviceMemory: navigator.deviceMemory || 0,
+                    maxTouchPoints: navigator.maxTouchPoints || 0,
+                    cookieEnabled: navigator.cookieEnabled,
+                    doNotTrack: navigator.doNotTrack || '',
+                    sessionId: '{session_id}'
+                }};
+                
+                // Create consistent hash
+                const dataString = Object.values(fingerData).join('|');
+                let hash = 0;
+                for (let i = 0; i < dataString.length; i++) {{
+                    const char = dataString.charCodeAt(i);
+                    hash = ((hash << 5) - hash) + char;
+                    hash = hash & hash; // Convert to 32bit integer
+                }}
+                
+                // Convert to hex and ensure 12 characters
+                const fingerprintId = (Math.abs(hash) >>> 0).toString(16).padStart(8, '0').substring(0, 12);
+                
+                // Determine privacy level
+                let privacyLevel = 'standard';
+                if (navigator.doNotTrack === '1') {{
+                    privacyLevel = 'high_privacy';
+                }} else if (navigator.globalPrivacyControl) {{
+                    privacyLevel = 'high_privacy';
+                }} else if (!navigator.cookieEnabled) {{
+                    privacyLevel = 'medium_privacy';
+                }}
+                
+                const result = {{
+                    fingerprint_id: fingerprintId,
+                    fingerprint_method: 'enhanced_browser_fingerprint',
+                    browser_privacy_level: privacyLevel,
+                    working_methods: ['canvas', 'webgl', 'navigator', 'screen'],
+                    timestamp: Date.now(),
+                    success: true
+                }};
+                
+                console.log('✅ Enhanced fingerprint generated:', fingerprintId);
+                return result;
+                
+            }} catch (error) {{
+                console.error('Enhanced fingerprinting failed:', error);
+                
+                // Simple but reliable fallback
+                const simpleData = (navigator.userAgent || '') + 
+                                  (screen.width || 0) + 'x' + (screen.height || 0) + 
+                                  (navigator.language || '') + 
+                                  Date.now();
+                
+                let simpleHash = 0;
+                for (let i = 0; i < simpleData.length; i++) {{
+                    simpleHash = ((simpleHash << 5) - simpleHash) + simpleData.charCodeAt(i);
+                    simpleHash = simpleHash & simpleHash;
+                }}
+                
+                const fallbackId = (Math.abs(simpleHash) >>> 0).toString(16).padStart(8, '0').substring(0, 12);
+                
+                return {{
+                    fingerprint_id: fallbackId,
+                    fingerprint_method: 'simple_js_fingerprint',
+                    browser_privacy_level: 'unknown',
+                    working_methods: ['basic'],
+                    timestamp: Date.now(),
+                    success: false
+                }};
+            }}
+        }})()
+        """
+        
+        try:
+            result = st_javascript(fingerprint_js, key=f"fp_{session_id}")
             
-            # Small delay to allow JS execution
-            time.sleep(0.1)
-            
-            try:
-                result = st_javascript(get_result_js)
-                if result and isinstance(result, dict) and result.get('fingerprint_id'):
-                    logger.info(f"✅ Silent fingerprint collected: {result.get('fingerprint_id')} via {result.get('fingerprint_method')}")
-                    return result
-            except Exception as e:
-                logger.debug(f"Failed to retrieve fingerprint result: {e}")
-            
+            if result and isinstance(result, dict) and result.get('fingerprint_id'):
+                logger.info(f"✅ Streamlit JS fingerprint success: {result.get('fingerprint_id')} via {result.get('fingerprint_method')}")
+                return result
+            else:
+                logger.warning(f"Streamlit JS fingerprinting returned invalid result: {result}")
+                
         except Exception as e:
-            logger.error(f"Silent fingerprinting component failed: {e}")
+            logger.error(f"Streamlit JS fingerprinting failed: {e}")
         
         return None
 
     def get_fingerprint_immediately(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Attempts to get fingerprint using the silent component approach."""
-        return self.render_silent_fingerprint_component(session_id)
+        """Attempts to get fingerprint using Streamlit's JavaScript execution."""
+        
+        # Try the enhanced Streamlit JS approach first
+        result = self.get_fingerprint_with_streamlit_js(session_id)
+        if result:
+            return result
+        
+        # If that fails, we'll use the fallback
+        logger.warning(f"All fingerprinting methods failed for session {session_id[:8]}, using secure fallback")
+        return None
 
     def _generate_fallback_fingerprint(self) -> Dict[str, Any]:
         """Generates a unique fallback fingerprint."""
@@ -1815,13 +1828,27 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             st.progress(min(session.daily_question_count / 4, 1.0))
             st.caption("Email verification unlocks 10 questions/day.")
         
-        # Show fingerprint ID properly
+        # Show fingerprint ID properly with refresh option
         if session.fingerprint_id:
             # Show the fingerprint type and truncated ID
             if session.fingerprint_method == 'secure_fallback':
                 st.markdown(f"**Device ID:** `{session.fingerprint_id}` (fallback)")
-            elif session.fingerprint_method in ['canvas_hash_hybrid', 'canvas_navigator_hybrid']:
+                if st.button("🔄 Try Real Fingerprint", key="refresh_fp", help="Attempt to get real browser fingerprint"):
+                    # Try to get real fingerprint
+                    real_fp = session_manager.fingerprinting.get_fingerprint_immediately(session.session_id)
+                    if real_fp and real_fp.get('fingerprint_id') and not real_fp.get('fingerprint_id').startswith('fb'):
+                        session.fingerprint_id = real_fp.get('fingerprint_id')
+                        session.fingerprint_method = real_fp.get('fingerprint_method')
+                        session.browser_privacy_level = real_fp.get('browser_privacy_level')
+                        session_manager.db.save_session(session)
+                        st.success("✅ Real fingerprint obtained!")
+                        st.rerun()
+                    else:
+                        st.warning("Browser fingerprinting not available - using secure fallback")
+            elif session.fingerprint_method in ['enhanced_browser_fingerprint', 'canvas_hash_hybrid']:
                 st.markdown(f"**Device ID:** `{session.fingerprint_id}` ✅")
+            elif session.fingerprint_method == 'simple_js_fingerprint':
+                st.markdown(f"**Device ID:** `{session.fingerprint_id}` ⚡")
             else:
                 st.markdown(f"**Device ID:** `{session.fingerprint_id}`")
             
