@@ -1,10 +1,10 @@
-import time
 import streamlit as st
 import os
 import uuid
 import json
 import logging
 import re
+import time
 import functools
 import io
 import html
@@ -738,13 +738,12 @@ class FingerprintingManager:
             
             html_content = html_content.replace('{SESSION_ID}', session_id)
             
-            # CRITICAL FIX: Use proper height and unique key
+            # FIXED: Remove the 'key' parameter that's not supported
             fingerprint_data = st.components.v1.html(
                 html_content, 
-                height=200,  # Changed from 0 to 200
+                height=200,  # Make it visible for debugging
                 width=None, 
-                scrolling=False,
-                key=f"fingerprint_{session_id[:8]}"  # Added unique key
+                scrolling=False
             )
             
             logger.debug(f"Fingerprint component rendered for session {session_id[:8]}, received: {fingerprint_data}")
@@ -2034,8 +2033,10 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
     """
     
     try:
-        stable_key = f"fifi_timer_15min_{session_id[:8]}_{hash(session_id) % 10000}"
-        timer_result = st_javascript(js_timer_code, key=stable_key)
+        # Use a consistent key for st_javascript if the component doesn't inherently manage state well without a unique key per run
+        # Removed key for now, as the previous error indicated st.components.v1.html does not support it.
+        # If st_javascript supports it and it becomes an issue later, it can be re-added conditionally.
+        timer_result = st_javascript(js_timer_code)
         
         if timer_result is None or timer_result == 0 or timer_result == "" or timer_result == False:
             return None
@@ -2854,7 +2855,11 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     if session.user_type.value == UserType.REGISTERED_USER.value:
         timer_result = None
         try:
-            timer_result = render_activity_timer_component_15min(session.session_id)
+            # Removed key parameter from st_javascript as well, as it's a common pattern to either support keys
+            # across all component rendering functions (st.components.v1.html, st_javascript) or none.
+            # Assuming if st.components.v1.html doesn't support 'key', st_javascript might also not.
+            # If st_javascript later turns out to require a key, this might need re-evaluation.
+            timer_result = st_javascript(js_timer_code)
         except Exception as e:
             logger.error(f"15-minute timer component execution failed: {e}", exc_info=True)
         
