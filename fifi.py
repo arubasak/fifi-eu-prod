@@ -54,7 +54,7 @@ from streamlit_javascript import st_javascript
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO, # Ensure this is INFO or DEBUG to see detailed logs
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -166,7 +166,6 @@ class ErrorSeverity(Enum):
 class ErrorContext:
     component: str
     operation: str
-
     error_type: str
     severity: ErrorSeverity
     user_message: str
@@ -792,7 +791,6 @@ class FingerprintingManager:
         self.fingerprint_cache = {}
 
     # FIX 1: Corrected generate_fingerprint_component for st.components.v1.html and no 'key'
-    # MODIFIED: Changed JS object keys to 'id', 'method', 'privacy' and added more console logs
     def generate_fingerprint_component(self, session_id: str) -> None:
         """
         Renders fingerprinting component using st.components.v1.html with postMessage.
@@ -814,7 +812,7 @@ class FingerprintingManager:
                 const sessionId = "{session_id}";
                 const safeSessionId = "{safe_session_id}";
                 
-                // Prevent multiple executions for the same session ID
+                // Prevent multiple executions
                 if (window['fifi_fp_executed_' + safeSessionId]) {{
                     console.log('🔍 Fingerprinting already executed for session', sessionId.substring(0, 8));
                     return;
@@ -835,9 +833,7 @@ class FingerprintingManager:
                         ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; ctx.fillText('Food & Beverage Industry', 4, 45);
                         ctx.strokeStyle = '#000'; ctx.beginPath();
                         ctx.arc(50, 50, 20, 0, Math.PI * 2); ctx.stroke();
-                        const fp = btoa(canvas.toDataURL()).slice(0, 32); // Base64 and truncate for consistency
-                        console.log('✅ Canvas FP generated:', fp);
-                        return fp;
+                        return btoa(canvas.toDataURL()).slice(0, 32); // Base64 and truncate for consistency
                     }} catch (e) {{
                         console.error("❌ Canvas fingerprint failed:", e);
                         return 'canvas_blocked';
@@ -849,19 +845,14 @@ class FingerprintingManager:
                     try {{
                         const canvas = document.createElement('canvas');
                         const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-                        if (!gl) {{ 
-                            console.warn('⚠️ WebGL unavailable.');
-                            return 'webgl_unavailable'; 
-                        }}
+                        if (!gl) {{ return 'webgl_unavailable'; }}
                         const webglData = {{
                             vendor: gl.getParameter(gl.VENDOR),
                             renderer: gl.getParameter(gl.RENDERER),
                             version: gl.getParameter(gl.VERSION),
                             extensions: gl.getSupportedExtensions() ? gl.getSupportedExtensions().slice(0, 10) : []
                         }};
-                        const fp = btoa(JSON.stringify(webglData)).slice(0, 32);
-                        console.log('✅ WebGL FP generated:', fp);
-                        return fp;
+                        return btoa(JSON.stringify(webglData)).slice(0, 32);
                     }} catch (e) {{
                         console.error("❌ WebGL fingerprint failed:", e);
                         return 'webgl_blocked';
@@ -872,15 +863,6 @@ class FingerprintingManager:
                 function generateAudioFingerprint() {{
                     try {{
                         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                        // Check if audio context is suspended/blocked immediately
-                        if (audioContext.state === 'suspended') {{
-                            console.warn('⚠️ AudioContext suspended, trying to resume for fingerprint.');
-                            // Attempt to resume, but it might still require user interaction
-                            audioContext.resume().catch(e => console.error("Error resuming AudioContext:", e));
-                            // Still return blocked if it cannot be used immediately
-                            return 'audio_blocked_initial'; 
-                        }}
-
                         const oscillator = audioContext.createOscillator();
                         const analyser = audioContext.createAnalyser();
                         const gainNode = audioContext.createGain();
@@ -890,9 +872,7 @@ class FingerprintingManager:
                         const frequencyData = new Uint8Array(analyser.frequencyBinCount);
                         analyser.getByteFrequencyData(frequencyData);
                         oscillator.stop(); audioContext.close();
-                        const fp = btoa(Array.from(frequencyData.slice(0, 32)).join(',')).slice(0, 32);
-                        console.log('✅ Audio FP generated:', fp);
-                        return fp;
+                        return btoa(Array.from(frequencyData.slice(0, 32)).join(',')).slice(0, 32);
                     }} catch (e) {{
                         console.error("❌ Audio fingerprint failed:", e);
                         return 'audio_blocked';
@@ -919,50 +899,39 @@ class FingerprintingManager:
                 const workingMethods = [];
                 if (canvasFp !== 'canvas_blocked') workingMethods.push('canvas');
                 if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') workingMethods.push('webgl');  
-                if (audioFp !== 'audio_blocked' && audioFp !== 'audio_blocked_initial') workingMethods.push('audio'); // Also check for initial audio block
+                if (audioFp !== 'audio_blocked') workingMethods.push('audio');
                 
                 if (workingMethods.length === 0) {{
                     primaryMethod = 'fallback';
                     fingerprintId = 'privacy_browser_' + Date.now();
-                    console.warn('⚠️ All fingerprinting methods blocked, using privacy fallback ID.');
                 }} else if (workingMethods.length > 1) {{
                     primaryMethod = 'hybrid';
-                    // Combine all valid fingerprints for a stronger hybrid ID
-                    let combinedFps = [];
-                    if (canvasFp !== 'canvas_blocked') combinedFps.push(canvasFp);
-                    if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') combinedFps.push(webglFp);
-                    if (audioFp !== 'audio_blocked' && audioFp !== 'audio_blocked_initial') combinedFps.push(audioFp);
-                    
-                    fingerprintId = btoa(combinedFps.join('|')).slice(0, 32);
-                    console.log('✨ Hybrid FP generated:', fingerprintId);
+                    fingerprintId = btoa([canvasFp, webglFp, audioFp].join('|')).slice(0, 32);
                 }} else {{
                     primaryMethod = workingMethods[0];
                     fingerprintId = (primaryMethod === 'canvas' ? canvasFp : (primaryMethod === 'webgl' ? webglFp : audioFp));
-                    console.log('⚡ Single method FP generated:', fingerprintId);
                 }}
                 
                 let privacyLevel = 'standard';
-                if (canvasFp === 'canvas_blocked' && (webglFp === 'webgl_blocked' || webglFp === 'webgl_unavailable') && (audioFp === 'audio_blocked' || audioFp === 'audio_blocked_initial')) {{
+                if (canvasFp === 'canvas_blocked' && webglFp.includes('blocked') && audioFp === 'audio_blocked') {{
                     privacyLevel = 'high_privacy';
-                    console.warn('🔒 High privacy detection due to all methods blocked.');
                 }}
                 
-                # MODIFIED: Changed object keys to 'id', 'method', 'privacy' as per requested structure
                 const fingerprintResult = {{
                     type: 'fingerprint_result',
                     session_id: sessionId,
-                    id: fingerprintId,           // <--- MODIFIED
-                    method: primaryMethod,       // <--- MODIFIED
-                    canvas_fp: canvasFp,         // Kept for diagnostics/details
-                    webgl_fp: webglFp,           // Kept for diagnostics/details
-                    audio_fp: audioFp,           // Kept for diagnostics/details
-                    browser_info: browserInfo,   // Kept for diagnostics/details
-                    privacy: privacyLevel,       // <--- MODIFIED
-                    working_methods: workingMethods, // Kept for diagnostics/details
+                    fingerprint_id: fingerprintId,
+                    fingerprint_method: primaryMethod,
+                    canvas_fp: canvasFp,
+                    webgl_fp: webglFp,
+                    audio_fp: audioFp,
+                    browser_info: browserInfo,
+                    privacy_level: privacyLevel,
+                    working_methods: workingMethods,
                     timestamp: Date.now()
                 }};
                 
-                console.log("🔍 Fingerprinting complete and ready to send:", {{
+                console.log("🔍 Fingerprinting complete:", {{
                     id: fingerprintId, method: primaryMethod, privacy: privacyLevel, working: workingMethods.length
                 }});
                 
@@ -970,23 +939,21 @@ class FingerprintingManager:
                 try {{
                     if (window.parent && window.parent !== window) {{
                         window.parent.postMessage(fingerprintResult, '*');
-                        console.log('✅ Fingerprint result sent to parent window via postMessage.');
-                    }} else {{
-                        console.warn('⚠️ Could not send fingerprint result: No parent window or same window.');
+                        console.log('✅ Fingerprint result sent to parent window');
                     }}
                 }} catch (e) {{
-                    console.error('❌ Failed to send fingerprint result via postMessage:', e);
+                    console.error('❌ Failed to send fingerprint result:', e);
                 }}
                 
             }} catch (error) {{
-                console.error("🚨 FiFi Fingerprinting component caught a critical error during execution:", error);
+                console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
                 const errorResult = {{
                     type: 'fingerprint_error',
                     session_id: "{session_id}",
                     error: true,
                     message: error.message,
                     name: error.name,
-                    capture_method: 'html_component_error_js' # ADDED for clarity
+                    capture_method: 'html_component_error'
                 }};
                 
                 try {{
@@ -994,7 +961,7 @@ class FingerprintingManager:
                         window.parent.postMessage(errorResult, '*');
                     }}
                 }} catch (e) {{
-                    console.error('Failed to send error message after critical error:', e);
+                    console.error('Failed to send error message:', e);
                 }}
             }}
         }})();
@@ -1006,21 +973,18 @@ class FingerprintingManager:
         # Render the component (NO KEY PARAMETER!)
         st.components.v1.html(html_code, height=0, width=0)
 
-    # MODIFIED: Updated to read 'id', 'method', 'privacy' from the JS result
+
     def extract_fingerprint_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Extracts and validates fingerprint data from the JavaScript component's return."""
-        # Check for the new 'id' key
-        if not result or not isinstance(result, dict) or result.get('id') == 'ZXJyb3I=':
-            logger.warning("Fingerprint JavaScript returned error or null/invalid 'id'. Using fallback.")
+        if not result or not isinstance(result, dict) or result.get('fingerprint_id') == 'ZXJyb3I=':
+            logger.warning("Fingerprint JavaScript returned error or null. Using fallback.")
             return self._generate_fallback_fingerprint()
         
-        # MODIFIED: Use the new keys 'id' and 'method'
-        fingerprint_id = result.get('id')
-        fingerprint_method = result.get('method', 'unknown')
+        fingerprint_id = result.get('fingerprint_id')
+        fingerprint_method = result.get('fingerprint_method', 'unknown')
         
-        # ADDED: Check if fingerprint_id or fingerprint_method are None/empty strings after retrieval
-        if not fingerprint_id or not fingerprint_method or fingerprint_id.startswith('privacy_browser_'):
-            logger.info(f"Fingerprint ID ({fingerprint_id}) or method ({fingerprint_method}) indicates privacy browser/empty/fallback. Generating new fallback.")
+        if not fingerprint_id or fingerprint_id.startswith('privacy_browser_'):
+            logger.info("Fingerprint ID indicates privacy browser or fallback. Generating new fallback.")
             return self._generate_fallback_fingerprint()
         
         visitor_type = "returning_visitor" if fingerprint_id in self.fingerprint_cache else "new_visitor"
@@ -1031,8 +995,7 @@ class FingerprintingManager:
             'fingerprint_method': fingerprint_method,
             'visitor_type': visitor_type,
             'browser_info': result.get('browser_info', {}),
-            # MODIFIED: Use the new 'privacy' key from JS result for 'privacy_level'
-            'privacy_level': result.get('privacy', 'standard'),
+            'privacy_level': result.get('privacy_level', 'standard'),
             'working_methods': result.get('working_methods', [])
         }
     
@@ -1996,7 +1959,7 @@ class SessionManager:
                         st.error(f"🚫 **Access Restricted**")
                         if time_remaining:
                             hours = max(0, int(time_remaining.total_seconds() // 3600))
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60) # SYNTAX FIX
+                            minutes = max(0, int((time_remaining.total_seconds() % 3600) // 60))
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.info(message)
                         logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
@@ -2097,7 +2060,6 @@ class SessionManager:
         return {'has_history': False}
 
     # FIX 2 (part of new functionality): check_component_messages method for SessionManager
-    # MODIFIED: Removed 'timeout' from st_javascript. Enhanced logging.
     def check_component_messages(self, session: UserSession) -> bool:
         """
         Fixed version: Checks for and processes messages from HTML components.
@@ -2107,63 +2069,41 @@ class SessionManager:
             # Get messages from JavaScript component storage
             js_get_messages = """
             (function() {
-                if (!window.fifi_component_messages || !Array.isArray(window.fifi_component_messages)) {
-                    console.log('🔍 JS: fifi_component_messages is not an array or undefined.');
+                if (!window.fifi_component_messages) {
                     return [];
                 }
                 
                 // Get unprocessed messages
                 const unprocessed = window.fifi_component_messages.filter(msg => !msg.processed);
                 
-                // Mark as processed (IMPORTANT: Modify in place for next check)
+                // Mark as processed
                 window.fifi_component_messages.forEach(msg => {
                     if (!msg.processed) {
                         msg.processed = true;
                     }
                 });
                 
-                // Clean up old messages (keep last 10, processed or not)
+                // Clean up old messages (keep last 10)
                 if (window.fifi_component_messages.length > 10) {
                     window.fifi_component_messages = window.fifi_component_messages.slice(-10);
-                    console.log('🔍 JS: Trimmed fifi_component_messages queue. New size:', window.fifi_component_messages.length);
-                }
-                
-                if (unprocessed.length > 0) {
-                    console.log(`🔍 JS: Returning ${unprocessed.length} unprocessed messages.`);
-                } else {
-                    console.log('🔍 JS: No new unprocessed messages found to return.');
                 }
                 
                 return unprocessed;
             })();
             """
             
-            # MODIFIED: Use a dynamic key incorporating time.time() to force re-evaluation
-            # REMOVED: timeout=5000 due to TypeError in older Streamlit_javascript versions
-            current_time_ms = int(time.time() * 1000)
-            stable_key_prefix = f"check_messages_js_{session.session_id[:8]}"
-            dynamic_key = f"{stable_key_prefix}_{current_time_ms}"
-
-            logger.debug(f"Calling st_javascript with key: {dynamic_key}")
-            messages = st_javascript(js_get_messages, key=dynamic_key) # MODIFIED: Dynamic key, REMOVED timeout
-
-            # CRITICAL FIX: Handle case where st_javascript returns integer 0 for empty array
-            if messages is None: # Added check for None (e.g., if JS execution returned nothing)
-                logger.warning(f"st_javascript call for messages returned None (JS possibly failed or returned null) for session {session.session_id[:8]}.")
+            # FIX: Use session-based key without timestamp to prevent duplicates
+            # Generate a stable key that changes only when needed
+            import hashlib
+            key_base = f"check_messages_{session.session_id[:8]}"
+            key_hash = hashlib.md5(key_base.encode()).hexdigest()[:8]
+            stable_key = f"check_messages_js_{key_hash}"
+            
+            # Use st_javascript to retrieve messages from the browser's window object
+            messages = st_javascript(js_get_messages, key=stable_key)
+            
+            if not messages or not isinstance(messages, list):
                 return False
-            elif messages == 0: # MODIFIED: Explicitly handle integer 0 as an empty list
-                messages = []
-                logger.debug(f"st_javascript returned 0, treating as empty list for session {session.session_id[:8]}.")
-            elif not isinstance(messages, list): # Continue to check if it's not a list (and not 0)
-                logger.error(f"st_javascript returned unexpected non-list type: {type(messages)}. Value: {messages} for session {session.session_id[:8]}.")
-                return False # Still return False for truly unexpected types
-
-            # ADDED: Log the raw messages received from st_javascript for debugging
-            if messages:
-                # Log first message (truncated to avoid huge console output)
-                logger.info(f"Received {len(messages)} messages from JS for session {session.session_id[:8]}. First message (truncated): {str(messages[0])[:500]}...")
-            else:
-                logger.debug(f"No new component messages received (after type handling) for session {session.session_id[:8]}.")
             
             fingerprint_updated = False
             
@@ -2175,12 +2115,9 @@ class SessionManager:
                 msg_type = msg.get('type')
                 msg_session_id = msg.get('session_id')
                 
-                # ADDED: Log the current message being processed for debugging
-                logger.debug(f"Processing message in Python loop. Type: {msg_type}, Session ID: {msg_session_id[:8] if msg_session_id else 'None'}, Full message: {str(msg)[:500]}...")
-
-                # Verify session ID matches to prevent processing messages from other sessions
+                # Verify session ID matches
                 if msg_session_id != session.session_id:
-                    logger.warning(f"Message session ID mismatch: expected {session.session_id[:8]}, got {msg_session_id[:8] if msg_session_id else 'None'}. Message ignored.")
+                    logger.warning(f"Message session ID mismatch: expected {session.session_id[:8]}, got {msg_session_id[:8] if msg_session_id else 'None'}")
                     continue
                 
                 logger.info(f"Processing component message: {msg_type} for session {session.session_id[:8]}")
@@ -2211,24 +2148,23 @@ class SessionManager:
                                 self.db.save_session(session)
                                 fingerprint_updated = True
                                 
-                                logger.info(f"✅ Fingerprint successfully updated and saved: {old_method} -> {session.fingerprint_method} (ID: {new_fp_id[:8]}...) for session {session.session_id[:8]}.") # MODIFIED log message
+                                logger.info(f"✅ Fingerprint successfully updated and saved: {old_method} -> {session.fingerprint_method} (ID: {old_fp[:8] if old_fp else 'None'}... -> {session.fingerprint_id[:8]}...)")
                             except Exception as save_error:
                                 logger.error(f"Failed to save updated fingerprint for session {session.session_id[:8]}: {save_error}")
-                                # Revert changes if save failed to maintain consistency with DB
+                                # Revert changes if save failed
                                 session.fingerprint_id = old_fp
                                 session.fingerprint_method = old_method
                                 fingerprint_updated = False
                         else:
-                            logger.debug(f"Skipping fingerprint update: method={new_method}, same_id={new_fp_id == session.fingerprint_id}, fallback={new_fp_id.startswith('fallback_') if isinstance(new_fp_id, str) else False} for session {session.session_id[:8]}.")
+                            logger.debug(f"Skipping fingerprint update: method={new_method}, same_id={new_fp_id == session.fingerprint_id}, fallback={new_fp_id.startswith('fallback_') if isinstance(new_fp_id, str) else False}")
                     else:
-                        logger.warning(f"Invalid fingerprint data received from JS component for session {session.session_id[:8]}: {fingerprint_data}")
+                        logger.warning(f"Invalid fingerprint data received: {fingerprint_data}")
                     
                 elif msg_type == 'fingerprint_error':
                     logger.error(f"Fingerprinting error from component for session {session.session_id[:8]}: {msg.get('message', 'Unknown error')}")
-                    # Only apply fallback if current fingerprint is temporary or missing
+                    # Only apply fallback if current fingerprint is temporary
                     if (session.fingerprint_method == "temporary_fallback_python" or 
-                        not session.fingerprint_id or
-                        (isinstance(session.fingerprint_id, str) and session.fingerprint_id.startswith('fallback_'))):
+                        not session.fingerprint_id):
                         fallback_data = self.fingerprinting._generate_fallback_fingerprint()
                         session.fingerprint_id = fallback_data.get('fingerprint_id')
                         session.fingerprint_method = fallback_data.get('fingerprint_method')
@@ -2238,34 +2174,22 @@ class SessionManager:
                         try:
                             self.db.save_session(session)
                             fingerprint_updated = True
-                            logger.info(f"Applied fallback fingerprint for session {session.session_id[:8]} due to JS error.")
+                            logger.info(f"Applied fallback fingerprint for session {session.session_id[:8]}")
                         except Exception as save_error:
-                            logger.error(f"Failed to save fallback fingerprint after JS error: {save_error}")
-                    else:
-                        logger.info(f"Not applying fallback fingerprint for session {session.session_id[:8]} as a valid fingerprint already exists.") 
+                            logger.error(f"Failed to save fallback fingerprint: {save_error}")
                     
                 elif msg_type == 'client_info_result':
+                    # Update session with enhanced client info from JavaScript
                     client_info = msg.get('client_info', {})
                     if client_info:
-                        # Only update if current info is from failed Python capture or is missing
-                        if (session.user_agent == "capture_failed_py_context" or not session.user_agent or
-                            session.ip_address == "capture_failed_py_context" or not session.ip_address):
-                            
-                            session.user_agent = client_info.get('userAgent', session.user_agent)[:500]
-                            # Logic to potentially update IP if client_info contains it AND it's not a dummy from Python
-                            if client_info.get('ipAddress') and session.ip_address == "capture_failed_py_context":
-                                session.ip_address = client_info.get('ipAddress')
-                                session.ip_detection_method = client_info.get('ipDetectionMethod', 'javascript')
-                            
+                        # Only update if current info is from failed Python capture
+                        if session.user_agent == "capture_failed_py_context":
+                            session.user_agent = client_info.get('userAgent', session.user_agent)[:500]  # Limit length
                             try:
                                 self.db.save_session(session)
                                 logger.info(f"Updated client info from JavaScript component for session {session.session_id[:8]}")
                             except Exception as save_error:
-                                logger.error(f"Failed to save client info update for {session.session_id[:8]}: {save_error}")
-                        else:
-                            logger.debug(f"Client info not updated for session {session.session_id[:8]} as Python capture was successful or info not provided by JS.")
-                    else:
-                        logger.warning(f"Client info result received but was empty for session {session.session_id[:8]}.")
+                                logger.error(f"Failed to save client info update: {save_error}")
                     
                 elif msg_type == 'client_info_error':
                     logger.error(f"Client info error from component for session {session.session_id[:8]}: {msg.get('message', 'Unknown error')}")
@@ -2414,7 +2338,7 @@ class SessionManager:
                 elif limit_check['reason'] in ['banned', 'daily_limit', 'total_limit']:
                     return {
                         'banned': True,
-                        'content': limit_check.get("content", 'Access restricted.'), # Corrected from "content" to "message" in a previous context
+                        'content': limit_check.get('message', 'Access restricted.'),
                         'time_remaining': limit_check.get('time_remaining')
                     }
             
@@ -2524,104 +2448,71 @@ class SessionManager:
 # =============================================================================
 
 # FIX 3: Added the missing add_message_listener function
-# MODIFIED: Enhanced robustness, error handling, and console logging.
 def add_message_listener():
     """
     Adds a JavaScript message listener to handle postMessage communication 
     from HTML components (fingerprinting, client info, etc.)
-    Ensures `window.fifi_component_messages` is initialized as an array.
     """
     js_listener_code = """
     <script>
     (function() {
-        try { // ADDED: Outer try-catch for robustness
-            // Prevent multiple listener registrations if Streamlit reruns
-            if (window.fifi_message_listener_initialized) {
-                console.log('🎧 FiFi message listener already initialized, skipping setup.'); // ADDED
-                return;
-            }
-            window.fifi_message_listener_initialized = true;
-            
-            console.log('🎧 Initializing FiFi message listener for component communication...'); // MODIFIED log
-            
-            // CRITICAL: Initialize message storage if not exists or if it's not an array
-            if (typeof window.fifi_component_messages === 'undefined' || !Array.isArray(window.fifi_component_messages)) { // MODIFIED check
-                window.fifi_component_messages = [];
-                console.log('✅ FiFi message queue initialized as empty array (first time or reset).'); // ADDED
-            } else {
-                console.log('ℹ️ FiFi message queue already exists and is an array.'); // ADDED
-            }
-            
-            function handleComponentMessage(event) {
-                try { // ADDED: Inner try-catch for robustness
-                    const data = event.data;
-                    console.log('📨 Raw message data received by listener:', data); // ADDED: Crucial debug log
-
-                    // Validate message structure and source (optional but good practice for security)
-                    // If you know the origin, you can check event.origin
-                    // For now, check essential fields
-                    if (!data || typeof data !== 'object' || !data.type || typeof data.session_id === 'undefined') { // MODIFIED check
-                        console.debug('Received non-FiFi component message or invalid format, ignoring.', data); // ADDED
-                        return; // Ignore irrelevant messages
-                    }
-                    
-                    // Define valid message types your system expects
-                    const validTypes = [
-                        'fingerprint_result', 
-                        'fingerprint_error',
-                        'client_info_result', 
-                        'client_info_error'
-                    ];
-                    
-                    if (!validTypes.includes(data.type)) {
-                        console.debug('Received unknown component message type, ignoring:', data.type); // ADDED
-                        return;
-                    }
-                    
-                    console.log('📨 Received component message:', data.type, 'for session:', data.session_id ? data.session_id.substring(0, 8) : 'unknown'); // MODIFIED log
-                    
-                    // Store message for Streamlit to process
-                    if (Array.isArray(window.fifi_component_messages)) { // ADDED check
-                        window.fifi_component_messages.push({
-                            ...data,
-                            received_timestamp: Date.now(), // MODIFIED: Used a distinct timestamp name
-                            processed: false # Mark as unprocessed for Python to pick up
-                        });
-                        
-                        # Limit message queue size to prevent excessive memory usage
-                        if (window.fifi_component_messages.length > 50) {
-                            window.fifi_component_messages = window.fifi_component_messages.slice(-25); # Keep last 25
-                            console.log('🗑️ FiFi message queue trimmed to 25 messages.'); # ADDED
-                        }
-                    } else { # ADDED: Fallback if array somehow got corrupted
-                        console.error('❌ Critical: fifi_component_messages became undefined or non-array during message handling!');
-                        # Attempt to re-initialize as a last resort, but data may be lost
-                        window.fifi_component_messages = [];
-                        window.fifi_component_messages.push({
-                            ...data,
-                            received_timestamp: Date.now(),
-                            processed: false
-                        });
-                    }
-                    
-                } catch (error) {
-                    console.error('❌ Error handling individual component message in listener:', error); # MODIFIED log
+        // Prevent multiple listener registrations
+        if (window.fifi_message_listener_initialized) {
+            return;
+        }
+        window.fifi_message_listener_initialized = true;
+        
+        console.log('🎧 Initializing FiFi message listener for component communication');
+        
+        // Initialize message storage if not exists
+        if (!window.fifi_component_messages) {
+            window.fifi_component_messages = [];
+        }
+        
+        function handleComponentMessage(event) {
+            try {
+                const data = event.data;
+                
+                // Validate message structure
+                if (!data || typeof data !== 'object') {
+                    return;
                 }
-            }
-            
-            # Add the message listener to the window
-            window.addEventListener('message', handleComponentMessage, false);
-            
-            console.log('✅ FiFi message listener event handler added successfully.'); # MODIFIED log
-
-        } catch (e) { # ADDED: Outer catch block
-            console.error('🚨 CRITICAL ERROR: FiFi message listener setup failed entirely:', e); # ADDED
-            # As a last resort, if the setup itself failed, try to ensure the array exists
-            if (typeof window.fifi_component_messages === 'undefined' || !Array.isArray(window.fifi_component_messages)) { # ADDED
-                window.fifi_component_messages = [];
-                console.warn('⚠️ Fallback: FiFi message queue forcibly initialized after critical setup error.'); # ADDED
+                
+                // Check if it's a FiFi component message
+                const validTypes = [
+                    'fingerprint_result', 
+                    'fingerprint_error',
+                    'client_info_result', 
+                    'client_info_error'
+                ];
+                
+                if (!validTypes.includes(data.type)) {
+                    return;
+                }
+                
+                console.log('📨 Received component message:', data.type, 'for session:', data.session_id ? data.session_id.substring(0, 8) : 'unknown');
+                
+                // Store message for Streamlit to process
+                window.fifi_component_messages.push({
+                    ...data,
+                    timestamp: Date.now(),
+                    processed: false
+                });
+                
+                // Limit message queue size
+                if (window.fifi_component_messages.length > 50) {
+                    window.fifi_component_messages = window.fifi_component_messages.slice(-25);
+                }
+                
+            } catch (error) {
+                console.error('❌ Error handling component message:', error);
             }
         }
+        
+        // Add the message listener
+        window.addEventListener('message', handleComponentMessage, false);
+        
+        console.log('✅ FiFi message listener initialized successfully');
     })();
     </script>
     """
@@ -2629,7 +2520,8 @@ def add_message_listener():
     try:
         st.components.v1.html(js_listener_code, height=0, width=0)
     except Exception as e:
-        logger.error(f"Failed to initialize message listener HTML component: {e}", exc_info=True) # MODIFIED log
+        logger.error(f"Failed to initialize message listener: {e}", exc_info=True)
+
 
 def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str, Any]]:
     """
@@ -2650,11 +2542,11 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             
             console.log("🕐 FiFi 15-Minute Timer: Checking session", sessionId.substring(0, 8));
             
-            # Corrected JavaScript variable name here
+            // Corrected JavaScript variable name here
             if (typeof window.fifi_timer_state_{safe_session_id_js} === 'undefined' || window.fifi_timer_state_{safe_session_id_js} === null || window.fifi_timer_state_{safe_session_id_js}.sessionId !== sessionId) {{
                 console.clear();
                 console.log("🆕 FiFi 15-Minute Timer: Starting/Resetting for session", sessionId.substring(0, 8)); 
-                # Corrected JavaScript variable name here
+                // Corrected JavaScript variable name here
                 window.fifi_timer_state_{safe_session_id_js} = {{
                     lastActivityTime: Date.now(),
                     expired: false,
@@ -2664,7 +2556,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                 console.log("🆕 FiFi 15-Minute Timer state initialized.");
             }}
             
-            # Corrected JavaScript variable name here
+            // Corrected JavaScript variable name here
             const state = window.fifi_timer_state_{safe_session_id_js};
             
             if (!state.listenersInitialized) {{
@@ -2878,7 +2770,7 @@ def render_browser_close_detection_simplified(session_id: str):
     """
     
     try:
-        st.components.v1.html(html_code, height=0, width=0)
+        st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render simplified browser close component: {e}", exc_info=True)
 
@@ -3511,7 +3403,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             if session.ban_end_time:
                 time_remaining = session.ban_end_time - datetime.now()
                 hours = int(time_remaining.total_seconds() // 3600)
-                minutes = int((time_remaining.total_seconds() % 3600) // 60) # SYNTAX FIX
+                minutes = int((time_remaining.total_seconds() % 3600) // 60)
                 st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
             st.markdown(f"Reason: {session.ban_reason or 'Usage policy violation'}")
         elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: 
@@ -3797,7 +3689,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
                         if response.get('time_remaining'):
                             time_remaining = response['time_remaining']
                             hours = int(time_remaining.total_seconds() // 3600)
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60) # SYNTAX FIX
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.rerun()
                     elif response.get('evasion_penalty'):
@@ -3864,7 +3756,6 @@ def debug_component_messages():
     """
     
     try:
-        # REMOVED timeout from this st_javascript call as well
         return st_javascript(js_debug, key=f"debug_messages_{int(time.time())}")
     except Exception as e:
         logger.error(f"Debug component messages failed: {e}")
@@ -3928,7 +3819,6 @@ def render_fingerprint_diagnostic_panel(session_manager: 'SessionManager', sessi
                 """
                 
                 try:
-                    # REMOVED timeout from this st_javascript call as well
                     queue_info = st_javascript(queue_check_js, key=f"queue_check_{int(time.time())}")
                     if queue_info:
                         st.json(queue_info)
@@ -3980,7 +3870,6 @@ def render_fingerprint_diagnostic_panel(session_manager: 'SessionManager', sessi
                 """
                 
                 try:
-                    # REMOVED timeout from this st_javascript call as well
                     result = st_javascript(clear_queue_js, key=f"clear_queue_{int(time.time())}")
                     if result:
                         st.success(f"🗑️ Cleared {result.get('cleared', 0)} messages from queue")
@@ -4029,7 +3918,6 @@ def render_fingerprint_diagnostic_panel(session_manager: 'SessionManager', sessi
             """
             
             try:
-                # REMOVED timeout from this st_javascript call as well
                 logs = st_javascript(console_logs_js, key=f"console_logs_{int(time.time())}")
                 if logs and len(logs) > 0:
                     for log in logs:
@@ -4062,7 +3950,7 @@ def render_fingerprint_diagnostic_panel(session_manager: 'SessionManager', sessi
                 else:
                     st.error("❌ Session not found in database!")
             except Exception as e:
-                st.error(f"❌ Database save verification failed: {e}")
+                st.error(f"❌ Database verification failed: {e}")
         
         # Step-by-step diagnostic
         st.subheader("🚦 Step-by-step Diagnostic")
@@ -4087,7 +3975,6 @@ def render_fingerprint_diagnostic_panel(session_manager: 'SessionManager', sessi
                         };
                     })();
                     """
-                    # REMOVED timeout from this st_javascript call as well
                     listener_status = st_javascript(listener_check_js, key=f"listener_check_{step_name.replace(' ', '_')}_{int(time.time())}")
                     if listener_status:
                         st.json(listener_status)
@@ -4104,7 +3991,6 @@ def render_fingerprint_diagnostic_panel(session_manager: 'SessionManager', sessi
                         }};
                     }})();
                     """
-                    # REMOVED timeout from this st_javascript call as well
                     fp_status = st_javascript(fp_check_js, key=f"fp_check_{step_name.replace(' ', '_')}_{int(time.time())}")
                     if fp_status:
                         st.json(fp_status)
