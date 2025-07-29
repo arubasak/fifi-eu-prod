@@ -297,10 +297,7 @@ class UserSession:
     email_addresses_used: List[str] = field(default_factory=list)
     email_switches_count: int = 0
     
-    # Network & Browser
-    ip_address: Optional[str] = None
-    ip_detection_method: Optional[str] = None
-    user_agent: Optional[str] = None
+    # Browser Privacy Level (from fingerprinting)
     browser_privacy_level: Optional[str] = None
     
     # Registration Tracking
@@ -365,7 +362,7 @@ class DatabaseManager:
     def _init_complete_database(self):
         """
         Simplified database initialization to avoid hanging issues with ALTER TABLE.
-        Creates the full schema upfront.
+        Creates the full schema upfront, without IP/User-Agent columns.
         """
         with self.lock:
             try:
@@ -400,9 +397,6 @@ class DatabaseManager:
                         escalation_level INTEGER DEFAULT 0,
                         email_addresses_used TEXT DEFAULT '[]',
                         email_switches_count INTEGER DEFAULT 0,
-                        ip_address TEXT,
-                        ip_detection_method TEXT,
-                        user_agent TEXT,
                         browser_privacy_level TEXT,
                         registration_prompted INTEGER DEFAULT 0,
                         registration_link_clicked INTEGER DEFAULT 0,
@@ -515,7 +509,7 @@ class DatabaseManager:
                     session.email_addresses_used = [] # Reset to empty list if serialization fails
                 
                 self.conn.execute(
-                    '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, ip_address, ip_detection_method, user_agent, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                     (session.session_id, session.user_type.value, session.email, session.full_name,
                      session.zoho_contact_id, session.created_at.isoformat(),
                      session.last_activity.isoformat(), json_messages, int(session.active),
@@ -528,8 +522,7 @@ class DatabaseManager:
                      session.ban_end_time.isoformat() if session.ban_end_time else None,
                      session.ban_reason, session.evasion_count, session.current_penalty_hours,
                      session.escalation_level, json_emails_used,
-                     session.email_switches_count, session.ip_address, session.ip_detection_method,
-                     session.user_agent, session.browser_privacy_level, int(session.registration_prompted),
+                     session.email_switches_count, session.browser_privacy_level, int(session.registration_prompted),
                      int(session.registration_link_clicked), session.recognition_response))
                 self.conn.commit()
                 
@@ -571,7 +564,7 @@ class DatabaseManager:
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
                 
-                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, ip_address, ip_detection_method, user_agent, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
                 row = cursor.fetchone()
                 
                 if not row: 
@@ -580,7 +573,7 @@ class DatabaseManager:
                 
                 # Handle as tuple (SQLite Cloud returns tuples)
                 # Ensure row has enough columns (Fix 3: Robustness)
-                expected_cols = 34 
+                expected_cols = 31 # Adjusted from 34
                 if len(row) < expected_cols:
                     logger.error(f"Row has insufficient columns: {len(row)} (expected {expected_cols}) for session {session_id[:8]}. Data corruption suspected.")
                     return None
@@ -614,13 +607,10 @@ class DatabaseManager:
                         escalation_level=row[24] or 0,
                         email_addresses_used=safe_json_loads(row[25], default_value=[]), # Use safe_json_loads (Fix 2)
                         email_switches_count=row[26] or 0,
-                        ip_address=row[27],
-                        ip_detection_method=row[28],
-                        user_agent=row[29],
-                        browser_privacy_level=row[30],
-                        registration_prompted=bool(row[31]),
-                        registration_link_clicked=bool(row[32]),
-                        recognition_response=row[33]
+                        browser_privacy_level=row[27], # Adjusted index
+                        registration_prompted=bool(row[28]), # Adjusted index
+                        registration_link_clicked=bool(row[29]), # Adjusted index
+                        recognition_response=row[30] # Adjusted index
                     )
                     
                     logger.info(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}")
@@ -655,9 +645,9 @@ class DatabaseManager:
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
 
-                cursor = self.conn.execute("SELECT * FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
+                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
                 sessions = []
-                expected_cols = 34 # Define expected columns based on table schema
+                expected_cols = 31 # Adjusted from 34
                 for row in cursor.fetchall():
                     if len(row) < expected_cols:
                         logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected {expected_cols}). Skipping row.")
@@ -692,13 +682,10 @@ class DatabaseManager:
                             escalation_level=row[24] or 0,
                             email_addresses_used=safe_json_loads(row[25], default_value=[]), # Use safe_json_loads (Fix 2)
                             email_switches_count=row[26] or 0,
-                            ip_address=row[27],
-                            ip_detection_method=row[28],
-                            user_agent=row[29],
-                            browser_privacy_level=row[30],
-                            registration_prompted=bool(row[31]),
-                            registration_link_clicked=bool(row[32]),
-                            recognition_response=row[33]
+                            browser_privacy_level=row[27], # Adjusted index
+                            registration_prompted=bool(row[28]), # Adjusted index
+                            registration_link_clicked=bool(row[29]), # Adjusted index
+                            recognition_response=row[30] # Adjusted index
                         )
                         sessions.append(s)
                     except Exception as e:
@@ -726,9 +713,9 @@ class DatabaseManager:
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
 
-                cursor = self.conn.execute("SELECT * FROM sessions WHERE email = ? ORDER BY last_activity DESC", (email,))
+                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response FROM sessions WHERE email = ? ORDER BY last_activity DESC", (email,))
                 sessions = []
-                expected_cols = 34 # Define expected columns based on table schema
+                expected_cols = 31 # Adjusted from 34
                 for row in cursor.fetchall():
                     if len(row) < expected_cols:
                         logger.warning(f"Row has insufficient columns in find_sessions_by_email: {len(row)} (expected {expected_cols}). Skipping row.")
@@ -763,13 +750,10 @@ class DatabaseManager:
                             escalation_level=row[24] or 0,
                             email_addresses_used=safe_json_loads(row[25], default_value=[]), # Use safe_json_loads (Fix 2)
                             email_switches_count=row[26] or 0,
-                            ip_address=row[27],
-                            ip_detection_method=row[28],
-                            user_agent=row[29],
-                            browser_privacy_level=row[30],
-                            registration_prompted=bool(row[31]),
-                            registration_link_clicked=bool(row[32]),
-                            recognition_response=row[33]
+                            browser_privacy_level=row[27], # Adjusted index
+                            registration_prompted=bool(row[28]), # Adjusted index
+                            registration_link_clicked=bool(row[29]), # Adjusted index
+                            recognition_response=row[30] # Adjusted index
                         )
                         sessions.append(s)
                     except Exception as e:
@@ -785,208 +769,58 @@ class DatabaseManager:
 # =============================================================================
 
 class FingerprintingManager:
-    """Manages the 3-layer browser fingerprinting for device identification."""
+    """Manages browser fingerprinting using Streamlit custom components."""
     
     def __init__(self):
         self.fingerprint_cache = {}
 
-    # FIX 1: Corrected generate_fingerprint_component for st.components.v1.html and no 'key'
-    def generate_fingerprint_component(self, session_id: str) -> None:
+    def render_fingerprint_component(self, session_id: str):
         """
-        Renders fingerprinting component using st.components.v1.html with postMessage.
+        Renders fingerprinting component using custom component.
+        Returns fingerprint data directly from JavaScript.
         """
-        safe_session_id = session_id.replace('-', '_')
-        
-        html_code = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body {{ margin: 0; padding: 0; }}
-            </style>
-        </head>
-        <body>
-        <script>
-        (function() {{
-            try {{
-                const sessionId = "{session_id}";
-                const safeSessionId = "{safe_session_id}";
-                
-                // Prevent multiple executions
-                if (window['fifi_fp_executed_' + safeSessionId]) {{
-                    console.log('🔍 Fingerprinting already executed for session', sessionId.substring(0, 8));
-                    return;
-                }}
-                window['fifi_fp_executed_' + safeSessionId] = true;
-                
-                console.log('🔍 Starting fingerprinting for session', sessionId.substring(0, 8));
-                
-                // Layer 1: Canvas Fingerprinting (Primary)
-                function generateCanvasFingerprint() {{
-                    try {{
-                        const canvas = document.createElement('canvas');
-                        const ctx = canvas.getContext('2d');
-                        canvas.width = 220; canvas.height = 100;
-                        ctx.textBaseline = 'top'; ctx.font = '14px Arial';
-                        ctx.fillStyle = '#f60'; ctx.fillRect(125, 1, 62, 20);
-                        ctx.fillStyle = '#069'; ctx.fillText('FiFi AI Canvas Test 🤖', 2, 15);
-                        ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; ctx.fillText('Food & Beverage Industry', 4, 45);
-                        ctx.strokeStyle = '#000'; ctx.beginPath();
-                        ctx.arc(50, 50, 20, 0, Math.PI * 2); ctx.stroke();
-                        return btoa(canvas.toDataURL()).slice(0, 32); // Base64 and truncate for consistency
-                    }} catch (e) {{
-                        console.error("❌ Canvas fingerprint failed:", e);
-                        return 'canvas_blocked';
-                    }}
-                }}
-                
-                // Layer 2: WebGL Fingerprinting (Secondary)
-                function generateWebGLFingerprint() {{
-                    try {{
-                        const canvas = document.createElement('canvas');
-                        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-                        if (!gl) {{ return 'webgl_unavailable'; }}
-                        const webglData = {{
-                            vendor: gl.getParameter(gl.VENDOR),
-                            renderer: gl.getParameter(gl.RENDERER),
-                            version: gl.getParameter(gl.VERSION),
-                            extensions: gl.getSupportedExtensions() ? gl.getSupportedExtensions().slice(0, 10) : []
-                        }};
-                        return btoa(JSON.stringify(webglData)).slice(0, 32);
-                    }} catch (e) {{
-                        console.error("❌ WebGL fingerprint failed:", e);
-                        return 'webgl_blocked';
-                    }}
-                }}
-                
-                // Layer 3: Audio Context Fingerprinting (Tertiary)
-                function generateAudioFingerprint() {{
-                    try {{
-                        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                        const oscillator = audioContext.createOscillator();
-                        const analyser = audioContext.createAnalyser();
-                        const gainNode = audioContext.createGain();
-                        oscillator.type = 'triangle'; oscillator.frequency.value = 1000; gainNode.gain.value = 0;
-                        oscillator.connect(analyser); analyser.connect(gainNode); gainNode.connect(audioContext.destination);
-                        oscillator.start(0);
-                        const frequencyData = new Uint8Array(analyser.frequencyBinCount);
-                        analyser.getByteFrequencyData(frequencyData);
-                        oscillator.stop(); audioContext.close();
-                        return btoa(Array.from(frequencyData.slice(0, 32)).join(',')).slice(0, 32);
-                    }} catch (e) {{
-                        console.error("❌ Audio fingerprint failed:", e);
-                        return 'audio_blocked';
-                    }}
-                }}
-                
-                // Collect general browser and system information
-                function getBrowserInfo() {{
-                    return {{
-                        userAgent: navigator.userAgent, language: navigator.language, platform: navigator.platform,
-                        cookieEnabled: navigator.cookieEnabled, doNotTrack: navigator.doNotTrack,
-                        hardwareConcurrency: navigator.hardwareConcurrency, maxTouchPoints: navigator.maxTouchPoints,
-                        screen: {{ width: screen.width, height: screen.height, colorDepth: screen.colorDepth, pixelDepth: screen.pixelDepth }},
-                        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
-                    }};
-                }}
-                
-                const canvasFp = generateCanvasFingerprint();
-                const webglFp = generateWebGLFingerprint();
-                const audioFp = generateAudioFingerprint();
-                const browserInfo = getBrowserInfo();
-                
-                let primaryMethod = 'canvas'; let fingerprintId = canvasFp;
-                const workingMethods = [];
-                if (canvasFp !== 'canvas_blocked') workingMethods.push('canvas');
-                if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') workingMethods.push('webgl');  
-                if (audioFp !== 'audio_blocked') workingMethods.push('audio');
-                
-                if (workingMethods.length === 0) {{
-                    primaryMethod = 'fallback';
-                    fingerprintId = 'privacy_browser_' + Date.now();
-                }} else if (workingMethods.length > 1) {{
-                    primaryMethod = 'hybrid';
-                    fingerprintId = btoa([canvasFp, webglFp, audioFp].join('|')).slice(0, 32);
-                }} else {{
-                    primaryMethod = workingMethods[0];
-                    fingerprintId = (primaryMethod === 'canvas' ? canvasFp : (primaryMethod === 'webgl' ? webglFp : audioFp));
-                }}
-                
-                let privacyLevel = 'standard';
-                if (canvasFp === 'canvas_blocked' && webglFp.includes('blocked') && audioFp === 'audio_blocked') {{
-                    privacyLevel = 'high_privacy';
-                }}
-                
-                const fingerprintResult = {{
-                    type: 'fingerprint_result',
-                    session_id: sessionId,
-                    fingerprint_id: fingerprintId,
-                    fingerprint_method: primaryMethod,
-                    canvas_fp: canvasFp,
-                    webgl_fp: webglFp,
-                    audio_fp: audioFp,
-                    browser_info: browserInfo,
-                    privacy_level: privacyLevel,
-                    working_methods: workingMethods,
-                    timestamp: Date.now()
-                }};
-                
-                console.log("🔍 Fingerprinting complete:", {{
-                    id: fingerprintId, method: primaryMethod, privacy: privacyLevel, working: workingMethods.length
-                }});
-                
-                // Send result to parent window
-                try {{
-                    if (window.parent && window.parent !== window) {{
-                        window.parent.postMessage(fingerprintResult, '*');
-                        console.log('✅ Fingerprint result sent to parent window');
-                    }}
-                }} catch (e) {{
-                    console.error('❌ Failed to send fingerprint result:', e);
-                }}
-                
-            }} catch (error) {{
-                console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
-                const errorResult = {{
-                    type: 'fingerprint_error',
-                    session_id: "{session_id}",
-                    error: true,
-                    message: error.message,
-                    name: error.name,
-                    capture_method: 'html_component_error'
-                }};
-                
-                try {{
-                    if (window.parent && window.parent !== window) {{
-                        window.parent.postMessage(errorResult, '*');
-                    }}
-                }} catch (e) {{
-                    console.error('Failed to send error message:', e);
-                }}
-            }}
-        }})();
-        </script>
-        </body>
-        </html>
-        """
-        
-        # Render the component (NO KEY PARAMETER!)
-        st.components.v1.html(html_code, height=0, width=0)
+        try:
+            # Read the HTML file
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
+            
+            with open(html_file_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            # Replace session ID placeholder
+            html_content = html_content.replace('{SESSION_ID}', session_id)
+            
+            # Render as invisible component
+            fingerprint_data = st.components.v1.html(html_content, height=0, width=0, scrolling=False)
+            
+            logger.debug(f"Fingerprint component rendered for session {session_id[:8]}")
+            return fingerprint_data
+            
+        except FileNotFoundError:
+            logger.error("fingerprint_component.html not found. Using fallback fingerprint.")
+            return self._generate_fallback_fingerprint()
+        except Exception as e:
+            logger.error(f"Failed to render fingerprint component: {e}")
+            return self._generate_fallback_fingerprint()
 
-
-    def extract_fingerprint_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        """Extracts and validates fingerprint data from the JavaScript component's return."""
-        if not result or not isinstance(result, dict) or result.get('fingerprint_id') == 'ZXJyb3I=':
-            logger.warning("Fingerprint JavaScript returned error or null. Using fallback.")
+    def process_fingerprint_data(self, fingerprint_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Processes fingerprint data received from the custom component.
+        Returns validated fingerprint information.
+        """
+        if not fingerprint_data or fingerprint_data.get('error'):
+            logger.warning("Fingerprint component returned error. Using fallback.")
             return self._generate_fallback_fingerprint()
         
-        fingerprint_id = result.get('fingerprint_id')
-        fingerprint_method = result.get('fingerprint_method', 'unknown')
+        fingerprint_id = fingerprint_data.get('id')
+        fingerprint_method = fingerprint_data.get('method')
+        privacy_level = fingerprint_data.get('privacy', 'standard')
         
-        if not fingerprint_id or fingerprint_id.startswith('privacy_browser_'):
-            logger.info("Fingerprint ID indicates privacy browser or fallback. Generating new fallback.")
+        if not fingerprint_id or not fingerprint_method:
+            logger.warning("Invalid fingerprint data received. Using fallback.")
             return self._generate_fallback_fingerprint()
         
+        # Check if this is a returning visitor
         visitor_type = "returning_visitor" if fingerprint_id in self.fingerprint_cache else "new_visitor"
         self.fingerprint_cache[fingerprint_id] = {'last_seen': datetime.now()}
         
@@ -994,9 +828,8 @@ class FingerprintingManager:
             'fingerprint_id': fingerprint_id,
             'fingerprint_method': fingerprint_method,
             'visitor_type': visitor_type,
-            'browser_info': result.get('browser_info', {}),
-            'privacy_level': result.get('privacy_level', 'standard'),
-            'working_methods': result.get('working_methods', [])
+            'browser_privacy_level': privacy_level,
+            'working_methods': fingerprint_data.get('working_methods', [])
         }
     
     def _generate_fallback_fingerprint(self) -> Dict[str, Any]:
@@ -1006,8 +839,7 @@ class FingerprintingManager:
             'fingerprint_id': fallback_id,
             'fingerprint_method': 'fallback',
             'visitor_type': 'new_visitor',
-            'browser_info': {},
-            'privacy_level': 'high_privacy',
+            'browser_privacy_level': 'high_privacy',
             'working_methods': []
         }
 
@@ -1760,10 +1592,6 @@ class SessionManager:
         self._cleanup_interval = timedelta(hours=1)  # Cleanup every hour (Fix 6)
         self._last_cleanup = datetime.now() # (Fix 6)
         
-        # Initialize message storage for component communication (Fix 3)
-        if 'component_messages' not in st.session_state:
-            st.session_state.component_messages = []
-        
         logger.info("✅ SessionManager initialized with all component managers.")
 
     def get_session_timeout_minutes(self) -> int:
@@ -1846,72 +1674,10 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
 
-    def _capture_client_info(self, session: UserSession) -> UserSession:
-        """
-        Enhanced client info capture with multiple fallback methods.
-        Attempts to get IP and User-Agent from Streamlit's internal context,
-        falling back to JS detection if necessary.
-        """
-        ip_captured = False
-        ua_captured = False
-        
-        # Method 1: Try the current Streamlit context (most reliable if available)
-        try:
-            from streamlit.runtime.scriptrunner import get_script_run_ctx
-            ctx = get_script_run_ctx()
-            
-            headers = None
-            if ctx:
-                if hasattr(ctx, 'request_context') and ctx.request_context and hasattr(ctx.request_context, 'headers'):
-                    headers = ctx.request_context.headers # Older Streamlit versions
-                elif hasattr(ctx, 'session_info') and ctx.session_info and hasattr(ctx.session_info, 'headers'):
-                    headers = ctx.session_info.headers # Newer Streamlit versions
-                elif hasattr(ctx, '_session_state') and hasattr(ctx._session_state, '_session_info') and hasattr(ctx._session_state._session_info, 'headers'):
-                    # Fallback for some specific deployments/versions
-                    headers = ctx._session_state._session_info.headers
-
-            if headers:
-                # Extract IP address from common headers
-                ip_headers_priority = [
-                    'x-forwarded-for', 'x-real-ip', 'cf-connecting-ip', 
-                    'x-client-ip', 'x-forwarded', 'forwarded-for', 'forwarded'
-                ]
-                
-                for header_name in ip_headers_priority:
-                    ip_val = headers.get(header_name) or headers.get(header_name.upper()) # Check both cases
-                    if ip_val:
-                        session.ip_address = ip_val.split(',')[0].strip()
-                        session.ip_detection_method = header_name
-                        ip_captured = True
-                        break
-                
-                # Extract User-Agent
-                ua_val = headers.get('user-agent') or headers.get('User-Agent')
-                if ua_val:
-                    session.user_agent = ua_val
-                    ua_captured = True
-                    
-        except Exception as e:
-            logger.debug(f"Method 1 (Streamlit context) failed to capture client info: {e}")
-        
-        # Final fallbacks if info was not captured by Python server-side
-        if not ip_captured:
-            session.ip_address = "capture_failed_py_context"
-            session.ip_detection_method = "python_context_unavailable"
-            
-        if not ua_captured:
-            session.user_agent = "capture_failed_py_context"
-        
-        logger.info(f"Client info capture for {session.session_id[:8]}: IP_Captured={ip_captured}, UA_Captured={ua_captured}")
-        return session
-
     def _create_new_session(self) -> UserSession:
         """Creates a new user session with client info capture."""
         session_id = str(uuid.uuid4())
         session = UserSession(session_id=session_id)
-        
-        # Capture client information
-        session = self._capture_client_info(session)
         
         # Apply temporary fingerprint until JS fingerprinting completes
         session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
@@ -2020,11 +1786,11 @@ class SessionManager:
         return session
 
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]):
-        """Applies fingerprinting data to the session."""
-        session.fingerprint_id = fingerprint_data.get('fingerprint_id')
-        session.fingerprint_method = fingerprint_data.get('fingerprint_method')
+        """Applies fingerprinting data from custom component to the session."""
+        session.fingerprint_id = fingerprint_data.get('id')
+        session.fingerprint_method = fingerprint_data.get('method')
         session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor')
-        session.browser_privacy_level = fingerprint_data.get('privacy_level', 'standard')
+        session.browser_privacy_level = fingerprint_data.get('privacy', 'standard') # Use 'privacy' key from JS
         
         # Check for existing sessions with same fingerprint
         existing_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
@@ -2058,147 +1824,6 @@ class SessionManager:
             }
         
         return {'has_history': False}
-
-    # FIX 2 (part of new functionality): check_component_messages method for SessionManager
-    def check_component_messages(self, session: UserSession) -> bool:
-        """
-        Fixed version: Checks for and processes messages from HTML components.
-        Returns True if fingerprint was updated (requiring a rerun).
-        """
-        try:
-            # Get messages from JavaScript component storage
-            js_get_messages = """
-            (function() {
-                if (!window.fifi_component_messages) {
-                    return [];
-                }
-                
-                // Get unprocessed messages
-                const unprocessed = window.fifi_component_messages.filter(msg => !msg.processed);
-                
-                // Mark as processed
-                window.fifi_component_messages.forEach(msg => {
-                    if (!msg.processed) {
-                        msg.processed = true;
-                    }
-                });
-                
-                // Clean up old messages (keep last 10)
-                if (window.fifi_component_messages.length > 10) {
-                    window.fifi_component_messages = window.fifi_component_messages.slice(-10);
-                }
-                
-                return unprocessed;
-            })();
-            """
-            
-            # FIX: Use session-based key without timestamp to prevent duplicates
-            # Generate a stable key that changes only when needed
-            import hashlib
-            key_base = f"check_messages_{session.session_id[:8]}"
-            key_hash = hashlib.md5(key_base.encode()).hexdigest()[:8]
-            stable_key = f"check_messages_js_{key_hash}"
-            
-            # Use st_javascript to retrieve messages from the browser's window object
-            messages = st_javascript(js_get_messages, key=stable_key)
-            
-            if not messages or not isinstance(messages, list):
-                return False
-            
-            fingerprint_updated = False
-            
-            for msg in messages:
-                if not isinstance(msg, dict):
-                    logger.warning(f"Skipping non-dict message from component: {msg}")
-                    continue
-                    
-                msg_type = msg.get('type')
-                msg_session_id = msg.get('session_id')
-                
-                # Verify session ID matches
-                if msg_session_id != session.session_id:
-                    logger.warning(f"Message session ID mismatch: expected {session.session_id[:8]}, got {msg_session_id[:8] if msg_session_id else 'None'}")
-                    continue
-                
-                logger.info(f"Processing component message: {msg_type} for session {session.session_id[:8]}")
-                
-                if msg_type == 'fingerprint_result':
-                    # Enhanced fingerprint processing with validation
-                    fingerprint_data = self.fingerprinting.extract_fingerprint_from_result(msg)
-                    if fingerprint_data and fingerprint_data.get('fingerprint_id'):
-                        # Only update if we have a valid, non-temporary fingerprint
-                        new_fp_id = fingerprint_data.get('fingerprint_id')
-                        new_method = fingerprint_data.get('fingerprint_method')
-                        
-                        # Don't replace a good fingerprint with a fallback
-                        if (new_method != 'fallback' and 
-                            new_fp_id != session.fingerprint_id and
-                            not new_fp_id.startswith('fallback_')):
-                            
-                            old_fp = session.fingerprint_id
-                            old_method = session.fingerprint_method
-                            
-                            session.fingerprint_id = new_fp_id
-                            session.fingerprint_method = new_method
-                            session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor')
-                            session.browser_privacy_level = fingerprint_data.get('privacy_level', 'standard')
-                            
-                            # Force immediate database save with error handling
-                            try:
-                                self.db.save_session(session)
-                                fingerprint_updated = True
-                                
-                                logger.info(f"✅ Fingerprint successfully updated and saved: {old_method} -> {session.fingerprint_method} (ID: {old_fp[:8] if old_fp else 'None'}... -> {session.fingerprint_id[:8]}...)")
-                            except Exception as save_error:
-                                logger.error(f"Failed to save updated fingerprint for session {session.session_id[:8]}: {save_error}")
-                                # Revert changes if save failed
-                                session.fingerprint_id = old_fp
-                                session.fingerprint_method = old_method
-                                fingerprint_updated = False
-                        else:
-                            logger.debug(f"Skipping fingerprint update: method={new_method}, same_id={new_fp_id == session.fingerprint_id}, fallback={new_fp_id.startswith('fallback_') if isinstance(new_fp_id, str) else False}")
-                    else:
-                        logger.warning(f"Invalid fingerprint data received: {fingerprint_data}")
-                    
-                elif msg_type == 'fingerprint_error':
-                    logger.error(f"Fingerprinting error from component for session {session.session_id[:8]}: {msg.get('message', 'Unknown error')}")
-                    # Only apply fallback if current fingerprint is temporary
-                    if (session.fingerprint_method == "temporary_fallback_python" or 
-                        not session.fingerprint_id):
-                        fallback_data = self.fingerprinting._generate_fallback_fingerprint()
-                        session.fingerprint_id = fallback_data.get('fingerprint_id')
-                        session.fingerprint_method = fallback_data.get('fingerprint_method')
-                        session.visitor_type = fallback_data.get('visitor_type', 'new_visitor')
-                        session.browser_privacy_level = fallback_data.get('privacy_level', 'high_privacy')
-                        
-                        try:
-                            self.db.save_session(session)
-                            fingerprint_updated = True
-                            logger.info(f"Applied fallback fingerprint for session {session.session_id[:8]}")
-                        except Exception as save_error:
-                            logger.error(f"Failed to save fallback fingerprint: {save_error}")
-                    
-                elif msg_type == 'client_info_result':
-                    # Update session with enhanced client info from JavaScript
-                    client_info = msg.get('client_info', {})
-                    if client_info:
-                        # Only update if current info is from failed Python capture
-                        if session.user_agent == "capture_failed_py_context":
-                            session.user_agent = client_info.get('userAgent', session.user_agent)[:500]  # Limit length
-                            try:
-                                self.db.save_session(session)
-                                logger.info(f"Updated client info from JavaScript component for session {session.session_id[:8]}")
-                            except Exception as save_error:
-                                logger.error(f"Failed to save client info update: {save_error}")
-                    
-                elif msg_type == 'client_info_error':
-                    logger.error(f"Client info error from component for session {session.session_id[:8]}: {msg.get('message', 'Unknown error')}")
-            
-            return fingerprint_updated
-            
-        except Exception as e:
-            logger.error(f"Error checking component messages for session {session.session_id[:8]}: {e}", exc_info=True)
-            return False
 
     def _mask_email(self, email: str) -> str:
         """Masks an email address for privacy."""
@@ -2446,82 +2071,6 @@ class SessionManager:
 # =============================================================================
 # JAVASCRIPT COMPONENTS & EVENT HANDLING
 # =============================================================================
-
-# FIX 3: Added the missing add_message_listener function
-def add_message_listener():
-    """
-    Adds a JavaScript message listener to handle postMessage communication 
-    from HTML components (fingerprinting, client info, etc.)
-    """
-    js_listener_code = """
-    <script>
-    (function() {
-        // Prevent multiple listener registrations
-        if (window.fifi_message_listener_initialized) {
-            return;
-        }
-        window.fifi_message_listener_initialized = true;
-        
-        console.log('🎧 Initializing FiFi message listener for component communication');
-        
-        // Initialize message storage if not exists
-        if (!window.fifi_component_messages) {
-            window.fifi_component_messages = [];
-        }
-        
-        function handleComponentMessage(event) {
-            try {
-                const data = event.data;
-                
-                // Validate message structure
-                if (!data || typeof data !== 'object') {
-                    return;
-                }
-                
-                // Check if it's a FiFi component message
-                const validTypes = [
-                    'fingerprint_result', 
-                    'fingerprint_error',
-                    'client_info_result', 
-                    'client_info_error'
-                ];
-                
-                if (!validTypes.includes(data.type)) {
-                    return;
-                }
-                
-                console.log('📨 Received component message:', data.type, 'for session:', data.session_id ? data.session_id.substring(0, 8) : 'unknown');
-                
-                // Store message for Streamlit to process
-                window.fifi_component_messages.push({
-                    ...data,
-                    timestamp: Date.now(),
-                    processed: false
-                });
-                
-                // Limit message queue size
-                if (window.fifi_component_messages.length > 50) {
-                    window.fifi_component_messages = window.fifi_component_messages.slice(-25);
-                }
-                
-            } catch (error) {
-                console.error('❌ Error handling component message:', error);
-            }
-        }
-        
-        // Add the message listener
-        window.addEventListener('message', handleComponentMessage, false);
-        
-        console.log('✅ FiFi message listener initialized successfully');
-    })();
-    </script>
-    """
-    
-    try:
-        st.components.v1.html(js_listener_code, height=0, width=0)
-    except Exception as e:
-        logger.error(f"Failed to initialize message listener: {e}", exc_info=True)
-
 
 def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str, Any]]:
     """
@@ -2928,143 +2477,6 @@ def render_browser_close_detection_enhanced(session_id: str):
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
 
 
-def global_message_channel_error_handler():
-    """
-    Injects a global JavaScript error handler to specifically catch and prevent
-    "message channel closed" errors.
-    """
-    js_error_handler = """
-    <script>
-    (function() {
-        if (window.fifi_global_error_handler_initialized) return;
-        window.fifi_global_error_handler_initialized = true;
-        
-        window.addEventListener('unhandledrejection', function(event) {
-            const error = event.reason;
-            if (error && error.message && error.message.includes('message channel closed')) {
-                console.log('🛡️ FiFi: Caught and gracefully handled a "message channel closed" error:', error.message);
-                event.preventDefault();
-            }
-        });
-        
-        console.log('✅ FiFi: Global message channel error handler initialized.');
-    })();
-    </script>
-    """
-    try:
-        st.components.v1.html(js_error_handler, height=0, width=0)
-    except Exception as e:
-        logger.error(f"Failed to initialize global message channel error handler: {e}", exc_info=True)
-
-# FIX 2: Replaced render_client_info_detector function (no 'key' parameter)
-def render_client_info_detector(session_id: str) -> None:
-    """
-    Renders client info detector using st.components.v1.html with postMessage.
-    """
-    safe_session_id = session_id.replace('-', '_')
-    
-    html_code = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body {{ margin: 0; padding: 0; }}
-        </style>
-    </head>
-    <body>
-    <script>
-    (function() {{
-        try {{
-            const sessionId = "{session_id}";
-            const safeSessionId = "{safe_session_id}";
-            
-            // Prevent multiple executions
-            if (window['fifi_client_info_sent_' + safeSessionId]) {{
-                console.log('Client info already sent for session', sessionId.substring(0, 8));
-                return;
-            }}
-            window['fifi_client_info_sent_' + safeSessionId] = true;
-            
-            console.log('🔍 Collecting client info for session', sessionId.substring(0, 8));
-
-            // Collect client information
-            const clientInfo = {{
-                userAgent: navigator.userAgent,
-                language: navigator.language,
-                languages: navigator.languages ? navigator.languages.join(',') : '',
-                platform: navigator.platform,
-                cookieEnabled: navigator.cookieEnabled,
-                doNotTrack: navigator.doNotTrack,
-                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                screen: {{
-                    width: screen.width,
-                    height: screen.height,
-                    colorDepth: screen.colorDepth
-                }},
-                viewport: {{
-                    width: window.innerWidth,
-                    height: window.innerHeight
-                }},
-                timestamp: Date.now()
-            }};
-            
-            // Try to get more detailed network info if available
-            if (navigator.connection) {{
-                clientInfo.connection = {{
-                    effectiveType: navigator.connection.effectiveType,
-                    downlink: navigator.connection.downlink,
-                    rtt: navigator.connection.rtt
-                }};
-            }}
-            
-            const resultObject = {{
-                type: 'client_info_result',
-                session_id: sessionId,
-                client_info: clientInfo,
-                capture_method: 'html_component'
-            }};
-
-            console.log('FiFi Client Info Detected:', resultObject);
-            
-            // Send result to parent window
-            try {{
-                if (window.parent && window.parent !== window) {{
-                    window.parent.postMessage(resultObject, '*');
-                    console.log('✅ Client info sent to parent window');
-                }}
-            }} catch (e) {{
-                console.error('❌ Failed to send client info:', e);
-            }}
-            
-        }} catch (error) {{
-            console.error("🚨 FiFi Client Info Detector caught a critical error:", error);
-            const errorResult = {{
-                type: 'client_info_error',
-                session_id: "{session_id}",
-                error: true,
-                message: error.message,
-                name: error.name,
-                capture_method: 'html_component_error'
-            }};
-            
-            try {{
-                if (window.parent && window.parent !== window) {{
-                    window.parent.postMessage(errorResult, '*');
-                }}
-            }} catch (e) {{
-                console.error('Failed to send error message:', e);
-            }}
-        }}
-    }})();
-    </script>
-    </body>
-    </html>
-    """
-    
-    # Render the component (NO KEY PARAMETER!)
-    st.components.v1.html(html_code, height=0, width=0)
-
-
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool: # Forward reference
     """
     Processes events triggered by the JavaScript activity timer (e.g., 15-minute timeout).
@@ -3188,11 +2600,6 @@ def process_emergency_save_from_query(session_id: str, reason: str) -> bool: # A
             else:
                 logger.info(f"ℹ️ Session '{session_id[:8]}' remains active (emergency close but not a definitive close reason: {reason}).")
             return False # No CRM save performed
-
-    except Exception as e:
-        logger.error(f"❌ Emergency save processing failed for session '{session_id[:8]}': {e}", exc_info=True)
-        error_handler.log_error(error_handler.handle_api_error("System", "Emergency Save Process (Query)", e))
-        return False
 
 # Modified to pass 'reason' to process_emergency_save_from_query
 def handle_emergency_save_requests_from_query():
@@ -3569,6 +2976,41 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion with universal fingerprinting.")
     
+    # Render fingerprinting component if needed and process result
+    if (not session.fingerprint_id or 
+        session.fingerprint_method == "temporary_fallback_python" or 
+        st.session_state.get('force_fingerprint_rerun', False)): # Added state for manual rerun
+        
+        logger.info(f"Rendering custom fingerprint component for session {session.session_id[:8]}")
+        
+        # Render custom component (invisible)
+        fingerprint_result = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+        
+        # Process the result if we got data
+        if fingerprint_result and isinstance(fingerprint_result, dict):
+            logger.info(f"Received fingerprint data for session {session.session_id[:8]}: {fingerprint_result}")
+            
+            # Validate session ID matches
+            if fingerprint_result.get('session_id') == session.session_id:
+                # Process the fingerprint data
+                processed_data = session_manager.fingerprinting.process_fingerprint_data(fingerprint_result)
+                
+                # Apply to session
+                session_manager.apply_fingerprinting(session, processed_data)
+                
+                logger.info(f"✅ Fingerprint applied: ID={session.fingerprint_id[:8]}..., Method={session.fingerprint_method}")
+                
+                # Clear the force rerun flag
+                if 'force_fingerprint_rerun' in st.session_state:
+                    del st.session_state['force_fingerprint_rerun']
+
+                # Rerun to update the interface with new fingerprint
+                st.rerun()
+            else:
+                logger.warning(f"Session ID mismatch in fingerprint result. Expected {session.session_id[:8]}, got {fingerprint_result.get('session_id', 'None')[:8]}.")
+        else:
+            logger.debug(f"No fingerprint data received yet for session {session.session_id[:8]}")
+    
     # TEMPORARY DEBUG: Show current fingerprint status
     with st.expander("🔍 Debug: Fingerprint Status", expanded=False):
         st.write(f"**Session ID:** {session.session_id[:8]}...")
@@ -3578,48 +3020,16 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
         st.write(f"**Privacy Level:** {session.browser_privacy_level}")
         
         # Manual refresh button for testing
-        if st.button("🔄 Force Check Messages"):
-            try:
-                updated = session_manager.check_component_messages(session)
-                st.write(f"**Messages Processed:** {updated}")
-                if updated:
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Error: {e}")
-
+        if st.button("🔄 Force Rerun Fingerprint"):
+            st.session_state.force_fingerprint_rerun = True
+            st.rerun()
+        
     # Temporary Debug: Add diagnostic panel for fingerprinting (as requested)
     if st.checkbox("🔬 Show Fingerprinting Diagnostics", key="show_fp_diagnostics"):
         render_fingerprint_diagnostic_panel(session_manager, session)
         
-    global_message_channel_error_handler()
-    add_message_listener() # Call the listener function
+    global_message_channel_error_handler() # Keep this for general JS error handling
     
-    # Process component messages with enhanced logging
-    try:
-        logger.info(f"About to check component messages for session {session.session_id[:8]}")
-        fingerprint_updated = session_manager.check_component_messages(session)
-        logger.info(f"Component message check result for session {session.session_id[:8]}: fingerprint_updated={fingerprint_updated}")
-        
-        if fingerprint_updated:
-            logger.info(f"Fingerprint was updated for session {session.session_id[:8]}, triggering rerun...")
-            time.sleep(0.1) # Small delay to ensure database save completes
-            st.rerun()
-    except Exception as e:
-        logger.error(f"Error processing component messages: {e}", exc_info=True)
-        st.error(f"Debug: Error processing component messages: {e}")
-    
-    # Render client info detector if needed
-    if (session.ip_address == "capture_failed_py_context" or 
-        session.user_agent == "capture_failed_py_context"):
-        render_client_info_detector(session.session_id)
-    
-    # Render fingerprinting component if needed
-    if (not session.fingerprint_id or 
-        session.fingerprint_method == "temporary_fallback_python"):
-        session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
-        logger.info(f"Rendered fingerprinting component for session {session.session_id[:8]} (current method: {session.fingerprint_method})")
-
-
     if session.user_type.value == UserType.REGISTERED_USER.value:
         try:
             # FIX 5: Use the enhanced version instead of simplified
@@ -3787,233 +3197,83 @@ def render_fingerprint_diagnostic_panel(session_manager: 'SessionManager', sessi
             })
         
         with col2:
-            st.subheader("🌐 JavaScript Message Queue")
-            if st.button("🔍 Check Message Queue", key="check_queue_btn"):
-                queue_check_js = """
-                (function() {
-                    if (!window.fifi_component_messages) {
-                        return {
-                            queue_exists: false,
-                            total_messages: 0,
-                            unprocessed_messages: 0,
-                            message_types: []
-                        };
-                    }
-                    
-                    const unprocessed = window.fifi_component_messages.filter(msg => !msg.processed);
-                    const messageTypes = [...new Set(window.fifi_component_messages.map(msg => msg.type))];
-                    
-                    return {
-                        queue_exists: true,
-                        total_messages: window.fifi_component_messages.length,
-                        unprocessed_messages: unprocessed.length,
-                        message_types: messageTypes,
-                        latest_messages: window.fifi_component_messages.slice(-3).map(msg => ({
-                            type: msg.type,
-                            session_id: msg.session_id ? msg.session_id.substring(0, 8) : 'unknown',
-                            processed: msg.processed,
-                            timestamp: new Date(msg.timestamp || msg.received_timestamp).toLocaleTimeString()
-                        }))
-                    };
-                })();
-                """
-                
-                try:
-                    queue_info = st_javascript(queue_check_js, key=f"queue_check_{int(time.time())}")
-                    if queue_info:
-                        st.json(queue_info)
-                        
-                        if queue_info.get('unprocessed_messages', 0) > 0:
-                            st.success(f"✅ Found {queue_info['unprocessed_messages']} unprocessed messages!")
-                        else:
-                            st.info("ℹ️ No unprocessed messages in queue")
-                    else:
-                        st.warning("⚠️ Unable to check message queue")
-                except Exception as e:
-                    st.error(f"❌ Queue check failed: {e}")
+            st.subheader("🌐 Custom Component Communication")
+            st.info("The custom component communicates directly. No queue to check here!")
+            if st.button("🔍 Check JavaScript Console", key="check_console_btn"):
+                st.markdown("Open your browser's developer console (F12) to see logs from the `fingerprint_component.html`.")
         
         # Manual fingerprint trigger
         st.subheader("🔄 Manual Actions")
         
-        col3, col4, col5 = st.columns(3)
+        col3, col4 = st.columns(2)
         
         with col3:
-            if st.button("🧬 Force Fingerprint", key="force_fp_btn"):
-                st.info("Rendering new fingerprint component...")
-                session_manager.fingerprinting.generate_fingerprint_component(session.session_id)
-                st.success("Fingerprint component rendered!")
+            if st.button("🧬 Force New Fingerprint", key="force_fp_btn"):
+                st.info("Triggering a rerun to force the fingerprint component to re-render and send data...")
+                st.session_state.force_fingerprint_rerun = True # Set a flag to force re-rendering of the component
+                st.rerun()
         
         with col4:
-            if st.button("📨 Process Messages", key="process_msgs_btn"):
+            if st.button("💾 Verify DB Save", key="verify_db_btn_diag"):
                 try:
-                    updated = session_manager.check_component_messages(session)
-                    if updated:
-                        st.success("✅ Fingerprint updated! Rerunning...")
-                        time.sleep(0.5)
-                        st.rerun()
+                    # Reload session from database
+                    fresh_session = session_manager.db.load_session(session.session_id)
+                    if fresh_session:
+                        st.success("✅ Session found in database")
+                        
+                        # Compare fingerprints
+                        if fresh_session.fingerprint_id != session.fingerprint_id:
+                            st.warning("⚠️ Fingerprint mismatch between memory and database! Rerunning...")
+                            st.json({
+                                "memory_fingerprint": session.fingerprint_id,
+                                "database_fingerprint": fresh_session.fingerprint_id,
+                                "memory_method": session.fingerprint_method,
+                                "database_method": fresh_session.fingerprint_method
+                            })
+                            st.session_state.force_fingerprint_rerun = True # Force re-get fingerprint
+                            st.rerun()
+                        else:
+                            st.success("✅ Fingerprints match between memory and database")
                     else:
-                        st.info("ℹ️ No fingerprint updates found")
+                        st.error("❌ Session not found in database!")
                 except Exception as e:
-                    st.error(f"❌ Message processing failed: {e}")
-        
-        with col5:
-            if st.button("🗑️ Clear Queue", key="clear_queue_btn"):
-                clear_queue_js = """
-                (function() {
-                    if (window.fifi_component_messages) {
-                        const count = window.fifi_component_messages.length;
-                        window.fifi_component_messages = [];
-                        return { cleared: count };
-                    }
-                    return { cleared: 0 };
-                })();
-                """
-                
-                try:
-                    result = st_javascript(clear_queue_js, key=f"clear_queue_{int(time.time())}")
-                    if result:
-                        st.success(f"🗑️ Cleared {result.get('cleared', 0)} messages from queue")
-                except Exception as e:
-                    st.error(f"❌ Queue clear failed: {e}")
+                    st.error(f"❌ Database verification failed: {e}")
         
         # Real-time monitoring
         st.subheader("⚡ Real-time Monitoring")
         
-        if st.checkbox("Enable Auto-refresh", key="auto_refresh_checkbox"):
+        if st.checkbox("Enable Auto-refresh Diagnostics", key="auto_refresh_checkbox"):
             # Auto-refresh every 3 seconds
             time.sleep(3)
             st.rerun()
         
-        # Console log viewer
+        # Console log viewer (simplified, directs user to browser console)
         st.subheader("📋 Browser Console Logs")
-        if st.button("📖 Get Console Logs", key="get_logs_btn"):
-            console_logs_js = """
-            (function() {
-                // Capture console logs related to fingerprinting
-                if (!window.fifi_console_logs) {
-                    window.fifi_console_logs = [];
-                    
-                    // Override console.log to capture logs
-                    const originalLog = console.log;
-                    console.log = function(...args) {
-                        const message = args.join(' ');
-                        if (message.includes('FiFi') || message.includes('🔍') || message.includes('fingerprint')) {
-                            window.fifi_console_logs.push({
-                                message: message,
-                                timestamp: new Date().toLocaleTimeString(),
-                                type: 'log'
-                            });
-                            
-                            // Keep only last 20 logs
-                            if (window.fifi_console_logs.length > 20) {
-                                window.fifi_console_logs = window.fifi_console_logs.slice(-20);
-                            }
-                        }
-                        originalLog.apply(console, args);
-                    };
-                }
-                
-                return window.fifi_console_logs.slice(-10); // Return last 10 logs
-            })();
-            """
-            
-            try:
-                logs = st_javascript(console_logs_js, key=f"console_logs_{int(time.time())}")
-                if logs and len(logs) > 0:
-                    for log in logs:
-                        st.code(f"[{log['timestamp']}] {log['message']}")
-                else:
-                    st.info("No fingerprinting-related console logs found")
-            except Exception as e:
-                st.error(f"❌ Console log retrieval failed: {e}")
+        st.info("For detailed JavaScript logs, open your browser's developer console (usually F12). Look for messages starting with '🔍 FiFi Fingerprinting:' or '🚨 FiFi Fingerprinting component caught a critical error:'.")
         
-        # Database verification
-        st.subheader("💾 Database Verification")
-        if st.button("🔍 Verify DB Save", key="verify_db_btn"):
-            try:
-                # Reload session from database
-                fresh_session = session_manager.db.load_session(session.session_id)
-                if fresh_session:
-                    st.success("✅ Session found in database")
-                    
-                    # Compare fingerprints
-                    if fresh_session.fingerprint_id != session.fingerprint_id:
-                        st.warning("⚠️ Fingerprint mismatch between memory and database!")
-                        st.json({
-                            "memory_fingerprint": session.fingerprint_id,
-                            "database_fingerprint": fresh_session.fingerprint_id,
-                            "memory_method": session.fingerprint_method,
-                            "database_method": fresh_session.fingerprint_method
-                        })
-                    else:
-                        st.success("✅ Fingerprints match between memory and database")
-                else:
-                    st.error("❌ Session not found in database!")
-            except Exception as e:
-                st.error(f"❌ Database verification failed: {e}")
         
         # Step-by-step diagnostic
         st.subheader("🚦 Step-by-step Diagnostic")
         
-        diagnostic_steps = [
-            ("1. Message Listener", "Check if message listener is initialized"),
-            ("2. Fingerprint Component", "Verify fingerprint component execution"),
-            ("3. Message Queue", "Check if messages are being queued"),
-            ("4. Message Processing", "Verify Python can read messages"),
-            ("5. Database Save", "Confirm fingerprint is saved to database")
-        ]
+        st.markdown("""
+        **1. Fingerprint Component Execution:**
+        - Check browser console (F12) for logs like:
+          `🔍 FiFi Fingerprinting: Starting for session...`
+          `🔍 Fingerprinting complete: {id: ..., method: ..., privacy: ...}`
+        - If these are present, the JavaScript component is running and sending data.
         
-        for step_name, step_desc in diagnostic_steps:
-            with st.expander(f"🔍 {step_name}: {step_desc}"):
-                if "Message Listener" in step_name:
-                    listener_check_js = """
-                    (function() {
-                        return {
-                            listener_initialized: !!window.fifi_message_listener_initialized,
-                            queue_exists: !!window.fifi_component_messages,
-                            debug_function_exists: typeof window.debugFiFiMessages === 'function'
-                        };
-                    })();
-                    """
-                    listener_status = st_javascript(listener_check_js, key=f"listener_check_{step_name.replace(' ', '_')}_{int(time.time())}")
-                    if listener_status:
-                        st.json(listener_status)
-                
-                elif "Fingerprint Component" in step_name:
-                    fp_check_js = f"""
-                    (function() {{
-                        const sessionId = "{session.session_id}";
-                        const safeSessionId = sessionId.replace(/-/g, '_');
-                        
-                        return {{
-                            component_executed: !!window['fifi_fp_executed_' + safeSessionId],
-                            session_id: sessionId.substring(0, 8)
-                        }};
-                    }})();
-                    """
-                    fp_status = st_javascript(fp_check_js, key=f"fp_check_{step_name.replace(' ', '_')}_{int(time.time())}")
-                    if fp_status:
-                        st.json(fp_status)
-                
-                elif "Message Queue" in step_name:
-                    # Already covered above
-                    st.info("Use the 'Check Message Queue' button above")
-                
-                elif "Message Processing" in step_name:
-                    if st.button(f"Test {step_name}", key=f"test_{step_name.replace(' ', '_')}_{int(time.time())}"):
-                        try:
-                            updated = session_manager.check_component_messages(session)
-                            st.json({"messages_processed": updated})
-                        except Exception as e:
-                            st.error(f"Processing failed: {e}")
-                
-                elif "Database Save" in step_name:
-                    if st.button(f"Test {step_name}", key=f"test_{step_name.replace(' ', '_')}_{int(time.time())}"):
-                        try:
-                            session_manager.db.save_session(session)
-                            st.success("✅ Session saved to database")
-                        except Exception as e:
-                            st.error(f"Database save failed: {e}")
+        **2. Python Data Reception:**
+        - Look at the Python application logs (where you run `streamlit run fifi.py`) for:
+          `Rendering custom fingerprint component for session...`
+          `Received fingerprint data for session...`
+          `✅ Fingerprint applied: ID=..., Method=...`
+        - If these are present, Python received the data and processed it.
+        
+        **3. Database Persistence:**
+        - Click the "Verify DB Save" button above.
+        - It should report "✅ Fingerprints match between memory and database".
+        - If not, check your database for the `sessions` table and the `fingerprint_id`, `fingerprint_method`, `browser_privacy_level` columns.
+        """)
 
 # =============================================================================
 # SIMPLE INTEGRATION FUNCTION
