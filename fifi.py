@@ -789,7 +789,7 @@ class FingerprintingManager:
         fallback_id = f"fallback_{secrets.token_hex(8)}"
         return {
             'fingerprint_id': fallback_id,
-            'fingerpoint_method': 'fallback',
+            'fingerprint_method': 'fallback',
             'visitor_type': 'new_visitor',
             'browser_privacy_level': 'high_privacy',
             'working_methods': []
@@ -2431,6 +2431,51 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
     except Exception as e:
         logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
         return False
+
+def handle_emergency_save_requests_from_query():
+    """Checks for and processes emergency save requests sent via URL query parameters."""
+    logger.info("🔍 EMERGENCY SAVE HANDLER: Checking for query parameter requests for emergency save...")
+    
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    reason = query_params.get("reason", "unknown")
+
+    if event == "emergency_close" and session_id:
+        logger.info("=" * 80)
+        logger.info("🚨 EMERGENCY SAVE REQUEST DETECTED VIA URL QUERY PARAMETERS!")
+        logger.info(f"Session ID: {session_id}, Event: {event}, Reason: {reason}")
+        logger.info("=" * 80)
+        
+        st.error("🚨 **Emergency Save Detected** - Processing browser close save...")
+        st.info("Please wait, your conversation is being saved...")
+        
+        # Clear query parameters to prevent re-triggering on rerun
+        if "event" in st.query_params:
+            del st.query_params["event"]
+        if "session_id" in st.query_params:
+            del st.query_params["session_id"]
+        if "reason" in st.query_params:
+            del st.query_params["reason"]
+        
+        try:
+            success = process_emergency_save_from_query(session_id, reason)
+            
+            if success:
+                st.success("✅ Emergency save completed successfully!")
+                logger.info("✅ Emergency save completed via query parameter successfully.")
+            else:
+                st.info("ℹ️ Emergency save completed (no CRM save needed or failed).")
+                logger.info("ℹ️ Emergency save completed via query parameter (not eligible for CRM save or internal error).")
+                
+        except Exception as e:
+            st.error(f"❌ An unexpected error occurred during emergency save: {str(e)}")
+            logger.critical(f"Emergency save processing crashed from query parameter: {e}", exc_info=True)
+        
+        time.sleep(2)
+        st.stop()
+    else:
+        logger.info("ℹ️ No emergency save requests found in current URL query parameters.")
 
 def handle_fingerprint_requests_from_query():
     """Checks for and processes fingerprint data sent via URL query parameters."""
