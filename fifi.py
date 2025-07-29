@@ -1554,7 +1554,7 @@ class SessionManager:
                         st.error(f"🚫 **Access Restricted**")
                         if time_remaining:
                             hours = max(0, int(time_remaining.total_seconds() // 3600))
-                            minutes = max(0, int((time_remaining.total_seconds() % 3600) // 60))
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.info(message)
                         logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
@@ -1902,6 +1902,7 @@ class SessionManager:
 def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str, Any]]:
     """Renders a JavaScript component that tracks user inactivity and triggers an event after 15 minutes."""
     if not session_id:
+        logger.warning("❌ Timer component: No session ID provided")
         return None
     
     safe_session_id_js = session_id.replace('-', '_')
@@ -1910,12 +1911,15 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
     (() => {{
         try {{
             const sessionId = "{session_id}";
-            const SESSION_TIMEOUT_MS = 900000;
+            const SESSION_TIMEOUT_MS = 900000; // 15 minutes
             
             console.log("🕐 FiFi 15-Minute Timer: Checking session", sessionId.substring(0, 8));
             
-            if (typeof window.fifi_timer_state_{safe_session_id_js} === 'undefined' || window.fifi_timer_state_{safe_session_id_js} === null || window.fifi_timer_state_{safe_session_id_js}.sessionId !== sessionId) {{
-                console.clear();
+            // Initialize or reset timer state
+            if (typeof window.fifi_timer_state_{safe_session_id_js} === 'undefined' || 
+                window.fifi_timer_state_{safe_session_id_js} === null || 
+                window.fifi_timer_state_{safe_session_id_js}.sessionId !== sessionId) {{
+                
                 console.log("🆕 FiFi 15-Minute Timer: Starting/Resetting for session", sessionId.substring(0, 8)); 
                 window.fifi_timer_state_{safe_session_id_js} = {{
                     lastActivityTime: Date.now(),
@@ -1923,11 +1927,11 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                     listenersInitialized: false,
                     sessionId: sessionId
                 }};
-                console.log("🆕 FiFi 15-Minute Timer state initialized.");
             }}
             
             const state = window.fifi_timer_state_{safe_session_id_js};
             
+            // Setup activity listeners (only once)
             if (!state.listenersInitialized) {{
                 console.log("👂 Setting up FiFi 15-Minute activity listeners...");
                 
@@ -1938,14 +1942,15 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                             state.lastActivityTime = now;
                             if (state.expired) {{
                                 console.log("🔄 Activity detected, resetting expired flag for timer.");
+                                state.expired = false;
                             }}
-                            state.expired = false;
                         }}
                     }} catch (e) {{
                         console.debug("Error in resetActivity:", e);
                     }}
                 }}
                 
+                // Activity event types to monitor
                 const events = [
                     'mousedown', 'mousemove', 'mouseup', 'click', 'dblclick',
                     'keydown', 'keyup', 'keypress',
@@ -1954,32 +1959,41 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                     'focus'
                 ];
                 
-                const addListenersToTarget = (target) => {{
-                    events.forEach(eventType => {{
-                        try {{
-                            target.addEventListener(eventType, resetActivity, {{ 
-                                passive: true, 
-                                capture: true,
-                                once: false
-                            }});
-                        }} catch (e) {{
-                            console.debug(`Failed to add ${{eventType}} listener to target:`, e);
-                        }}
-                    }});
-                }};
+                // Add listeners to current document
+                events.forEach(eventType => {{
+                    try {{
+                        document.addEventListener(eventType, resetActivity, {{ 
+                            passive: true, 
+                            capture: true
+                        }});
+                    }} catch (e) {{
+                        console.debug(`Failed to add ${{eventType}} listener:`, e);
+                    }}
+                }});
                 
-                addListenersToTarget(document);
-                
+                // Try to add listeners to parent document (for iframes)
                 try {{
-                    if (window.parent && window.parent.document && window.parent.document !== document &&
+                    if (window.parent && window.parent.document && 
+                        window.parent.document !== document &&
                         window.parent.location.origin === window.location.origin) {{
-                        addListenersToTarget(window.parent.document);
+                        
+                        events.forEach(eventType => {{
+                            try {{
+                                window.parent.document.addEventListener(eventType, resetActivity, {{ 
+                                    passive: true, 
+                                    capture: true
+                                }});
+                            }} catch (e) {{
+                                console.debug(`Failed to add parent ${{eventType}} listener:`, e);
+                            }}
+                        }});
                         console.log("👂 Parent document listeners added successfully.");
                     }}
                 }} catch (e) {{
                     console.debug("Cannot access parent document for listeners:", e);
                 }}
                 
+                // Visibility change handlers
                 const handleVisibilityChange = () => {{
                     try {{
                         if (document.visibilityState === 'visible') {{
@@ -1989,7 +2003,9 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                         console.debug("Visibility change error:", e);
                     }}
                 }};
+                
                 document.addEventListener('visibilitychange', handleVisibilityChange, {{ passive: true }});
+                
                 try {{
                     if (window.parent && window.parent.document && window.parent.document !== document) {{
                         window.parent.document.addEventListener('visibilitychange', handleVisibilityChange, {{ passive: true }});
@@ -2002,13 +2018,18 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                 console.log("✅ FiFi 15-Minute activity listeners initialized.");
             }}
             
+            // Check for timeout
             const currentTime = Date.now();
             const inactiveTimeMs = currentTime - state.lastActivityTime;
             const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
             const inactiveSeconds = Math.floor((inactiveTimeMs % 60000) / 1000);
             
-            console.log(`⏰ Session ${{sessionId.substring(0, 8)}} inactive: ${{inactiveMinutes}}m${{inactiveSeconds}}s`);
+            // Log every 5 minutes for debugging
+            if (inactiveMinutes > 0 && inactiveMinutes % 5 === 0 && inactiveSeconds < 10) {{
+                console.log(`⏰ Session ${{sessionId.substring(0, 8)}} inactive: ${{inactiveMinutes}}m${{inactiveSeconds}}s`);
+            }}
             
+            // Check if timeout reached
             if (inactiveTimeMs >= SESSION_TIMEOUT_MS && !state.expired) {{
                 state.expired = true;
                 console.log("🚨 15-MINUTE SESSION TIMEOUT REACHED for session", sessionId.substring(0, 8));
@@ -2027,33 +2048,44 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             
         }} catch (error) {{
             console.error("🚨 FiFi 15-Minute Timer component caught a critical error:", error);
-            return null;
+            return {{
+                event: "timer_error",
+                session_id: "{session_id}",
+                error: error.message,
+                timestamp: Date.now()
+            }};
         }}
     }})()
     """
     
     try:
-        # Use a consistent key for st_javascript if the component doesn't inherently manage state well without a unique key per run
-        # Removed key for now, as the previous error indicated st.components.v1.html does not support it.
-        # If st_javascript supports it and it becomes an issue later, it can be re-added conditionally.
+        # Execute the timer JavaScript code
         timer_result = st_javascript(js_timer_code)
         
+        # Validate the result
         if timer_result is None or timer_result == 0 or timer_result == "" or timer_result == False:
             return None
         
-        if isinstance(timer_result, dict) and timer_result.get('event') == "session_timeout_15min":
-            if timer_result.get('session_id') == session_id:
-                logger.info(f"✅ Valid 15-min timer event received: {timer_result.get('event')} for session {session_id[:8]}.")
-                return timer_result
+        if isinstance(timer_result, dict):
+            if timer_result.get('event') == "session_timeout_15min":
+                if timer_result.get('session_id') == session_id:
+                    logger.info(f"✅ Valid 15-min timer event received: {timer_result.get('event')} for session {session_id[:8]}.")
+                    return timer_result
+                else:
+                    logger.warning(f"⚠️ Timer event session ID mismatch: expected {session_id[:8]}, got {timer_result.get('session_id', 'None')[:8]}. Event ignored.")
+                    return None
+            elif timer_result.get('event') == "timer_error":
+                logger.error(f"❌ Timer component error for session {session_id[:8]}: {timer_result.get('error', 'Unknown error')}")
+                return None
             else:
-                logger.warning(f"⚠️ Timer event session ID mismatch: expected {session_id[:8]}, got {timer_result.get('session_id', 'None')[:8]}. Event ignored.")
+                logger.debug(f"Received non-timeout timer result: {timer_result.get('event', 'unknown')}")
                 return None
         else:
-            logger.debug(f"Received non-event timer result: {timer_result} (type: {type(timer_result)}).")
+            logger.debug(f"Received non-dict timer result: {timer_result} (type: {type(timer_result)}).")
             return None
         
     except Exception as e:
-        logger.error(f"❌ JavaScript timer component execution error: {e}", exc_info=True)
+        logger.error(f"❌ JavaScript timer component execution error for session {session_id[:8]}: {e}", exc_info=True)
         return None
 
 def render_browser_close_detection_simplified(session_id: str):
@@ -2792,37 +2824,51 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     
     if fingerprint_needed:
         logger.info(f"🔄 Fingerprinting needed for session {session.session_id[:8]}")
+        logger.debug(f"Fingerprint details: ID={session.fingerprint_id}, Method={session.fingerprint_method}, Force={st.session_state.get('force_fingerprint_rerun', False)}")
         
         # Show status to user
         with st.container():
             st.info("🔍 Initializing device fingerprinting...")
         
         # Render component and get result
-        fingerprint_result = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-        
-        # Debug output
-        st.write("**Debug - Fingerprint Result:**", fingerprint_result)
-        
-        # Process result if received
-        if fingerprint_result and isinstance(fingerprint_result, dict):
-            if fingerprint_result.get('session_id') == session.session_id:
-                if not fingerprint_result.get('error'):
-                    processed_data = session_manager.fingerprinting.process_fingerprint_data(fingerprint_result)
-                    session_manager.apply_fingerprinting(session, processed_data)
-                    
-                    logger.info(f"✅ Fingerprint applied: ID={session.fingerprint_id[:8]}..., Method={session.fingerprint_method}")
-                    
-                    # Clear flags and rerun
-                    if 'force_fingerprint_rerun' in st.session_state:
-                        del st.session_state['force_fingerprint_rerun']
-                    
-                    st.success("✅ Device fingerprinting completed!")
-                    time.sleep(1)
-                    st.rerun()
+        try:
+            fingerprint_result = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+            
+            # Debug output (only show in development)
+            if st.session_state.get('debug_mode', False):
+                st.write("**Debug - Fingerprint Result:**", fingerprint_result)
+            
+            # Process result if received
+            if fingerprint_result and isinstance(fingerprint_result, dict):
+                if fingerprint_result.get('session_id') == session.session_id:
+                    if not fingerprint_result.get('error'):
+                        processed_data = session_manager.fingerprinting.process_fingerprint_data(fingerprint_result)
+                        session_manager.apply_fingerprinting(session, processed_data)
+                        
+                        logger.info(f"✅ Fingerprint applied: ID={session.fingerprint_id[:8]}..., Method={session.fingerprint_method}")
+                        
+                        # Clear flags and rerun
+                        if 'force_fingerprint_rerun' in st.session_state:
+                            del st.session_state['force_fingerprint_rerun']
+                        
+                        st.success("✅ Device fingerprinting completed!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Fingerprinting error: {fingerprint_result.get('message', 'Unknown error')}")
+                        logger.error(f"Fingerprinting component error: {fingerprint_result}")
                 else:
-                    st.error(f"❌ Fingerprinting error: {fingerprint_result.get('message', 'Unknown error')}")
+                    logger.warning(f"Session ID mismatch in fingerprint result: expected {session.session_id[:8]}, got {fingerprint_result.get('session_id', 'None')[:8]}")
             else:
-                logger.warning(f"Session ID mismatch in fingerprint result")
+                logger.debug(f"No valid fingerprint result received: {type(fingerprint_result)}")
+                
+        except Exception as fp_error:
+            logger.error(f"Fingerprinting component failed for session {session.session_id[:8]}: {fp_error}", exc_info=True)
+            st.warning("⚠️ Device fingerprinting failed. Using fallback method.")
+            
+            # Apply fallback fingerprint
+            fallback_data = session_manager.fingerprinting._generate_fallback_fingerprint()
+            session_manager.apply_fingerprinting(session, fallback_data)
         
         # Show current fingerprint status
         st.info(f"Current fingerprint: {session.fingerprint_id}")
@@ -2842,30 +2888,17 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
         
     global_message_channel_error_handler()
     
+    # Timer handling for registered users
     if session.user_type.value == UserType.REGISTERED_USER.value:
         try:
-            render_browser_close_detection_enhanced(session.session_id)
-        except Exception as e:
-            logger.error(f"Failed to render enhanced browser close detection for {session.session_id[:8]}: {e}", exc_info=True)
-            try:
-                render_browser_close_detection_simplified(session.session_id)
-            except Exception as fallback_e:
-                logger.error(f"Fallback browser close detection also failed: {fallback_e}", exc_info=True)
-
-    if session.user_type.value == UserType.REGISTERED_USER.value:
-        timer_result = None
-        try:
-            # Removed key parameter from st_javascript as well, as it's a common pattern to either support keys
-            # across all component rendering functions (st.components.v1.html, st_javascript) or none.
-            # Assuming if st.components.v1.html doesn't support 'key', st_javascript might also not.
-            # If st_javascript later turns out to require a key, this might need re-evaluation.
-            timer_result = st_javascript(js_timer_code)
-        except Exception as e:
-            logger.error(f"15-minute timer component execution failed: {e}", exc_info=True)
-        
-        if timer_result:
-            if handle_timer_event(timer_result, session_manager, session):
+            # Call the function that properly defines and executes the timer
+            timer_result = render_activity_timer_component_15min(session.session_id)
+            if timer_result and handle_timer_event(timer_result, session_manager, session):
                 st.rerun()
+        except Exception as e:
+            logger.error(f"15-minute timer component execution failed for session {session.session_id[:8]}: {e}", exc_info=True)
+            # Continue execution without timer functionality
+
 
     limit_check = session_manager.question_limits.is_within_limits(session)
     if not limit_check['allowed']:
