@@ -722,153 +722,244 @@ class DatabaseManager:
 # =============================================================================
 
 class FingerprintingManager:
-    """Manages browser fingerprinting with improved stability."""
+    """Manages browser fingerprinting using redirect method from original code."""
     
     def __init__(self):
         self.fingerprint_cache = {}
 
-    def get_fingerprint_with_streamlit_js(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Uses Streamlit's native JavaScript execution for immediate fingerprinting."""
-        
-        fingerprint_js = f"""
-        (() => {{
-            try {{
-                // Enhanced fingerprinting with multiple methods
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-                if (ctx) {{
-                    ctx.textBaseline = 'top';
-                    ctx.font = '14px Arial, sans-serif';
-                    ctx.fillStyle = '#f60';
-                    ctx.fillRect(125, 1, 62, 20);
-                    ctx.fillStyle = '#069';
-                    ctx.fillText('FiFi 🤖 {session_id[:8]}', 2, 2);
-                    ctx.fillStyle = 'rgba(102, 204, 0, 0.7)';
-                    ctx.fillText('Canvas fingerprint', 4, 17);
-                }}
-                const canvasData = canvas.toDataURL();
-                
-                // WebGL fingerprinting
-                let webglInfo = 'none';
-                try {{
-                    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-                    if (gl) {{
-                        const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
-                        if (debugInfo) {{
-                            webglInfo = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) + '|' + 
-                                       gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+    def render_fingerprint_component(self, session_id: str):
+        """Renders fingerprinting component that redirects with results (from original code)."""
+        try:
+            # Create the fingerprinting HTML component that redirects back with data
+            fingerprint_html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>FiFi Fingerprinting</title>
+                <style>
+                    body {{ margin: 0; padding: 0; display: none; }}
+                </style>
+            </head>
+            <body>
+                <script>
+                (function() {{
+                    const sessionId = '{session_id}';
+                    
+                    function generateFingerprint() {{
+                        try {{
+                            // Enhanced browser fingerprinting
+                            const canvas = document.createElement('canvas');
+                            const ctx = canvas.getContext('2d');
+                            if (ctx) {{
+                                ctx.textBaseline = 'top';
+                                ctx.font = '14px Arial';
+                                ctx.fillStyle = '#f60';
+                                ctx.fillRect(125, 1, 62, 20);
+                                ctx.fillStyle = '#069';
+                                ctx.fillText('FiFi Fingerprint Test', 2, 2);
+                                ctx.fillStyle = 'rgba(102, 204, 0, 0.7)';
+                                ctx.fillText('Browser ID: ' + sessionId.substring(0, 8), 4, 17);
+                            }}
+                            const canvasData = canvas.toDataURL();
+                            
+                            // WebGL fingerprinting
+                            let webglInfo = 'none';
+                            try {{
+                                const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                                if (gl) {{
+                                    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+                                    if (debugInfo) {{
+                                        webglInfo = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) + '|' + 
+                                                   gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+                                    }} else {{
+                                        webglInfo = gl.getParameter(gl.VENDOR) + '|' + gl.getParameter(gl.RENDERER);
+                                    }}
+                                }}
+                            }} catch (e) {{
+                                webglInfo = 'webgl_error';
+                            }}
+                            
+                            // Collect comprehensive browser properties
+                            const props = [
+                                navigator.userAgent || '',
+                                navigator.language || '',
+                                (navigator.languages || []).join(','),
+                                navigator.platform || '',
+                                screen.width + 'x' + screen.height + 'x' + screen.colorDepth,
+                                (new Date()).getTimezoneOffset(),
+                                Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+                                navigator.hardwareConcurrency || 0,
+                                navigator.deviceMemory || 0,
+                                navigator.maxTouchPoints || 0,
+                                navigator.cookieEnabled ? '1' : '0',
+                                navigator.doNotTrack || '',
+                                canvasData.substring(canvasData.length - 100), // Last 100 chars of canvas
+                                webglInfo
+                            ];
+                            
+                            // Create consistent hash
+                            let hash = 0;
+                            const dataString = props.join('|');
+                            for (let i = 0; i < dataString.length; i++) {{
+                                const char = dataString.charCodeAt(i);
+                                hash = ((hash << 5) - hash) + char;
+                                hash = hash & hash; // Convert to 32bit integer
+                            }}
+                            
+                            // Convert to hex fingerprint ID (12 characters)
+                            const fingerprintId = (Math.abs(hash) >>> 0).toString(16).padStart(12, '0').substring(0, 12);
+                            
+                            // Determine privacy level
+                            let privacyLevel = 'standard';
+                            if (navigator.doNotTrack === '1') {{
+                                privacyLevel = 'high_privacy';
+                            }} else if (navigator.globalPrivacyControl) {{
+                                privacyLevel = 'high_privacy';
+                            }} else if (!navigator.cookieEnabled) {{
+                                privacyLevel = 'medium_privacy';
+                            }}
+                            
+                            // Working methods
+                            const workingMethods = ['canvas', 'navigator', 'screen', 'timezone'];
+                            if (webglInfo !== 'none' && webglInfo !== 'webgl_error') {{
+                                workingMethods.push('webgl');
+                            }}
+                            if (navigator.hardwareConcurrency) {{
+                                workingMethods.push('hardware');
+                            }}
+                            
+                            console.log('✅ FiFi fingerprint generated successfully:', fingerprintId);
+                            
+                            // Redirect back to app with fingerprint data
+                            redirectWithFingerprint(fingerprintId, 'enhanced_canvas_webgl', privacyLevel, workingMethods);
+                            
+                        }} catch (error) {{
+                            console.error('❌ Advanced fingerprinting failed:', error);
+                            
+                            // Fallback fingerprinting
+                            try {{
+                                const simpleProps = [
+                                    navigator.userAgent || 'unknown',
+                                    navigator.language || 'unknown',
+                                    navigator.platform || 'unknown',
+                                    screen.width || 0,
+                                    screen.height || 0,
+                                    (new Date()).getTimezoneOffset() || 0
+                                ];
+                                
+                                let simpleHash = 0;
+                                const simpleString = simpleProps.join('|');
+                                for (let i = 0; i < simpleString.length; i++) {{
+                                    simpleHash = ((simpleHash << 5) - simpleHash) + simpleString.charCodeAt(i);
+                                    simpleHash = simpleHash & simpleHash;
+                                }}
+                                
+                                const fallbackId = (Math.abs(simpleHash) >>> 0).toString(16).padStart(12, '0').substring(0, 12);
+                                
+                                console.log('⚠️ Using fallback fingerprint:', fallbackId);
+                                redirectWithFingerprint(fallbackId, 'simple_fallback', 'unknown', ['basic']);
+                                
+                            }} catch (fallbackError) {{
+                                console.error('❌ Even fallback fingerprinting failed:', fallbackError);
+                                
+                                // Ultimate fallback - timestamp based
+                                const timestampId = Date.now().toString(16).substring(-12).padStart(12, '0');
+                                redirectWithFingerprint(timestampId, 'timestamp_fallback', 'unknown', ['timestamp']);
+                            }}
                         }}
                     }}
-                }} catch (e) {{
-                    webglInfo = 'error';
-                }}
-                
-                // Collect comprehensive browser data
-                const fingerData = {{
-                    userAgent: navigator.userAgent || '',
-                    language: navigator.language || '',
-                    languages: (navigator.languages || []).join(','),
-                    platform: navigator.platform || '',
-                    screen: screen.width + 'x' + screen.height + 'x' + screen.colorDepth,
-                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
-                    canvas: canvasData.substring(canvasData.length - 50), // Last 50 chars
-                    webgl: webglInfo,
-                    hardwareConcurrency: navigator.hardwareConcurrency || 0,
-                    deviceMemory: navigator.deviceMemory || 0,
-                    maxTouchPoints: navigator.maxTouchPoints || 0,
-                    cookieEnabled: navigator.cookieEnabled,
-                    doNotTrack: navigator.doNotTrack || '',
-                    sessionId: '{session_id}'
-                }};
-                
-                // Create consistent hash
-                const dataString = Object.values(fingerData).join('|');
-                let hash = 0;
-                for (let i = 0; i < dataString.length; i++) {{
-                    const char = dataString.charCodeAt(i);
-                    hash = ((hash << 5) - hash) + char;
-                    hash = hash & hash; // Convert to 32bit integer
-                }}
-                
-                // Convert to hex and ensure 12 characters
-                const fingerprintId = (Math.abs(hash) >>> 0).toString(16).padStart(8, '0').substring(0, 12);
-                
-                // Determine privacy level
-                let privacyLevel = 'standard';
-                if (navigator.doNotTrack === '1') {{
-                    privacyLevel = 'high_privacy';
-                }} else if (navigator.globalPrivacyControl) {{
-                    privacyLevel = 'high_privacy';
-                }} else if (!navigator.cookieEnabled) {{
-                    privacyLevel = 'medium_privacy';
-                }}
-                
-                const result = {{
-                    fingerprint_id: fingerprintId,
-                    fingerprint_method: 'enhanced_browser_fingerprint',
-                    browser_privacy_level: privacyLevel,
-                    working_methods: ['canvas', 'webgl', 'navigator', 'screen'],
-                    timestamp: Date.now(),
-                    success: true
-                }};
-                
-                console.log('✅ Enhanced fingerprint generated:', fingerprintId);
-                return result;
-                
-            }} catch (error) {{
-                console.error('Enhanced fingerprinting failed:', error);
-                
-                // Simple but reliable fallback
-                const simpleData = (navigator.userAgent || '') + 
-                                  (screen.width || 0) + 'x' + (screen.height || 0) + 
-                                  (navigator.language || '') + 
-                                  Date.now();
-                
-                let simpleHash = 0;
-                for (let i = 0; i < simpleData.length; i++) {{
-                    simpleHash = ((simpleHash << 5) - simpleHash) + simpleData.charCodeAt(i);
-                    simpleHash = simpleHash & simpleHash;
-                }}
-                
-                const fallbackId = (Math.abs(simpleHash) >>> 0).toString(16).padStart(8, '0').substring(0, 12);
-                
-                return {{
-                    fingerprint_id: fallbackId,
-                    fingerprint_method: 'simple_js_fingerprint',
-                    browser_privacy_level: 'unknown',
-                    working_methods: ['basic'],
-                    timestamp: Date.now(),
-                    success: false
-                }};
-            }}
-        }})()
-        """
-        
-        try:
-            result = st_javascript(fingerprint_js, key=f"fp_{session_id}")
+                    
+                    function redirectWithFingerprint(fingerprintId, method, privacy, workingMethods) {{
+                        try {{
+                            // Get the current app URL
+                            let appUrl = window.location.origin + window.location.pathname;
+                            
+                            // Try to get parent URL if in iframe
+                            try {{
+                                if (window.parent && window.parent.location && 
+                                    window.parent.location.origin === window.location.origin) {{
+                                    appUrl = window.parent.location.origin + window.parent.location.pathname;
+                                }}
+                            }} catch (e) {{
+                                console.debug('Cannot access parent URL, using current URL');
+                            }}
+                            
+                            // Build redirect URL with fingerprint data
+                            const params = new URLSearchParams({{
+                                event: 'fingerprint_complete',
+                                session_id: sessionId,
+                                fingerprint_id: fingerprintId,
+                                method: method,
+                                privacy: privacy,
+                                working_methods: workingMethods.join(','),
+                                timestamp: Date.now()
+                            }});
+                            
+                            const redirectUrl = `${{appUrl}}?${{params.toString()}}`;
+                            
+                            console.log('🔄 Redirecting to app with fingerprint data...');
+                            
+                            // Redirect to main app
+                            if (window.parent && window.parent.location && 
+                                window.parent.location.origin === window.location.origin) {{
+                                window.parent.location.href = redirectUrl;
+                            }} else {{
+                                window.location.href = redirectUrl;
+                            }}
+                            
+                        }} catch (redirectError) {{
+                            console.error('❌ Redirect failed:', redirectError);
+                        }}
+                    }}
+                    
+                    // Start fingerprinting
+                    if (document.readyState === 'loading') {{
+                        document.addEventListener('DOMContentLoaded', generateFingerprint);
+                    }} else {{
+                        setTimeout(generateFingerprint, 100);
+                    }}
+                    
+                }})();
+                </script>
+            </body>
+            </html>
+            """
             
-            if result and isinstance(result, dict) and result.get('fingerprint_id'):
-                logger.info(f"✅ Streamlit JS fingerprint success: {result.get('fingerprint_id')} via {result.get('fingerprint_method')}")
-                return result
-            else:
-                logger.warning(f"Streamlit JS fingerprinting returned invalid result: {result}")
-                
+            # Render the component invisibly
+            st.components.v1.html(fingerprint_html, height=0, width=0, scrolling=False)
+            
+            logger.debug(f"Fingerprint component rendered for session {session_id[:8]} - waiting for redirect...")
+            return None  # Always return None since data comes via redirect
+            
         except Exception as e:
-            logger.error(f"Streamlit JS fingerprinting failed: {e}")
-        
-        return None
+            logger.error(f"Failed to render fingerprint component: {e}")
+            return self._generate_fallback_fingerprint()
 
-    def get_fingerprint_immediately(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Attempts to get fingerprint using Streamlit's JavaScript execution."""
+    def process_fingerprint_data(self, fingerprint_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Processes fingerprint data received from the redirect (from original code)."""
+        if not fingerprint_data or fingerprint_data.get('error'):
+            logger.warning("Fingerprint component returned error. Using fallback.")
+            return self._generate_fallback_fingerprint()
         
-        # Try the enhanced Streamlit JS approach first
-        result = self.get_fingerprint_with_streamlit_js(session_id)
-        if result:
-            return result
+        fingerprint_id = fingerprint_data.get('fingerprint_id')
+        fingerprint_method = fingerprint_data.get('method')
+        privacy_level = fingerprint_data.get('privacy', 'standard')
         
-        # If that fails, we'll use the fallback
-        logger.warning(f"All fingerprinting methods failed for session {session_id[:8]}, using secure fallback")
-        return None
+        if not fingerprint_id or not fingerprint_method:
+            logger.warning("Invalid fingerprint data received. Using fallback.")
+            return self._generate_fallback_fingerprint()
+        
+        visitor_type = "returning_visitor" if fingerprint_id in self.fingerprint_cache else "new_visitor"
+        self.fingerprint_cache[fingerprint_id] = {'last_seen': datetime.now()}
+        
+        return {
+            'fingerprint_id': fingerprint_id,
+            'fingerprint_method': fingerprint_method,
+            'visitor_type': visitor_type,
+            'browser_privacy_level': privacy_level,
+            'working_methods': fingerprint_data.get('working_methods', [])
+        }
 
     def _generate_fallback_fingerprint(self) -> Dict[str, Any]:
         """Generates a unique fallback fingerprint."""
@@ -1329,30 +1420,67 @@ class SessionManager:
             logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
 
     def _create_new_session(self) -> UserSession:
-        """Creates a new user session with improved fingerprinting."""
+        """Creates a new user session with redirect-based fingerprinting."""
         session_id = str(uuid.uuid4())
         session = UserSession(session_id=session_id)
         
-        # Try to get fingerprint immediately using the silent component
-        fingerprint_result = self.fingerprinting.get_fingerprint_immediately(session_id)
-        if fingerprint_result and fingerprint_result.get('fingerprint_id'):
-            session.fingerprint_id = fingerprint_result.get('fingerprint_id')
-            session.fingerprint_method = fingerprint_result.get('fingerprint_method')
-            session.browser_privacy_level = fingerprint_result.get('browser_privacy_level')
-            logger.info(f"✅ Real fingerprint applied to new session {session_id[:8]}: {session.fingerprint_id}")
-        else:
-            # Use improved fallback fingerprint
-            fallback_data = self.fingerprinting._generate_fallback_fingerprint()
-            session.fingerprint_id = fallback_data['fingerprint_id']
-            session.fingerprint_method = fallback_data['fingerprint_method']
-            session.browser_privacy_level = fallback_data['browser_privacy_level']
-            logger.info(f"⚠️ Using improved fallback fingerprint for new session {session_id[:8]}: {session.fingerprint_id}")
+        # Apply temporary fingerprint until redirect fingerprinting completes
+        session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
+        session.fingerprint_method = "temporary_fallback_python"
         
         # Save to database
         self.db.save_session(session)
         
         logger.info(f"Created new session {session_id[:8]} with user type {session.user_type.value}")
         return session
+
+    def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]):
+        """Applies fingerprinting data from redirect to the session."""
+        try:
+            if not fingerprint_data or not isinstance(fingerprint_data, dict):
+                logger.warning("Invalid fingerprint data provided to apply_fingerprinting")
+                return
+            
+            old_fingerprint_id = session.fingerprint_id
+            old_method = session.fingerprint_method
+            
+            session.fingerprint_id = fingerprint_data.get('fingerprint_id')
+            session.fingerprint_method = fingerprint_data.get('fingerprint_method')
+            session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor')
+            session.browser_privacy_level = fingerprint_data.get('browser_privacy_level', 'standard')
+            
+            # Validate essential fields
+            if not session.fingerprint_id or not session.fingerprint_method:
+                logger.error("Invalid fingerprint data: missing essential fields")
+                # Restore old values if they existed
+                session.fingerprint_id = old_fingerprint_id
+                session.fingerprint_method = old_method
+                return
+            
+            # Check for existing sessions with same fingerprint
+            try:
+                existing_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+                if existing_sessions:
+                    # Inherit recognition data from most recent session
+                    recent_session = max(existing_sessions, key=lambda s: s.last_activity)
+                    if recent_session.email and recent_session.user_type != UserType.GUEST:
+                        session.visitor_type = "returning_visitor"
+            except Exception as e:
+                logger.error(f"Failed to check fingerprint history: {e}")
+                # Continue without history check
+            
+            # Save session with new fingerprint data
+            try:
+                self.db.save_session(session)
+                logger.info(f"✅ Fingerprinting applied to {session.session_id[:8]}: {session.fingerprint_method} (ID: {session.fingerprint_id[:8]}...)")
+            except Exception as e:
+                logger.error(f"Failed to save session after fingerprinting: {e}")
+                # Restore old values on save failure
+                session.fingerprint_id = old_fingerprint_id
+                session.fingerprint_method = old_method
+                
+        except Exception as e:
+            logger.error(f"Error in apply_fingerprinting for session {session.session_id[:8]}: {e}", exc_info=True)
 
     def get_session(self) -> Optional[UserSession]:
         """Gets or creates the current user session."""
@@ -1702,6 +1830,79 @@ class SessionManager:
             st.error("❌ Failed to save to CRM. Please try again later.")
 
 # =============================================================================
+# QUERY PARAMETER HANDLERS FOR REDIRECT-BASED FINGERPRINTING
+# =============================================================================
+
+def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
+    """Processes fingerprint data received via URL query parameters."""
+    try:
+        session_manager = st.session_state.get('session_manager')
+        if not session_manager:
+            logger.error("❌ Session manager not available during fingerprint processing from query.")
+            return False
+        
+        session = session_manager.db.load_session(session_id)
+        if not session:
+            logger.error(f"❌ Fingerprint processing: Session '{session_id[:8]}' not found in database.")
+            return False
+        
+        logger.info(f"✅ Processing fingerprint for session '{session_id[:8]}': ID={fingerprint_id[:8]}, Method={method}, Privacy={privacy}")
+        
+        # Create processed fingerprint data using the fingerprinting manager
+        processed_data = session_manager.fingerprinting.process_fingerprint_data({
+            'fingerprint_id': fingerprint_id,
+            'method': method,
+            'privacy': privacy,
+            'working_methods': working_methods
+        })
+        
+        # Apply fingerprinting to session
+        session_manager.apply_fingerprinting(session, processed_data)
+        
+        logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
+        return False
+
+def handle_fingerprint_requests_from_query():
+    """Silently processes fingerprint data sent via URL query parameters."""
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    
+    if event == "fingerprint_complete" and session_id:
+        logger.info("=" * 80)
+        logger.info("🔍 FINGERPRINT DATA DETECTED VIA URL QUERY PARAMETERS!")
+        logger.info(f"Session ID: {session_id}, Event: {event}")
+        logger.info("=" * 80)
+        
+        # EXTRACT PARAMETERS BEFORE CLEARING THEM
+        fingerprint_id = query_params.get("fingerprint_id")
+        method = query_params.get("method")
+        privacy = query_params.get("privacy")
+        working_methods = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
+        
+        # Clear query parameters immediately to prevent loops
+        for param in ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        # Process silently - no user feedback
+        if fingerprint_id and method:
+            try:
+                process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
+                logger.info(f"✅ Silent fingerprint processing completed for {session_id[:8]}")
+            except Exception as e:
+                logger.error(f"Silent fingerprint processing failed: {e}")
+        
+        # NO st.rerun() here - let normal flow continue
+        return
+    else:
+        logger.debug("ℹ️ No fingerprint requests found in current URL query parameters.")
+
+# =============================================================================
 # UI COMPONENTS - CLEAN PROFESSIONAL VERSION
 # =============================================================================
 
@@ -1828,33 +2029,29 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             st.progress(min(session.daily_question_count / 4, 1.0))
             st.caption("Email verification unlocks 10 questions/day.")
         
-        # Show fingerprint ID properly with refresh option
+        # Show fingerprint ID properly with better status
         if session.fingerprint_id:
-            # Show the fingerprint type and truncated ID
-            if session.fingerprint_method == 'secure_fallback':
+            # Check if fingerprinting is still in progress
+            if (session.fingerprint_id.startswith(("temp_py_", "temp_fp_")) or 
+                session.fingerprint_method == "temporary_fallback_python"):
+                st.markdown(f"**Device ID:** Identifying... 🔄")
+                st.caption("Browser fingerprinting in progress")
+            elif session.fingerprint_method == 'secure_fallback':
                 st.markdown(f"**Device ID:** `{session.fingerprint_id}` (fallback)")
-                if st.button("🔄 Try Real Fingerprint", key="refresh_fp", help="Attempt to get real browser fingerprint"):
-                    # Try to get real fingerprint
-                    real_fp = session_manager.fingerprinting.get_fingerprint_immediately(session.session_id)
-                    if real_fp and real_fp.get('fingerprint_id') and not real_fp.get('fingerprint_id').startswith('fb'):
-                        session.fingerprint_id = real_fp.get('fingerprint_id')
-                        session.fingerprint_method = real_fp.get('fingerprint_method')
-                        session.browser_privacy_level = real_fp.get('browser_privacy_level')
-                        session_manager.db.save_session(session)
-                        st.success("✅ Real fingerprint obtained!")
-                        st.rerun()
-                    else:
-                        st.warning("Browser fingerprinting not available - using secure fallback")
-            elif session.fingerprint_method in ['enhanced_browser_fingerprint', 'canvas_hash_hybrid']:
+                st.caption(f"Method: Secure Fallback | Privacy: Unknown")
+            elif session.fingerprint_method in ['enhanced_canvas_webgl', 'enhanced_browser_fingerprint']:
                 st.markdown(f"**Device ID:** `{session.fingerprint_id}` ✅")
-            elif session.fingerprint_method == 'simple_js_fingerprint':
+                method_display = "Enhanced Browser" if session.fingerprint_method == 'enhanced_browser_fingerprint' else "Canvas + WebGL"
+                privacy_display = session.browser_privacy_level.replace('_', ' ').title() if session.browser_privacy_level else 'Standard'
+                st.caption(f"Method: {method_display} | Privacy: {privacy_display}")
+            elif session.fingerprint_method == 'simple_fallback':
                 st.markdown(f"**Device ID:** `{session.fingerprint_id}` ⚡")
+                st.caption(f"Method: Simple Fallback | Privacy: {session.browser_privacy_level or 'Unknown'}")
             else:
                 st.markdown(f"**Device ID:** `{session.fingerprint_id}`")
-            
-            method_display = session.fingerprint_method.replace('_', ' ').title() if session.fingerprint_method else 'Unknown'
-            privacy_display = session.browser_privacy_level.replace('_', ' ').title() if session.browser_privacy_level else 'Standard'
-            st.caption(f"Method: {method_display} | Privacy: {privacy_display}")
+                method_display = session.fingerprint_method.replace('_', ' ').title() if session.fingerprint_method else 'Unknown'
+                privacy_display = session.browser_privacy_level.replace('_', ' ').title() if session.browser_privacy_level else 'Standard'
+                st.caption(f"Method: {method_display} | Privacy: {privacy_display}")
         else:
             st.markdown(f"**Device ID:** Generating...")
             st.caption("Fingerprinting in progress...")
@@ -2038,11 +2235,24 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                     st.error("Please enter the verification code you received.")
 
 def render_chat_interface(session_manager: 'SessionManager', session: UserSession):
-    """Renders the main chat interface - CLEAN PROFESSIONAL VERSION."""
+    """Renders the main chat interface with redirect-based fingerprinting."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
     
+    # Handle fingerprinting - render component if needed
+    fingerprint_needed = (
+        not session.fingerprint_id or 
+        session.fingerprint_method == "temporary_fallback_python" or 
+        session.fingerprint_id.startswith(("temp_py_", "temp_fp_"))
+    )
+    
+    if fingerprint_needed:
+        # Render fingerprinting component - this will redirect when complete
+        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+        # Exit current run to allow redirect to happen cleanly
+        return 
+
     # Check limits first
     limit_check = session_manager.question_limits.is_within_limits(session)
     if not limit_check['allowed']:
@@ -2216,7 +2426,7 @@ def ensure_initialization():
     return True
 
 def main():
-    """Clean main entry point - professional version"""
+    """Clean main entry point with redirect-based fingerprinting"""
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
@@ -2243,6 +2453,12 @@ def main():
         st.info("Try clicking 'Reset App' above or refresh the page.")
         logger.error(f"Main initialization error: {init_error}", exc_info=True)
         return
+
+    # Handle fingerprint requests from query parameters FIRST
+    try:
+        handle_fingerprint_requests_from_query()
+    except Exception as e:
+        logger.error(f"Fingerprint query parameter handling failed: {e}")
 
     # Get session manager
     session_manager = st.session_state.get('session_manager')
