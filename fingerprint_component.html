@@ -4,15 +4,26 @@
     <style>
         body { margin: 0; padding: 0; }
     </style>
+    <!-- REQUIRED: Load Streamlit Component Library first. -->
+    <script src="https://cdn.jsdelivr.net/npm/@streamlit/lib/dist/streamlit-component-lib.js"></script>
 </head>
 <body>
 <script>
-(function() {
+// IMPORTANT: All component logic must be inside Streamlit.onComponentReady
+Streamlit.onComponentReady(function() {
     try {
-        const sessionId = "{SESSION_ID}"; // Will be replaced by Python
+        // SESSION_ID is replaced by Python when rendering the component
+        const sessionId = "{SESSION_ID}"; 
         
         console.log('🔍 FiFi Fingerprinting: Starting for session', sessionId.substring(0, 8));
         
+        // Prevent multiple executions for the same component instance (optional, for safety)
+        if (window.fifi_fp_executed_for_session === sessionId) {
+            console.log('🔍 FiFi Fingerprinting: Already executed for this session instance.');
+            return;
+        }
+        window.fifi_fp_executed_for_session = sessionId; // Mark as executed
+
         // Layer 1: Canvas Fingerprinting (Primary)
         function generateCanvasFingerprint() {
             try {
@@ -102,6 +113,9 @@
             fingerprintId = 'privacy_browser_' + Date.now();
         } else if (workingMethods.length > 1) {
             method = 'hybrid';
+            // Combining multiple hashes can be sensitive to order and collision
+            // For robustness, consider a more sophisticated hashing scheme if exact collision is critical.
+            // For general device recognition, a simple concatenation and base64 is often sufficient.
             fingerprintId = btoa([canvasFp, webglFp, audioFp].join('|')).slice(0, 32);
         } else {
             method = workingMethods[0];
@@ -114,40 +128,40 @@
             privacy = 'high_privacy';
         }
         
-        // Prepare result object with EXACT keys you need
+        // Prepare result object with EXACT keys you need for Python mapping
         const fingerprintResult = {
             session_id: sessionId,
-            id: fingerprintId,           // Maps to fingerprint_id column
-            method: method,              // Maps to fingerprint_method column  
-            privacy: privacy,            // Maps to browser_privacy_level column
+            id: fingerprintId,           // Maps to fingerprint_id column in DB
+            method: method,              // Maps to fingerprint_method column in DB
+            privacy: privacy,            // Maps to browser_privacy_level column in DB
             working_methods: workingMethods,
             timestamp: Date.now()
         };
         
-        console.log("🔍 Fingerprinting complete:", {
+        console.log("🔍 FiFi Fingerprinting complete:", {
             id: fingerprintId, 
             method: method, 
             privacy: privacy, 
             working: workingMethods.length
         });
         
-        // Send to Python via Streamlit Custom Component API
+        // Send data back to Python
         Streamlit.setComponentValue(fingerprintResult);
         
     } catch (error) {
         console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
         
-        // Send error result
+        // Send an error result back to Python
         Streamlit.setComponentValue({
-            session_id: "{SESSION_ID}",
+            session_id: sessionId, // Still include session_id for Python to know which session had the error
             error: true,
             message: error.message,
             id: null,
-            method: null,
-            privacy: null
+            method: 'js_error', // Indicate error method
+            privacy: 'unknown'
         });
     }
-})();
+});
 </script>
 </body>
 </html>
