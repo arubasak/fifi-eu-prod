@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { margin: 0; padding: 0; }
+    </style>
+</head>
+<body>
+<script>
+(function() {
+    try {
+        const sessionId = "{SESSION_ID}"; // Will be replaced by Python
+        
+        console.log('🔍 FiFi Fingerprinting: Starting for session', sessionId.substring(0, 8));
+        
+        // Layer 1: Canvas Fingerprinting (Primary)
+        function generateCanvasFingerprint() {
+            try {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = 220; 
+                canvas.height = 100;
+                ctx.textBaseline = 'top'; 
+                ctx.font = '14px Arial';
+                ctx.fillStyle = '#f60'; 
+                ctx.fillRect(125, 1, 62, 20);
+                ctx.fillStyle = '#069'; 
+                ctx.fillText('FiFi AI Canvas Test 🤖', 2, 15);
+                ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; 
+                ctx.fillText('Food & Beverage Industry', 4, 45);
+                ctx.strokeStyle = '#000'; 
+                ctx.beginPath();
+                ctx.arc(50, 50, 20, 0, Math.PI * 2); 
+                ctx.stroke();
+                return btoa(canvas.toDataURL()).slice(0, 32);
+            } catch (e) {
+                console.error("❌ Canvas fingerprint failed:", e);
+                return 'canvas_blocked';
+            }
+        }
+        
+        // Layer 2: WebGL Fingerprinting (Secondary)
+        function generateWebGLFingerprint() {
+            try {
+                const canvas = document.createElement('canvas');
+                const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                if (!gl) { return 'webgl_unavailable'; }
+                const webglData = {
+                    vendor: gl.getParameter(gl.VENDOR),
+                    renderer: gl.getParameter(gl.RENDERER),
+                    version: gl.getParameter(gl.VERSION),
+                    extensions: gl.getSupportedExtensions() ? gl.getSupportedExtensions().slice(0, 10) : []
+                };
+                return btoa(JSON.stringify(webglData)).slice(0, 32);
+            } catch (e) {
+                console.error("❌ WebGL fingerprint failed:", e);
+                return 'webgl_blocked';
+            }
+        }
+        
+        // Layer 3: Audio Context Fingerprinting (Tertiary)
+        function generateAudioFingerprint() {
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const analyser = audioContext.createAnalyser();
+                const gainNode = audioContext.createGain();
+                oscillator.type = 'triangle'; 
+                oscillator.frequency.value = 1000; 
+                gainNode.gain.value = 0;
+                oscillator.connect(analyser); 
+                analyser.connect(gainNode); 
+                gainNode.connect(audioContext.destination);
+                oscillator.start(0);
+                const frequencyData = new Uint8Array(analyser.frequencyBinCount);
+                analyser.getByteFrequencyData(frequencyData);
+                oscillator.stop(); 
+                audioContext.close();
+                return btoa(Array.from(frequencyData.slice(0, 32)).join(',')).slice(0, 32);
+            } catch (e) {
+                console.error("❌ Audio fingerprint failed:", e);
+                return 'audio_blocked';
+            }
+        }
+        
+        // Execute fingerprinting
+        const canvasFp = generateCanvasFingerprint();
+        const webglFp = generateWebGLFingerprint();
+        const audioFp = generateAudioFingerprint();
+        
+        // Determine method and fingerprint ID
+        let method = 'canvas'; 
+        let fingerprintId = canvasFp;
+        const workingMethods = [];
+        
+        if (canvasFp !== 'canvas_blocked') workingMethods.push('canvas');
+        if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') workingMethods.push('webgl');  
+        if (audioFp !== 'audio_blocked') workingMethods.push('audio');
+        
+        if (workingMethods.length === 0) {
+            method = 'fallback';
+            fingerprintId = 'privacy_browser_' + Date.now();
+        } else if (workingMethods.length > 1) {
+            method = 'hybrid';
+            fingerprintId = btoa([canvasFp, webglFp, audioFp].join('|')).slice(0, 32);
+        } else {
+            method = workingMethods[0];
+            fingerprintId = (method === 'canvas' ? canvasFp : (method === 'webgl' ? webglFp : audioFp));
+        }
+        
+        // Determine privacy level
+        let privacy = 'standard';
+        if (canvasFp === 'canvas_blocked' && webglFp.includes('blocked') && audioFp === 'audio_blocked') {
+            privacy = 'high_privacy';
+        }
+        
+        // Prepare result object with EXACT keys you need
+        const fingerprintResult = {
+            session_id: sessionId,
+            id: fingerprintId,           // Maps to fingerprint_id column
+            method: method,              // Maps to fingerprint_method column  
+            privacy: privacy,            // Maps to browser_privacy_level column
+            working_methods: workingMethods,
+            timestamp: Date.now()
+        };
+        
+        console.log("🔍 Fingerprinting complete:", {
+            id: fingerprintId, 
+            method: method, 
+            privacy: privacy, 
+            working: workingMethods.length
+        });
+        
+        // Send to Python via Streamlit Custom Component API
+        Streamlit.setComponentValue(fingerprintResult);
+        
+    } catch (error) {
+        console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
+        
+        // Send error result
+        Streamlit.setComponentValue({
+            session_id: "{SESSION_ID}",
+            error: true,
+            message: error.message,
+            id: null,
+            method: null,
+            privacy: null
+        });
+    }
+})();
+</script>
+</body>
+</html>
