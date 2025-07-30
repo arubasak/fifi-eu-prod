@@ -1546,6 +1546,16 @@ class SessionManager:
                 if session and session.active:
                     session = self._validate_session(session)
                     
+                    # Enhanced session recovery - always ensure we have some fingerprint
+                    if not session.fingerprint_id:
+                        session.fingerprint_id = f"temp_fp_{session.session_id[:8]}"
+                        session.fingerprint_method = "temporary_fallback_python"
+                        try:
+                            self.db.save_session(session)
+                            logger.info(f"Applied temporary fallback fingerprint to session {session.session_id[:8]}.")
+                        except Exception as e:
+                            logger.error(f"Failed to save temporary fingerprint for session {session.session_id[:8]}: {e}", exc_info=True)
+
                     # Check limits and handle bans
                     limit_check = self.question_limits.is_within_limits(session)
                     if not limit_check.get('allowed', True):
