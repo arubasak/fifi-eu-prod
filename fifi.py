@@ -2478,22 +2478,23 @@ def handle_fingerprint_requests_from_query():
             st.rerun()
             return
         
-        # Process silently and rerun to show updated fingerprint
+        # Process silently and stop execution
         try:
             success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
             if success:
-                # Rerun to refresh the interface with the new fingerprint
-                st.rerun()
+                # Stop execution - user stays on current page, next interaction will show updated fingerprint
+                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
+                st.stop()
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
         
-        # NO st.rerun() here if processing failed - let normal flow continue
+        # If we get here, processing failed - let normal flow continue
         return
     else:
         logger.info("ℹ️ No fingerprint requests found in current URL query parameters.")
-
+        
 def global_message_channel_error_handler():
     """Enhanced global error handler for component messages with better communication handling"""
     js_error_handler = """
