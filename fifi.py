@@ -2483,19 +2483,19 @@ def handle_fingerprint_requests_from_query():
             success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
-           if success:
-    # Ensure page state is preserved before rerunning
-    if 'page' not in st.session_state or st.session_state.page is None:
-        # Check if this session belongs to an authenticated user
-        session_manager = st.session_state.get('session_manager')
-        if session_manager:
-            session = session_manager.db.load_session(session_id)
-            if session and session.user_type.value != 'guest':
-                st.session_state.page = "chat"
-                logger.info(f"🔄 Restored chat page state for authenticated user")
-    
-    logger.info(f"🔄 Fingerprint processed successfully, rerunning to show immediately")
-    st.rerun()
+            if success:
+                # Ensure page state is preserved before rerunning
+                if 'page' not in st.session_state or st.session_state.page is None:
+                    # Check if this session belongs to an authenticated user
+                    session_manager = st.session_state.get('session_manager')
+                    if session_manager:
+                        session = session_manager.db.load_session(session_id)
+                        if session and session.user_type.value != 'guest':
+                            st.session_state.page = "chat"
+                            logger.info(f"🔄 Restored chat page state for authenticated user")
+                
+                logger.info(f"🔄 Fingerprint processed successfully, rerunning to show immediately")
+                st.rerun()
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
         
