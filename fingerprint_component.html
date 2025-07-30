@@ -1,293 +1,191 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="UTF-8">
-    <title>Fingerprint Component</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/fingerprintjs/3.4.0/fingerprint.min.js"></script>
     <style>
-        body {
-            margin: 0;
-            padding: 0;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: transparent;
-        }
-        #status {
-            display: none;
-            padding: 10px;
-            text-align: center;
-            font-size: 14px;
-        }
-        .debug {
-            display: none;
-            position: fixed;
-            bottom: 10px;
-            right: 10px;
-            background: rgba(0, 0, 0, 0.8);
-            color: #fff;
-            padding: 10px;
-            border-radius: 5px;
-            font-family: monospace;
-            font-size: 12px;
-            max-width: 300px;
-        }
+        body { margin: 0; padding: 0; }
     </style>
 </head>
 <body>
-    <div id="status"></div>
-    <div id="debug" class="debug"></div>
+<script>
+(function() {
+    try {
+        const sessionId = "{SESSION_ID}"; 
+        
+        console.log('🔍 FiFi Fingerprinting: Starting for session', sessionId.substring(0, 8));
+        
+        // Prevent multiple executions
+        if (window.fifi_fp_executed_for_session === sessionId) {
+            console.log('🔍 FiFi Fingerprinting: Already executed for this session instance.');
+            return;
+        }
+        window.fifi_fp_executed_for_session = sessionId;
 
-    <script>
-    (function() {
-        'use strict';
-        
-        // Configuration
-        const CONFIG = {
-            SESSION_ID: new URLSearchParams(window.location.search).get('session_id') || 'unknown',
-            MAX_RETRIES: 3,
-            RETRY_DELAY: 1000,
-            DEBUG: false
-        };
-        
-        // State management
-        const state = {
-            status: 'initializing',
-            retryCount: 0,
-            fingerprintId: null,
-            error: null,
-            startTime: Date.now()
-        };
-        
-        // Logging helper
-        function log(message, data = {}) {
-            const logEntry = {
-                timestamp: new Date().toISOString(),
-                message,
-                ...data
-            };
-            
-            console.log(`[Fingerprint] ${message}`, data);
-            
-            if (CONFIG.DEBUG) {
-                const debug = document.getElementById('debug');
-                debug.style.display = 'block';
-                debug.innerHTML = `<pre>${JSON.stringify(logEntry, null, 2)}</pre>`;
-            }
-        }
-        
-        // Update parent window status
-        function updateParent(status, data = {}) {
-            const message = {
-                type: 'fingerprint_status',
-                sessionId: CONFIG.SESSION_ID,
-                status: status,
-                timestamp: Date.now(),
-                ...data
-            };
-            
+        // Layer 1: Canvas Fingerprinting (Primary)
+        function generateCanvasFingerprint() {
             try {
-                // Send to parent window
-                window.parent.postMessage(message, '*');
-                
-                // Also update Streamlit if available
-                if (window.parent.streamlit) {
-                    window.parent.streamlit.setComponentValue(message);
-                }
-                
-                log('Parent updated', message);
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = 220; 
+                canvas.height = 100;
+                ctx.textBaseline = 'top'; 
+                ctx.font = '14px Arial';
+                ctx.fillStyle = '#f60'; 
+                ctx.fillRect(125, 1, 62, 20);
+                ctx.fillStyle = '#069'; 
+                ctx.fillText('FiFi AI Canvas Test 🤖', 2, 15);
+                ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; 
+                ctx.fillText('Food & Beverage Industry', 4, 45);
+                ctx.strokeStyle = '#000'; 
+                ctx.beginPath();
+                ctx.arc(50, 50, 20, 0, Math.PI * 2); 
+                ctx.stroke();
+                return btoa(canvas.toDataURL()).slice(0, 32);
             } catch (e) {
-                log('Failed to update parent', { error: e.message });
+                console.error("❌ Canvas fingerprint failed:", e);
+                return 'canvas_blocked';
             }
         }
         
-        // Generate fingerprint
-        async function generateFingerprint() {
+        // Layer 2: WebGL Fingerprinting (Secondary)
+        function generateWebGLFingerprint() {
             try {
-                state.status = 'loading';
-                updateParent('loading');
-                
-                // Load FingerprintJS
-                const fp = await FingerprintJS.load({
-                    monitoring: false,
-                    debug: CONFIG.DEBUG
-                });
-                
-                state.status = 'generating';
-                updateParent('generating');
-                
-                // Get fingerprint
-                const result = await fp.get();
-                
-                // Extract components
-                const components = result.components;
-                const componentData = {
-                    canvas: components.canvas?.value?.toString().substring(0, 10),
-                    webgl: components.webgl?.value?.toString().substring(0, 10),
-                    webglVendor: components.webglVendorAndRenderer?.value?.vendor,
-                    timezone: components.timezone?.value,
-                    screen: components.screenResolution?.value?.join('x'),
-                    colorDepth: components.colorDepth?.value,
-                    hardware: components.hardwareConcurrency?.value,
-                    platform: components.platform?.value,
-                    languages: components.languages?.value?.join(',')
+                const canvas = document.createElement('canvas');
+                const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                if (!gl) { return 'webgl_unavailable'; }
+                const webglData = {
+                    vendor: gl.getParameter(gl.VENDOR),
+                    renderer: gl.getParameter(gl.RENDERER),
+                    version: gl.getParameter(gl.VERSION),
+                    extensions: gl.getSupportedExtensions() ? gl.getSupportedExtensions().slice(0, 10) : []
                 };
-                
-                // Generate consistent ID
-                const idComponents = [
-                    componentData.canvas,
-                    componentData.webgl,
-                    componentData.timezone,
-                    componentData.screen,
-                    componentData.hardware
-                ].filter(Boolean).join('|');
-                
-                // Simple hash function
-                let hash = 0;
-                for (let i = 0; i < idComponents.length; i++) {
-                    hash = ((hash << 5) - hash) + idComponents.charCodeAt(i);
-                    hash = hash & hash;
-                }
-                
-                const fingerprintId = '00003ff3' + Math.abs(hash).toString(16).padStart(4, '0').substring(0, 4);
-                
-                state.fingerprintId = fingerprintId;
-                state.status = 'completed';
-                
-                log('Fingerprint generated', {
-                    fingerprintId,
-                    visitorId: result.visitorId,
-                    confidence: result.confidence?.score,
-                    components: Object.keys(components).length
-                });
-                
-                // Prepare redirect data
-                const redirectData = {
-                    event: 'fingerprint_complete',
-                    session_id: CONFIG.SESSION_ID,
-                    fingerprint_id: fingerprintId,
-                    visitor_id: result.visitorId.substring(0, 16),
-                    method: 'enhanced_canvas_webgl',
-                    privacy: 'high_privacy',
-                    working_methods: Object.keys(components).join(','),
-                    timestamp: Date.now(),
-                    confidence: result.confidence?.score || 0
-                };
-                
-                // Update parent before redirect
-                updateParent('completed', {
-                    fingerprintId,
-                    redirecting: true
-                });
-                
-                // Redirect with data
-                const queryString = new URLSearchParams(redirectData).toString();
-                const redirectUrl = `${window.location.pathname}?${queryString}`;
-                
-                log('Redirecting', { url: redirectUrl });
-                
-                // Small delay to ensure parent receives message
-                setTimeout(() => {
-                    window.location.href = redirectUrl;
-                }, 250);
-                
-            } catch (error) {
-                handleError(error);
+                return btoa(JSON.stringify(webglData)).slice(0, 32);
+            } catch (e) {
+                console.error("❌ WebGL fingerprint failed:", e);
+                return 'webgl_blocked';
             }
         }
         
-        // Error handling
-        function handleError(error) {
-            state.error = error.message;
-            state.retryCount++;
-            
-            log('Error occurred', {
-                error: error.message,
-                retryCount: state.retryCount,
-                stack: error.stack
-            });
-            
-            if (state.retryCount < CONFIG.MAX_RETRIES) {
-                state.status = 'retrying';
-                updateParent('retrying', {
-                    attempt: state.retryCount,
-                    error: error.message
-                });
-                
-                const delay = CONFIG.RETRY_DELAY * state.retryCount;
-                log(`Retrying in ${delay}ms...`);
-                
-                setTimeout(generateFingerprint, delay);
-            } else {
-                state.status = 'error';
-                updateParent('error', {
-                    error: error.message,
-                    attempts: state.retryCount
-                });
-                
-                // Final fallback - generate simple ID
-                const fallbackId = '00003ff3' + Date.now().toString(16).substring(-4);
-                log('Using fallback ID', { fallbackId });
-                
-                setTimeout(() => {
-                    const fallbackData = {
-                        event: 'fingerprint_complete',
-                        session_id: CONFIG.SESSION_ID,
-                        fingerprint_id: fallbackId,
-                        method: 'fallback',
-                        timestamp: Date.now()
-                    };
-                    
-                    const queryString = new URLSearchParams(fallbackData).toString();
-                    window.location.href = `${window.location.pathname}?${queryString}`;
-                }, 1000);
+        // Layer 3: Audio Context Fingerprinting (Tertiary)
+        function generateAudioFingerprint() {
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const analyser = audioContext.createAnalyser();
+                const gainNode = audioContext.createGain();
+                oscillator.type = 'triangle'; 
+                oscillator.frequency.value = 1000; 
+                gainNode.gain.value = 0;
+                oscillator.connect(analyser); 
+                analyser.connect(gainNode); 
+                gainNode.connect(audioContext.destination);
+                oscillator.start(0);
+                const frequencyData = new Uint8Array(analyser.frequencyBinCount);
+                analyser.getByteFrequencyData(frequencyData);
+                oscillator.stop(); 
+                audioContext.close();
+                return btoa(Array.from(frequencyData.slice(0, 32)).join(',')).slice(0, 32);
+            } catch (e) {
+                console.error("❌ Audio fingerprint failed:", e);
+                return 'audio_blocked';
             }
         }
         
-        // Initialize
-        function init() {
-            log('Initializing fingerprint component', {
-                sessionId: CONFIG.SESSION_ID,
-                url: window.location.href
-            });
-            
-            // Check if we're in an iframe
-            if (window.self !== window.top) {
-                log('Running in iframe');
-            }
-            
-            // Start fingerprinting immediately
-            updateParent('initializing');
-            
-            // Small delay to ensure component is fully loaded
-            setTimeout(generateFingerprint, 100);
-        }
+        // Execute fingerprinting
+        const canvasFp = generateCanvasFingerprint();
+        const webglFp = generateWebGLFingerprint();
+        const audioFp = generateAudioFingerprint();
         
-        // Start when DOM is ready
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', init);
+        // Determine method and fingerprint ID
+        let method = 'canvas'; 
+        let fingerprintId = canvasFp;
+        const workingMethods = [];
+        
+        if (canvasFp !== 'canvas_blocked') workingMethods.push('canvas');
+        if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') workingMethods.push('webgl');  
+        if (audioFp !== 'audio_blocked') workingMethods.push('audio');
+        
+        if (workingMethods.length === 0) {
+            method = 'fallback';
+            fingerprintId = 'privacy_browser_' + Date.now();
+        } else if (workingMethods.length > 1) {
+            method = 'hybrid';
+            fingerprintId = btoa([canvasFp, webglFp, audioFp].join('|')).slice(0, 32);
         } else {
-            init();
+            method = workingMethods[0];
+            fingerprintId = (method === 'canvas' ? canvasFp : (method === 'webgl' ? webglFp : audioFp));
         }
         
-        // Handle messages from parent
-        window.addEventListener('message', function(event) {
-            if (event.data && event.data.type === 'fingerprint_command') {
-                log('Received command', event.data);
-                
-                if (event.data.command === 'retry') {
-                    state.retryCount = 0;
-                    generateFingerprint();
+        // Determine privacy level
+        let privacy = 'standard';
+        if (canvasFp === 'canvas_blocked' && webglFp.includes('blocked') && audioFp === 'audio_blocked') {
+            privacy = 'high_privacy';
+        }
+        
+        console.log("🔍 FiFi Fingerprinting complete:", {
+            fingerprint_id: fingerprintId, 
+            method: method, 
+            privacy: privacy, 
+            working: workingMethods.length
+        });
+        
+        // REDIRECT METHOD: Send data via URL parameters
+        function getAppUrl() {
+            try {
+                if (window.parent && window.parent.location.origin === window.location.origin) {
+                    return window.parent.location.origin + window.parent.location.pathname;
                 }
+            } catch (e) {
+                console.warn("Using current window location as fallback");
             }
-        });
+            return window.location.origin + window.location.pathname;
+        }
         
-        // Cleanup on unload
-        window.addEventListener('beforeunload', function() {
-            if (state.status === 'generating') {
-                updateParent('cancelled');
+        // Build fingerprint URL with parameters
+        const appUrl = getAppUrl();
+        const fingerprintUrl = `${appUrl}?event=fingerprint_complete&session_id=${sessionId}&fingerprint_id=${encodeURIComponent(fingerprintId)}&method=${encodeURIComponent(method)}&privacy=${encodeURIComponent(privacy)}&working_methods=${encodeURIComponent(workingMethods.join(','))}&timestamp=${Date.now()}`;
+        
+        console.log("🔍 FiFi Fingerprinting: Redirecting with data...");
+        
+        // Redirect to pass data to Python
+        try {
+            if (window.parent && window.parent.location.origin === window.location.origin) {
+                window.parent.location.href = fingerprintUrl;
+            } else {
+                window.location.href = fingerprintUrl;
             }
-        });
+        } catch (e) {
+            console.error('Fingerprint redirect failed:', e);
+        }
         
-    })();
-    </script>
+    } catch (error) {
+        console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
+        
+        // Redirect with error information
+        function getAppUrl() {
+            try {
+                if (window.parent && window.parent.location.origin === window.location.origin) {
+                    return window.parent.location.origin + window.parent.location.pathname;
+                }
+            } catch (e) {
+                console.warn("Using current window location as fallback");
+            }
+            return window.location.origin + window.location.pathname;
+        }
+        
+        const appUrl = getAppUrl();
+        const errorUrl = `${appUrl}?event=fingerprint_error&session_id=${sessionId}&error=${encodeURIComponent(error.message)}&timestamp=${Date.now()}`;
+        
+        try {
+            if (window.parent && window.parent.location.origin === window.location.origin) {
+                window.parent.location.href = errorUrl;
+            } else {
+                window.location.href = errorUrl;
+            }
+        } catch (e) {
+            console.error('Error redirect failed:', e);
+        }
+    }
+})();
+</script>
 </body>
 </html>
