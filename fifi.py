@@ -1683,7 +1683,8 @@ class SessionManager:
         try:
             self.db.save_session(session)
             logger.debug(f"Activity update saved for {session.session_id[:8]} with {len(session.messages)} messages")
-        except Exception as e:    logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
 
     def _create_new_session(self) -> UserSession:
         """Creates a new user session with immediate working fingerprint."""
@@ -3043,7 +3044,8 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                 else:
                     st.error("Please enter the verification code you received.")
 
-def render_chat_interface(session_manager: 'SessionManager', session: UserSession):    """Renders the main chat interface."""
+def render_chat_interface(session_manager: 'SessionManager', session: UserSession):
+    """Renders the main chat interface."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
