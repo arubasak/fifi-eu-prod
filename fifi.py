@@ -2901,11 +2901,11 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # Check if session needs fingerprinting (only for fallback IDs)
+    # Check if session needs fingerprinting - FIXED CONDITION
     fingerprint_needed = (
         not session.fingerprint_id or
-        session.fingerprint_method == "fallback" or
-        session.fingerprint_id.startswith("fallback_")
+        session.fingerprint_method == "temporary_fallback_python" or
+        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
     )
     
     if fingerprint_needed:
@@ -3012,7 +3012,6 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
                     st.error("⚠️ Sorry, I encountered an unexpected error processing your request. Please try again.")
         
         st.rerun()
-
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
 # =============================================================================
