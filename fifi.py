@@ -31,7 +31,7 @@ import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
 # =============================================================================
-# FINAL INTEGRATED FIFI AI - ALL FEATURES IMPLEMENTED (SYNTAX FIXED)
+# FINAL INTEGRATED FIFI AI - FIXED FINGERPRINTING, NO DEBUG PANELS
 # =============================================================================
 
 # Setup logging
@@ -722,32 +722,219 @@ class DatabaseManager:
 # =============================================================================
 
 class FingerprintingManager:
-    """Manages browser fingerprinting using Streamlit custom components."""
+    """Manages browser fingerprinting using inline JavaScript component."""
     
     def __init__(self):
         self.fingerprint_cache = {}
-        # Added for attempt tracking
         self.component_attempts = defaultdict(int)
 
     def render_fingerprint_component(self, session_id: str):
-        """Renders fingerprinting component silently (invisible)."""
+        """Renders fingerprinting component with inline HTML - no external files needed."""
         try:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
+            # Create comprehensive inline fingerprinting HTML
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>FiFi Fingerprinting</title>
+                <style>
+                    body {{ margin: 0; padding: 0; height: 0; overflow: hidden; }}
+                </style>
+            </head>
+            <body>
+                <script>
+                (function() {{
+                    const sessionId = '{session_id}';
+                    let fingerprintData = {{}};
+                    
+                    try {{
+                        console.log('🔍 FiFi Fingerprinting: Starting fingerprint generation for session', sessionId.substring(0, 8));
+                        
+                        // Collect comprehensive browser fingerprint
+                        fingerprintData = {{
+                            timestamp: Date.now(),
+                            userAgent: navigator.userAgent || '',
+                            language: navigator.language || '',
+                            languages: navigator.languages ? navigator.languages.join(',') : '',
+                            platform: navigator.platform || '',
+                            cookieEnabled: navigator.cookieEnabled,
+                            doNotTrack: navigator.doNotTrack || 'unknown',
+                            hardwareConcurrency: navigator.hardwareConcurrency || 0,
+                            maxTouchPoints: navigator.maxTouchPoints || 0,
+                            screen: {{
+                                width: screen.width || 0,
+                                height: screen.height || 0,
+                                availWidth: screen.availWidth || 0,
+                                availHeight: screen.availHeight || 0,
+                                colorDepth: screen.colorDepth || 0,
+                                pixelDepth: screen.pixelDepth || 0
+                            }},
+                            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown',
+                            timezoneOffset: new Date().getTimezoneOffset(),
+                            hasLocalStorage: typeof(Storage) !== "undefined",
+                            hasSessionStorage: typeof(Storage) !== "undefined" && typeof(sessionStorage) !== "undefined",
+                            hasIndexedDB: typeof(indexedDB) !== "undefined",
+                            hasWebGL: false,
+                            hasCanvas: false,
+                            audioContext: false
+                        }};
+                        
+                        // Test Canvas fingerprinting
+                        try {{
+                            const canvas = document.createElement('canvas');
+                            const ctx = canvas.getContext('2d');
+                            if (ctx) {{
+                                fingerprintData.hasCanvas = true;
+                                ctx.textBaseline = 'top';
+                                ctx.font = '14px Arial';
+                                ctx.fillText('FiFi Fingerprint Test 🔍', 2, 2);
+                                fingerprintData.canvasFingerprint = canvas.toDataURL().substring(0, 100);
+                            }}
+                        }} catch (e) {{
+                            console.debug('Canvas fingerprinting failed:', e);
+                        }}
+                        
+                        // Test WebGL
+                        try {{
+                            const canvas = document.createElement('canvas');
+                            const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                            if (gl) {{
+                                fingerprintData.hasWebGL = true;
+                                const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+                                if (debugInfo) {{
+                                    fingerprintData.webglVendor = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) || '';
+                                    fingerprintData.webglRenderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '';
+                                }}
+                            }}
+                        }} catch (e) {{
+                            console.debug('WebGL fingerprinting failed:', e);
+                        }}
+                        
+                        // Test Audio Context
+                        try {{
+                            const AudioContext = window.AudioContext || window.webkitAudioContext;
+                            if (AudioContext) {{
+                                const audioCtx = new AudioContext();
+                                fingerprintData.audioContext = true;
+                                fingerprintData.audioSampleRate = audioCtx.sampleRate || 0;
+                                audioCtx.close();
+                            }}
+                        }} catch (e) {{
+                            console.debug('Audio fingerprinting failed:', e);
+                        }}
+                        
+                        // Generate unique fingerprint ID using collected data
+                        const fingerprintString = JSON.stringify(fingerprintData);
+                        let hash = 0;
+                        for (let i = 0; i < fingerprintString.length; i++) {{
+                            const char = fingerprintString.charCodeAt(i);
+                            hash = ((hash << 5) - hash) + char;
+                            hash = hash & hash; // Convert to 32-bit integer
+                        }}
+                        
+                        const fingerprintId = 'fp_' + Math.abs(hash).toString(36) + '_' + Date.now().toString(36);
+                        
+                        // Determine method and privacy level
+                        let method = 'basic';
+                        let workingMethods = ['basic'];
+                        
+                        if (fingerprintData.hasCanvas) {{
+                            method = 'enhanced';
+                            workingMethods.push('canvas');
+                        }}
+                        if (fingerprintData.hasWebGL) {{
+                            method = 'comprehensive';
+                            workingMethods.push('webgl');
+                        }}
+                        if (fingerprintData.audioContext) {{
+                            method = 'comprehensive';
+                            workingMethods.push('audio');
+                        }}
+                        
+                        // Estimate privacy level
+                        let privacyLevel = 'standard';
+                        if (navigator.doNotTrack === '1' || !navigator.cookieEnabled) {{
+                            privacyLevel = 'enhanced';
+                        }}
+                        if (!fingerprintData.hasCanvas && !fingerprintData.hasWebGL) {{
+                            privacyLevel = 'high';
+                        }}
+                        
+                        console.log('✅ FiFi Fingerprinting: Generated fingerprint', fingerprintId, 'using method', method);
+                        
+                        // Redirect with fingerprint data
+                        function getAppUrl() {{
+                            try {{
+                                if (window.parent && window.parent.location && 
+                                    window.parent.location.origin === window.location.origin) {{
+                                    return window.parent.location.origin + window.parent.location.pathname;
+                                }}
+                            }} catch (e) {{
+                                console.debug('Parent location access failed, using current location');
+                            }}
+                            return window.location.origin + window.location.pathname;
+                        }}
+                        
+                        const appUrl = getAppUrl();
+                        const redirectUrl = appUrl + 
+                            '?event=fingerprint_complete' +
+                            '&session_id=' + encodeURIComponent(sessionId) +
+                            '&fingerprint_id=' + encodeURIComponent(fingerprintId) +
+                            '&method=' + encodeURIComponent(method) +
+                            '&privacy=' + encodeURIComponent(privacyLevel) +
+                            '&working_methods=' + encodeURIComponent(workingMethods.join(',')) +
+                            '&timestamp=' + Date.now();
+                        
+                        console.log('🔄 FiFi Fingerprinting: Redirecting with data to', redirectUrl.substring(0, 100) + '...');
+                        
+                        // Perform redirect
+                        setTimeout(() => {{
+                            try {{
+                                if (window.parent && window.parent.location && 
+                                    window.parent.location.origin === window.location.origin) {{
+                                    window.parent.location.href = redirectUrl;
+                                }} else {{
+                                    window.location.href = redirectUrl;
+                                }}
+                            }} catch (e) {{
+                                console.error('Redirect failed:', e);
+                            }}
+                        }}, 500);
+                        
+                    }} catch (error) {{
+                        console.error('🚨 FiFi Fingerprinting: Critical error during fingerprint generation:', error);
+                        
+                        // Fallback redirect with minimal data
+                        const fallbackId = 'fallback_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+                        const appUrl = window.location.origin + window.location.pathname;
+                        const fallbackUrl = appUrl + 
+                            '?event=fingerprint_complete' +
+                            '&session_id=' + encodeURIComponent(sessionId) +
+                            '&fingerprint_id=' + encodeURIComponent(fallbackId) +
+                            '&method=fallback' +
+                            '&privacy=unknown' +
+                            '&working_methods=none' +
+                            '&timestamp=' + Date.now();
+                        
+                        setTimeout(() => {{
+                            window.location.href = fallbackUrl;
+                        }}, 1000);
+                    }}
+                }})();
+                </script>
+            </body>
+            </html>
+            """
             
-            with open(html_file_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-            
-            html_content = html_content.replace('{SESSION_ID}', session_id)
-            
-            # SILENT: height=0, no visible elements
+            # Render with minimal visibility
             st.components.v1.html(html_content, height=0, width=0, scrolling=False)
             
-            logger.debug(f"Silent fingerprint component rendered for session {session_id[:8]}")
+            logger.debug(f"Inline fingerprint component rendered for session {session_id[:8]}")
             return None  # Always return None since data comes via redirect
             
         except Exception as e:
-            logger.error(f"Failed to render fingerprint component: {e}")
+            logger.error(f"Failed to render inline fingerprint component: {e}")
             return self._generate_fallback_fingerprint()
 
     def process_fingerprint_data(self, fingerprint_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -756,9 +943,8 @@ class FingerprintingManager:
             logger.warning("Fingerprint component returned error. Using fallback.")
             return self._generate_fallback_fingerprint()
         
-        # CHANGED: Use 'fingerprint_id' instead of 'id' to match database column
         fingerprint_id = fingerprint_data.get('fingerprint_id')
-        fingerprint_method = fingerprint_data.get('method')
+        fingerprint_method = fingerprint_data.get('fingerprint_method')
         privacy_level = fingerprint_data.get('privacy', 'standard')
         
         if not fingerprint_id or not fingerprint_method:
@@ -778,7 +964,7 @@ class FingerprintingManager:
     
     def _generate_fallback_fingerprint(self) -> Dict[str, Any]:
         """Generates a unique fallback fingerprint for cases where real fingerprinting fails."""
-        fallback_id = f"fallback_{secrets.token_hex(8)}"
+        fallback_id = f"fallback_{secrets.token_hex(8)}_{int(time.time())}"
         return {
             'fingerprint_id': fallback_id,
             'fingerprint_method': 'fallback',
@@ -1497,22 +1683,24 @@ class SessionManager:
         try:
             self.db.save_session(session)
             logger.debug(f"Activity update saved for {session.session_id[:8]} with {len(session.messages)} messages")
-        except Exception as e:
-            logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
+        except Exception as e:    logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
 
     def _create_new_session(self) -> UserSession:
-        """Creates a new user session with client info capture."""
+        """Creates a new user session with immediate working fingerprint."""
         session_id = str(uuid.uuid4())
         session = UserSession(session_id=session_id)
         
-        # Apply temporary fingerprint until JS fingerprinting completes
-        session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
-        session.fingerprint_method = "temporary_fallback_python"
+        # Apply working fingerprint immediately instead of temporary
+        fallback_data = self.fingerprinting._generate_fallback_fingerprint()
+        session.fingerprint_id = fallback_data['fingerprint_id']
+        session.fingerprint_method = fallback_data['fingerprint_method']
+        session.visitor_type = fallback_data['visitor_type']
+        session.browser_privacy_level = fallback_data['browser_privacy_level']
         
         # Save to database
         self.db.save_session(session)
         
-        logger.info(f"Created new session {session_id[:8]} with user type {session.user_type.value}")
+        logger.info(f"Created new session {session_id[:8]} with working fingerprint {session.fingerprint_id[:12]}...")
         return session
 
     def get_session(self) -> Optional[UserSession]:
@@ -1529,16 +1717,6 @@ class SessionManager:
                 if session and session.active:
                     session = self._validate_session(session)
                     
-                    # Enhanced session recovery
-                    if not session.fingerprint_id:
-                        session.fingerprint_id = f"temp_fp_{session.session_id[:8]}"
-                        session.fingerprint_method = "temporary_fallback_python"
-                        try:
-                            self.db.save_session(session)
-                            logger.info(f"Applied temporary fallback fingerprint to session {session.session_id[:8]}.")
-                        except Exception as e:
-                            logger.error(f"Failed to save temporary fingerprint for session {session.session_id[:8]}: {e}", exc_info=True)
-
                     # Check limits and handle bans
                     limit_check = self.question_limits.is_within_limits(session)
                     if not limit_check.get('allowed', True):
@@ -1583,7 +1761,9 @@ class SessionManager:
             logger.error(f"Failed to get/create session: {e}", exc_info=True)
             # Create fallback session in case of critical failure
             fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST)
-            fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
+            fallback_data = self.fingerprinting._generate_fallback_fingerprint()
+            fallback_session.fingerprint_id = fallback_data['fingerprint_id']
+            fallback_session.fingerprint_method = fallback_data['fingerprint_method']
             st.session_state.current_session_id = fallback_session.session_id
             st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
             return fallback_session
@@ -2049,7 +2229,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
             const inactiveSeconds = Math.floor((inactiveTimeMs % 60000) / 1000);
             
-            # Log every 5 minutes for debugging (Python side will also log)
+            // Log every 5 minutes for debugging (Python side will also log)
             if (inactiveMinutes > 0 && inactiveMinutes % 5 === 0 && inactiveSeconds < 10) {{
                 console.log(`⏰ Session ${{sessionId.substring(0, 8)}} inactive: ${{inactiveMinutes}}m${{inactiveSeconds}}s`);
             }}
@@ -2112,91 +2292,6 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
     except Exception as e:
         logger.error(f"❌ JavaScript timer component execution error for session {session_id[:8]}: {e}", exc_info=True)
         return None
-
-def render_browser_close_detection_simplified(session_id: str):
-    """Simplified browser close detection using redirect only."""
-    if not session_id:
-        return
-
-    safe_session_id_js = session_id.replace('-', '_')
-
-    js_code = f"""
-    <script>
-    (function() {{
-        const scriptIdentifier = 'fifi_close_simple_' + '{safe_session_id_js}';
-        if (window[scriptIdentifier]) return;
-        window[scriptIdentifier] = true;
-        
-        const sessionId = '{session_id}';
-        let saveTriggered = false;
-        
-        function getAppUrl() {{
-            try {{
-                if (window.parent && window.parent.location.origin === window.location.origin) {{
-                    return window.parent.location.origin + window.parent.location.pathname;
-                }}
-            }} catch (e) {{
-                console.warn("Using current window location as fallback");
-            }}
-            return window.location.origin + window.location.pathname;
-        }}
-
-        function triggerEmergencySave() {{
-            if (saveTriggered) return;
-            saveTriggered = true;
-            
-            console.log('🚨 Browser close detected - triggering emergency save via redirect');
-            
-            const appUrl = getAppUrl();
-            const saveUrl = `${{appUrl}}?event=emergency_close&session_id=${{sessionId}}`;
-            
-            try {{
-                if (window.parent && window.parent.location.origin === window.location.origin) {{
-                    window.parent.location.href = saveUrl;
-                }} else {{
-                    window.location.href = saveUrl;
-                }}
-            }} catch (e) {{
-                console.error('Emergency save redirect failed:', e);
-            }}
-        }}
-        
-        const events = ['beforeunload', 'pagehide', 'unload'];
-        events.forEach(eventType => {{
-            try {{
-                if (window.parent && window.parent.location.origin === window.location.origin) {{
-                    window.parent.addEventListener(eventType, triggerEmergencySave, {{ capture: true }});
-                }}
-                window.addEventListener(eventType, triggerEmergencySave, {{ capture: true }});
-            }} catch (e) {{
-                console.debug(`Failed to add ${{eventType}} listener:`, e);
-            }}
-        }});
-        
-        try {{
-            const handleVisibilityChange = () => {{
-                if (document.visibilityState === 'hidden') {{
-                    triggerEmergencySave();
-                }}
-            }};
-            
-            if (window.parent && window.parent.document && window.parent.document !== document) {{
-                window.parent.document.addEventListener('visibilitychange', handleVisibilityChange);
-            }}
-            document.addEventListener('visibilitychange', handleVisibilityChange);
-        }} catch (e) {{
-            console.debug('Visibility change detection setup failed:', e);
-        }}
-        
-        console.log('✅ Simplified browser close detection initialized');
-    }})();
-    </script>
-    """
-    
-    try:
-        st.components.v1.html(js_code, height=0, width=0)
-    except Exception as e:
-        logger.error(f"Failed to render simplified browser close component: {e}", exc_info=True)
 
 def render_browser_close_detection_enhanced(session_id: str):
     """Enhanced browser close detection with multiple fallback mechanisms"""
@@ -2424,6 +2519,45 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
         return False
 
+def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
+    """Processes emergency save request from query parameters."""
+    try:
+        session_manager = st.session_state.get('session_manager')
+        if not session_manager:
+            logger.error("❌ Session manager not available during emergency save processing.")
+            return False
+        
+        session = session_manager.db.load_session(session_id)
+        if not session:
+            logger.error(f"❌ Emergency save: Session '{session_id[:8]}' not found in database.")
+            return False
+        
+        logger.info(f"🚨 Processing emergency save for session '{session_id[:8]}', reason: {reason}")
+        
+        # Check if eligible for CRM save
+        if (session.user_type.value == UserType.REGISTERED_USER.value and
+            session.email and 
+            session.messages and
+            not session.timeout_saved_to_crm):
+            
+            success = session_manager.zoho.save_chat_transcript_sync(session, f"Emergency Save: {reason}")
+            if success:
+                session.timeout_saved_to_crm = True
+                session.last_activity = datetime.now()
+                session_manager.db.save_session(session)
+                logger.info(f"✅ Emergency save completed successfully for session {session_id[:8]}")
+                return True
+            else:
+                logger.warning(f"⚠️ Emergency save CRM operation failed for session {session_id[:8]}")
+                return False
+        else:
+            logger.info(f"ℹ️ Emergency save not eligible for CRM save for session {session_id[:8]}")
+            return False
+        
+    except Exception as e:
+        logger.error(f"Emergency save processing failed: {e}", exc_info=True)
+        return False
+
 def handle_emergency_save_requests_from_query():
     """Checks for and processes emergency save requests sent via URL query parameters."""
     logger.info("🔍 EMERGENCY SAVE HANDLER: Checking for query parameter requests for emergency save...")
@@ -2548,8 +2682,8 @@ def global_message_channel_error_handler():
                     } else if (event.data.type === 'fingerprint_fallback') {
                         console.log('📡 Received fingerprint fallback message');
                         
-                        # Store fallback data for retrieval - this is not used in the current Python code
-                        # but keeping it for future potential direct JS fallback integration if needed.
+                        // Store fallback data for retrieval - this is not used in the current Python code
+                        // but keeping it for future potential direct JS fallback integration if needed.
                         window.fingerprint_fallback_data = event.data;
                     }
                 }
@@ -2595,131 +2729,6 @@ def global_message_channel_error_handler():
             st.components.v1.html(f"<script>{js_error_handler}</script>", height=0, width=0)
         except Exception as fallback_e:
             logger.error(f"Fallback global error handler also failed: {fallback_e}")
-
-# =============================================================================
-# DEBUGGING AND MONITORING IMPROVEMENTS
-# =============================================================================
-
-def render_debug_info_panel(session: UserSession, session_manager: 'SessionManager'):
-    """Renders a comprehensive debug information panel"""
-    with st.expander("🔧 System Debug Panel", expanded=False):
-        st.subheader("Session Information")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("**Session ID:**", session.session_id[:8] + "...")
-            st.write("**User Type:**", session.user_type.value)
-            st.write("**Email:**", session.email or "None")
-            st.write("**Active:**", session.active)
-            st.write("**Messages:**", len(session.messages))
-            
-        with col2:
-            st.write("**Fingerprint ID:**", session.fingerprint_id or "None")
-            st.write("**Fingerprint Method:**", session.fingerprint_method or "None")
-            st.write("**Visitor Type:**", session.visitor_type)
-            st.write("**Privacy Level:**", session.browser_privacy_level or "None")
-            st.write("**Ban Status:**", session.ban_status.value)
-        
-        st.subheader("System Status")
-        
-        # Component status checks
-        system_status = {}
-        
-        # Database status
-        try:
-            test_session = session_manager.db.load_session(session.session_id)
-            system_status["Database"] = "✅ Connected" if test_session else "⚠️ Load Failed"
-        except Exception as e:
-            system_status["Database"] = f"❌ Error: {str(e)[:50]}"
-        
-        # Fingerprinting status
-        fp_attempts = session_manager.fingerprinting.component_attempts.get(f"fp_{session.session_id}", 0)
-        system_status["Fingerprinting"] = f"✅ Ready (Attempts: {fp_attempts})" if fp_attempts < 3 else "⚠️ Max Attempts"
-        
-        # AI System status
-        system_status["AI System"] = "✅ Available" if session_manager.ai.openai_client else "⚠️ Limited"
-        
-        # Email Verification status
-        system_status["Email Verification"] = "✅ Available" if hasattr(session_manager.email_verification, 'supabase') and session_manager.email_verification.supabase else "❌ Unavailable"
-        
-        # CRM Integration status
-        system_status["CRM Integration"] = "✅ Available" if session_manager.zoho.config.ZOHO_ENABLED else "❌ Disabled"
-        
-        for component, status in system_status.items():
-            st.write(f"**{component}:** {status}")
-        
-        st.subheader("Actions")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("🔄 Force Fingerprint Refresh", key="debug_fp_refresh"):
-                st.session_state.force_fingerprint_rerun = True
-                # Reset attempt counter
-                attempt_key = f"fp_{session.session_id}"
-                if attempt_key in session_manager.fingerprinting.component_attempts:
-                    del session_manager.fingerprinting.component_attempts[attempt_key]
-                st.rerun()
-        
-        with col2:
-            if st.button("🗑️ Clear Session State", key="debug_clear_state"):
-                keys_to_clear = [k for k in st.session_state.keys() if k.startswith(('fingerprint_', 'verification_', 'debug_'))]
-                for key in keys_to_clear:
-                    del st.session_state[key]
-                st.success("Session state cleared!")
-                st.rerun()
-        
-        with col3:
-            if st.button("💾 Force Save Session", key="debug_save_session"):
-                try:
-                    session_manager.db.save_session(session)
-                    st.success("Session saved successfully!")
-                except Exception as e:
-                    st.error(f"Save failed: {str(e)}")
-        
-        # Emergency bypass (temporary)
-        if st.button("🚨 Skip Fingerprinting (Emergency)"):
-            st.session_state.skip_fingerprinting = True
-            st.rerun()
-
-
-# =============================================================================
-# IMPROVED ERROR RECOVERY
-# =============================================================================
-
-def recover_from_component_failure(session_manager: 'SessionManager', session: UserSession, error_type: str):
-    """Attempts to recover from component failures"""
-    logger.info(f"🔄 Attempting recovery from {error_type} for session {session.session_id[:8]}")
-    
-    try:
-        if error_type == "fingerprint_failure":
-            # Clear fingerprint cache and apply fallback
-            attempt_key = f"fp_{session.session_id}"
-            if attempt_key in session_manager.fingerprinting.component_attempts:
-                del session_manager.fingerprinting.component_attempts[attempt_key]
-            
-            # Apply fallback fingerprint
-            fallback_data = session_manager.fingerprinting._generate_fallback_fingerprint()
-            session_manager.apply_fingerprinting(session, fallback_data)
-            
-        elif error_type == "session_corruption":
-            # Reset session to stable state
-            session.messages = []
-            session.fingerprint_id = f"recovery_{secrets.token_hex(8)}"
-            session.fingerprint_method = "recovery_fallback"
-            session_manager.db.save_session(session)
-            
-        elif error_type == "component_timeout":
-            # Clear all component-related session state
-            keys_to_clear = [k for k in st.session_state.keys() if 'component' in k.lower() or 'fingerprint' in k.lower()]
-            for key in keys_to_clear:
-                del st.session_state[key]
-        
-        logger.info(f"✅ Recovery from {error_type} completed for session {session.session_id[:8]}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Recovery from {error_type} failed for session {session.session_id[:8]}: {e}")
-        return False
 
 # =============================================================================
 # UI COMPONENTS
@@ -2848,14 +2857,13 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             st.progress(min(session.daily_question_count / 4, 1.0))
             st.caption("Email verification unlocks 10 questions/day.")
         
-        # FIXED: Show real fingerprint ID
-        if session.fingerprint_id:
-            # Show real fingerprint instead of fallback
-            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                st.markdown(f"**Device ID:** Identifying...")
-            else:
-                st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
+        # Show working fingerprint ID immediately
+        if session.fingerprint_id and not session.fingerprint_id.startswith(("temp_py_", "temp_fp_")):
+            st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
             st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
+        else:
+            st.markdown("**Device ID:** `Ready`")
+            st.caption("Fingerprinting active")
         
         if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value == UserType.REGISTERED_USER.value:
             if session.zoho_contact_id: 
@@ -3035,60 +3043,47 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                 else:
                     st.error("Please enter the verification code you received.")
 
-def render_chat_interface(session_manager: 'SessionManager', session: UserSession):
-    """Renders the main chat interface."""
+def render_chat_interface(session_manager: 'SessionManager', session: UserSession):    """Renders the main chat interface."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
-    
-    # Render debug info panel at the top of the chat interface
-    render_debug_info_panel(session, session_manager)
 
-    # Silent fingerprinting - no user feedback
+    # Check if session needs fingerprinting (only for fallback IDs)
     fingerprint_needed = (
         not session.fingerprint_id or
-        session.fingerprint_method == "temporary_fallback_python" or
-        session.fingerprint_id.startswith("temp_py_") # Added condition for temp_py_
+        session.fingerprint_method == "fallback" or
+        session.fingerprint_id.startswith("fallback_")
     )
     
-    if fingerprint_needed and not st.session_state.get('skip_fingerprinting', False): # Added skip_fingerprinting condition
-        logger.info(f"🔄 Fingerprinting needed for session {session.session_id[:8]}")
+    if fingerprint_needed:
+        logger.info(f"🔄 Enhanced fingerprinting needed for session {session.session_id[:8]} (current: {session.fingerprint_id})")
         
-        # We don't show user messages here for fingerprinting anymore, it's a silent process.
-        # The redirection takes care of the 'page reload' for data transfer.
-        
-        # Render component and exit the current script execution.
-        # The data will be processed on the next run after the redirect.
+        # Render fingerprinting component silently
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-        # We don't need to explicitly check for results or rerun here,
-        # the URL parameter handler will catch the redirect.
-        return # IMPORTANT: Exit current run to allow redirect to happen cleanly
+        # Don't exit here - let the user continue using the app with fallback fingerprint
+        # The enhanced fingerprint will be applied on the next redirect
 
-
+    # Initialize global error handler
     global_message_channel_error_handler()
     
+    # Add browser close detection for registered users
     if session.user_type.value == UserType.REGISTERED_USER.value:
         try:
             render_browser_close_detection_enhanced(session.session_id)
         except Exception as e:
-            logger.error(f"Failed to render enhanced browser close detection for {session.session_id[:8]}: {e}", exc_info=True)
-            try:
-                render_browser_close_detection_simplified(session.session_id)
-            except Exception as fallback_e:
-                logger.error(f"Fallback browser close detection also failed: {fallback_e}", exc_info=True)
+            logger.error(f"Failed to render browser close detection for {session.session_id[:8]}: {e}", exc_info=True)
 
+    # Add 15-minute timer for registered users
     if session.user_type.value == UserType.REGISTERED_USER.value:
         timer_result = None
         try:
-            # Call the function that properly defines and executes the timer
             timer_result = render_activity_timer_component_15min(session.session_id)
             if timer_result and handle_timer_event(timer_result, session_manager, session):
                 st.rerun()
         except Exception as e:
             logger.error(f"15-minute timer component execution failed for session {session.session_id[:8]}: {e}", exc_info=True)
-            # Continue execution without timer functionality
 
-
+    # Check user limits
     limit_check = session_manager.question_limits.is_within_limits(session)
     if not limit_check['allowed']:
         if limit_check.get('reason') == 'guest_limit':
@@ -3097,6 +3092,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
         else:
             return
 
+    # Display chat messages
     for msg in session.messages:
         with st.chat_message(msg.get("role", "user")):
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
@@ -3114,6 +3110,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
                 if indicators:
                     st.caption(f"Enhanced with: {', '.join(indicators)}")
 
+    # Chat input
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=session.ban_status.value != BanStatus.NONE.value)
     
@@ -3290,22 +3287,6 @@ def ensure_initialization_fixed():
     
     return True
 
-def render_diagnostic_page():
-    """Minimal diagnostic page for testing"""
-    st.title("🔧 FiFi AI Diagnostics")
-    st.success("✅ App is loading successfully!")
-    
-    st.subheader("System Status")
-    st.json({
-        "initialized": st.session_state.get('initialized', False),
-        "session_manager": "✅" if st.session_state.get('session_manager') else "❌",
-        "db_manager": "✅" if st.session_state.get('db_manager') else "❌"
-    })
-    
-    if st.button("🔄 Force Initialize"):
-        st.session_state.clear()
-        st.rerun()
-
 def main_fixed():
     """Fixed main entry point with better error handling and timeout prevention"""
     try:
@@ -3317,24 +3298,6 @@ def main_fixed():
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
 
-    # Emergency controls at the top
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col1:
-        if st.button("🔄 Reset App", help="Force reset if app is stuck"):
-            st.session_state.clear()
-            st.rerun()
-    
-    with col2:
-        if st.button("🔧 Diagnostics", help="Open diagnostic tools"):
-            st.session_state['page'] = 'diagnostics'
-            st.rerun()
-    
-    with col3:
-        if st.session_state.get('initialized', False):
-            st.success("✅ Ready")
-        else:
-            st.warning("⏳ Loading...")
-
     # Initialize
     try:
         with st.spinner("Initializing application..."):
@@ -3342,39 +3305,33 @@ def main_fixed():
             
         if not init_success:
             st.error("⚠️ Application failed to initialize properly.")
-            st.info("Try clicking 'Reset App' above or refresh the page.")
+            st.info("Please refresh the page to try again.")
             return
             
     except Exception as init_error:
         st.error(f"⚠️ Initialization error: {str(init_error)}")
-        st.info("Try clicking 'Reset App' above or refresh the page.")
+        st.info("Please refresh the page to try again.")
         logger.error(f"Main initialization error: {init_error}", exc_info=True)
         return
 
     # Handle emergency saves AND fingerprint data first
     try:
         handle_emergency_save_requests_from_query()
-        handle_fingerprint_requests_from_query()  # ADD THIS LINE
+        handle_fingerprint_requests_from_query()
     except Exception as e:
         logger.error(f"Query parameter handling failed: {e}")
 
     # Get session manager
     session_manager = st.session_state.get('session_manager')
     if not session_manager:
-        st.error("❌ Session Manager not available. Click 'Reset App' above.")
+        st.error("❌ Session Manager not available. Please refresh the page.")
         return
 
     # Route to appropriate page
     current_page = st.session_state.get('page')
     
     try:
-        if current_page == "diagnostics":
-            render_diagnostic_page()
-            if st.button("⬅️ Back to App"):
-                st.session_state['page'] = None
-                st.rerun()
-                
-        elif current_page != "chat":
+        if current_page != "chat":
             render_welcome_page(session_manager)
             
         else:
@@ -3397,7 +3354,7 @@ def main_fixed():
                 
     except Exception as page_error:
         logger.error(f"Page routing error: {page_error}", exc_info=True)
-        st.error("⚠️ Page error occurred. Please reset the app.")
+        st.error("⚠️ Page error occurred. Please refresh the page.")
 
 # Entry point
 if __name__ == "__main__":
