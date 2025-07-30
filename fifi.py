@@ -734,24 +734,38 @@ class FingerprintingManager:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
             
+            logger.info(f"🔍 Looking for fingerprint component at: {html_file_path}")
+            
             if not os.path.exists(html_file_path):
-                logger.error(f"Fingerprint component file not found at {html_file_path}")
+                logger.error(f"❌ Fingerprint component file NOT FOUND at {html_file_path}")
+                logger.info(f"📁 Current directory contents: {os.listdir(current_dir)}")
                 return self._generate_fallback_fingerprint()
+            
+            logger.info(f"✅ Fingerprint component file found, reading content...")
             
             with open(html_file_path, 'r', encoding='utf-8') as f:
                 html_content = f.read()
             
+            logger.info(f"📄 Read {len(html_content)} characters from fingerprint component file")
+            
             # Replace session ID placeholder in the HTML
+            original_content = html_content
             html_content = html_content.replace('{SESSION_ID}', session_id)
             
-            # SILENT: height=0, no visible elements
+            if original_content == html_content:
+                logger.warning(f"⚠️ No {{SESSION_ID}} placeholder found in HTML content!")
+            else:
+                logger.info(f"✅ Replaced {{SESSION_ID}} placeholder with {session_id[:8]}...")
+            
+            # Render with minimal visibility (height=0 for silent operation)
+            logger.info(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
             st.components.v1.html(html_content, height=0, width=0, scrolling=False)
             
-            logger.debug(f"External fingerprint component rendered for session {session_id[:8]}")
+            logger.info(f"✅ External fingerprint component rendered successfully for session {session_id[:8]}")
             return None  # Always return None since data comes via redirect
             
         except Exception as e:
-            logger.error(f"Failed to render external fingerprint component: {e}")
+            logger.error(f"❌ Failed to render external fingerprint component: {e}", exc_info=True)
             return self._generate_fallback_fingerprint()
 
     def process_fingerprint_data(self, fingerprint_data: Dict[str, Any]) -> Dict[str, Any]:
