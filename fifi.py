@@ -2631,8 +2631,10 @@ def render_welcome_page(session_manager: 'SessionManager'):
                         if authenticated_session:
                             st.balloons()
                             st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
-                            time.sleep(1)
+                            logger.info(f"🔍 AUTHENTICATION SUCCESS: Setting page to 'chat' for session {authenticated_session.session_id[:8]}")
                             st.session_state.page = "chat"
+                            time.sleep(1)
+                            logger.info(f"🔍 AUTHENTICATION SUCCESS: About to rerun, page state = '{st.session_state.get('page')}'")
                             st.rerun()
             
             st.markdown("---")
@@ -2653,7 +2655,9 @@ def render_welcome_page(session_manager: 'SessionManager'):
         col1, col2, col3 = st.columns(3)
         with col2:
             if st.button("👤 Start as Guest", use_container_width=True):
+                logger.info("🔍 GUEST BUTTON: Setting page to 'chat'")
                 st.session_state.page = "chat"
+                logger.info(f"🔍 GUEST BUTTON: Page state set to '{st.session_state.get('page')}', about to rerun")
                 st.rerun()
 
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
@@ -3178,19 +3182,25 @@ def main_fixed():
 
     # Route to appropriate page
     current_page = st.session_state.get('page')
+    logger.info(f"🔍 MAIN ROUTING: Current page = '{current_page}'")
     
     try:
         if current_page != "chat":
+            logger.info("🔍 MAIN ROUTING: Rendering welcome page")
             render_welcome_page(session_manager)
             
         else:
+            logger.info("🔍 MAIN ROUTING: Should render chat interface, getting session...")
             try:
                 session = session_manager.get_session()
+                logger.info(f"🔍 MAIN ROUTING: Got session {session.session_id[:8] if session else 'None'}")
                 
                 if session and session.active:
+                    logger.info(f"🔍 MAIN ROUTING: Session is active, rendering sidebar and chat interface")
                     render_sidebar(session_manager, session, st.session_state.pdf_exporter)
                     render_chat_interface(session_manager, session)
                 else:
+                    logger.warning(f"🔍 MAIN ROUTING: Session inactive or None, redirecting to welcome")
                     st.session_state['page'] = None
                     st.rerun()
                     
