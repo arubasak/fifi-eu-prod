@@ -2485,8 +2485,8 @@ def handle_fingerprint_requests_from_query():
             
             if success:
             # Stop execution - user stays on current page, next interaction will show updated fingerprint
-            logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
-            st.stop()
+                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
+                st.stop()
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
         
