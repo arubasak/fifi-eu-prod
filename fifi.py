@@ -2712,7 +2712,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.caption("Fingerprinting in progress...")                
             else:
                 # Real fingerprint ID from JavaScript
-                st.rerun()
                 st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
                 st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
         else:
