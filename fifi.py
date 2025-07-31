@@ -2710,6 +2710,9 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 st.markdown("**Device ID:** Identifying...")
                 st.caption("Fingerprinting in progress...")
+                # Auto-refresh every 2 seconds to check for real fingerprint
+                time.sleep(2)
+                st.rerun()
             else:
                 # Real fingerprint ID from JavaScript
                 st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
