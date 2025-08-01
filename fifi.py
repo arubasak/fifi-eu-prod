@@ -2220,7 +2220,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
         return None
 
 def render_browser_close_detection_enhanced(session_id: str):
-    """Enhanced browser close detection with multiple fallback mechanisms"""
+    """Enhanced browser close detection - ONLY for real exits, NOT tab switching"""
     if not session_id:
         return
 
@@ -2234,120 +2234,88 @@ def render_browser_close_detection_enhanced(session_id: str):
         window[scriptIdentifier] = true;
         
         const sessionId = '{session_id}';
+        const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         let saveTriggered = false;
-        let heartbeatInterval = null;
         
-        console.log('🛡️ Enhanced browser close detection initialized for session', sessionId.substring(0, 8));
-        
-        function getAppUrl() {{
-            try {{
-                if (window.parent && window.parent.location && 
-                    window.parent.location.origin === window.location.origin) {{
-                    return window.parent.location.origin + window.parent.location.pathname;
-                }}
-            }} catch (e) {{
-                console.warn("Using current window location as fallback");
-            }}
-            return window.location.origin + window.location.pathname;
-        }}
+        console.log('🛡️ Browser close detection initialized (NO tab switching saves)');
 
         function triggerEmergencySave(reason = 'unknown') {{
             if (saveTriggered) return;
             saveTriggered = true;
             
-            console.log('🚨 Browser close detected (' + reason + ') - triggering emergency save');
+            console.log('🚨 REAL browser exit detected (' + reason + ') - triggering emergency save');
             
-            const appUrl = getAppUrl();
-            const saveUrl = `${{appUrl}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}`;
-            
-            if (heartbeatInterval) {{
-                clearInterval(heartbeatInterval);
-                heartbeatInterval = null;
+            // PRIMARY METHOD: Send beacon to FastAPI
+            if (navigator.sendBeacon) {{
+                try {{
+                    const emergencyData = JSON.stringify({{
+                        session_id: sessionId,
+                        reason: reason,
+                        timestamp: Date.now()
+                    }});
+                    
+                    const beaconSent = navigator.sendBeacon(
+                        FASTAPI_URL,
+                        new Blob([emergencyData], {{type: 'application/json'}})
+                    );
+                    
+                    if (beaconSent) {{
+                        console.log('✅ Emergency save beacon sent successfully');
+                        return;
+                    }} else {{
+                        console.error('❌ Beacon failed to send');
+                    }}
+                }} catch (beaconError) {{
+                    console.error('❌ Beacon error:', beaconError);
+                }}
             }}
             
+            // FALLBACK: Redirect to Streamlit
             try {{
-                if (window.parent && window.parent.location && 
-                    window.parent.location.origin === window.location.origin) {{
-                    window.parent.location.href = saveUrl;
-                }} else {{
-                    window.location.href = saveUrl;
-                }}
+                console.log('🔄 Beacon failed, trying redirect fallback...');
+                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}`;
+                window.location.href = saveUrl;
             }} catch (e) {{
-                console.error('Emergency save redirect failed:', e);
-                if (navigator.sendBeacon) {{
-                    try {{
-                        navigator.sendBeacon(saveUrl.replace('?', '/beacon?'), 
-                            'emergency_save=true&session_id=' + sessionId);
-                    }} catch (beaconError) {{
-                        console.error('Beacon fallback also failed:', beaconError);
-                    }}
-                }}
+                console.error('❌ Both beacon and redirect failed:', e);
             }}
         }}
         
-        const events = ['beforeunload', 'pagehide', 'unload'];
-        events.forEach(eventType => {{
+        // ONLY listen to REAL exit events (NOT visibility/pagehide)
+        const realExitEvents = ['beforeunload', 'unload'];
+        realExitEvents.forEach(eventType => {{
             try {{
-                window.addEventListener(eventType, () => triggerEmergencySave(eventType), {{ 
-                    capture: true, passive: true 
-                }});
+                window.addEventListener(eventType, () => {{
+                    console.log('🚨 Real exit event detected:', eventType);
+                    triggerEmergencySave(eventType);
+                }}, {{ capture: true, passive: true }});
                 
+                // Also listen on parent window (for iframe scenarios)
                 if (window.parent && window.parent !== window) {{
-                    window.parent.addEventListener(eventType, () => triggerEmergencySave('parent_' + eventType), {{ 
-                        capture: true, passive: true 
-                    }});
+                    window.parent.addEventListener(eventType, () => {{
+                        console.log('🚨 Parent exit event detected:', eventType);
+                        triggerEmergencySave('parent_' + eventType);
+                    }}, {{ capture: true, passive: true }});
                 }}
             }} catch (e) {{
                 console.debug(`Failed to add ${{eventType}} listener:`, e);
             }}
         }});
         
-        function handleVisibilityChange() {{
-            try {{
-                if (document.visibilityState === 'hidden') {{
-                    setTimeout(() => {{
-                        if (document.hidden) {{
-                            triggerEmergencySave('visibility_hidden');
-                        }}
-                    }}, 2000);
-                }}
-            }} catch (e) {{
-                console.debug('Visibility change handling failed:', e);
+        // LOG tab switching but DON'T trigger saves
+        document.addEventListener('visibilitychange', function() {{
+            if (document.visibilityState === 'hidden') {{
+                console.log('👁️ Tab switched away (NOT triggering save)');
+            }} else {{
+                console.log('👁️ Tab switched back (welcome back!)');
             }}
-        }}
+        }}, {{ passive: true }});
         
-        document.addEventListener('visibilitychange', handleVisibilityChange, {{ passive: true }});
-        try {{
-            if (window.parent && window.parent.document && window.parent.document !== document) {{
-                window.parent.document.addEventListener('visibilitychange', handleVisibilityChange, {{ passive: true }});
-            }}
-        }} catch (e) {{
-            console.debug('Parent visibility detection setup failed:', e);
-        }}
+        // LOG pagehide but DON'T trigger saves (too unreliable for tab vs close)
+        window.addEventListener('pagehide', function() {{
+            console.log('📄 pagehide detected (NOT triggering save - relying on beforeunload/unload)');
+        }}, {{ passive: true }});
         
-        let lastHeartbeat = Date.now();
-        heartbeatInterval = setInterval(() => {{
-            const now = Date.now();
-            if (now - lastHeartbeat > 60000) {{
-                triggerEmergencySave('heartbeat_timeout');
-            }}
-            lastHeartbeat = now;
-        }}, 30000);
-        
-        let wasVisible = !document.hidden;
-        setInterval(() => {{
-            const isVisible = !document.hidden;
-            if (wasVisible && !isVisible) {{
-                setTimeout(() => {{
-                    if (document.hidden) {{
-                        triggerEmergencySave('tab_hidden_timeout');
-                    }}
-                }}, 5000);
-            }}
-            wasVisible = isVisible;
-        }}, 1000);
-        
-        console.log('✅ Enhanced browser close detection fully initialized');
+        console.log('✅ Browser close detection ready - ONLY saves on real exits');
     }})();
     </script>
     """
