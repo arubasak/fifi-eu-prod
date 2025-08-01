@@ -31,7 +31,7 @@ import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
 # =============================================================================
-# FINAL INTEGRATED FIFI AI - FIXED FINGERPRINTING, NO DEBUG PANELS
+# FINAL INTEGRATED FIFI AI - WITH TRUE 15-MIN SESSION TIMEOUT
 # =============================================================================
 
 # Setup logging
@@ -1244,7 +1244,7 @@ class ZohoCRMManager:
         logger.info("=" * 80)
         logger.info(f"ZOHO SAVE START - Trigger: {trigger_reason}")
         
-        if (session.user_type.value != UserType.REGISTERED_USER.value or 
+        if (session.user_type.value not in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] or 
             not session.email or 
             not session.messages or 
             not self.config.ZOHO_ENABLED):
@@ -1531,6 +1531,60 @@ class SessionManager:
         
         logger.info(f"Created new session {session_id[:8]} with temporary fingerprint - waiting for JS fingerprinting")
         return session
+
+    def _check_15min_eligibility(self, session: UserSession) -> bool:
+        """Check if session has been active for at least 15 minutes to be eligible for CRM save."""
+        try:
+            # Use the earliest of session creation time or first question time
+            start_time = session.created_at
+            if session.last_question_time and session.last_question_time < start_time:
+                start_time = session.last_question_time
+            
+            elapsed_time = datetime.now() - start_time
+            elapsed_minutes = elapsed_time.total_seconds() / 60
+            
+            logger.info(f"15-min eligibility check for {session.session_id[:8]}: {elapsed_minutes:.1f} minutes elapsed")
+            return elapsed_minutes >= 15.0
+            
+        except Exception as e:
+            logger.error(f"Error checking 15-min eligibility for {session.session_id[:8]}: {e}")
+            return False
+
+    def _is_crm_save_eligible(self, session: UserSession, trigger_reason: str) -> bool:
+        """Enhanced eligibility check for CRM saves including new user types and conditions."""
+        try:
+            # Basic eligibility requirements
+            if not session.email or not session.messages:
+                logger.info(f"CRM save not eligible - missing email or messages for {session.session_id[:8]}")
+                return False
+            
+            # Check if already saved to avoid duplicates
+            if session.timeout_saved_to_crm and "clear_chat" in trigger_reason.lower():
+                logger.info(f"CRM save not eligible - already saved for {session.session_id[:8]}")
+                return False
+            
+            # User type eligibility: registered_user OR email_verified_guest
+            if session.user_type not in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]:
+                logger.info(f"CRM save not eligible - user type {session.user_type.value} for {session.session_id[:8]}")
+                return False
+            
+            # Question count requirement: at least 1 question asked
+            if session.daily_question_count < 1:
+                logger.info(f"CRM save not eligible - no questions asked for {session.session_id[:8]}")
+                return False
+            
+            # 15-minute eligibility check
+            if not self._check_15min_eligibility(session):
+                logger.info(f"CRM save not eligible - less than 15 minutes active for {session.session_id[:8]}")
+                return False
+            
+            # All conditions met
+            logger.info(f"CRM save eligible for {session.session_id[:8]}: UserType={session.user_type.value}, Questions={session.daily_question_count}, 15min+")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error checking CRM eligibility for {session.session_id[:8]}: {e}")
+            return False
 
     def get_session(self) -> Optional[UserSession]:
         """Gets or creates the current user session."""
@@ -1884,23 +1938,57 @@ class SessionManager:
             }
 
     def clear_chat_history(self, session: UserSession):
-        """Clears chat history for the session."""
-        session.messages = []
-        session.last_activity = datetime.now()
-        self.db.save_session(session)
-        logger.info(f"Chat history cleared for session {session.session_id[:8]}")
+        """Enhanced clear chat history with CRM save functionality."""
+        try:
+            logger.info(f"Clear chat requested for session {session.session_id[:8]} with {len(session.messages)} messages")
+            
+            # Check if eligible for CRM save before clearing
+            if self._is_crm_save_eligible(session, "Clear Chat Request"):
+                logger.info(f"Performing CRM save before clearing chat for {session.session_id[:8]}")
+                
+                try:
+                    # Save to CRM directly (no tab switching protection)
+                    save_success = self.zoho.save_chat_transcript_sync(session, "Clear Chat Request")
+                    
+                    if save_success:
+                        session.timeout_saved_to_crm = True
+                        logger.info(f"✅ CRM save completed successfully before clearing chat for {session.session_id[:8]}")
+                    else:
+                        logger.warning(f"⚠️ CRM save failed before clearing chat for {session.session_id[:8]}")
+                        
+                except Exception as crm_error:
+                    logger.error(f"CRM save error during clear chat for {session.session_id[:8]}: {crm_error}")
+                    # Continue with clearing chat even if CRM save fails
+            
+            # Clear the chat messages
+            session.messages = []
+            session.last_activity = datetime.now()
+            
+            # Save to database (always happens regardless of CRM save status)
+            self.db.save_session(session)
+            logger.info(f"Chat history cleared and saved to DB for session {session.session_id[:8]}")
+            
+        except Exception as e:
+            logger.error(f"Error clearing chat history for session {session.session_id[:8]}: {e}", exc_info=True)
+            # Fallback: just clear and save to DB
+            session.messages = []
+            session.last_activity = datetime.now()
+            try:
+                self.db.save_session(session)
+            except Exception as db_error:
+                logger.error(f"Database save also failed during clear chat fallback: {db_error}")
 
     def end_session(self, session: UserSession):
         """Ends the current session and performs cleanup."""
         try:
-            # Save to CRM if eligible
-            if (session.user_type == UserType.REGISTERED_USER and 
-                session.email and 
-                session.messages and 
-                not session.timeout_saved_to_crm):
-                
+            # Save to CRM if eligible (using the enhanced eligibility check)
+            if self._is_crm_save_eligible(session, "Manual Sign Out"):
                 logger.info(f"Performing CRM save during session end for {session.session_id[:8]}")
-                self.zoho.save_chat_transcript_sync(session, "Manual Sign Out")
+                
+                # For sign out, save directly to CRM (no tab switching protection)
+                save_success = self.zoho.save_chat_transcript_sync(session, "Manual Sign Out")
+                if save_success:
+                    session.timeout_saved_to_crm = True
             
             # Mark session as inactive
             session.active = False
@@ -1924,8 +2012,8 @@ class SessionManager:
             st.warning("No conversation to save.")
             return
         
-        if session.user_type != UserType.REGISTERED_USER:
-            st.error("CRM saving is only available for registered users.")
+        if session.user_type not in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]:
+            st.error("CRM saving is only available for registered users and email-verified guests.")
             return
         
         with st.spinner("Saving conversation to Zoho CRM..."):
@@ -2270,7 +2358,7 @@ def render_browser_close_detection_enhanced(session_id: str):
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
 
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
-    """Processes events triggered by the JavaScript activity timer (e.g., 15-minute timeout)."""
+    """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
     if not timer_result or not isinstance(timer_result, dict):
         return False
     
@@ -2285,13 +2373,11 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
         
         if event == 'session_timeout_15min':
             st.info(f"⏰ **Session timeout:** Detected {inactive_minutes} minutes of inactivity.")
+            st.info("🔄 **Your session is being closed due to inactivity.**")
             
-            if (session.user_type.value == UserType.REGISTERED_USER.value and
-                session.email and 
-                session.messages and
-                not session.timeout_saved_to_crm):
-                
-                with st.spinner("💾 Auto-saving chat to CRM (15-min timeout)..."):
+            # Save to CRM if eligible before closing session
+            if session_manager._is_crm_save_eligible(session, "15-Minute Session Inactivity Timeout"):
+                with st.spinner("💾 Auto-saving chat to CRM before closing session..."):
                     try:
                         save_success = session_manager.zoho.save_chat_transcript_sync(session, "15-Minute Session Inactivity Timeout")
                     except Exception as e:
@@ -2301,18 +2387,42 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
                 if save_success:
                     st.success("✅ Chat automatically saved to CRM!")
                     session.timeout_saved_to_crm = True
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
                 else:
                     st.warning("⚠️ Auto-save to CRM failed. Please check your credentials or contact support if issue persists.")
-                
-                st.info("ℹ️ You can continue using FiFi AI.")
-                return False
             else:
-                st.info("ℹ️ Session timeout detected, but no CRM save was performed (e.g., Guest user, no chat history, or already saved).")
-                logger.info(f"15-min timeout CRM save eligibility check failed for {session_id[:8]}: UserType={session.user_type.value}, Email={bool(session.email)}, Messages={len(session.messages)}, Saved Status={session.timeout_saved_to_crm}.")
-                st.info("ℹ️ You can continue using FiFi AI.")
-                return False
+                st.info("ℹ️ Session timeout detected, but no CRM save was performed (not eligible based on activity, user type, or duration).")
+                logger.info(f"15-min timeout CRM save eligibility check failed for {session_id[:8]}: UserType={session.user_type.value}, Email={bool(session.email)}, Messages={len(session.messages)}, Questions={session.daily_question_count}, Saved Status={session.timeout_saved_to_crm}.")
+            
+            # TRUE SESSION TIMEOUT: Close session and redirect to home
+            try:
+                # Mark session as inactive
+                session.active = False
+                session.last_activity = datetime.now()
+                session_manager.db.save_session(session)
+                
+                # Clear Streamlit session state to force new session
+                if 'current_session_id' in st.session_state:
+                    del st.session_state['current_session_id']
+                if 'page' in st.session_state:
+                    del st.session_state['page']
+                
+                logger.info(f"🔒 Session {session_id[:8]} closed due to 15-minute timeout")
+                
+                # Show redirect message and redirect to home
+                st.info("🏠 **Redirecting to home page...**")
+                st.info("You can start a new session from the welcome page.")
+                
+                # Force redirect to home after a brief delay
+                time.sleep(2)
+                st.rerun()
+                
+            except Exception as close_error:
+                logger.error(f"Error closing session during timeout for {session_id[:8]}: {close_error}")
+                # Force redirect even if session close fails
+                st.session_state['page'] = None
+                st.rerun()
+                
+            return True  # Indicate that session was closed
                 
         else:
             logger.warning(f"⚠️ Received unhandled timer event type: '{event}'.")
@@ -2373,11 +2483,7 @@ def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
         logger.info(f"🚨 Processing emergency save for session '{session_id[:8]}', reason: {reason}")
         
         # Check if eligible for CRM save
-        if (session.user_type.value == UserType.REGISTERED_USER.value and
-            session.email and 
-            session.messages and
-            not session.timeout_saved_to_crm):
-            
+        if session_manager._is_crm_save_eligible(session, f"Emergency Save: {reason}"):
             success = session_manager.zoho.save_chat_transcript_sync(session, f"Emergency Save: {reason}")
             if success:
                 session.timeout_saved_to_crm = True
@@ -2718,7 +2824,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             st.markdown("**Device ID:** Initializing...")
             st.caption("Starting fingerprinting...")
         
-        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value == UserType.REGISTERED_USER.value:
+        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
             if session.zoho_contact_id: 
                 st.success("🔗 **CRM Linked**")
             else: 
@@ -2728,7 +2834,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             else:
                 st.caption("💾 Auto-save enabled (after 15 min inactivity)")
         else: 
-            st.caption("🚫 CRM Integration: Registered users only")
+            st.caption("🚫 CRM Integration: Registered users & verified guests only")
         
         st.divider()
         
@@ -2750,15 +2856,34 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🗑️ Clear Chat", use_container_width=True, help="Clears all messages from the current conversation."):
-                session_manager.clear_chat_history(session)
+            # Enhanced Clear Chat button with tooltip about CRM save
+            clear_chat_help = "Clears all messages from the current conversation."
+            if (session.user_type in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST] and 
+                session.email and session.messages and session.daily_question_count >= 1):
+                
+                # Check 15-minute eligibility
+                if session_manager._check_15min_eligibility(session):
+                    clear_chat_help += " Your conversation will be automatically saved to CRM before clearing."
+                else:
+                    clear_chat_help += " (CRM save requires 15+ minutes of activity)"
+            
+            if st.button("🗑️ Clear Chat", use_container_width=True, help=clear_chat_help):
+                # Show appropriate messaging based on CRM save eligibility
+                if session_manager._is_crm_save_eligible(session, "Clear Chat Request"):
+                    with st.spinner("💾 Saving conversation to CRM before clearing..."):
+                        session_manager.clear_chat_history(session)
+                    st.success("✅ Chat saved to CRM and cleared!")
+                else:
+                    session_manager.clear_chat_history(session)
+                    st.info("🗑️ Chat history cleared.")
+                
                 st.rerun()
         with col2:
             if st.button("🚪 Sign Out", use_container_width=True, help="Ends your current session and returns to the welcome page."):
                 session_manager.end_session(session)
                 st.rerun()
 
-        if session.user_type.value == UserType.REGISTERED_USER.value and session.messages:
+        if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and session.messages:
             st.divider()
             
             pdf_buffer = pdf_exporter.generate_chat_pdf(session)
@@ -2920,22 +3045,22 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     # Initialize global error handler
     global_message_channel_error_handler()
     
-    # Add browser close detection for registered users
-    if session.user_type.value == UserType.REGISTERED_USER.value:
+    # Add browser close detection for all user types (since all can now have CRM saves)
+    if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
             render_browser_close_detection_enhanced(session.session_id)
         except Exception as e:
             logger.error(f"Failed to render browser close detection for {session.session_id[:8]}: {e}", exc_info=True)
 
-    # Add 15-minute timer for registered users
-    if session.user_type.value == UserType.REGISTERED_USER.value:
-        timer_result = None
-        try:
-            timer_result = render_activity_timer_component_15min(session.session_id)
-            if timer_result and handle_timer_event(timer_result, session_manager, session):
-                st.rerun()
-        except Exception as e:
-            logger.error(f"15-minute timer component execution failed for session {session.session_id[:8]}: {e}", exc_info=True)
+    # Add 15-minute timer for ALL user types (since sessions now auto-close after 15 minutes)
+    timer_result = None
+    try:
+        timer_result = render_activity_timer_component_15min(session.session_id)
+        if timer_result and handle_timer_event(timer_result, session_manager, session):
+            # Timer event handled and session was closed - execution should have been stopped by st.rerun()
+            return
+    except Exception as e:
+        logger.error(f"15-minute timer component execution failed for session {session.session_id[:8]}: {e}", exc_info=True)
 
     # Check user limits
     limit_check = session_manager.question_limits.is_within_limits(session)
@@ -3013,6 +3138,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
                     st.error("⚠️ Sorry, I encountered an unexpected error processing your request. Please try again.")
         
         st.rerun()
+
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
 # =============================================================================
