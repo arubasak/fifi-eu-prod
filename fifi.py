@@ -2224,6 +2224,7 @@ def render_browser_close_detection_enhanced(session_id: str):
     if not session_id:
         return
 
+    # Use full session ID for the actual data, but safe version for variable names
     safe_session_id_js = session_id.replace('-', '_')
 
     js_code = f"""
@@ -2233,26 +2234,31 @@ def render_browser_close_detection_enhanced(session_id: str):
         if (window[scriptIdentifier]) return;
         window[scriptIdentifier] = true;
         
-        const sessionId = '{session_id}';
+        // CRITICAL: Use the full session ID, not the safe version
+        const sessionId = '{session_id}';  // Full UUID: {session_id}
         const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         let saveTriggered = false;
         
-        console.log('🛡️ Browser close detection initialized (NO tab switching saves)');
+        console.log('🛡️ Browser close detection initialized with session ID:', sessionId);
+        console.log('🔍 Session ID length check:', sessionId.length, 'chars (should be 36)');
 
         function triggerEmergencySave(reason = 'unknown') {{
             if (saveTriggered) return;
             saveTriggered = true;
             
             console.log('🚨 REAL browser exit detected (' + reason + ') - triggering emergency save');
+            console.log('📤 Sending emergency save for session:', sessionId);
             
             // PRIMARY METHOD: Send beacon to FastAPI
             if (navigator.sendBeacon) {{
                 try {{
                     const emergencyData = JSON.stringify({{
-                        session_id: sessionId,
+                        session_id: sessionId,  // Using full session ID
                         reason: reason,
                         timestamp: Date.now()
                     }});
+                    
+                    console.log('📤 Beacon payload:', emergencyData);
                     
                     const beaconSent = navigator.sendBeacon(
                         FASTAPI_URL,
@@ -2274,6 +2280,7 @@ def render_browser_close_detection_enhanced(session_id: str):
             try {{
                 console.log('🔄 Beacon failed, trying redirect fallback...');
                 const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}`;
+                console.log('🔄 Redirect URL:', saveUrl);
                 window.location.href = saveUrl;
             }} catch (e) {{
                 console.error('❌ Both beacon and redirect failed:', e);
@@ -2301,30 +2308,17 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }});
         
-        // LOG tab switching but DON'T trigger saves
-        document.addEventListener('visibilitychange', function() {{
-            if (document.visibilityState === 'hidden') {{
-                console.log('👁️ Tab switched away (NOT triggering save)');
-            }} else {{
-                console.log('👁️ Tab switched back (welcome back!)');
-            }}
-        }}, {{ passive: true }});
-        
-        // LOG pagehide but DON'T trigger saves (too unreliable for tab vs close)
-        window.addEventListener('pagehide', function() {{
-            console.log('📄 pagehide detected (NOT triggering save - relying on beforeunload/unload)');
-        }}, {{ passive: true }});
-        
-        console.log('✅ Browser close detection ready - ONLY saves on real exits');
+        console.log('✅ Browser close detection ready - session ID confirmed:', sessionId);
     }})();
     </script>
     """
     
     try:
         st.components.v1.html(js_code, height=0, width=0)
+        logger.info(f"✅ Enhanced browser close detection rendered for session {session_id}")
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
-
+        
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
     """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
     if not timer_result or not isinstance(timer_result, dict):
