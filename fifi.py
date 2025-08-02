@@ -31,7 +31,7 @@ import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
 # =============================================================================
-# FINAL INTEGRATED FIFI AI - WITH TRUE 15-MIN SESSION TIMEOUT
+# FINAL INTEGRATED FIFI AI - WITH SESSION ID DEBUG & FIXES
 # =============================================================================
 
 # Setup logging
@@ -95,6 +95,92 @@ DEFAULT_EXCLUDED_DOMAINS = [
     "foodmaven.com", "connect.kehe.com", "knowde.com", "ingredientsonline.com",
     "sourcegoodfood.com"
 ]
+
+# =============================================================================
+# DEBUG UTILITIES FOR SESSION ID TRACING
+# =============================================================================
+
+def debug_session_id_flow(session_id: str, location: str):
+    """Debug helper to track session ID through the system"""
+    logger.info(f"🔍 SESSION ID DEBUG - {location}:")
+    logger.info(f"   Full ID: '{session_id}'")
+    logger.info(f"   Length: {len(session_id)} chars")
+    logger.info(f"   First 8: '{session_id[:8]}'")
+    logger.info(f"   Expected: 36 chars UUID format")
+    if len(session_id) != 36:
+        logger.error(f"❌ TRUNCATION DETECTED at {location}!")
+        logger.error(f"   Expected: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+        logger.error(f"   Received: {session_id}")
+
+def debug_streamlit_session_state():
+    """Check if Streamlit itself truncates session IDs"""
+    logger.info("🔍 STREAMLIT_SESSION_STATE DEBUG:")
+    
+    current_id = st.session_state.get('current_session_id')
+    if current_id:
+        logger.info(f"   current_session_id: '{current_id}' (len: {len(current_id)})")
+        
+        # Test storing and retrieving a full UUID
+        test_uuid = str(uuid.uuid4())
+        st.session_state['test_uuid'] = test_uuid
+        retrieved_uuid = st.session_state.get('test_uuid')
+        
+        logger.info(f"   Test UUID stored: '{test_uuid}' (len: {len(test_uuid)})")
+        logger.info(f"   Test UUID retrieved: '{retrieved_uuid}' (len: {len(retrieved_uuid)})")
+        
+        if test_uuid != retrieved_uuid:
+            logger.error("❌ STREAMLIT TRUNCATES UUIDs!")
+        else:
+            logger.info("✅ Streamlit session state preserves UUIDs")
+        
+        # Clean up test
+        if 'test_uuid' in st.session_state:
+            del st.session_state['test_uuid']
+    else:
+        logger.warning("   No current_session_id in session state")
+
+def debug_database_session_storage(db_manager, session_id):
+    """Check if database truncates session IDs"""
+    logger.info(f"🔍 DB_DEBUG: Testing storage for '{session_id}' (len: {len(session_id)})")
+    
+    try:
+        with db_manager.lock:
+            if hasattr(db_manager.conn, 'row_factory'):
+                db_manager.conn.row_factory = None
+            
+            cursor = db_manager.conn.execute(
+                "SELECT session_id FROM sessions WHERE session_id = ?", 
+                (session_id,)
+            )
+            result = cursor.fetchone()
+            
+            if result:
+                stored_id = result[0]
+                logger.info(f"🔍 DB_DEBUG: Found stored ID '{stored_id}' (len: {len(stored_id)})")
+                
+                if stored_id != session_id:
+                    logger.error(f"❌ DB_DEBUG: Database corrupted session ID!")
+                    logger.error(f"   Original: '{session_id}'")
+                    logger.error(f"   Stored:   '{stored_id}'")
+                else:
+                    logger.info("✅ DB_DEBUG: Database preserves full session ID")
+            else:
+                logger.warning(f"🔍 DB_DEBUG: No session found with ID '{session_id}'")
+                
+                # Check if any partial matches exist
+                partial_cursor = db_manager.conn.execute(
+                    "SELECT session_id FROM sessions WHERE session_id LIKE ? LIMIT 3",
+                    (f"{session_id[:8]}%",)
+                )
+                partials = partial_cursor.fetchall()
+                
+                if partials:
+                    logger.info(f"🔍 DB_DEBUG: Found {len(partials)} partial matches:")
+                    for partial in partials:
+                        logger.info(f"   Partial: '{partial[0]}'")
+                
+    except Exception as e:
+        logger.error(f"❌ DB_DEBUG: Database check failed: {e}")
 
 # Utility for safe JSON loading
 def safe_json_loads(data: Optional[str], default_value: Any = None) -> Any:
@@ -442,7 +528,9 @@ class DatabaseManager:
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
-        """Save session with SQLite Cloud compatibility and connection health check"""
+        """Save session with enhanced session ID debugging"""
+        debug_session_id_flow(session.session_id, "DatabaseManager.save_session - Start")
+        
         with self.lock:
             # Check and ensure connection health before any DB operation
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
@@ -475,6 +563,9 @@ class DatabaseManager:
                     session.messages = []
                     session.email_addresses_used = []
                 
+                # Debug the session ID being saved
+                debug_session_id_flow(session.session_id, "DatabaseManager.save_session - Before DB Insert")
+                
                 self.conn.execute(
                     '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                     (session.session_id, session.user_type.value, session.email, session.full_name,
@@ -495,6 +586,9 @@ class DatabaseManager:
                 
                 logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}")
                 
+                # Verify the save with a debug check
+                debug_database_session_storage(self, session.session_id)
+                
             except Exception as e:
                 logger.error(f"Failed to save session {session.session_id[:8]}: {e}", exc_info=True)
                 # Try to fallback to in-memory on save failure
@@ -506,7 +600,9 @@ class DatabaseManager:
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
-        """Load session with complete SQLite Cloud compatibility and connection health check"""
+        """Load session with enhanced session ID debugging"""
+        debug_session_id_flow(session_id, "DatabaseManager.load_session - Start")
+        
         with self.lock:
             # Check and ensure connection health before any DB operation
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
@@ -527,6 +623,9 @@ class DatabaseManager:
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
                 
+                # Debug before database query
+                debug_session_id_flow(session_id, "DatabaseManager.load_session - Before DB Query")
+                
                 cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
                 row = cursor.fetchone()
                 
@@ -539,6 +638,15 @@ class DatabaseManager:
                 if len(row) < expected_cols:
                     logger.error(f"Row has insufficient columns: {len(row)} (expected {expected_cols}) for session {session_id[:8]}. Data corruption suspected.")
                     return None
+                
+                # Debug the session ID retrieved from database
+                retrieved_session_id = row[0]
+                debug_session_id_flow(retrieved_session_id, "DatabaseManager.load_session - Retrieved from DB")
+                
+                if retrieved_session_id != session_id:
+                    logger.error(f"❌ SESSION ID MISMATCH!")
+                    logger.error(f"   Requested: '{session_id}'")
+                    logger.error(f"   Retrieved: '{retrieved_session_id}'")
                     
                 try:
                     user_session = UserSession(
@@ -729,12 +837,19 @@ class FingerprintingManager:
         self.component_attempts = defaultdict(int)
 
     def render_fingerprint_component(self, session_id: str):
-        """Renders fingerprinting component using external fingerprint_component.html file."""
+        """Enhanced fingerprinting with session ID validation and debugging"""
         try:
+            # Validate session ID before proceeding
+            debug_session_id_flow(session_id, "FingerprintingManager.render_fingerprint_component - Start")
+            
+            if not session_id or len(session_id) != 36:
+                logger.error(f"❌ INVALID SESSION ID for fingerprinting: '{session_id}' (len: {len(session_id) if session_id else 0})")
+                return self._generate_fallback_fingerprint()
+            
             current_dir = os.path.dirname(os.path.abspath(__file__))
             html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
             
-            logger.info(f"🔍 Looking for fingerprint component at: {html_file_path}")
+            logger.info(f"🔍 Fingerprinting component for session: '{session_id[:8]}...'")
             
             if not os.path.exists(html_file_path):
                 logger.error(f"❌ Fingerprint component file NOT FOUND at {html_file_path}")
@@ -748,24 +863,34 @@ class FingerprintingManager:
             
             logger.info(f"📄 Read {len(html_content)} characters from fingerprint component file")
             
-            # Replace session ID placeholder in the HTML
+            # Validate template before replacement
+            if '{SESSION_ID}' not in html_content:
+                logger.error("❌ No {SESSION_ID} placeholder found in fingerprint component template!")
+                return self._generate_fallback_fingerprint()
+            
+            # Replace with full session ID
             original_content = html_content
             html_content = html_content.replace('{SESSION_ID}', session_id)
             
+            # Verify replacement happened correctly
+            if session_id not in html_content:
+                logger.error(f"❌ Session ID replacement failed! ID '{session_id}' not found in final HTML")
+                return self._generate_fallback_fingerprint()
+            
             if original_content == html_content:
-                logger.warning(f"⚠️ No {{SESSION_ID}} placeholder found in HTML content!")
+                logger.warning(f"⚠️ No {SESSION_ID} placeholder replacement detected!")
             else:
-                logger.info(f"✅ Replaced {{SESSION_ID}} placeholder with {session_id[:8]}...")
+                logger.info(f"✅ Session ID replacement successful: {session_id[:8]}...")
             
             # Render with minimal visibility (height=0 for silent operation)
             logger.info(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
             st.components.v1.html(html_content, height=0, width=0, scrolling=False)
             
-            logger.info(f"✅ External fingerprint component rendered successfully for session {session_id[:8]}")
+            logger.info(f"✅ Fingerprinting component rendered successfully for session {session_id[:8]}")
             return None  # Always return None since data comes via redirect
             
         except Exception as e:
-            logger.error(f"❌ Failed to render external fingerprint component: {e}", exc_info=True)
+            logger.error(f"❌ Failed to render fingerprinting component: {e}", exc_info=True)
             return self._generate_fallback_fingerprint()
 
     def process_fingerprint_data(self, fingerprint_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -803,6 +928,22 @@ class FingerprintingManager:
             'browser_privacy_level': 'high_privacy',
             'working_methods': []
         }
+
+def debug_fingerprinting_status(session: UserSession):
+    """Debug the current fingerprinting status"""
+    logger.info("🔍 FINGERPRINTING DEBUG:")
+    logger.info(f"   Fingerprint ID: '{session.fingerprint_id}'")
+    logger.info(f"   Method: '{session.fingerprint_method}'")
+    logger.info(f"   Visitor Type: '{session.visitor_type}'")
+    logger.info(f"   Privacy Level: '{session.browser_privacy_level}'")
+    
+    if not session.fingerprint_id:
+        logger.error("❌ NO FINGERPRINT ID")
+    elif session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+        logger.warning(f"⚠️ USING FALLBACK FINGERPRINT: {session.fingerprint_id}")
+        logger.warning("⚠️ This suggests JavaScript fingerprinting failed or hasn't completed")
+    else:
+        logger.info(f"✅ PROPER FINGERPRINT: {session.fingerprint_id[:12]}...")
 
 class EmailVerificationManager:
     """Manages email verification process using Supabase Auth OTP."""
@@ -1518,8 +1659,10 @@ class SessionManager:
             logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
 
     def _create_new_session(self) -> UserSession:
-        """Creates a new user session with temporary fingerprint until JS fingerprinting completes."""
+        """Creates a new user session with enhanced session ID debugging."""
         session_id = str(uuid.uuid4())
+        debug_session_id_flow(session_id, "SessionManager._create_new_session - Generated")
+        
         session = UserSession(session_id=session_id)
         
         # Apply temporary fingerprint until JS fingerprinting completes
@@ -1587,18 +1730,22 @@ class SessionManager:
             return False
 
     def get_session(self) -> Optional[UserSession]:
-        """Gets or creates the current user session."""
+        """Gets or creates the current user session with enhanced debugging."""
         # Perform periodic cleanup
         self._periodic_cleanup()
 
         try:
             # Try to get existing session from Streamlit session state
             session_id = st.session_state.get('current_session_id')
+            debug_session_id_flow(session_id, "SessionManager.get_session - From st.session_state") if session_id else None
             
             if session_id:
                 session = self.db.load_session(session_id)
                 if session and session.active:
                     session = self._validate_session(session)
+                    
+                    # Debug fingerprinting status
+                    debug_fingerprinting_status(session)
                     
                     # Enhanced session recovery - always ensure we have some fingerprint
                     if not session.fingerprint_id:
@@ -1648,6 +1795,7 @@ class SessionManager:
             # Create new session if no valid session found
             new_session = self._create_new_session()
             st.session_state.current_session_id = new_session.session_id
+            debug_session_id_flow(new_session.session_id, "SessionManager.get_session - Set in st.session_state")
             return self._validate_session(new_session)
             
         except Exception as e:
@@ -1657,6 +1805,7 @@ class SessionManager:
             fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
             fallback_session.fingerprint_method = "emergency_fallback"
             st.session_state.current_session_id = fallback_session.session_id
+            debug_session_id_flow(fallback_session.session_id, "SessionManager.get_session - Emergency Fallback")
             st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
             return fallback_session
 
@@ -2027,14 +2176,21 @@ class SessionManager:
             st.error("❌ Failed to save to CRM. Please try again later.")
 
 # =============================================================================
-# JAVASCRIPT COMPONENTS & EVENT HANDLING
+# JAVASCRIPT COMPONENTS & EVENT HANDLING WITH SESSION ID DEBUG
 # =============================================================================
 
 def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str, Any]]:
-    """Renders a JavaScript component that tracks user inactivity and triggers an event after 15 minutes."""
+    """Enhanced 15-minute timer with session ID debugging"""
     if not session_id:
         logger.warning("❌ Timer component: No session ID provided")
         return None
+    
+    debug_session_id_flow(session_id, "Timer Component - Start")
+    
+    if len(session_id) != 36:
+        logger.error(f"❌ TIMER_COMPONENT: Session ID already truncated! Expected 36, got {len(session_id)}")
+        logger.error(f"❌ Truncated ID: '{session_id}'")
+        # Continue anyway to see what happens
     
     safe_session_id_js = session_id.replace('-', '_')
     
@@ -2044,19 +2200,33 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             const sessionId = "{session_id}";
             const SESSION_TIMEOUT_MS = 900000; // 15 minutes
             
-            console.log("🕐 FiFi 15-Minute Timer: Checking session", sessionId.substring(0, 8));
+            // 🔍 DEBUG: Check what we actually received in JavaScript
+            console.log("🕐 FiFi 15-Minute Timer: Session ID received:", sessionId);
+            console.log("🕐 Timer: Session ID length:", sessionId.length);
+            console.log("🕐 Timer: Expected format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx");
+            
+            if (sessionId.length !== 36) {{
+                console.error("❌ CRITICAL: Session ID truncated before reaching JavaScript timer!");
+                console.error("❌ Expected 36 chars, got:", sessionId.length);
+                console.error("❌ Received ID:", sessionId);
+                console.error("❌ This will cause FastAPI emergency saves to fail!");
+            }} else {{
+                console.log("✅ Timer: Session ID format looks correct");
+            }}
+            
+            console.log("🕐 Timer: Checking session", sessionId.substring(0, 8));
             
             // Initialize or reset timer state
             if (typeof window.fifi_timer_state_{safe_session_id_js} === 'undefined' || 
                 window.fifi_timer_state_{safe_session_id_js} === null || 
                 window.fifi_timer_state_{safe_session_id_js}.sessionId !== sessionId) {{
                 
-                console.log("🆕 FiFi 15-Minute Timer: Starting/Resetting for session", sessionId.substring(0, 8)); 
+                console.log("🆕 Timer: Starting/Resetting for session", sessionId.substring(0, 8)); 
                 window.fifi_timer_state_{safe_session_id_js} = {{
                     lastActivityTime: Date.now(),
                     expired: false,
                     listenersInitialized: false,
-                    sessionId: sessionId
+                    sessionId: sessionId  // Store FULL session ID
                 }};
             }}
             
@@ -2064,7 +2234,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             
             // Setup activity listeners (only once)
             if (!state.listenersInitialized) {{
-                console.log("👂 Setting up FiFi 15-Minute activity listeners...");
+                console.log("👂 Setting up activity listeners...");
                 
                 function resetActivity() {{
                     try {{
@@ -2146,7 +2316,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                 }}
                 
                 state.listenersInitialized = true;
-                console.log("✅ FiFi 15-Minute activity listeners initialized.");
+                console.log("✅ Activity listeners initialized.");
             }}
             
             // Check for timeout
@@ -2164,10 +2334,11 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             if (inactiveTimeMs >= SESSION_TIMEOUT_MS && !state.expired) {{
                 state.expired = true;
                 console.log("🚨 15-MINUTE SESSION TIMEOUT REACHED for session", sessionId.substring(0, 8));
+                console.log("🚨 Timer returning timeout event with FULL session ID:", sessionId);
                 
                 return {{
                     event: "session_timeout_15min",
-                    session_id: sessionId,
+                    session_id: sessionId,  // Return FULL session ID
                     inactive_time_ms: inactiveTimeMs,
                     inactive_minutes: inactiveMinutes,
                     inactive_seconds: inactiveSeconds,
@@ -2178,10 +2349,10 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             return null;
             
         }} catch (error) {{
-            console.error("🚨 FiFi 15-Minute Timer component caught a critical error:", error);
+            console.error("🚨 Timer component caught a critical error:", error);
             return {{
                 event: "timer_error",
-                session_id: "{session_id}",
+                session_id: "{session_id}",  // Use full session ID in error too
                 error: error.message,
                 timestamp: Date.now()
             }};
@@ -2192,6 +2363,14 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
     try:
         # Execute the timer JavaScript code
         timer_result = st_javascript(js_timer_code)
+        
+        # Debug the result
+        if timer_result and isinstance(timer_result, dict):
+            result_session_id = timer_result.get('session_id')
+            if result_session_id:
+                debug_session_id_flow(result_session_id, "Timer Component - JavaScript Result")
+                if len(result_session_id) != 36:
+                    logger.error(f"❌ TIMER_RESULT: Session ID truncated in JavaScript result!")
         
         # Validate the result
         if timer_result is None or timer_result == 0 or timer_result == "" or timer_result == False:
@@ -2220,9 +2399,12 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
         return None
 
 def render_browser_close_detection_enhanced(session_id: str):
-    """Enhanced browser close detection - ONLY for real exits, NOT tab switching"""
+    """Enhanced browser close detection with session ID debugging - REVERTED to working version with debug"""
     if not session_id:
         return
+
+    # Debug the session ID we're starting with
+    debug_session_id_flow(session_id, "Browser Close Detection - Start")
 
     safe_session_id_js = session_id.replace('-', '_')
 
@@ -2237,13 +2419,28 @@ def render_browser_close_detection_enhanced(session_id: str):
         const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         let saveTriggered = false;
         
-        console.log('🛡️ Browser close detection initialized (NO tab switching saves)');
+        // 🔍 DEBUG: Log the session ID we received
+        console.log('🛡️ Browser close detection initialized (REVERTED VERSION with DEBUG)');
+        console.log('🔍 DEBUG: Session ID received:', sessionId);
+        console.log('🔍 DEBUG: Session ID length:', sessionId.length);
+        console.log('🔍 DEBUG: Expected full UUID like: 8e022d50-6352-4e85-a8f3-cbeaeeb52d40');
+        
+        if (sessionId.length !== 36) {{
+            console.error('❌ CRITICAL: Session ID is truncated before reaching JavaScript!');
+            console.error('❌ Received:', sessionId);
+            console.error('❌ Length:', sessionId.length, '(expected 36)');
+            console.error('❌ THIS WILL CAUSE EMERGENCY SAVES TO FAIL!');
+        }} else {{
+            console.log('✅ Session ID format looks correct for browser close detection');
+        }}
 
         function triggerEmergencySave(reason = 'unknown') {{
             if (saveTriggered) return;
             saveTriggered = true;
             
             console.log('🚨 REAL browser exit detected (' + reason + ') - triggering emergency save');
+            console.log('🔍 DEBUG: About to send session ID:', sessionId);
+            console.log('🔍 DEBUG: Session ID length before send:', sessionId.length);
             
             // PRIMARY METHOD: Send beacon to FastAPI
             if (navigator.sendBeacon) {{
@@ -2253,6 +2450,8 @@ def render_browser_close_detection_enhanced(session_id: str):
                         reason: reason,
                         timestamp: Date.now()
                     }});
+                    
+                    console.log('🔍 DEBUG: Beacon payload:', emergencyData);
                     
                     const beaconSent = navigator.sendBeacon(
                         FASTAPI_URL,
@@ -2274,6 +2473,7 @@ def render_browser_close_detection_enhanced(session_id: str):
             try {{
                 console.log('🔄 Beacon failed, trying redirect fallback...');
                 const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}`;
+                console.log('🔍 DEBUG: Redirect URL:', saveUrl);
                 window.location.href = saveUrl;
             }} catch (e) {{
                 console.error('❌ Both beacon and redirect failed:', e);
@@ -2315,18 +2515,20 @@ def render_browser_close_detection_enhanced(session_id: str):
             console.log('📄 pagehide detected (NOT triggering save - relying on beforeunload/unload)');
         }}, {{ passive: true }});
         
-        console.log('✅ Browser close detection ready - ONLY saves on real exits');
+        console.log('✅ Browser close detection ready (REVERTED) - session confirmed:', sessionId);
     }})();
     </script>
     """
     
     try:
         st.components.v1.html(js_code, height=0, width=0)
+        debug_session_id_flow(session_id, "Browser Close Detection - End")
+        logger.info(f"✅ Enhanced browser close detection rendered for session {session_id[:8]}")
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
 
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
-    """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
+    """Processes events triggered by the JavaScript activity timer with session ID debugging."""
     if not timer_result or not isinstance(timer_result, dict):
         return False
     
@@ -2335,6 +2537,10 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
     inactive_minutes = timer_result.get('inactive_minutes', 0)
     
     logger.info(f"🎯 Processing timer event: '{event}' for session {session_id[:8] if session_id else 'unknown'}.")
+    
+    # Debug the session ID in the timer result
+    if session_id:
+        debug_session_id_flow(session_id, "Timer Event Handler - Received")
     
     try:
         session = session_manager._validate_session(session)
@@ -2402,8 +2608,10 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
         return False
 
 def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
-    """Processes fingerprint data received via URL query parameters."""
+    """Processes fingerprint data received via URL query parameters with session ID debugging."""
     try:
+        debug_session_id_flow(session_id, "Process Fingerprint from Query - Start")
+        
         session_manager = st.session_state.get('session_manager')
         if not session_manager:
             logger.error("❌ Session manager not available during fingerprint processing from query.")
@@ -2436,8 +2644,10 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         return False
 
 def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
-    """Processes emergency save request from query parameters."""
+    """Processes emergency save request from query parameters with session ID debugging."""
     try:
+        debug_session_id_flow(session_id, "Process Emergency Save from Query - Start")
+        
         session_manager = st.session_state.get('session_manager')
         if not session_manager:
             logger.error("❌ Session manager not available during emergency save processing.")
@@ -2471,7 +2681,7 @@ def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
         return False
 
 def handle_emergency_save_requests_from_query():
-    """Checks for and processes emergency save requests sent via URL query parameters."""
+    """Checks for and processes emergency save requests sent via URL query parameters with session ID debugging."""
     logger.info("🔍 EMERGENCY SAVE HANDLER: Checking for query parameter requests for emergency save...")
     
     query_params = st.query_params
@@ -2480,6 +2690,8 @@ def handle_emergency_save_requests_from_query():
     reason = query_params.get("reason", "unknown")
 
     if event == "emergency_close" and session_id:
+        debug_session_id_flow(session_id, "Emergency Save Handler - URL Query")
+        
         logger.info("=" * 80)
         logger.info("🚨 EMERGENCY SAVE REQUEST DETECTED VIA URL QUERY PARAMETERS!")
         logger.info(f"Session ID: {session_id}, Event: {event}, Reason: {reason}")
@@ -2516,7 +2728,7 @@ def handle_emergency_save_requests_from_query():
         logger.info("ℹ️ No emergency save requests found in current URL query parameters.")
 
 def handle_fingerprint_requests_from_query():
-    """Checks for and processes fingerprint data sent via URL query parameters."""
+    """Checks for and processes fingerprint data sent via URL query parameters with session ID debugging."""
     logger.info("🔍 FINGERPRINT HANDLER: Checking for query parameter fingerprint data...")
     
     query_params = st.query_params
@@ -2524,6 +2736,8 @@ def handle_fingerprint_requests_from_query():
     session_id = query_params.get("session_id")
     
     if event == "fingerprint_complete" and session_id:
+        debug_session_id_flow(session_id, "Fingerprint Handler - URL Query")
+        
         logger.info("=" * 80)
         logger.info("🔍 FINGERPRINT DATA DETECTED VIA URL QUERY PARAMETERS!")
         logger.info(f"Session ID: {session_id}, Event: {event}")
@@ -2568,7 +2782,7 @@ def handle_fingerprint_requests_from_query():
         return
     else:
         logger.info("ℹ️ No fingerprint requests found in current URL query parameters.")
-        
+
 def global_message_channel_error_handler():
     """Enhanced global error handler for component messages with better communication handling"""
     js_error_handler = """
@@ -2778,12 +2992,13 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             st.progress(min(session.daily_question_count / 4, 1.0))
             st.caption("Email verification unlocks 10 questions/day.")
         
-        # Show fingerprint status properly
+        # Show fingerprint status properly with debug info
         if session.fingerprint_id:
             # Check if it's a temporary or fallback fingerprint
             if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 st.markdown("**Device ID:** Identifying...")
-                st.caption("Fingerprinting in progress...")                
+                st.caption("Fingerprinting in progress...")
+                st.caption(f"Debug: {session.fingerprint_id[:20]}...")
             else:
                 # Real fingerprint ID from JavaScript
                 st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
@@ -2990,10 +3205,18 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                     st.error("Please enter the verification code you received.")
 
 def render_chat_interface(session_manager: 'SessionManager', session: UserSession):
-    """Renders the main chat interface."""
+    """Enhanced chat interface with session ID debugging and proper fingerprinting."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
+
+    # 🔍 CRITICAL DEBUG: Trace session ID at every step
+    logger.info("=" * 60)
+    logger.info("🔍 CHAT INTERFACE SESSION ID TRACE:")
+    logger.info(f"   Session ID from session object: '{session.session_id}'")
+    logger.info(f"   Length: {len(session.session_id)}")
+    logger.info(f"   Streamlit session_state ID: '{st.session_state.get('current_session_id')}'")
+    logger.info("=" * 60)
 
     # Check if session needs fingerprinting - FIXED CONDITION
     fingerprint_needed = (
@@ -3003,12 +3226,18 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     )
     
     if fingerprint_needed:
-        logger.info(f"🔄 Enhanced fingerprinting needed for session {session.session_id[:8]} (current: {session.fingerprint_id})")
+        logger.warning(f"⚠️ FINGERPRINTING NEEDED: Session {session.session_id[:8]} needs fingerprinting")
+        logger.warning(f"   Current fingerprint_id: '{session.fingerprint_id}'")
+        logger.warning(f"   Current method: '{session.fingerprint_method}'")
         
         # Render fingerprinting component silently
-        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-        # Don't exit here - let the user continue using the app with fallback fingerprint
-        # The enhanced fingerprint will be applied on the next redirect
+        try:
+            session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+            logger.info(f"✅ Fingerprinting component rendered for {session.session_id[:8]}")
+        except Exception as fp_error:
+            logger.error(f"❌ Fingerprinting component failed: {fp_error}")
+    else:
+        logger.info(f"✅ Fingerprinting OK: {session.fingerprint_id[:12]}... ({session.fingerprint_method})")
 
     # Initialize global error handler
     global_message_channel_error_handler()
@@ -3016,13 +3245,19 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     # Add browser close detection for all user types (since all can now have CRM saves)
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
+            logger.info(f"🛡️ Rendering browser close detection for {session.session_id[:8]}")
+            logger.info(f"🔍 Full session ID being passed: '{session.session_id}' (len: {len(session.session_id)})")
+            
             render_browser_close_detection_enhanced(session.session_id)
+            
+            logger.info(f"✅ Browser close detection rendered")
         except Exception as e:
-            logger.error(f"Failed to render browser close detection for {session.session_id[:8]}: {e}", exc_info=True)
+            logger.error(f"❌ Browser close detection failed: {e}")
 
     # Add 15-minute timer for ALL user types (since sessions now auto-close after 15 minutes)
     timer_result = None
     try:
+        logger.info(f"🕐 Rendering 15-min timer for {session.session_id[:8]}")
         timer_result = render_activity_timer_component_15min(session.session_id)
         if timer_result and handle_timer_event(timer_result, session_manager, session):
             # Timer event handled and session was closed - execution should have been stopped by st.rerun()
@@ -3112,9 +3347,12 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
 # =============================================================================
 
 def ensure_initialization_fixed():
-    """Fixed version of ensure_initialization with better error handling and timeout prevention"""
+    """Fixed version of ensure_initialization with better error handling and session ID debugging"""
     if 'initialized' not in st.session_state or not st.session_state.initialized:
         logger.info("Starting application initialization sequence...")
+        
+        # Debug Streamlit session state immediately
+        debug_streamlit_session_state()
         
         try:
             progress_placeholder = st.empty()
@@ -3235,7 +3473,7 @@ def ensure_initialization_fixed():
     return True
 
 def main_fixed():
-    """Fixed main entry point with better error handling and timeout prevention"""
+    """Enhanced main entry point with comprehensive session ID debugging"""
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
@@ -3244,6 +3482,9 @@ def main_fixed():
         )
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
+
+    # IMMEDIATE DEBUG: Check Streamlit session state
+    debug_streamlit_session_state()
 
     # Initialize
     try:
@@ -3291,6 +3532,13 @@ def main_fixed():
                 
                 if session and session.active:
                     logger.info(f"🔍 MAIN ROUTING: Session is active, rendering sidebar and chat interface")
+                    
+                    # Check fingerprinting status
+                    if session.fingerprint_id and not session.fingerprint_id.startswith("temp_"):
+                        logger.info(f"✅ MAIN: Fingerprinting working: {session.fingerprint_id[:12]}...")
+                    else:
+                        logger.warning(f"⚠️ MAIN: Fingerprinting needs attention: {session.fingerprint_id}")
+                    
                     render_sidebar(session_manager, session, st.session_state.pdf_exporter)
                     render_chat_interface(session_manager, session)
                 else:
