@@ -10,7 +10,7 @@ uuid
 dataclasses-json
 langchain-tavily>=0.1.0
 python-dotenv
-sqlitecloud 0.0.84
+sqlitecloud==0.0.84
 python-multipart
 PyJWT>=2.0.0
 reportlab==4.2.0
