@@ -2342,48 +2342,75 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
         if event == 'session_timeout_15min':
             st.info(f"⏰ **Session timeout:** Detected {inactive_minutes} minutes of inactivity.")
             st.info("🔄 **Your session is being closed due to inactivity.**")
-            
-            # Save to CRM if eligible before closing session
+    
+            # For 15-minute timeout, use Beacon+Redirect pattern (like browser close)
+            # instead of synchronous Python save
             if session_manager._is_crm_save_eligible(session, "15-Minute Session Inactivity Timeout"):
-                with st.spinner("💾 Auto-saving chat to CRM before closing session..."):
-                    try:
-                        save_success = session_manager.zoho.save_chat_transcript_sync(session, "15-Minute Session Inactivity Timeout")
-                    except Exception as e:
-                        logger.error(f"15-min timeout CRM save failed during execution: {e}", exc_info=True)
-                        save_success = False
+                st.info("💾 **Auto-saving conversation and redirecting...**")
+    
+            # Mark session as inactive immediately
+            session.active = False
+            session.last_activity = datetime.now()
+            session_manager.db.save_session(session)
+    
+            # Clear Streamlit session state to force new session
+            if 'current_session_id' in st.session_state:
+                del st.session_state['current_session_id']
+            if 'page' in st.session_state:
+                del st.session_state['page']
+    
+            logger.info(f"🔒 Session {session_id[:8]} closed due to 15-minute timeout")
+    
+            # Trigger Beacon+Redirect save and redirect to Sign In page
+            timeout_js = f"""
+            <script>
+            (function() {{
+                const sessionId = '{session_id}';
+                const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
+        
+                console.log('🚨 15-minute timeout - triggering Beacon+Redirect save');
+        
+                // PRIMARY: Send beacon to FastAPI
+                if (navigator.sendBeacon) {{
+                    try {{
+                        const timeoutData = JSON.stringify({{
+                            session_id: sessionId,
+                            reason: '15_minute_timeout',
+                            timestamp: Date.now()
+                        }});
                 
-                if save_success:
-                    st.success("✅ Chat automatically saved to CRM!")
-                    session.timeout_saved_to_crm = True
-                else:
-                    st.warning("⚠️ Auto-save to CRM failed. Please check your credentials or contact support if issue persists.")
-            else:
-                st.info("ℹ️ Session timeout detected, but no CRM save was performed (not eligible based on activity, user type, or duration).")
-                logger.info(f"15-min timeout CRM save eligibility check failed for {session_id[:8]}: UserType={session.user_type.value}, Email={bool(session.email)}, Messages={len(session.messages)}, Questions={session.daily_question_count}, Saved Status={session.timeout_saved_to_crm}.")
-            
-            # TRUE SESSION TIMEOUT: Close session and redirect to home
-            try:
-                # Mark session as inactive
-                session.active = False
-                session.last_activity = datetime.now()
-                session_manager.db.save_session(session)
+                        const beaconSent = navigator.sendBeacon(
+                            FASTAPI_URL,
+                            new Blob([timeoutData], {{type: 'application/json'}})
+                        );
                 
-                # Clear Streamlit session state to force new session
-                if 'current_session_id' in st.session_state:
-                    del st.session_state['current_session_id']
-                if 'page' in st.session_state:
-                    del st.session_state['page']
-                
-                logger.info(f"🔒 Session {session_id[:8]} closed due to 15-minute timeout")
-                
-                # Show redirect message and redirect to home
-                st.info("🏠 **Redirecting to home page...**")
-                st.info("You can start a new session from the welcome page.")
-                
-                # Force redirect to home after a brief delay
-                time.sleep(2)
-                st.rerun()
-                
+                        if (beaconSent) {{
+                            console.log('✅ 15-min timeout beacon sent successfully');
+                            // Redirect to Sign In page after beacon
+                            setTimeout(() => {{
+                                window.location.href = window.location.origin + window.location.pathname;
+                            }}, 1000);
+                            return;
+                        }}
+                    }} catch (beaconError) {{
+                        console.error('❌ 15-min timeout beacon error:', beaconError);
+                    }}
+                }}
+        
+                // FALLBACK: Redirect with query params for CRM save
+                console.log('🔄 Beacon failed, using redirect fallback for 15-min timeout...');
+                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=15_minute_timeout`;
+                window.location.href = saveUrl;
+            }})();
+            </script>
+            """
+    
+            # Execute the timeout save JavaScript
+            st.components.v1.html(timeout_js, height=0, width=0)
+    
+            # Brief delay before stopping execution
+            time.sleep(1)
+            st.stop()  # Stop execution here - JavaScript will handle the redirect                
             except Exception as close_error:
                 logger.error(f"Error closing session during timeout for {session_id[:8]}: {close_error}")
                 # Force redirect even if session close fails
@@ -2510,6 +2537,7 @@ def handle_emergency_save_requests_from_query():
             st.error(f"❌ An unexpected error occurred during emergency save: {str(e)}")
             logger.critical(f"Emergency save processing crashed from query parameter: {e}", exc_info=True)
         
+        st.info("🏠 **Redirecting to Sign In page...**")
         time.sleep(2)
         st.stop()
     else:
