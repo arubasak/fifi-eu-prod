@@ -2220,7 +2220,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
         return None
 
 def render_browser_close_detection_enhanced(session_id: str):
-    """Enhanced browser close detection - ONLY for real exits, NOT tab switching - IMPROVED VERSION"""
+    """Enhanced browser close detection - ONLY for real exits, NOT tab switching"""
     if not session_id:
         return
 
@@ -2236,40 +2236,14 @@ def render_browser_close_detection_enhanced(session_id: str):
         const sessionId = '{session_id}';
         const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         let saveTriggered = false;
-        let isTabSwitch = false;
         
-        console.log('🛡️ Enhanced browser close detection initialized - IMPROVED tab switch filtering');
-
-        // IMPROVED: Track visibility changes to detect tab switches
-        document.addEventListener('visibilitychange', function() {{
-            if (document.visibilityState === 'hidden') {{
-                console.log('👁️ Tab/window hidden - marking as potential tab switch');
-                isTabSwitch = true;
-                
-                // Reset tab switch flag after 2 seconds if no unload occurs
-                setTimeout(() => {{
-                    if (isTabSwitch) {{
-                        console.log('👁️ Tab switch confirmed - no unload occurred');
-                        isTabSwitch = false;
-                    }}
-                }}, 2000);
-            }} else {{
-                console.log('👁️ Tab/window visible again - was definitely tab switch');
-                isTabSwitch = false;
-            }}
-        }}, {{ passive: true }});
+        console.log('🛡️ Browser close detection initialized (NO tab switching saves)');
 
         function triggerEmergencySave(reason = 'unknown') {{
-            // IMPROVED: Check if this might be a tab switch
-            if (isTabSwitch && document.visibilityState === 'hidden') {{
-                console.log('🚫 BLOCKED: Potential tab switch detected, NOT triggering save (' + reason + ')');
-                return;
-            }}
-            
             if (saveTriggered) return;
             saveTriggered = true;
             
-            console.log('🚨 REAL browser exit confirmed (' + reason + ') - triggering emergency save');
+            console.log('🚨 REAL browser exit detected (' + reason + ') - triggering emergency save');
             
             // PRIMARY METHOD: Send beacon to FastAPI
             if (navigator.sendBeacon) {{
@@ -2306,62 +2280,42 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }}
         
-        // IMPROVED: Add delay to unload detection to filter out tab switches
-        let unloadTimer = null;
-        
-        function handleUnload(eventType) {{
-            console.log('🔍 ' + eventType + ' event detected - checking if real close...');
-            
-            // If page is hidden (tab switch scenario), add a small delay
-            if (document.visibilityState === 'hidden') {{
-                console.log('⏳ Page hidden during ' + eventType + ' - adding delay to confirm real close');
-                
-                unloadTimer = setTimeout(() => {{
-                    console.log('✅ Delay complete - confirming real close for ' + eventType);
-                    triggerEmergencySave(eventType);
-                }}, 100); // 100ms delay to filter out quick tab switches
-            }} else {{
-                // Page is visible during unload - likely a real close
-                console.log('✅ Page visible during ' + eventType + ' - immediate real close');
-                triggerEmergencySave(eventType);
-            }}
-        }}
-        
-        // IMPROVED: Enhanced event listeners with delay logic
-        window.addEventListener('beforeunload', () => {{
-            handleUnload('beforeunload');
-        }}, {{ capture: true, passive: true }});
-        
-        window.addEventListener('unload', () => {{
-            handleUnload('unload');
-        }}, {{ capture: true, passive: true }});
-        
-        // Also listen on parent window (for iframe scenarios)
-        if (window.parent && window.parent !== window) {{
+        // ONLY listen to REAL exit events (NOT visibility/pagehide)
+        const realExitEvents = ['beforeunload', 'unload'];
+        realExitEvents.forEach(eventType => {{
             try {{
-                window.parent.addEventListener('beforeunload', () => {{
-                    handleUnload('parent_beforeunload');
+                window.addEventListener(eventType, () => {{
+                    console.log('🚨 Real exit event detected:', eventType);
+                    triggerEmergencySave(eventType);
                 }}, {{ capture: true, passive: true }});
                 
-                window.parent.addEventListener('unload', () => {{
-                    handleUnload('parent_unload');
-                }}, {{ capture: true, passive: true }});
+                // Also listen on parent window (for iframe scenarios)
+                if (window.parent && window.parent !== window) {{
+                    window.parent.addEventListener(eventType, () => {{
+                        console.log('🚨 Parent exit event detected:', eventType);
+                        triggerEmergencySave('parent_' + eventType);
+                    }}, {{ capture: true, passive: true }});
+                }}
             }} catch (e) {{
-                console.debug('Cannot add parent listeners:', e);
+                console.debug(`Failed to add ${{eventType}} listener:`, e);
             }}
-        }}
+        }});
         
-        // IMPROVED: Handle page becoming visible again (cancel any pending saves)
+        // LOG tab switching but DON'T trigger saves
         document.addEventListener('visibilitychange', function() {{
-            if (document.visibilityState === 'visible' && unloadTimer) {{
-                console.log('🚫 Page became visible again - canceling pending save (was tab switch)');
-                clearTimeout(unloadTimer);
-                unloadTimer = null;
-                saveTriggered = false; // Reset save trigger
+            if (document.visibilityState === 'hidden') {{
+                console.log('👁️ Tab switched away (NOT triggering save)');
+            }} else {{
+                console.log('👁️ Tab switched back (welcome back!)');
             }}
         }}, {{ passive: true }});
         
-        console.log('✅ IMPROVED browser close detection ready - enhanced tab switch filtering');
+        // LOG pagehide but DON'T trigger saves (too unreliable for tab vs close)
+        window.addEventListener('pagehide', function() {{
+            console.log('📄 pagehide detected (NOT triggering save - relying on beforeunload/unload)');
+        }}, {{ passive: true }});
+        
+        console.log('✅ Browser close detection ready - ONLY saves on real exits');
     }})();
     </script>
     """
@@ -2370,6 +2324,7 @@ def render_browser_close_detection_enhanced(session_id: str):
         st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
+
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
     """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
     if not timer_result or not isinstance(timer_result, dict):
@@ -2387,102 +2342,54 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
         if event == 'session_timeout_15min':
             st.info(f"⏰ **Session timeout:** Detected {inactive_minutes} minutes of inactivity.")
             st.info("🔄 **Your session is being closed due to inactivity.**")
-    
-            # For 15-minute timeout, use Beacon+Redirect pattern (like browser close)
-            # instead of synchronous Python save
+            
+            # Save to CRM if eligible before closing session
             if session_manager._is_crm_save_eligible(session, "15-Minute Session Inactivity Timeout"):
-                st.info("💾 **Auto-saving conversation and redirecting...**")
-    
-            # Mark session as inactive immediately
-            session.active = False
-            session.last_activity = datetime.now()
-            session_manager.db.save_session(session)
-    
-            # Clear Streamlit session state to force new session
-            if 'current_session_id' in st.session_state:
-                del st.session_state['current_session_id']
-            if 'page' in st.session_state:
-                del st.session_state['page']
-    
-            logger.info(f"🔒 Session {session_id[:8]} closed due to 15-minute timeout")
-    
-            # Trigger Beacon+Redirect save and redirect to Sign In page
-            timeout_js = f"""
-            <script>
-            (function() {{
-                const sessionId = '{session_id}';
-                const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
-                let redirectTriggered = false;
-    
-                console.log('🚨 15-minute timeout - triggering GUARANTEED redirect with beacon attempt');
-    
-                // GUARANTEED REDIRECT: Always redirect after 5 seconds maximum
-                const guaranteedRedirect = setTimeout(() => {{
-                if (!redirectTriggered) {{
-                    redirectTriggered = true;
-                    console.log('⏰ GUARANTEED REDIRECT: 5-second timeout reached, redirecting to Sign In');
-                    window.location.href = window.location.origin + window.location.pathname;
-                }}
-            }}, 5000); // 5 seconds maximum wait
-    
-            // ATTEMPT BEACON: Try beacon first, but don't rely on it
-                if (navigator.sendBeacon) {{
-                    try {{
-                        console.log('📡 Attempting beacon send...');
-                        const timeoutData = JSON.stringify({{
-                        session_id: sessionId,
-                        reason: '15_minute_timeout',
-                        timestamp: Date.now()
-                        }});
+                with st.spinner("💾 Auto-saving chat to CRM before closing session..."):
+                    try:
+                        save_success = session_manager.zoho.save_chat_transcript_sync(session, "15-Minute Session Inactivity Timeout")
+                    except Exception as e:
+                        logger.error(f"15-min timeout CRM save failed during execution: {e}", exc_info=True)
+                        save_success = False
+                
+                if save_success:
+                    st.success("✅ Chat automatically saved to CRM!")
+                    session.timeout_saved_to_crm = True
+                else:
+                    st.warning("⚠️ Auto-save to CRM failed. Please check your credentials or contact support if issue persists.")
+            else:
+                st.info("ℹ️ Session timeout detected, but no CRM save was performed (not eligible based on activity, user type, or duration).")
+                logger.info(f"15-min timeout CRM save eligibility check failed for {session_id[:8]}: UserType={session.user_type.value}, Email={bool(session.email)}, Messages={len(session.messages)}, Questions={session.daily_question_count}, Saved Status={session.timeout_saved_to_crm}.")
             
-            // Send beacon - don't wait for result, just send and move on
-            navigator.sendBeacon(
-            FASTAPI_URL,
-            new Blob([timeoutData], {{type: 'application/json'}})
-            );
-            
-            console.log('📡 Beacon sent (result unknown) - redirect will happen in 3 seconds');
-            
-            // Early redirect for successful beacon attempt
-            setTimeout(() => {{
-                if (!redirectTriggered) {{
-                    redirectTriggered = true;
-                    clearTimeout(guaranteedRedirect);
-                    console.log('✅ Early redirect after beacon attempt');
-                    window.location.href = window.location.origin + window.location.pathname;
-                }}
-            }}, 3000); // 3 seconds for beacon attempt
-            
-        }} catch (beaconError) {{
-            console.error('❌ Beacon error:', beaconError);
-            // Immediate redirect on beacon error
-            if (!redirectTriggered) {{
-                redirectTriggered = true;
-                clearTimeout(guaranteedRedirect);
-                console.log('🔄 Immediate redirect due to beacon error');
-                window.location.href = window.location.origin + window.location.pathname;
-            }}
-        }}
-    }} else {{
-        // No beacon support - immediate redirect
-        if (!redirectTriggered) {{
-            redirectTriggered = true;
-            clearTimeout(guaranteedRedirect);
-            console.log('🔄 Immediate redirect - no beacon support');
-            window.location.href = window.location.origin + window.location.pathname;
-        }}
-    }}
-}})();
-</script>
-"""
-    
-            # Execute the timeout save JavaScript
-            st.components.v1.html(timeout_js, height=0, width=0)
-    
-            # Brief delay before stopping execution
-            time.sleep(1)
-            st.stop()  # Stop execution here - JavaScript will handle the redirect                
-               
+            # TRUE SESSION TIMEOUT: Close session and redirect to home
+            try:
+                # Mark session as inactive
+                session.active = False
+                session.last_activity = datetime.now()
+                session_manager.db.save_session(session)
+                
+                # Clear Streamlit session state to force new session
+                if 'current_session_id' in st.session_state:
+                    del st.session_state['current_session_id']
+                if 'page' in st.session_state:
+                    del st.session_state['page']
+                
+                logger.info(f"🔒 Session {session_id[:8]} closed due to 15-minute timeout")
+                
+                # Show redirect message and redirect to home
+                st.info("🏠 **Redirecting to home page...**")
+                st.info("You can start a new session from the welcome page.")
+                
+                # Force redirect to home after a brief delay
+                time.sleep(2)
+                st.rerun()
+                
+            except Exception as close_error:
+                logger.error(f"Error closing session during timeout for {session_id[:8]}: {close_error}")
+                # Force redirect even if session close fails
+                st.session_state['page'] = None
+                st.rerun()
+                
             return True  # Indicate that session was closed
                 
         else:
@@ -2603,7 +2510,6 @@ def handle_emergency_save_requests_from_query():
             st.error(f"❌ An unexpected error occurred during emergency save: {str(e)}")
             logger.critical(f"Emergency save processing crashed from query parameter: {e}", exc_info=True)
         
-        st.info("🏠 **Redirecting to Sign In page...**")
         time.sleep(2)
         st.stop()
     else:
