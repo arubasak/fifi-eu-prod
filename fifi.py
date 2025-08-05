@@ -2411,23 +2411,17 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
             # Brief delay before stopping execution
             time.sleep(1)
             st.stop()  # Stop execution here - JavaScript will handle the redirect                
-        
-        except Exception as close_error:
-                logger.error(f"Error closing session during timeout for {session_id[:8]}: {close_error}")
-                # Force redirect even if session close fails
-                st.session_state['page'] = None
-                st.rerun()
+               
+            return True  # Indicate that session was closed
                 
-                return True  # Indicate that session was closed
-                
-            else:
-                logger.warning(f"⚠️ Received unhandled timer event type: '{event}'.")
-                return False
-            
-        except Exception as e:
-            logger.error(f"❌ Error processing timer event '{event}' for session {session_id[:8]}: {e}", exc_info=True)
-            st.error(f"⚠️ An internal error occurred while processing activity. Please try refreshing if issues persist.")
+        else:
+            logger.warning(f"⚠️ Received unhandled timer event type: '{event}'.")
             return False
+            
+    except Exception as e:
+        logger.error(f"❌ Error processing timer event '{event}' for session {session_id[:8]}: {e}", exc_info=True)
+        st.error(f"⚠️ An internal error occurred while processing activity. Please try refreshing if issues persist.")
+        return False
 
 def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
     """Processes fingerprint data received via URL query parameters."""
