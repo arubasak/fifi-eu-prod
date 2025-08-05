@@ -2362,39 +2362,38 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
             logger.info(f"🔒 Session {session_id[:8]} closed due to 15-minute timeout")
     
             # Trigger Beacon+Redirect save and redirect to Sign In page
-            # Trigger Beacon+Redirect save and redirect to Sign In page
-timeout_js = f"""
-<script>
-(function() {{
-    const sessionId = '{session_id}';
-    const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
-    let redirectTriggered = false;
+            timeout_js = f"""
+            <script>
+            (function() {{
+                const sessionId = '{session_id}';
+                const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
+                let redirectTriggered = false;
     
-    console.log('🚨 15-minute timeout - triggering GUARANTEED redirect with beacon attempt');
+                console.log('🚨 15-minute timeout - triggering GUARANTEED redirect with beacon attempt');
     
-    // GUARANTEED REDIRECT: Always redirect after 5 seconds maximum
-    const guaranteedRedirect = setTimeout(() => {{
-        if (!redirectTriggered) {{
-            redirectTriggered = true;
-            console.log('⏰ GUARANTEED REDIRECT: 5-second timeout reached, redirecting to Sign In');
-            window.location.href = window.location.origin + window.location.pathname;
-        }}
-    }}, 5000); // 5 seconds maximum wait
+                // GUARANTEED REDIRECT: Always redirect after 5 seconds maximum
+                const guaranteedRedirect = setTimeout(() => {{
+                if (!redirectTriggered) {{
+                    redirectTriggered = true;
+                    console.log('⏰ GUARANTEED REDIRECT: 5-second timeout reached, redirecting to Sign In');
+                    window.location.href = window.location.origin + window.location.pathname;
+                }}
+            }}, 5000); // 5 seconds maximum wait
     
-    // ATTEMPT BEACON: Try beacon first, but don't rely on it
-    if (navigator.sendBeacon) {{
-        try {{
-            console.log('📡 Attempting beacon send...');
-            const timeoutData = JSON.stringify({{
-                session_id: sessionId,
-                reason: '15_minute_timeout',
-                timestamp: Date.now()
-            }});
+            // ATTEMPT BEACON: Try beacon first, but don't rely on it
+                if (navigator.sendBeacon) {{
+                    try {{
+                        console.log('📡 Attempting beacon send...');
+                        const timeoutData = JSON.stringify({{
+                        session_id: sessionId,
+                        reason: '15_minute_timeout',
+                        timestamp: Date.now()
+                        }});
             
             // Send beacon - don't wait for result, just send and move on
             navigator.sendBeacon(
-                FASTAPI_URL,
-                new Blob([timeoutData], {{type: 'application/json'}})
+            FASTAPI_URL,
+            new Blob([timeoutData], {{type: 'application/json'}})
             );
             
             console.log('📡 Beacon sent (result unknown) - redirect will happen in 3 seconds');
