@@ -2411,7 +2411,8 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
             # Brief delay before stopping execution
             time.sleep(1)
             st.stop()  # Stop execution here - JavaScript will handle the redirect                
-            except Exception as close_error:
+        
+        except Exception as close_error:
                 logger.error(f"Error closing session during timeout for {session_id[:8]}: {close_error}")
                 # Force redirect even if session close fails
                 st.session_state['page'] = None
