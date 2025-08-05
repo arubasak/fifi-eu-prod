@@ -2220,7 +2220,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
         return None
 
 def render_browser_close_detection_enhanced(session_id: str):
-    """Enhanced browser close detection - ONLY for real exits, NOT tab switching"""
+    """Enhanced browser close detection - ONLY for real exits, NOT tab switching - IMPROVED VERSION"""
     if not session_id:
         return
 
@@ -2236,14 +2236,40 @@ def render_browser_close_detection_enhanced(session_id: str):
         const sessionId = '{session_id}';
         const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         let saveTriggered = false;
+        let isTabSwitch = false;
         
-        console.log('🛡️ Browser close detection initialized (NO tab switching saves)');
+        console.log('🛡️ Enhanced browser close detection initialized - IMPROVED tab switch filtering');
+
+        // IMPROVED: Track visibility changes to detect tab switches
+        document.addEventListener('visibilitychange', function() {{
+            if (document.visibilityState === 'hidden') {{
+                console.log('👁️ Tab/window hidden - marking as potential tab switch');
+                isTabSwitch = true;
+                
+                // Reset tab switch flag after 2 seconds if no unload occurs
+                setTimeout(() => {{
+                    if (isTabSwitch) {{
+                        console.log('👁️ Tab switch confirmed - no unload occurred');
+                        isTabSwitch = false;
+                    }}
+                }}, 2000);
+            }} else {{
+                console.log('👁️ Tab/window visible again - was definitely tab switch');
+                isTabSwitch = false;
+            }}
+        }}, {{ passive: true }});
 
         function triggerEmergencySave(reason = 'unknown') {{
+            // IMPROVED: Check if this might be a tab switch
+            if (isTabSwitch && document.visibilityState === 'hidden') {{
+                console.log('🚫 BLOCKED: Potential tab switch detected, NOT triggering save (' + reason + ')');
+                return;
+            }}
+            
             if (saveTriggered) return;
             saveTriggered = true;
             
-            console.log('🚨 REAL browser exit detected (' + reason + ') - triggering emergency save');
+            console.log('🚨 REAL browser exit confirmed (' + reason + ') - triggering emergency save');
             
             // PRIMARY METHOD: Send beacon to FastAPI
             if (navigator.sendBeacon) {{
@@ -2280,42 +2306,62 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }}
         
-        // ONLY listen to REAL exit events (NOT visibility/pagehide)
-        const realExitEvents = ['beforeunload', 'unload'];
-        realExitEvents.forEach(eventType => {{
-            try {{
-                window.addEventListener(eventType, () => {{
-                    console.log('🚨 Real exit event detected:', eventType);
+        // IMPROVED: Add delay to unload detection to filter out tab switches
+        let unloadTimer = null;
+        
+        function handleUnload(eventType) {{
+            console.log('🔍 ' + eventType + ' event detected - checking if real close...');
+            
+            // If page is hidden (tab switch scenario), add a small delay
+            if (document.visibilityState === 'hidden') {{
+                console.log('⏳ Page hidden during ' + eventType + ' - adding delay to confirm real close');
+                
+                unloadTimer = setTimeout(() => {{
+                    console.log('✅ Delay complete - confirming real close for ' + eventType);
                     triggerEmergencySave(eventType);
+                }}, 100); // 100ms delay to filter out quick tab switches
+            }} else {{
+                // Page is visible during unload - likely a real close
+                console.log('✅ Page visible during ' + eventType + ' - immediate real close');
+                triggerEmergencySave(eventType);
+            }}
+        }}
+        
+        // IMPROVED: Enhanced event listeners with delay logic
+        window.addEventListener('beforeunload', () => {{
+            handleUnload('beforeunload');
+        }}, {{ capture: true, passive: true }});
+        
+        window.addEventListener('unload', () => {{
+            handleUnload('unload');
+        }}, {{ capture: true, passive: true }});
+        
+        // Also listen on parent window (for iframe scenarios)
+        if (window.parent && window.parent !== window) {{
+            try {{
+                window.parent.addEventListener('beforeunload', () => {{
+                    handleUnload('parent_beforeunload');
                 }}, {{ capture: true, passive: true }});
                 
-                // Also listen on parent window (for iframe scenarios)
-                if (window.parent && window.parent !== window) {{
-                    window.parent.addEventListener(eventType, () => {{
-                        console.log('🚨 Parent exit event detected:', eventType);
-                        triggerEmergencySave('parent_' + eventType);
-                    }}, {{ capture: true, passive: true }});
-                }}
+                window.parent.addEventListener('unload', () => {{
+                    handleUnload('parent_unload');
+                }}, {{ capture: true, passive: true }});
             }} catch (e) {{
-                console.debug(`Failed to add ${{eventType}} listener:`, e);
+                console.debug('Cannot add parent listeners:', e);
             }}
-        }});
+        }}
         
-        // LOG tab switching but DON'T trigger saves
+        // IMPROVED: Handle page becoming visible again (cancel any pending saves)
         document.addEventListener('visibilitychange', function() {{
-            if (document.visibilityState === 'hidden') {{
-                console.log('👁️ Tab switched away (NOT triggering save)');
-            }} else {{
-                console.log('👁️ Tab switched back (welcome back!)');
+            if (document.visibilityState === 'visible' && unloadTimer) {{
+                console.log('🚫 Page became visible again - canceling pending save (was tab switch)');
+                clearTimeout(unloadTimer);
+                unloadTimer = null;
+                saveTriggered = false; // Reset save trigger
             }}
         }}, {{ passive: true }});
         
-        // LOG pagehide but DON'T trigger saves (too unreliable for tab vs close)
-        window.addEventListener('pagehide', function() {{
-            console.log('📄 pagehide detected (NOT triggering save - relying on beforeunload/unload)');
-        }}, {{ passive: true }});
-        
-        console.log('✅ Browser close detection ready - ONLY saves on real exits');
+        console.log('✅ IMPROVED browser close detection ready - enhanced tab switch filtering');
     }})();
     </script>
     """
@@ -2324,7 +2370,6 @@ def render_browser_close_detection_enhanced(session_id: str):
         st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
-
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
     """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
     if not timer_result or not isinstance(timer_result, dict):
