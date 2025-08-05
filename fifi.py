@@ -2030,8 +2030,11 @@ class SessionManager:
 # JAVASCRIPT COMPONENTS & EVENT HANDLING
 # =============================================================================
 
-def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str, Any]]:
-    """Renders a JavaScript component that tracks user inactivity and triggers an event after 15 minutes."""
+def render_activity_timer_component_15min_fixed(session_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Enhanced timer component that automatically redirects after 15 minutes of inactivity
+    without requiring Python-side checking.
+    """
     if not session_id:
         logger.warning("❌ Timer component: No session ID provided")
         return None
@@ -2044,18 +2047,19 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             const sessionId = "{session_id}";
             const SESSION_TIMEOUT_MS = 900000; // 15 minutes
             
-            console.log("🕐 FiFi 15-Minute Timer: Checking session", sessionId.substring(0, 8));
+            console.log("🕐 FiFi 15-Minute Timer: Initializing for session", sessionId.substring(0, 8));
             
             // Initialize or reset timer state
             if (typeof window.fifi_timer_state_{safe_session_id_js} === 'undefined' || 
                 window.fifi_timer_state_{safe_session_id_js} === null || 
                 window.fifi_timer_state_{safe_session_id_js}.sessionId !== sessionId) {{
                 
-                console.log("🆕 FiFi 15-Minute Timer: Starting/Resetting for session", sessionId.substring(0, 8)); 
+                console.log("🆕 Starting new timer for session", sessionId.substring(0, 8)); 
                 window.fifi_timer_state_{safe_session_id_js} = {{
                     lastActivityTime: Date.now(),
                     expired: false,
                     listenersInitialized: false,
+                    timeoutCheckInterval: null,
                     sessionId: sessionId
                 }};
             }}
@@ -2064,7 +2068,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             
             // Setup activity listeners (only once)
             if (!state.listenersInitialized) {{
-                console.log("👂 Setting up FiFi 15-Minute activity listeners...");
+                console.log("👂 Setting up activity listeners...");
                 
                 function resetActivity() {{
                     try {{
@@ -2072,7 +2076,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                         if (state.lastActivityTime !== now) {{
                             state.lastActivityTime = now;
                             if (state.expired) {{
-                                console.log("🔄 Activity detected, resetting expired flag for timer.");
+                                console.log("🔄 Activity detected, resetting expired flag");
                                 state.expired = false;
                             }}
                         }}
@@ -2137,34 +2141,66 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                 
                 document.addEventListener('visibilitychange', handleVisibilityChange, {{ passive: true }});
                 
-                try {{
-                    if (window.parent && window.parent.document && window.parent.document !== document) {{
-                        window.parent.document.addEventListener('visibilitychange', handleVisibilityChange, {{ passive: true }});
-                    }}
-                }} catch (e) {{
-                    console.debug("Cannot setup parent visibility detection:", e);
+                // CRITICAL: Clear any existing interval before setting a new one
+                if (state.timeoutCheckInterval) {{
+                    clearInterval(state.timeoutCheckInterval);
                 }}
                 
+                // NEW: Set up automatic timeout checking and redirect
+                state.timeoutCheckInterval = setInterval(() => {{
+                    const currentTime = Date.now();
+                    const inactiveTimeMs = currentTime - state.lastActivityTime;
+                    const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
+                    const inactiveSeconds = Math.floor((inactiveTimeMs % 60000) / 1000);
+                    
+                    // Log every 5 minutes
+                    if (inactiveMinutes > 0 && inactiveMinutes % 5 === 0 && inactiveSeconds < 2) {{
+                        console.log(`⏰ Session ${{sessionId.substring(0, 8)}} inactive: ${{inactiveMinutes}}m${{inactiveSeconds}}s`);
+                    }}
+                    
+                    // Check if timeout reached
+                    if (inactiveTimeMs >= SESSION_TIMEOUT_MS && !state.expired) {{
+                        state.expired = true;
+                        console.log("🚨 15-MINUTE TIMEOUT REACHED - TRIGGERING AUTO-REDIRECT");
+                        
+                        // Clear the interval to stop checking
+                        clearInterval(state.timeoutCheckInterval);
+                        
+                        // AUTOMATIC REDIRECT - doesn't depend on Python checking
+                        try {{
+                            // First, try to trigger the timeout save via URL parameters
+                            const timeoutUrl = `${{window.location.origin}}${{window.location.pathname}}?event=session_timeout_auto&session_id=${{sessionId}}&inactive_minutes=${{inactiveMinutes}}`;
+                            
+                            console.log("🔄 Redirecting to trigger timeout save and return to home...");
+                            
+                            // Force redirect to trigger the timeout handling
+                            window.location.href = timeoutUrl;
+                            
+                        }} catch (redirectError) {{
+                            console.error("Failed to redirect:", redirectError);
+                            
+                            // Fallback: Try to clear session and go to base URL
+                            try {{
+                                window.location.href = window.location.origin + window.location.pathname;
+                            }} catch (fallbackError) {{
+                                console.error("Fallback redirect also failed:", fallbackError);
+                            }}
+                        }}
+                    }}
+                }}, 10000); // Check every 10 seconds for timeout
+                
                 state.listenersInitialized = true;
-                console.log("✅ FiFi 15-Minute activity listeners initialized.");
+                console.log("✅ Activity listeners and auto-timeout checker initialized");
             }}
             
-            // Check for timeout
+            // Still return timeout status for Python-side checking (backward compatibility)
             const currentTime = Date.now();
             const inactiveTimeMs = currentTime - state.lastActivityTime;
             const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
             const inactiveSeconds = Math.floor((inactiveTimeMs % 60000) / 1000);
             
-            // Log every 5 minutes for debugging (Python side will also log)
-            if (inactiveMinutes > 0 && inactiveMinutes % 5 === 0 && inactiveSeconds < 10) {{
-                console.log(`⏰ Session ${{sessionId.substring(0, 8)}} inactive: ${{inactiveMinutes}}m${{inactiveSeconds}}s`);
-            }}
-            
-            // Check if timeout reached
             if (inactiveTimeMs >= SESSION_TIMEOUT_MS && !state.expired) {{
                 state.expired = true;
-                console.log("🚨 15-MINUTE SESSION TIMEOUT REACHED for session", sessionId.substring(0, 8));
-                
                 return {{
                     event: "session_timeout_15min",
                     session_id: sessionId,
@@ -2178,7 +2214,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
             return null;
             
         }} catch (error) {{
-            console.error("🚨 FiFi 15-Minute Timer component caught a critical error:", error);
+            console.error("🚨 Timer component error:", error);
             return {{
                 event: "timer_error",
                 session_id: "{session_id}",
@@ -2193,7 +2229,7 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
         # Execute the timer JavaScript code
         timer_result = st_javascript(js_timer_code)
         
-        # Validate the result
+        # Validate the result (still works if Python checks it)
         if timer_result is None or timer_result == 0 or timer_result == "" or timer_result == False:
             return None
         
@@ -2203,21 +2239,82 @@ def render_activity_timer_component_15min(session_id: str) -> Optional[Dict[str,
                     logger.info(f"✅ Valid 15-min timer event received: {timer_result.get('event')} for session {session_id[:8]}.")
                     return timer_result
                 else:
-                    logger.warning(f"⚠️ Timer event session ID mismatch: expected {session_id[:8]}, got {timer_result.get('session_id', 'None')[:8]}. Event ignored.")
+                    logger.warning(f"⚠️ Timer event session ID mismatch")
                     return None
             elif timer_result.get('event') == "timer_error":
-                logger.error(f"❌ Timer component error for session {session_id[:8]}: {timer_result.get('error', 'Unknown error')}")
+                logger.error(f"❌ Timer component error: {timer_result.get('error', 'Unknown error')}")
                 return None
-            else:
-                logger.debug(f"Received non-timeout timer result: {timer_result.get('event', 'unknown')}")
-                return None
-        else:
-            logger.debug(f"Received non-dict timer result: {timer_result} (type: {type(timer_result)}).")
-            return None
+        
+        return None
         
     except Exception as e:
-        logger.error(f"❌ JavaScript timer component execution error for session {session_id[:8]}: {e}", exc_info=True)
+        logger.error(f"❌ JavaScript timer component execution error: {e}", exc_info=True)
         return None
+
+
+def handle_auto_timeout_from_query():
+    """
+    Handles automatic timeout redirects triggered by the JavaScript timer.
+    Add this to your query parameter handlers.
+    """
+    logger.info("🔍 AUTO-TIMEOUT HANDLER: Checking for timeout requests...")
+    
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    inactive_minutes = query_params.get("inactive_minutes", "15")
+    
+    if event == "session_timeout_auto" and session_id:
+        logger.info("=" * 80)
+        logger.info("⏰ AUTO-TIMEOUT DETECTED VIA URL REDIRECT!")
+        logger.info(f"Session ID: {session_id}, Inactive: {inactive_minutes} minutes")
+        logger.info("=" * 80)
+        
+        # Clear query parameters
+        for param in ["event", "session_id", "inactive_minutes"]:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        # Get session manager
+        session_manager = st.session_state.get('session_manager')
+        if not session_manager:
+            logger.error("Session manager not available during timeout handling")
+            st.session_state['page'] = None
+            st.rerun()
+            return
+        
+        # Load and process the session
+        try:
+            session = session_manager.db.load_session(session_id)
+            if session:
+                # Save to CRM if eligible
+                if session_manager._is_crm_save_eligible(session, "15-Minute Auto Timeout"):
+                    logger.info(f"Performing CRM save for auto-timeout session {session_id[:8]}")
+                    save_success = session_manager.zoho.save_chat_transcript_sync(session, "15-Minute Auto Timeout")
+                    if save_success:
+                        session.timeout_saved_to_crm = True
+                
+                # Mark session as inactive
+                session.active = False
+                session.last_activity = datetime.now()
+                session_manager.db.save_session(session)
+                logger.info(f"🔒 Session {session_id[:8]} closed due to auto-timeout")
+            
+        except Exception as e:
+            logger.error(f"Error processing auto-timeout: {e}", exc_info=True)
+        
+        # Clear session state and redirect to home
+        if 'current_session_id' in st.session_state:
+            del st.session_state['current_session_id']
+        if 'page' in st.session_state:
+            del st.session_state['page']
+        
+        # Show message and redirect
+        st.info("⏰ **Session Timeout:** Your session has been closed due to 15 minutes of inactivity.")
+        st.info("🏠 Please click 'Start as Guest' or 'Sign In' to begin a new session.")
+        
+        # Force rerun to show welcome page
+        st.rerun()
 
 def render_browser_close_detection_enhanced(session_id: str):
     """Enhanced browser close detection - ONLY for real exits, NOT tab switching"""
@@ -3023,7 +3120,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     # Add 15-minute timer for ALL user types (since sessions now auto-close after 15 minutes)
     timer_result = None
     try:
-        timer_result = render_activity_timer_component_15min(session.session_id)
+        timer_result = render_activity_timer_component_15min_fixed(session.session_id)
         if timer_result and handle_timer_event(timer_result, session_manager, session):
             # Timer event handled and session was closed - execution should have been stopped by st.rerun()
             return
@@ -3265,6 +3362,7 @@ def main_fixed():
     try:
         handle_emergency_save_requests_from_query()
         handle_fingerprint_requests_from_query()
+        handle_auto_timeout_from_query()
     except Exception as e:
         logger.error(f"Query parameter handling failed: {e}")
 
