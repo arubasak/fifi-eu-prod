@@ -2362,48 +2362,75 @@ def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionMa
             logger.info(f"🔒 Session {session_id[:8]} closed due to 15-minute timeout")
     
             # Trigger Beacon+Redirect save and redirect to Sign In page
-            timeout_js = f"""
-            <script>
-            (function() {{
-                const sessionId = '{session_id}';
-                const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
-        
-                console.log('🚨 15-minute timeout - triggering Beacon+Redirect save');
-        
-                // PRIMARY: Send beacon to FastAPI
-                if (navigator.sendBeacon) {{
-                    try {{
-                        const timeoutData = JSON.stringify({{
-                            session_id: sessionId,
-                            reason: '15_minute_timeout',
-                            timestamp: Date.now()
-                        }});
-                
-                        const beaconSent = navigator.sendBeacon(
-                            FASTAPI_URL,
-                            new Blob([timeoutData], {{type: 'application/json'}})
-                        );
-                
-                        if (beaconSent) {{
-                            console.log('✅ 15-min timeout beacon sent successfully');
-                            // Redirect to Sign In page after beacon
-                            setTimeout(() => {{
-                                window.location.href = window.location.origin + window.location.pathname;
-                            }}, 1000);
-                            return;
-                        }}
-                    }} catch (beaconError) {{
-                        console.error('❌ 15-min timeout beacon error:', beaconError);
-                    }}
+            # Trigger Beacon+Redirect save and redirect to Sign In page
+timeout_js = f"""
+<script>
+(function() {{
+    const sessionId = '{session_id}';
+    const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
+    let redirectTriggered = false;
+    
+    console.log('🚨 15-minute timeout - triggering GUARANTEED redirect with beacon attempt');
+    
+    // GUARANTEED REDIRECT: Always redirect after 5 seconds maximum
+    const guaranteedRedirect = setTimeout(() => {{
+        if (!redirectTriggered) {{
+            redirectTriggered = true;
+            console.log('⏰ GUARANTEED REDIRECT: 5-second timeout reached, redirecting to Sign In');
+            window.location.href = window.location.origin + window.location.pathname;
+        }}
+    }}, 5000); // 5 seconds maximum wait
+    
+    // ATTEMPT BEACON: Try beacon first, but don't rely on it
+    if (navigator.sendBeacon) {{
+        try {{
+            console.log('📡 Attempting beacon send...');
+            const timeoutData = JSON.stringify({{
+                session_id: sessionId,
+                reason: '15_minute_timeout',
+                timestamp: Date.now()
+            }});
+            
+            // Send beacon - don't wait for result, just send and move on
+            navigator.sendBeacon(
+                FASTAPI_URL,
+                new Blob([timeoutData], {{type: 'application/json'}})
+            );
+            
+            console.log('📡 Beacon sent (result unknown) - redirect will happen in 3 seconds');
+            
+            // Early redirect for successful beacon attempt
+            setTimeout(() => {{
+                if (!redirectTriggered) {{
+                    redirectTriggered = true;
+                    clearTimeout(guaranteedRedirect);
+                    console.log('✅ Early redirect after beacon attempt');
+                    window.location.href = window.location.origin + window.location.pathname;
                 }}
-        
-                // FALLBACK: Redirect with query params for CRM save
-                console.log('🔄 Beacon failed, using redirect fallback for 15-min timeout...');
-                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=15_minute_timeout`;
-                window.location.href = saveUrl;
-            }})();
-            </script>
-            """
+            }}, 3000); // 3 seconds for beacon attempt
+            
+        }} catch (beaconError) {{
+            console.error('❌ Beacon error:', beaconError);
+            // Immediate redirect on beacon error
+            if (!redirectTriggered) {{
+                redirectTriggered = true;
+                clearTimeout(guaranteedRedirect);
+                console.log('🔄 Immediate redirect due to beacon error');
+                window.location.href = window.location.origin + window.location.pathname;
+            }}
+        }}
+    }} else {{
+        // No beacon support - immediate redirect
+        if (!redirectTriggered) {{
+            redirectTriggered = true;
+            clearTimeout(guaranteedRedirect);
+            console.log('🔄 Immediate redirect - no beacon support');
+            window.location.href = window.location.origin + window.location.pathname;
+        }}
+    }}
+}})();
+</script>
+"""
     
             # Execute the timeout save JavaScript
             st.components.v1.html(timeout_js, height=0, width=0)
