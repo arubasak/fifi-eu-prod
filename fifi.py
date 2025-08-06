@@ -3576,12 +3576,30 @@ def check_server_side_timeout(session_manager, session, timeout_minutes: int = 1
     
     return False
 
-
 def handle_timeout_redirect():
-    """
-    Handles the timeout redirect flag in query params.
-    """
+    """ENHANCED: Set timeout context when redirecting"""
     if st.query_params.get("timeout_redirect") == "true":
+        # Set timeout context in JavaScript
+        timeout_context_js = """
+        <script>
+        try {
+            // Store timeout reason in sessionStorage
+            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
+            
+            // Also send message to browser close detection
+            window.postMessage({
+                type: 'fifi_timeout_context',
+                reason: 'session_timeout_15min_inactivity'
+            }, '*');
+            
+            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
+        } catch (e) {
+            console.error('Failed to set timeout context:', e);
+        }
+        </script>
+        """
+        st.components.v1.html(timeout_context_js, height=0, width=0)
+        
         # Clear the flag
         if "timeout_redirect" in st.query_params:
             del st.query_params["timeout_redirect"]
@@ -3589,11 +3607,8 @@ def handle_timeout_redirect():
         # Clear session state to show welcome page
         for key in ['current_session_id', 'page']:
             if key in st.session_state:
-                del st.session_state[key]
+                del st.session_state[key]        
         
-        # The main routing logic will now show welcome page
-
-
 def render_timeout_status_sidebar(session):
     """
     Shows timeout countdown in sidebar ONLY in the last 5 minutes.
