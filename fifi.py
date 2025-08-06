@@ -3021,12 +3021,12 @@ def check_and_handle_timeout_with_reset(session_manager, session, timeout_minute
     try {
         sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
         window.postMessage({
-        type: 'fifi_timeout_context', 
-        reason: 'session_timeout_15min_inactivity'
-        }, '*');
-    console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
-        } catch (e) {
-    console.error('Failed to set timeout context:', e);
+                            type: 'fifi_timeout_context', 
+                            reason: 'session_timeout_15min_inactivity'
+                            }, '*');
+                            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
+                            } catch (e) {
+        console.error('Failed to set timeout context:', e);
         }
     </script>
     """
