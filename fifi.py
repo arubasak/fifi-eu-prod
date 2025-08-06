@@ -2030,10 +2030,10 @@ class SessionManager:
 # JAVASCRIPT COMPONENTS & EVENT HANDLING
 # =============================================================================
 
-def render_activity_timer_component_15min_fixed(session_id: str) -> Optional[Dict[str, Any]]:
+def render_activity_timer_component_15min_fixed_v2(session_id: str) -> Optional[Dict[str, Any]]:
     """
-    Enhanced timer component that automatically redirects after 15 minutes of inactivity
-    without requiring Python-side checking.
+    Enhanced timer component V2 that automatically redirects after 15 minutes of inactivity.
+    Handles both iframe and non-iframe scenarios by detecting and redirecting the appropriate window.
     """
     if not session_id:
         logger.warning("❌ Timer component: No session ID provided")
@@ -2047,7 +2047,20 @@ def render_activity_timer_component_15min_fixed(session_id: str) -> Optional[Dic
             const sessionId = "{session_id}";
             const SESSION_TIMEOUT_MS = 900000; // 15 minutes
             
-            console.log("🕐 FiFi 15-Minute Timer: Initializing for session", sessionId.substring(0, 8));
+            console.log("🕐 FiFi 15-Minute Timer V2: Initializing for session", sessionId.substring(0, 8));
+            
+            // Detect if we're in an iframe
+            const isInIframe = () => {{
+                try {{
+                    return window !== window.parent || window !== window.top;
+                }} catch (e) {{
+                    // Cross-origin iframe will throw error
+                    return true;
+                }}
+            }};
+            
+            const inIframe = isInIframe();
+            console.log(`📍 Running in ${{inIframe ? 'IFRAME' : 'TOP WINDOW'}}`);
             
             // Initialize or reset timer state
             if (typeof window.fifi_timer_state_{safe_session_id_js} === 'undefined' || 
@@ -2060,7 +2073,8 @@ def render_activity_timer_component_15min_fixed(session_id: str) -> Optional[Dic
                     expired: false,
                     listenersInitialized: false,
                     timeoutCheckInterval: null,
-                    sessionId: sessionId
+                    sessionId: sessionId,
+                    isInIframe: inIframe
                 }};
             }}
             
@@ -2107,25 +2121,26 @@ def render_activity_timer_component_15min_fixed(session_id: str) -> Optional[Dic
                 }});
                 
                 // Try to add listeners to parent document (for iframes)
-                try {{
-                    if (window.parent && window.parent.document && 
-                        window.parent.document !== document &&
-                        window.parent.location.origin === window.location.origin) {{
-                        
-                        events.forEach(eventType => {{
-                            try {{
-                                window.parent.document.addEventListener(eventType, resetActivity, {{ 
-                                    passive: true, 
-                                    capture: true
-                                }});
-                            }} catch (e) {{
-                                console.debug(`Failed to add parent ${{eventType}} listener:`, e);
-                            }}
-                        }});
-                        console.log("👂 Parent document listeners added successfully.");
+                if (inIframe) {{
+                    try {{
+                        if (window.parent && window.parent.document && 
+                            window.parent.location.origin === window.location.origin) {{
+                            
+                            events.forEach(eventType => {{
+                                try {{
+                                    window.parent.document.addEventListener(eventType, resetActivity, {{ 
+                                        passive: true, 
+                                        capture: true
+                                    }});
+                                }} catch (e) {{
+                                    console.debug(`Failed to add parent ${{eventType}} listener:`, e);
+                                }}
+                            }});
+                            console.log("👂 Parent document listeners added successfully.");
+                        }}
+                    }} catch (e) {{
+                        console.debug("Cannot access parent document for listeners (likely cross-origin):", e);
                     }}
-                }} catch (e) {{
-                    console.debug("Cannot access parent document for listeners:", e);
                 }}
                 
                 // Visibility change handlers
@@ -2146,7 +2161,7 @@ def render_activity_timer_component_15min_fixed(session_id: str) -> Optional[Dic
                     clearInterval(state.timeoutCheckInterval);
                 }}
                 
-                // NEW: Set up automatic timeout checking and redirect
+                // NEW V2: Enhanced automatic timeout checking with iframe handling
                 state.timeoutCheckInterval = setInterval(() => {{
                     const currentTime = Date.now();
                     const inactiveTimeMs = currentTime - state.lastActivityTime;
@@ -2162,35 +2177,113 @@ def render_activity_timer_component_15min_fixed(session_id: str) -> Optional[Dic
                     if (inactiveTimeMs >= SESSION_TIMEOUT_MS && !state.expired) {{
                         state.expired = true;
                         console.log("🚨 15-MINUTE TIMEOUT REACHED - TRIGGERING AUTO-REDIRECT");
+                        console.log(`📍 Redirect mode: ${{state.isInIframe ? 'IFRAME → PARENT' : 'DIRECT'}}`);
                         
                         // Clear the interval to stop checking
                         clearInterval(state.timeoutCheckInterval);
                         
-                        // AUTOMATIC REDIRECT - doesn't depend on Python checking
+                        // Build the timeout URL
+                        const timeoutUrl = `${{window.location.origin}}${{window.location.pathname}}?event=session_timeout_auto&session_id=${{sessionId}}&inactive_minutes=${{inactiveMinutes}}`;
+                        
+                        // V2: Smart redirect based on iframe status
+                        const performRedirect = () => {{
+                            console.log("🔄 Performing redirect to:", timeoutUrl);
+                            
+                            if (state.isInIframe) {{
+                                // We're in an iframe - try to redirect parent/top window
+                                console.log("🔄 Attempting parent/top window redirect...");
+                                
+                                try {{
+                                    // Try top window first (handles nested iframes)
+                                    if (window.top && window.top.location) {{
+                                        console.log("✅ Redirecting TOP window");
+                                        window.top.location.href = timeoutUrl;
+                                        return;
+                                    }}
+                                }} catch (e) {{
+                                    console.log("⚠️ Cannot access top window (cross-origin?):", e.message);
+                                }}
+                                
+                                try {{
+                                    // Fallback to parent window
+                                    if (window.parent && window.parent.location) {{
+                                        console.log("✅ Redirecting PARENT window");
+                                        window.parent.location.href = timeoutUrl;
+                                        return;
+                                    }}
+                                }} catch (e) {{
+                                    console.log("⚠️ Cannot access parent window (cross-origin?):", e.message);
+                                }}
+                                
+                                // If we can't access parent/top, try postMessage as last resort
+                                try {{
+                                    console.log("📡 Attempting postMessage to parent for redirect");
+                                    window.parent.postMessage({{
+                                        type: 'fifi_timeout_redirect',
+                                        url: timeoutUrl,
+                                        sessionId: sessionId
+                                    }}, '*');
+                                    
+                                    // Also redirect iframe itself as fallback
+                                    setTimeout(() => {{
+                                        console.log("🔄 Fallback: Redirecting iframe itself");
+                                        window.location.href = timeoutUrl;
+                                    }}, 1000);
+                                }} catch (e) {{
+                                    console.error("❌ postMessage failed:", e);
+                                    // Last resort: redirect iframe only
+                                    window.location.href = timeoutUrl;
+                                }}
+                                
+                            }} else {{
+                                // We're in the top window - direct redirect
+                                console.log("✅ Redirecting current window (not in iframe)");
+                                window.location.href = timeoutUrl;
+                            }}
+                        }};
+                        
                         try {{
-                            // First, try to trigger the timeout save via URL parameters
-                            const timeoutUrl = `${{window.location.origin}}${{window.location.pathname}}?event=session_timeout_auto&session_id=${{sessionId}}&inactive_minutes=${{inactiveMinutes}}`;
-                            
-                            console.log("🔄 Redirecting to trigger timeout save and return to home...");
-                            
-                            // Force redirect to trigger the timeout handling
-                            window.location.href = timeoutUrl;
-                            
+                            performRedirect();
                         }} catch (redirectError) {{
-                            console.error("Failed to redirect:", redirectError);
+                            console.error("❌ Redirect failed:", redirectError);
                             
-                            // Fallback: Try to clear session and go to base URL
+                            // Ultimate fallback: Try base URL
                             try {{
-                                window.location.href = window.location.origin + window.location.pathname;
+                                const fallbackUrl = window.location.origin + window.location.pathname;
+                                console.log("🔄 Ultimate fallback redirect to:", fallbackUrl);
+                                
+                                if (state.isInIframe) {{
+                                    try {{
+                                        window.top.location.href = fallbackUrl;
+                                    }} catch (e) {{
+                                        window.parent.location.href = fallbackUrl;
+                                    }}
+                                }} else {{
+                                    window.location.href = fallbackUrl;
+                                }}
                             }} catch (fallbackError) {{
-                                console.error("Fallback redirect also failed:", fallbackError);
+                                console.error("❌ All redirect attempts failed:", fallbackError);
                             }}
                         }}
                     }}
                 }}, 10000); // Check every 10 seconds for timeout
                 
+                // V2: Setup parent message listener for cross-origin iframe scenarios
+                if (inIframe) {{
+                    try {{
+                        // Tell parent to listen for timeout messages
+                        window.parent.postMessage({{
+                            type: 'fifi_timer_ready',
+                            sessionId: sessionId
+                        }}, '*');
+                    }} catch (e) {{
+                        console.debug("Could not notify parent of timer readiness:", e);
+                    }}
+                }}
+                
                 state.listenersInitialized = true;
-                console.log("✅ Activity listeners and auto-timeout checker initialized");
+                console.log("✅ Activity listeners and auto-timeout checker V2 initialized");
+                console.log(`📍 Context: ${{state.isInIframe ? 'IFRAME' : 'TOP'}} | Session: ${{sessionId.substring(0, 8)}}`);
             }}
             
             // Still return timeout status for Python-side checking (backward compatibility)
@@ -2207,14 +2300,15 @@ def render_activity_timer_component_15min_fixed(session_id: str) -> Optional[Dic
                     inactive_time_ms: inactiveTimeMs,
                     inactive_minutes: inactiveMinutes,
                     inactive_seconds: inactiveSeconds,
-                    timestamp: currentTime
+                    timestamp: currentTime,
+                    is_iframe: state.isInIframe
                 }};
             }}
             
             return null;
             
         }} catch (error) {{
-            console.error("🚨 Timer component error:", error);
+            console.error("🚨 Timer component V2 error:", error);
             return {{
                 event: "timer_error",
                 session_id: "{session_id}",
@@ -2237,6 +2331,8 @@ def render_activity_timer_component_15min_fixed(session_id: str) -> Optional[Dic
             if timer_result.get('event') == "session_timeout_15min":
                 if timer_result.get('session_id') == session_id:
                     logger.info(f"✅ Valid 15-min timer event received: {timer_result.get('event')} for session {session_id[:8]}.")
+                    if timer_result.get('is_iframe'):
+                        logger.info("📍 Timer detected iframe context")
                     return timer_result
                 else:
                     logger.warning(f"⚠️ Timer event session ID mismatch")
@@ -2248,8 +2344,9 @@ def render_activity_timer_component_15min_fixed(session_id: str) -> Optional[Dic
         return None
         
     except Exception as e:
-        logger.error(f"❌ JavaScript timer component execution error: {e}", exc_info=True)
+        logger.error(f"❌ JavaScript timer component V2 execution error: {e}", exc_info=True)
         return None
+        
 
 
 def handle_auto_timeout_from_query():
