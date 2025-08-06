@@ -2479,7 +2479,7 @@ def render_browser_close_detection_enhanced(session_id: str):
                 const timeoutFlag = sessionStorage.getItem('fifi_timeout_reason');
                 if (timeoutFlag) {{
                     console.log('✅ Found timeout reason in sessionStorage:', timeoutFlag);
-                    sessionStorage.removeItem('fifi_timeout_reason'); // Clean up
+                    // sessionStorage.removeItem('fifi_timeout_reason');
                     return timeoutFlag;
                 }}
             }} catch (e) {{
