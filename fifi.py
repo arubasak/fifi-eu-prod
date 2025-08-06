@@ -2414,7 +2414,7 @@ def handle_auto_timeout_from_query():
         st.rerun()
 
 def render_browser_close_detection_enhanced(session_id: str):
-    """Enhanced browser close detection - ONLY for real exits, NOT tab switching"""
+    """Enhanced browser close detection - FIXED to properly distinguish tab switches from real exits"""
     if not session_id:
         return
 
@@ -2429,11 +2429,43 @@ def render_browser_close_detection_enhanced(session_id: str):
         
         const sessionId = '{session_id}';
         const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
-        let saveTriggered = false;
         
-        console.log('🛡️ Browser close detection initialized (NO tab switching saves)');
+        // FIXED: Tab switch detection state
+        let saveTriggered = false;
+        let isTabSwitching = false;
+        let tabSwitchTimeout = null;
+        
+        console.log('🛡️ Browser close detection initialized (ENHANCED tab switch filtering)');
 
+        // FIXED: Enhanced emergency save that checks for tab switches
         function triggerEmergencySave(reason = 'unknown') {{
+            if (saveTriggered) return;
+            
+            // CRITICAL FIX: If we detected a recent tab switch, delay and check if we come back
+            if (isTabSwitching) {{
+                console.log('🔍 Potential tab switch detected, delaying emergency save by 100ms...');
+                
+                setTimeout(() => {{
+                    // Check if document became visible again (indicates tab switch, not real exit)
+                    if (document.visibilityState === 'visible') {{
+                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
+                        isTabSwitching = false;
+                        return;
+                    }}
+                    
+                    // Still hidden after delay, proceed with save
+                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
+                    performActualEmergencySave(reason + '_confirmed');
+                }}, 100); // Short delay to check visibility
+                
+                return;
+            }}
+            
+            // Immediate save for non-tab-switch scenarios
+            performActualEmergencySave(reason);
+        }}
+        
+        function performActualEmergencySave(reason) {{
             if (saveTriggered) return;
             saveTriggered = true;
             
@@ -2474,19 +2506,48 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }}
         
-        // ONLY listen to REAL exit events (NOT visibility/pagehide)
+        // ENHANCED: Improved visibility change tracking
+        document.addEventListener('visibilitychange', function() {{
+            if (document.visibilityState === 'hidden') {{
+                console.log('👁️ Tab switched away - marking as potential tab switch');
+                isTabSwitching = true;
+                
+                // Clear any existing timeout
+                if (tabSwitchTimeout) {{
+                    clearTimeout(tabSwitchTimeout);
+                }}
+                
+                // Reset tab switching flag after 2 seconds
+                tabSwitchTimeout = setTimeout(() => {{
+                    console.log('⏰ Tab switch timeout - assuming real navigation');
+                    isTabSwitching = false;
+                }}, 2000);
+                
+            }} else {{
+                console.log('👁️ Tab switched back - confirmed tab switch (not real exit)');
+                isTabSwitching = false;
+                
+                // Clear the timeout since we're back
+                if (tabSwitchTimeout) {{
+                    clearTimeout(tabSwitchTimeout);
+                    tabSwitchTimeout = null;
+                }}
+            }}
+        }}, {{ passive: true }});
+        
+        // ONLY listen to REAL exit events with enhanced filtering
         const realExitEvents = ['beforeunload', 'unload'];
         realExitEvents.forEach(eventType => {{
             try {{
-                window.addEventListener(eventType, () => {{
-                    console.log('🚨 Real exit event detected:', eventType);
+                window.addEventListener(eventType, (event) => {{
+                    console.log('🚨 Exit event detected:', eventType, 'TabSwitching:', isTabSwitching);
                     triggerEmergencySave(eventType);
                 }}, {{ capture: true, passive: true }});
                 
                 // Also listen on parent window (for iframe scenarios)
                 if (window.parent && window.parent !== window) {{
-                    window.parent.addEventListener(eventType, () => {{
-                        console.log('🚨 Parent exit event detected:', eventType);
+                    window.parent.addEventListener(eventType, (event) => {{
+                        console.log('🚨 Parent exit event detected:', eventType, 'TabSwitching:', isTabSwitching);
                         triggerEmergencySave('parent_' + eventType);
                     }}, {{ capture: true, passive: true }});
                 }}
@@ -2495,21 +2556,20 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }});
         
-        // LOG tab switching but DON'T trigger saves
-        document.addEventListener('visibilitychange', function() {{
-            if (document.visibilityState === 'hidden') {{
-                console.log('👁️ Tab switched away (NOT triggering save)');
+        // ENHANCED: Page hide with better tab switch detection
+        window.addEventListener('pagehide', function(event) {{
+            console.log('📄 pagehide detected - persisted:', event.persisted, 'TabSwitching:', isTabSwitching);
+            
+            // Only trigger save for pagehide if it's not persisted (real navigation) and not a tab switch
+            if (!event.persisted && !isTabSwitching) {{
+                console.log('🚨 Non-persisted pagehide detected (likely real navigation)');
+                triggerEmergencySave('pagehide_non_persisted');
             }} else {{
-                console.log('👁️ Tab switched back (welcome back!)');
+                console.log('👁️ Pagehide skipped (persisted cache or tab switch)');
             }}
         }}, {{ passive: true }});
         
-        // LOG pagehide but DON'T trigger saves (too unreliable for tab vs close)
-        window.addEventListener('pagehide', function() {{
-            console.log('📄 pagehide detected (NOT triggering save - relying on beforeunload/unload)');
-        }}, {{ passive: true }});
-        
-        console.log('✅ Browser close detection ready - ONLY saves on real exits');
+        console.log('✅ Enhanced browser close detection ready - Smart tab switch filtering enabled');
     }})();
     </script>
     """
@@ -2518,7 +2578,7 @@ def render_browser_close_detection_enhanced(session_id: str):
         st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
-
+        
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
     """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
     if not timer_result or not isinstance(timer_result, dict):
