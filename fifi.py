@@ -3217,7 +3217,7 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
     # Add 15-minute timer for ALL user types (since sessions now auto-close after 15 minutes)
     timer_result = None
     try:
-        timer_result = render_activity_timer_component_15min_fixed(session.session_id)
+        timer_result = render_activity_timer_component_15min_fixed_v2(session.session_id)
         if timer_result and handle_timer_event(timer_result, session_manager, session):
             # Timer event handled and session was closed - execution should have been stopped by st.rerun()
             return
