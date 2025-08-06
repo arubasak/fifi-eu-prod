@@ -3014,7 +3014,24 @@ def check_and_handle_timeout_with_reset(session_manager, session, timeout_minute
     # Check if timeout reached
     if time_since_activity.total_seconds() > (timeout_minutes * 60):
         logger.info(f"⏰ Session timeout: {session.session_id[:8]} inactive for {time_since_activity}")
-        
+
+        # Set timeout context before any UI changes
+timeout_context_js = """
+<script>
+try {
+    sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
+    window.postMessage({
+        type: 'fifi_timeout_context', 
+        reason: 'session_timeout_15min_inactivity'
+    }, '*');
+    console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
+} catch (e) {
+    console.error('Failed to set timeout context:', e);
+}
+</script>
+"""
+st.components.v1.html(timeout_context_js, height=0, width=0)
+
         # Show timeout message
         st.error("⏰ **Session Timeout**")
         st.info("Your session has expired due to 15 minutes of inactivity. Please start a new session.")
