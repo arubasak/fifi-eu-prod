@@ -2985,6 +2985,8 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         else:
             st.markdown("**Device ID:** Initializing...")
             st.caption("Starting fingerprinting...")
+
+        render_timeout_status_sidebar(session)
         
         if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
             if session.zoho_contact_id: 
@@ -3183,8 +3185,239 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                 else:
                     st.error("Please enter the verification code you received.")
 
+# =============================================================================
+# ADD THESE FUNCTIONS ANYWHERE BEFORE render_chat_interface
+# (e.g., after your existing JavaScript components section)
+# =============================================================================
+
+def inject_activity_heartbeat_monitor(session_id: str, heartbeat_interval_seconds: int = 30):
+    """
+    Injects JavaScript that monitors activity and sends heartbeats to Python.
+    This is more reliable than expecting JS to run for 15 minutes straight.
+    """
+    
+    heartbeat_js = f"""
+    (() => {{
+        // Unique namespace for this session
+        const SESSION_ID = '{session_id}';
+        const HEARTBEAT_INTERVAL = {heartbeat_interval_seconds * 1000};
+        const TIMEOUT_MS = 900000; // 15 minutes
+        
+        // Initialize or retrieve state
+        if (!window.fifiHeartbeatMonitor) {{
+            window.fifiHeartbeatMonitor = {{
+                lastActivityTime: Date.now(),
+                lastHeartbeatTime: 0,
+                isActive: true,
+                sessionId: SESSION_ID
+            }};
+            
+            console.log('💓 Heartbeat monitor initialized for session', SESSION_ID.substring(0, 8));
+            
+            // Activity tracking
+            function trackActivity() {{
+                window.fifiHeartbeatMonitor.lastActivityTime = Date.now();
+                window.fifiHeartbeatMonitor.isActive = true;
+            }}
+            
+            // Monitor all activity types
+            const events = ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart', 'click', 'focus'];
+            events.forEach(event => {{
+                document.addEventListener(event, trackActivity, {{ passive: true, capture: true }});
+            }});
+            
+            // Also monitor parent if in iframe
+            try {{
+                if (window.parent && window.parent !== window) {{
+                    events.forEach(event => {{
+                        window.parent.document.addEventListener(event, trackActivity, {{ passive: true, capture: true }});
+                    }});
+                }}
+            }} catch (e) {{
+                console.debug('Cannot monitor parent activity:', e);
+            }}
+            
+            // Heartbeat sender
+            setInterval(() => {{
+                const monitor = window.fifiHeartbeatMonitor;
+                const now = Date.now();
+                const timeSinceActivity = now - monitor.lastActivityTime;
+                const timeSinceHeartbeat = now - monitor.lastHeartbeatTime;
+                
+                // Check if we should send a heartbeat
+                if (timeSinceActivity < TIMEOUT_MS && timeSinceHeartbeat >= HEARTBEAT_INTERVAL) {{
+                    monitor.lastHeartbeatTime = now;
+                    
+                    const heartbeatData = {{
+                        type: 'activity_heartbeat',
+                        session_id: SESSION_ID,
+                        last_activity: monitor.lastActivityTime,
+                        time_since_activity: timeSinceActivity,
+                        timestamp: now
+                    }};
+                    
+                    console.log('💓 Sending heartbeat, inactive for', Math.floor(timeSinceActivity / 1000), 'seconds');
+                    
+                    // Return data for st_javascript to capture
+                    return heartbeatData;
+                }}
+                
+                // Check for client-side timeout
+                if (timeSinceActivity >= TIMEOUT_MS && monitor.isActive) {{
+                    monitor.isActive = false;
+                    console.log('⏰ Client-side timeout detected!');
+                    
+                    // Try to notify Python about timeout
+                    return {{
+                        type: 'client_timeout',
+                        session_id: SESSION_ID,
+                        inactive_minutes: Math.floor(timeSinceActivity / 60000),
+                        timestamp: now
+                    }};
+                }}
+            }}, 5000); // Check every 5 seconds
+        }}
+        
+        // Return current status
+        const monitor = window.fifiHeartbeatMonitor;
+        const now = Date.now();
+        const timeSinceActivity = now - monitor.lastActivityTime;
+        
+        return {{
+            type: 'status_check',
+            session_id: SESSION_ID,
+            time_since_activity: timeSinceActivity,
+            is_active: monitor.isActive,
+            timestamp: now
+        }};
+    }})()
+    """
+    
+    # Execute and capture result
+    result = st_javascript(heartbeat_js)
+    return result
+
+
+def update_session_heartbeat(session_manager, session, heartbeat_data: dict):
+    """
+    Updates session based on heartbeat data from JavaScript.
+    """
+    if not heartbeat_data or not isinstance(heartbeat_data, dict):
+        return
+    
+    heartbeat_type = heartbeat_data.get('type')
+    
+    if heartbeat_type == 'activity_heartbeat':
+        # Update last activity time based on client report
+        client_activity_time = heartbeat_data.get('last_activity')
+        if client_activity_time:
+            # Convert JS timestamp to Python datetime
+            client_activity = datetime.fromtimestamp(client_activity_time / 1000)
+            
+            # Only update if client reports more recent activity
+            if client_activity > session.last_activity:
+                session.last_activity = client_activity
+                session_manager.db.save_session(session)
+                logger.debug(f"💓 Heartbeat updated activity for {session.session_id[:8]}")
+    
+    elif heartbeat_type == 'client_timeout':
+        logger.info(f"⏰ Client reported timeout for {session.session_id[:8]}")
+        # Client detected timeout, but server makes final decision
+
+
+def check_server_side_timeout(session_manager, session, timeout_minutes: int = 15) -> bool:
+    """
+    Server-side timeout check - the authoritative source of truth.
+    """
+    time_since_activity = datetime.now() - session.last_activity
+    timeout_seconds = timeout_minutes * 60
+    
+    if time_since_activity.total_seconds() > timeout_seconds:
+        logger.info(f"⏰ Server-side timeout confirmed for {session.session_id[:8]}")
+        
+        # Display timeout message
+        st.error("⏰ **Session Timeout:** Your session has expired due to 15 minutes of inactivity.")
+        
+        # Save to CRM if eligible
+        if session_manager._is_crm_save_eligible(session, "15-Minute Inactivity Timeout"):
+            with st.spinner("💾 Saving conversation to CRM..."):
+                try:
+                    save_success = session_manager.zoho.save_chat_transcript_sync(
+                        session, 
+                        "15-Minute Inactivity Timeout"
+                    )
+                    if save_success:
+                        st.success("✅ Conversation saved to CRM")
+                        session.timeout_saved_to_crm = True
+                except Exception as e:
+                    logger.error(f"CRM save failed during timeout: {e}")
+        
+        # End the session
+        session.active = False
+        session.last_activity = datetime.now()
+        session_manager.db.save_session(session)
+        
+        # Clear session state
+        for key in ['current_session_id', 'page']:
+            if key in st.session_state:
+                del st.session_state[key]
+        
+        st.info("🏠 Redirecting to home page...")
+        
+        # Force redirect using query params
+        st.query_params["timeout_redirect"] = "true"
+        time.sleep(1)
+        st.rerun()
+        
+        return True
+    
+    return False
+
+
+def handle_timeout_redirect():
+    """
+    Handles the timeout redirect flag in query params.
+    """
+    if st.query_params.get("timeout_redirect") == "true":
+        # Clear the flag
+        if "timeout_redirect" in st.query_params:
+            del st.query_params["timeout_redirect"]
+        
+        # Clear session state to show welcome page
+        for key in ['current_session_id', 'page']:
+            if key in st.session_state:
+                del st.session_state[key]
+        
+        # The main routing logic will now show welcome page
+
+
+def render_timeout_status_sidebar(session):
+    """
+    Shows timeout countdown in sidebar ONLY in the last 5 minutes.
+    """
+    TIMEOUT_MINUTES = 15
+    time_since_activity = datetime.now() - session.last_activity
+    time_remaining = timedelta(minutes=TIMEOUT_MINUTES) - time_since_activity
+    
+    if time_remaining.total_seconds() > 0:
+        total_seconds = int(time_remaining.total_seconds())
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        
+        # ONLY show warning in last 5 minutes
+        if minutes < 5:
+            if minutes < 2:
+                st.sidebar.error(f"⏰ Session expires in: {minutes}m {seconds}s")
+            else:
+                st.sidebar.warning(f"⏰ Session expires in: {minutes}m {seconds}s")
+            st.sidebar.caption("Any activity resets the timer")
+
 def render_chat_interface(session_manager: 'SessionManager', session: UserSession):
     """Renders the main chat interface."""
+    
+    # FIRST: Check server-side timeout
+    if check_server_side_timeout(session_manager, session):
+        return  # Stop rendering, session timed out
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
@@ -3214,15 +3447,24 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
         except Exception as e:
             logger.error(f"Failed to render browser close detection for {session.session_id[:8]}: {e}", exc_info=True)
 
-    # Add 15-minute timer for ALL user types (since sessions now auto-close after 15 minutes)
-    timer_result = None
-    try:
-        timer_result = render_activity_timer_component_15min_fixed_v2(session.session_id)
-        if timer_result and handle_timer_event(timer_result, session_manager, session):
-            # Timer event handled and session was closed - execution should have been stopped by st.rerun()
-            return
-    except Exception as e:
-        logger.error(f"15-minute timer component execution failed for session {session.session_id[:8]}: {e}", exc_info=True)
+    # REPLACE THE OLD TIMER WITH THIS:
+    # Inject heartbeat monitor and capture any data
+    heartbeat_data = inject_activity_heartbeat_monitor(session.session_id)
+    
+    # Process heartbeat data if received
+    if heartbeat_data:
+        update_session_heartbeat(session_manager, session, heartbeat_data)
+    
+    # Force a periodic check even if no heartbeat (fallback)
+    # This uses a less aggressive approach - only every 2 minutes
+    if 'last_timeout_check' not in st.session_state:
+        st.session_state.last_timeout_check = time.time()
+    
+    if time.time() - st.session_state.last_timeout_check > 120:  # 2 minutes
+        st.session_state.last_timeout_check = time.time()
+        # Add a small random delay to prevent all sessions rerunning at once
+        time.sleep(0.1)
+        st.rerun()
 
     # Check user limits
     limit_check = session_manager.question_limits.is_within_limits(session)
@@ -3300,7 +3542,6 @@ def render_chat_interface(session_manager: 'SessionManager', session: UserSessio
                     st.error("⚠️ Sorry, I encountered an unexpected error processing your request. Please try again.")
         
         st.rerun()
-
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
 # =============================================================================
@@ -3460,6 +3701,7 @@ def main_fixed():
         handle_emergency_save_requests_from_query()
         handle_fingerprint_requests_from_query()
         handle_auto_timeout_from_query()
+        handle_timeout_redirect()
     except Exception as e:
         logger.error(f"Query parameter handling failed: {e}")
 
