@@ -2035,6 +2035,8 @@ def render_activity_timer_component_15min_fixed_v2(session_id: str) -> Optional[
     Enhanced timer component V2 that automatically redirects after 15 minutes of inactivity.
     Handles both iframe and non-iframe scenarios by detecting and redirecting the appropriate window.
     """
+    logger.info(f"🔍 DEBUG: JavaScript timer component called for {session_id[:8]}")
+    
     if not session_id:
         logger.warning("❌ Timer component: No session ID provided")
         return None
@@ -2354,6 +2356,8 @@ def handle_auto_timeout_from_query():
     Handles automatic timeout redirects triggered by the JavaScript timer.
     Add this to your query parameter handlers.
     """
+    logger.info("🔍 DEBUG: handle_auto_timeout_from_query called")
+    
     logger.info("🔍 AUTO-TIMEOUT HANDLER: Checking for timeout requests...")
     
     query_params = st.query_params
@@ -2976,6 +2980,8 @@ def inject_dynamic_timeout_refresh(session):
     Injects a meta refresh that will trigger EXACTLY when the session should timeout.
     This updates dynamically based on user activity.
     """
+    logger.info(f"🔍 DEBUG: Dynamic timeout refresh called for {session.session_id[:8]}")
+
     seconds_until_timeout = calculate_seconds_until_timeout(session)
     
     # Add 1 second buffer to ensure we're past the timeout
@@ -3020,6 +3026,8 @@ def check_and_handle_timeout_with_reset(session_manager, session, timeout_minute
     """
     Checks for timeout and completely resets the session if timed out.
     """
+    logger.info(f"🔍 DEBUG: check_and_handle_timeout_with_reset called for {session.session_id[:8] if session else 'None'}")
+
     if not session or not session.active:
         return True
         
@@ -3631,6 +3639,8 @@ def check_server_side_timeout(session_manager, session, timeout_minutes: int = 1
 
 def handle_timeout_redirect():
     """ENHANCED: Set timeout context when redirecting"""
+    logger.info("🔍 DEBUG: handle_timeout_redirect called")
+
     if st.query_params.get("timeout_redirect") == "true":
         # Set timeout context in JavaScript
         timeout_context_js = """
