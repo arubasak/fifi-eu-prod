@@ -2841,6 +2841,107 @@ def global_message_channel_error_handler():
         except Exception as fallback_e:
             logger.error(f"Fallback global error handler also failed: {fallback_e}")
 
+def calculate_seconds_until_timeout(session, timeout_minutes=15):
+    """
+    Calculates exactly how many seconds until this session will timeout.
+    """
+    time_since_activity = datetime.now() - session.last_activity
+    timeout_seconds = timeout_minutes * 60
+    seconds_until_timeout = timeout_seconds - time_since_activity.total_seconds()
+    
+    # Return at least 5 seconds to prevent immediate refresh loops
+    return max(5, int(seconds_until_timeout))
+
+
+def inject_dynamic_timeout_refresh(session):
+    """
+    Injects a meta refresh that will trigger EXACTLY when the session should timeout.
+    This updates dynamically based on user activity.
+    """
+    seconds_until_timeout = calculate_seconds_until_timeout(session)
+    
+    # Add 1 second buffer to ensure we're past the timeout
+    refresh_at = seconds_until_timeout + 1
+    
+    dynamic_refresh_html = f"""
+    <meta http-equiv="refresh" content="{refresh_at}">
+    <script>
+        console.log('⏰ Session will be checked for timeout in {refresh_at} seconds');
+        
+        // Visual countdown (optional - remove if you don't want users to see)
+        let secondsLeft = {refresh_at};
+        setInterval(() => {{
+            secondsLeft--;
+            if (secondsLeft <= 300 && secondsLeft > 0) {{ // Last 5 minutes
+                console.log(`⏰ Timeout in ${{Math.floor(secondsLeft/60)}}m ${{secondsLeft%60}}s`);
+            }}
+        }}, 1000);
+    </script>
+    """
+    
+    st.markdown(dynamic_refresh_html, unsafe_allow_html=True)
+
+
+def completely_reset_session():
+    """
+    Completely clears the session and creates a new one.
+    This is like the user closing and reopening the browser.
+    """
+    logger.info("🔄 Completely resetting session due to timeout")
+    
+    # Clear ALL session state
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    
+    # This will force a new session to be created on next rerun
+    st.session_state.clear()
+    
+    logger.info("✅ Session state completely cleared")
+
+
+def check_and_handle_timeout_with_reset(session_manager, session, timeout_minutes=15):
+    """
+    Checks for timeout and completely resets the session if timed out.
+    """
+    if not session or not session.active:
+        return True
+        
+    # Calculate time since last activity
+    time_since_activity = datetime.now() - session.last_activity
+    
+    # Check if timeout reached
+    if time_since_activity.total_seconds() > (timeout_minutes * 60):
+        logger.info(f"⏰ Session timeout: {session.session_id[:8]} inactive for {time_since_activity}")
+        
+        # Show timeout message
+        st.error("⏰ **Session Timeout**")
+        st.info("Your session has expired due to 15 minutes of inactivity. Please start a new session.")
+        
+        # Save to CRM if eligible (before clearing)
+        if session_manager._is_crm_save_eligible(session, "15-Minute Timeout"):
+            with st.spinner("Saving conversation before ending session..."):
+                try:
+                    session_manager.zoho.save_chat_transcript_sync(session, "15-Minute Timeout")
+                    st.success("✅ Conversation saved")
+                except Exception as e:
+                    logger.error(f"CRM save failed: {e}")
+        
+        # Mark session as inactive in database
+        session.active = False
+        session_manager.db.save_session(session)
+        
+        # COMPLETELY RESET SESSION
+        completely_reset_session()
+        
+        # Add a button to start fresh
+        if st.button("🔄 Start New Session", type="primary"):
+            st.rerun()
+        
+        st.stop()  # Stop execution
+        return True
+        
+    return False
+
 # =============================================================================
 # UI COMPONENTS
 # =============================================================================
@@ -3412,12 +3513,16 @@ def render_timeout_status_sidebar(session):
                 st.sidebar.warning(f"⏰ Session expires in: {minutes}m {seconds}s")
             st.sidebar.caption("Any activity resets the timer")
 
-def render_chat_interface(session_manager: 'SessionManager', session: UserSession):
-    """Renders the main chat interface."""
+def render_chat_interface_with_exact_timeout(session_manager: 'SessionManager', session: UserSession):
+    """
+    Chat interface that refreshes exactly at the timeout moment.
+    """
+    # Check if already timed out
+    if check_and_handle_timeout_with_reset(session_manager, session):
+        return  # Session was reset, stop here
     
-    # FIRST: Check server-side timeout
-    if check_server_side_timeout(session_manager, session):
-        return  # Stop rendering, session timed out
+    # Inject dynamic refresh that will trigger exactly at timeout
+    inject_dynamic_timeout_refresh(session)
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
@@ -3728,8 +3833,13 @@ def main_fixed():
                 
                 if session and session.active:
                     logger.info(f"🔍 MAIN ROUTING: Session is active, rendering sidebar and chat interface")
+                    
+                     # ADD THIS CHECK HERE - Check timeout BEFORE rendering anything
+                    if check_and_handle_timeout_with_reset(session_manager, session):
+                        return  # Session timed out and was reset, stop here
+                        
                     render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-                    render_chat_interface(session_manager, session)
+                    render_chat_interface_with_exact_timeout(session_manager, session)
                 else:
                     logger.warning(f"🔍 MAIN ROUTING: Session inactive or None, redirecting to welcome")
                     st.session_state['page'] = None
