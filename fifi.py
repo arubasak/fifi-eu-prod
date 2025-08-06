@@ -2556,17 +2556,9 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }});
         
-        // ENHANCED: Page hide with better tab switch detection
+        // LOG pagehide but DON'T trigger saves (too unreliable for tab vs close detection)
         window.addEventListener('pagehide', function(event) {{
-            console.log('📄 pagehide detected - persisted:', event.persisted, 'TabSwitching:', isTabSwitching);
-            
-            // Only trigger save for pagehide if it's not persisted (real navigation) and not a tab switch
-            if (!event.persisted && !isTabSwitching) {{
-                console.log('🚨 Non-persisted pagehide detected (likely real navigation)');
-                triggerEmergencySave('pagehide_non_persisted');
-            }} else {{
-                console.log('👁️ Pagehide skipped (persisted cache or tab switch)');
-            }}
+            console.log('📄 pagehide detected - persisted:', event.persisted, 'TabSwitching:', isTabSwitching, '(NOT triggering save - relying on beforeunload/unload)');
         }}, {{ passive: true }});
         
         console.log('✅ Enhanced browser close detection ready - Smart tab switch filtering enabled');
