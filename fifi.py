@@ -3527,16 +3527,36 @@ def update_session_heartbeat(session_manager, session, heartbeat_data: dict):
         logger.info(f"⏰ Client reported timeout for {session.session_id[:8]}")
         # Client detected timeout, but server makes final decision
 
-
 def check_server_side_timeout(session_manager, session, timeout_minutes: int = 15) -> bool:
-    """
-    Server-side timeout check - the authoritative source of truth.
-    """
+    """ENHANCED: Server-side timeout check with context setting"""
     time_since_activity = datetime.now() - session.last_activity
     timeout_seconds = timeout_minutes * 60
     
     if time_since_activity.total_seconds() > timeout_seconds:
         logger.info(f"⏰ Server-side timeout confirmed for {session.session_id[:8]}")
+        
+        # ENHANCED: Set timeout context before any redirects
+        timeout_context_js = """
+        <script>
+        try {
+            // Set timeout context immediately
+            sessionStorage.setItem('fifi_timeout_reason', 'server_side_timeout_15min');
+            
+            // Send message to browser close detection
+            if (window.postMessage) {
+                window.postMessage({
+                    type: 'fifi_timeout_context',
+                    reason: 'server_side_timeout_15min'
+                }, '*');
+            }
+            
+            console.log('⏰ Server-side timeout context set');
+        } catch (e) {
+            console.error('Failed to set server timeout context:', e);
+        }
+        </script>
+        """
+        st.components.v1.html(timeout_context_js, height=0, width=0)
         
         # Display timeout message
         st.error("⏰ **Session Timeout:** Your session has expired due to 15 minutes of inactivity.")
@@ -3567,7 +3587,7 @@ def check_server_side_timeout(session_manager, session, timeout_minutes: int = 1
         
         st.info("🏠 Redirecting to home page...")
         
-        # Force redirect using query params
+        # ENHANCED: Force redirect with timeout flag
         st.query_params["timeout_redirect"] = "true"
         time.sleep(1)
         st.rerun()
