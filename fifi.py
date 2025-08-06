@@ -2366,7 +2366,23 @@ def handle_auto_timeout_from_query():
         logger.info("⏰ AUTO-TIMEOUT DETECTED VIA URL REDIRECT!")
         logger.info(f"Session ID: {session_id}, Inactive: {inactive_minutes} minutes")
         logger.info("=" * 80)
-        
+
+        # Set timeout context before any UI changes
+        timeout_context_js = """
+        <script>
+        try {
+            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
+            window.postMessage({
+                type: 'fifi_timeout_context', 
+                reason: 'session_timeout_15min_inactivity'
+            }, '*');
+            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
+        } catch (e) {
+            console.error('Failed to set timeout context:', e);
+        }
+        </script>
+        """
+        st.components.v1.html(timeout_context_js, height=0, width=0)
         # Clear query parameters
         for param in ["event", "session_id", "inactive_minutes"]:
             if param in st.query_params:
