@@ -2981,12 +2981,30 @@ def inject_dynamic_timeout_refresh(session):
     This updates dynamically based on user activity.
     """
     logger.info(f"🔍 DEBUG: Dynamic timeout refresh called for {session.session_id[:8]}")
-
+    
     seconds_until_timeout = calculate_seconds_until_timeout(session)
     
     # Add 1 second buffer to ensure we're past the timeout
     refresh_at = seconds_until_timeout + 1
     
+    # 🔧 SET TIMEOUT CONTEXT BEFORE META REFRESH
+    timeout_context_js = """
+    <script>
+    try {
+        sessionStorage.setItem('fifi_timeout_reason', 'meta_refresh_timeout_15min');
+        window.postMessage({
+            type: 'fifi_timeout_context',
+            reason: 'meta_refresh_timeout_15min'
+        }, '*');
+        console.log('⏰ Meta refresh timeout context set for', window.location.href);
+    } catch (e) {
+        console.error('Failed to set meta refresh timeout context:', e);
+    }
+    </script>
+    """
+    st.components.v1.html(timeout_context_js, height=0, width=0)
+    
+    # ORIGINAL META REFRESH WITH TIMEOUT CONTEXT
     dynamic_refresh_html = f"""
     <meta http-equiv="refresh" content="{refresh_at}">
     <script>
@@ -3004,7 +3022,6 @@ def inject_dynamic_timeout_refresh(session):
     """
     
     st.markdown(dynamic_refresh_html, unsafe_allow_html=True)
-
 
 def completely_reset_session():
     """
