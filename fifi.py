@@ -2414,7 +2414,7 @@ def handle_auto_timeout_from_query():
         st.rerun()
 
 def render_browser_close_detection_enhanced(session_id: str):
-    """Enhanced browser close detection - FIXED to properly distinguish tab switches from real exits"""
+    """Enhanced browser close detection - FIXED to pass timeout context when available"""
     if not session_id:
         return
 
@@ -2430,53 +2430,68 @@ def render_browser_close_detection_enhanced(session_id: str):
         const sessionId = '{session_id}';
         const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         
-        // FIXED: Tab switch detection state
+        // ENHANCED: Check for timeout context
         let saveTriggered = false;
         let isTabSwitching = false;
         let tabSwitchTimeout = null;
+        let timeoutContext = null; // NEW: Store timeout context
         
-        console.log('🛡️ Browser close detection initialized (ENHANCED tab switch filtering)');
+        console.log('🛡️ Browser close detection initialized (ENHANCED with timeout context)');
 
-        // FIXED: Enhanced emergency save that checks for tab switches
-        function triggerEmergencySave(reason = 'unknown') {{
-            if (saveTriggered) return;
-            
-            // CRITICAL FIX: If we detected a recent tab switch, delay and check if we come back
-            if (isTabSwitching) {{
-                console.log('🔍 Potential tab switch detected, delaying emergency save by 100ms...');
-                
-                setTimeout(() => {{
-                    // Check if document became visible again (indicates tab switch, not real exit)
-                    if (document.visibilityState === 'visible') {{
-                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
-                        isTabSwitching = false;
-                        return;
-                    }}
-                    
-                    // Still hidden after delay, proceed with save
-                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
-                    performActualEmergencySave(reason + '_confirmed');
-                }}, 100); // Short delay to check visibility
-                
-                return;
+        // NEW: Listen for timeout context from Streamlit
+        window.addEventListener('message', function(event) {{
+            if (event.data && event.data.type === 'fifi_timeout_context') {{
+                timeoutContext = event.data.reason;
+                console.log('⏰ Timeout context received:', timeoutContext);
+            }}
+        }});
+        
+        // ENHANCED: Check for timeout context in sessionStorage
+        function getActualReason(defaultReason) {{
+            // Check for timeout context first
+            if (timeoutContext) {{
+                console.log('✅ Using timeout context:', timeoutContext);
+                return timeoutContext;
             }}
             
-            // Immediate save for non-tab-switch scenarios
-            performActualEmergencySave(reason);
+            // Check sessionStorage for timeout flag
+            try {{
+                const timeoutFlag = sessionStorage.getItem('fifi_timeout_reason');
+                if (timeoutFlag) {{
+                    console.log('✅ Found timeout reason in sessionStorage:', timeoutFlag);
+                    sessionStorage.removeItem('fifi_timeout_reason'); // Clean up
+                    return timeoutFlag;
+                }}
+            }} catch (e) {{
+                console.debug('SessionStorage not available:', e);
+            }}
+            
+            // Check for timeout indicators in URL
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.get('timeout_redirect') === 'true') {{
+                console.log('✅ Detected timeout redirect in URL');
+                return 'session_timeout_redirect';
+            }}
+            
+            console.log('ℹ️ No timeout context found, using browser event:', defaultReason);
+            return defaultReason;
         }}
-        
-        function performActualEmergencySave(reason) {{
+
+        function performActualEmergencySave(browserReason) {{
             if (saveTriggered) return;
             saveTriggered = true;
             
-            console.log('🚨 REAL browser exit detected (' + reason + ') - triggering emergency save');
+            // ENHANCED: Get the actual reason (timeout context or browser event)
+            const actualReason = getActualReason(browserReason);
+            console.log('🚨 Emergency save triggered - Browser:', browserReason, 'Actual:', actualReason);
             
-            // PRIMARY METHOD: Send beacon to FastAPI
+            // PRIMARY METHOD: Send beacon to FastAPI with correct reason
             if (navigator.sendBeacon) {{
                 try {{
                     const emergencyData = JSON.stringify({{
                         session_id: sessionId,
-                        reason: reason,
+                        reason: actualReason, // Use actual reason, not browser reason
+                        browser_event: browserReason, // Include browser event for debugging
                         timestamp: Date.now()
                     }});
                     
@@ -2486,7 +2501,7 @@ def render_browser_close_detection_enhanced(session_id: str):
                     );
                     
                     if (beaconSent) {{
-                        console.log('✅ Emergency save beacon sent successfully');
+                        console.log('✅ Emergency save beacon sent with correct reason:', actualReason);
                         return;
                     }} else {{
                         console.error('❌ Beacon failed to send');
@@ -2496,28 +2511,64 @@ def render_browser_close_detection_enhanced(session_id: str):
                 }}
             }}
             
-            // FALLBACK: Redirect to Streamlit
+            // FALLBACK: Redirect to Streamlit with correct reason
             try {{
                 console.log('🔄 Beacon failed, trying redirect fallback...');
-                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}`;
+                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{actualReason}}`;
                 window.location.href = saveUrl;
             }} catch (e) {{
                 console.error('❌ Both beacon and redirect failed:', e);
             }}
         }}
+
+        // FIXED: Enhanced emergency save that checks for tab switches and timeout context
+        function triggerEmergencySave(reason = 'unknown') {{
+            if (saveTriggered) return;
+            
+            // Check for timeout context first
+            const actualReason = getActualReason(reason);
+            
+            // If this is a timeout, skip tab switch detection
+            if (actualReason.includes('timeout') || actualReason.includes('inactivity')) {{
+                console.log('⏰ Timeout detected, bypassing tab switch detection');
+                performActualEmergencySave(reason);
+                return;
+            }}
+            
+            // ORIGINAL tab switch detection logic for non-timeout events
+            if (isTabSwitching) {{
+                console.log('🔍 Potential tab switch detected, delaying emergency save by 100ms...');
+                
+                setTimeout(() => {{
+                    if (document.visibilityState === 'visible') {{
+                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
+                        isTabSwitching = false;
+                        return;
+                    }}
+                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
+                    performActualEmergencySave(reason);
+                }}, 100);
+                
+                return;
+            }}
+            
+            // Immediate save for non-tab-switch scenarios
+            performActualEmergencySave(reason);
+        }}
         
-        // ENHANCED: Improved visibility change tracking
+        // ... rest of the existing browser close detection code ...
+        // (Enhanced visibility change tracking, exit event listeners, etc.)
+        
+        // Enhanced visibility change tracking
         document.addEventListener('visibilitychange', function() {{
             if (document.visibilityState === 'hidden') {{
                 console.log('👁️ Tab switched away - marking as potential tab switch');
                 isTabSwitching = true;
                 
-                // Clear any existing timeout
                 if (tabSwitchTimeout) {{
                     clearTimeout(tabSwitchTimeout);
                 }}
                 
-                // Reset tab switching flag after 2 seconds
                 tabSwitchTimeout = setTimeout(() => {{
                     console.log('⏰ Tab switch timeout - assuming real navigation');
                     isTabSwitching = false;
@@ -2527,7 +2578,6 @@ def render_browser_close_detection_enhanced(session_id: str):
                 console.log('👁️ Tab switched back - confirmed tab switch (not real exit)');
                 isTabSwitching = false;
                 
-                // Clear the timeout since we're back
                 if (tabSwitchTimeout) {{
                     clearTimeout(tabSwitchTimeout);
                     tabSwitchTimeout = null;
@@ -2535,7 +2585,7 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }}, {{ passive: true }});
         
-        // ONLY listen to REAL exit events with enhanced filtering
+        // Listen to exit events
         const realExitEvents = ['beforeunload', 'unload'];
         realExitEvents.forEach(eventType => {{
             try {{
@@ -2544,7 +2594,6 @@ def render_browser_close_detection_enhanced(session_id: str):
                     triggerEmergencySave(eventType);
                 }}, {{ capture: true, passive: true }});
                 
-                // Also listen on parent window (for iframe scenarios)
                 if (window.parent && window.parent !== window) {{
                     window.parent.addEventListener(eventType, (event) => {{
                         console.log('🚨 Parent exit event detected:', eventType, 'TabSwitching:', isTabSwitching);
@@ -2556,12 +2605,12 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }});
         
-        // LOG pagehide but DON'T trigger saves (too unreliable for tab vs close detection)
+        // LOG pagehide but DON'T trigger saves
         window.addEventListener('pagehide', function(event) {{
             console.log('📄 pagehide detected - persisted:', event.persisted, 'TabSwitching:', isTabSwitching, '(NOT triggering save - relying on beforeunload/unload)');
         }}, {{ passive: true }});
         
-        console.log('✅ Enhanced browser close detection ready - Smart tab switch filtering enabled');
+        console.log('✅ Enhanced browser close detection ready - Smart timeout context detection enabled');
     }})();
     </script>
     """
@@ -2570,6 +2619,7 @@ def render_browser_close_detection_enhanced(session_id: str):
         st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
+
         
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
     """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
