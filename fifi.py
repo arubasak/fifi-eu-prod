@@ -2011,14 +2011,14 @@ class SessionManager:
         else:
             return {"status": "active", "minutes": minutes_inactive}
 
-def extend_session(self, session: UserSession):
-    """Extend session for another 15 minutes"""
-    session.last_activity = datetime.now()
-    try:
-        self._save_session_with_retry(session)
-        logger.info(f"Session extended for {session.session_id[:8]}")
-    except Exception as e:
-        logger.error(f"Failed to extend session: {e}")
+    def extend_session(self, session: UserSession):
+        """Extend session for another 15 minutes"""
+        session.last_activity = datetime.now()
+        try:
+            self._save_session_with_retry(session)
+            logger.info(f"Session extended for {session.session_id[:8]}")
+        except Exception as e:
+            logger.error(f"Failed to extend session: {e}")
     
     def _create_new_session(self) -> UserSession:
         """Creates a new user session with temporary fingerprint until JS fingerprinting completes."""
