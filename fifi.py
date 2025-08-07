@@ -3131,6 +3131,57 @@ def render_browser_close_detection_enhanced(session_id: str):
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
 
+def add_activity_detection(session_id: str, session_manager, session):
+    """Simple activity detection for meta refresh"""
+    if not session_id:
+        return
+    
+    safe_session_id = session_id.replace('-', '_')
+    
+    activity_js = f"""
+    (() => {{
+        const sessionId = "{session_id}";
+        const stateKey = 'fifi_activity_{safe_session_id}';
+        
+        if (!window[stateKey]) {{
+            window[stateKey] = {{ lastActivity: Date.now(), lastUpdate: 0, initialized: false }};
+        }}
+        
+        const state = window[stateKey];
+        
+        if (!state.initialized) {{
+            function track() {{ state.lastActivity = Date.now(); }}
+            ['mousedown', 'keydown', 'click', 'scroll', 'touchstart'].forEach(e => {{
+                document.addEventListener(e, track, {{passive: true}});
+            }});
+            state.initialized = true;
+            console.log('✅ Activity tracking enabled');
+        }}
+        
+        const now = Date.now();
+        if (now - state.lastUpdate > 30000) {{
+            state.lastUpdate = now;
+            return {{ type: 'activity_ping', session_id: sessionId, last_activity: state.lastActivity }};
+        }}
+        return null;
+    }})()
+    """
+    
+    try:
+        result = st_javascript(activity_js)
+        if result and result.get('type') == 'activity_ping':
+            js_activity = result.get('last_activity')
+            if js_activity:
+                try:
+                    new_activity = datetime.fromtimestamp(js_activity / 1000)
+                    if new_activity > session.last_activity:
+                        session.last_activity = new_activity
+                        session_manager.db.save_session(session)
+                        logger.debug(f"💓 Activity updated for {session_id[:8]}")
+                except Exception as e:
+                    logger.error(f"Activity processing failed: {e}")
+    except Exception as e:
+        logger.error(f"Activity detection failed: {e}")
         
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
     """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
