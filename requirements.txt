@@ -1,6 +1,8 @@
 streamlit>=1.28.0
 openai>=1.0.0
 langchain-openai>=0.1.0
+langchain
+langchain-core
 tavily-python>=0.3.0
 pinecone>=4.0.0
 pinecone-plugin-assistant>=0.0.4
