@@ -4283,21 +4283,58 @@ def render_timeout_status_sidebar(session):
                 st.sidebar.warning(f"⏰ Session expires in: {minutes}m {seconds}s")
             st.sidebar.caption("Any activity resets the timer")
 
-def render_chat_interface_with_exact_timeout(session_manager: 'SessionManager', session: UserSession):
-    """
-    Chat interface that refreshes exactly at the timeout moment.
-    """
-    # Check if already timed out
-    if check_and_handle_timeout_with_reset(session_manager, session):
-        return  # Session was reset, stop here
-    
-    # Inject dynamic refresh that will trigger exactly at timeout
-    inject_dynamic_timeout_refresh(session)
+def render_chat_interface_complete_fix(session_manager: 'SessionManager', session: UserSession):
+    """Complete fix for all chat issues"""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # Check if session needs fingerprinting - FIXED CONDITION
+    # ENHANCEMENT A: Session refresh at interface start
+    try:
+        fresh_session = session_manager.db.load_session(session.session_id)
+        if fresh_session and fresh_session.active:
+            session = fresh_session
+    except Exception as refresh_error:
+        logger.error(f"Interface session refresh failed: {refresh_error}")
+
+    # ENHANCEMENT B: Database health check
+    try:
+        session_manager.db._ensure_connection_healthy(session_manager.config)
+    except Exception as db_error:
+        logger.error(f"Database check failed: {db_error}")
+
+    # Server timeout check
+    time_since_activity = datetime.now() - session.last_activity
+    if time_since_activity.total_seconds() > (15 * 60):
+        st.error("⏰ **Session Timeout:** Your session expired due to 15 minutes of inactivity.")
+        if session_manager._is_crm_save_eligible(session, "Server Timeout"):
+            with st.spinner("💾 Saving conversation..."):
+                try:
+                    session_manager.zoho.save_chat_transcript_sync(session, "Server Timeout")
+                    st.success("✅ Conversation saved")
+                except Exception as e:
+                    logger.error(f"CRM save failed: {e}")
+        
+        session.active = False
+        try:
+            session_manager.db.save_session(session)
+        except Exception as e:
+            logger.error(f"Failed to save ended session: {e}")
+        
+        for key in ['current_session_id', 'page']:
+            if key in st.session_state:
+                del st.session_state[key]
+        
+        st.info("🏠 Please start a new session from the welcome page.")
+        time.sleep(2)
+        st.rerun()
+        return
+
+    # ENHANCEMENT C: Keep your working meta refresh + add activity detection
+    inject_dynamic_timeout_refresh(session)
+    add_activity_detection(session.session_id, session_manager, session)
+
+    # Your existing functionality (fingerprinting, error handler, etc.)
     fingerprint_needed = (
         not session.fingerprint_id or
         session.fingerprint_method == "temporary_fallback_python" or
@@ -4305,43 +4342,17 @@ def render_chat_interface_with_exact_timeout(session_manager: 'SessionManager', 
     )
     
     if fingerprint_needed:
-        logger.info(f"🔄 Enhanced fingerprinting needed for session {session.session_id[:8]} (current: {session.fingerprint_id})")
-        
-        # Render fingerprinting component silently
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-        # Don't exit here - let the user continue using the app with fallback fingerprint
-        # The enhanced fingerprint will be applied on the next redirect
 
-    # Initialize global error handler
     global_message_channel_error_handler()
     
-    # Add browser close detection for all user types (since all can now have CRM saves)
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
             render_browser_close_detection_enhanced(session.session_id)
         except Exception as e:
-            logger.error(f"Failed to render browser close detection for {session.session_id[:8]}: {e}", exc_info=True)
+            logger.error(f"Browser close detection failed: {e}")
 
-    # REPLACE THE OLD TIMER WITH THIS:
-    # Inject heartbeat monitor and capture any data
-    heartbeat_data = inject_activity_heartbeat_monitor(session.session_id)
-    
-    # Process heartbeat data if received
-    if heartbeat_data:
-        update_session_heartbeat(session_manager, session, heartbeat_data)
-    
-    # Force a periodic check even if no heartbeat (fallback)
-    # This uses a less aggressive approach - only every 2 minutes
-    if 'last_timeout_check' not in st.session_state:
-        st.session_state.last_timeout_check = time.time()
-    
-    if time.time() - st.session_state.last_timeout_check > 120:  # 2 minutes
-        st.session_state.last_timeout_check = time.time()
-        # Add a small random delay to prevent all sessions rerunning at once
-        time.sleep(0.1)
-        st.rerun()
-
-    # Check user limits
+    # User limits check
     limit_check = session_manager.question_limits.is_within_limits(session)
     if not limit_check['allowed']:
         if limit_check.get('reason') == 'guest_limit':
@@ -4351,45 +4362,40 @@ def render_chat_interface_with_exact_timeout(session_manager: 'SessionManager', 
             return
 
     # Display chat messages
-    # Display chat messages
     for msg in session.messages:
         with st.chat_message(msg.get("role", "user")):
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
-            if msg.get("role") == "assistant":
-                # Source attribution
-                if "source" in msg:
-                    source_color = {
-                        "FiFi": "🧠",
-                        "FiFi Web Search": "🌐", 
-                        "System Fallback": "⚠️",
-                        "error": "❌"
-                    }.get(msg['source'], "🤖")
-                    st.caption(f"{source_color} Source: {msg['source']}")
-                
-                # Tool usage indicators
-                indicators = []
-                if msg.get("used_pinecone"):
-                    indicators.append("🧠 Knowledge Base")
-                if msg.get("used_search"):
-                    indicators.append("🌐 Web Search")
-                
-                if indicators:
-                    st.caption(f"Enhanced with: {', '.join(indicators)}")
-                
-                # Safety override warning
-                if msg.get("safety_override"):
-                    st.warning("🛡️ Safety Override: Switched to verified sources to prevent misinformation")
-                
-                # Citation indicators
-                if msg.get("has_citations") and msg.get("has_inline_citations"):
-                    st.caption("📚 Response includes verified citations")
+            if msg.get("role") == "assistant" and "source" in msg:
+                source_color = {
+                    "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                    "Error Handler": "❌"
+                }.get(msg['source'], "🤖")
+                st.caption(f"{source_color} Source: {msg['source']}")
 
-    # Chat input
+    # ENHANCEMENT D: Enhanced chat input processing
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=session.ban_status.value != BanStatus.NONE.value)
     
     if prompt:
+        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
+        
+        # CRITICAL: Refresh session again before processing
+        try:
+            fresh_session = session_manager.db.load_session(session.session_id)
+            if fresh_session and fresh_session.active:
+                session = fresh_session
+        except Exception as refresh_error:
+            logger.error(f"Pre-processing refresh failed: {refresh_error}")
+        
+        # Update activity immediately
+        session.last_activity = datetime.now()
+        try:
+            session_manager.db.save_session(session)
+        except Exception as save_error:
+            logger.error(f"Failed to save activity: {save_error}")
+        
         with st.chat_message("user"):
             st.markdown(prompt)
         
@@ -4399,7 +4405,7 @@ def render_chat_interface_with_exact_timeout(session_manager: 'SessionManager', 
                     response = session_manager.get_ai_response(session, prompt)
                     
                     if response.get('requires_email'):
-                        st.error("📧 Please verify your email to continue using FiFi AI.")
+                        st.error("📧 Please verify your email to continue.")
                         st.session_state.verification_stage = 'email_entry'
                         st.rerun()
                     elif response.get('banned'):
@@ -4410,28 +4416,22 @@ def render_chat_interface_with_exact_timeout(session_manager: 'SessionManager', 
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.rerun()
-                    elif response.get('evasion_penalty'):
-                        st.error("🚫 Evasion detected - Your access has been temporarily restricted.")
-                        st.error(f"Penalty duration: {response.get('penalty_hours', 0)} hours.")
-                        st.rerun()
                     else:
                         st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         
                         if response.get("source"):
-                            st.caption(f"Source: {response['source']}")
+                            source_color = {
+                                "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                "Error Handler": "❌"
+                            }.get(response['source'], "🤖")
+                            st.caption(f"{source_color} Source: {response['source']}")
                         
-                        indicators = []
-                        if response.get("used_pinecone"):
-                            indicators.append("🧠 Knowledge Base")
-                        if response.get("used_search"):
-                            indicators.append("🌐 Web Search")
-                        
-                        if indicators:
-                            st.caption(f"Enhanced with: {', '.join(indicators)}")
+                        logger.info(f"✅ Question processed successfully for {session.session_id[:8]}")
                         
                 except Exception as e:
-                    logger.error(f"AI response generation failed due to an unexpected error: {e}", exc_info=True)
-                    st.error("⚠️ Sorry, I encountered an unexpected error processing your request. Please try again.")
+                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
+                    st.error("⚠️ I encountered an error. Please try again.")
         
         st.rerun()
 # =============================================================================
