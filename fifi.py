@@ -2301,14 +2301,14 @@ class SessionManager:
             }
 
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-        """Gets AI response for user prompt with all checks and limits."""
-        try:
-            # Rate limiting check
-            if not self.rate_limiter.is_allowed(session.session_id):
-                return {
-                    'content': 'Please slow down - you are sending requests too quickly.',
-                    'success': False
-                }
+    """Gets AI response for user prompt with all checks and limits."""
+    try:
+        # Rate limiting check
+        if not self.rate_limiter.is_allowed(session.session_id):
+            return {
+                'content': 'Please slow down - you are sending requests too quickly.',
+                'success': False
+            }
         
         # Question limit check
         limit_check = self.question_limits.is_within_limits(session)
@@ -2386,7 +2386,7 @@ class SessionManager:
             'success': False,
             'source': 'Error Handler'
         }
-
+        
     def clear_chat_history(self, session: UserSession):
         """Enhanced clear chat history with CRM save functionality."""
         try:
