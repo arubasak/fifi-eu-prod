@@ -441,6 +441,43 @@ class DatabaseManager:
                     self.local_sessions = {}
 
     @handle_api_errors("Database", "Save Session")
+
+    def _ensure_connection_healthy(self, config_instance: Any):
+        """Ensure database connection is healthy, reconnect if needed"""
+        if not self._check_connection_health():
+            logger.warning("Database connection unhealthy, attempting reconnection...")
+            old_conn = self.conn
+            self.conn = None
+        
+            if old_conn:
+                try:
+                    old_conn.close()
+                except Exception as e:
+                    logger.debug(f"Error closing old DB connection: {e}")
+        
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    if self.db_type == "cloud" and SQLITECLOUD_AVAILABLE and hasattr(config_instance, 'SQLITE_CLOUD_CONNECTION'):
+                        self.conn, _ = self._try_sqlite_cloud(config_instance.SQLITE_CLOUD_CONNECTION)
+                    elif self.db_type == "file":
+                        self.conn, _ = self._try_local_sqlite()
+                
+                    if self.conn:
+                        self.conn.execute("SELECT 1").fetchone()
+                        logger.info(f"✅ Database reconnection successful on attempt {attempt + 1}")
+                        return
+                        
+                except Exception as e:
+                    logger.error(f"Database reconnection attempt {attempt + 1} failed: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+        
+            logger.error("All database reconnection attempts failed, falling back to in-memory storage")
+            self.db_type = "memory"
+            if not hasattr(self, 'local_sessions'):
+                self.local_sessions = {}
+            
     def save_session(self, session: UserSession):
         """Save session with SQLite Cloud compatibility and connection health check"""
         with self.lock:
