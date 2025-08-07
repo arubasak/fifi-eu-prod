@@ -1369,31 +1369,463 @@ def sanitize_input(text: str, max_length: int = 4000) -> str:
     if not isinstance(text, str): 
         return ""
     return html.escape(text)[:max_length].strip()
+
+# =============================================================================
+# PINECONE ASSISTANT TOOL
+# =============================================================================
+
+class PineconeAssistantTool:
+    def __init__(self, api_key: str, assistant_name: str):
+        if not PINECONE_AVAILABLE: 
+            raise ImportError("Pinecone client not available.")
+        self.pc = Pinecone(api_key=api_key)
+        self.assistant_name = assistant_name
+        self.assistant = self.initialize_assistant()
+
+    def initialize_assistant(self):
+        try:
+            instructions = (
+                "You are a document-based AI assistant with STRICT limitations.\n\n"
+                "ABSOLUTE RULES - NO EXCEPTIONS:\n"
+                "1. You can ONLY answer using information that exists in your uploaded documents\n"
+                "2. If you cannot find the answer in your documents, you MUST respond with EXACTLY: 'I don't have specific information about this topic in my knowledge base.'\n"
+                "3. NEVER create fake citations, URLs, or source references\n"
+                "4. NEVER create fake file paths, image references (.jpg, .png, etc.), or document names\n"
+                "5. NEVER use general knowledge or information not in your documents\n"
+                "6. NEVER guess or speculate about anything\n"
+                "7. NEVER make up website links, file paths, or citations\n"
+                "8. If asked about current events, news, recent information, or anything not in your documents, respond with: 'I don't have specific information about this topic in my knowledge base.'\n"
+                "9. Only include citations [1], [2], etc. if they come from your actual uploaded documents\n"
+                "10. NEVER reference images, files, or documents that were not actually uploaded to your knowledge base\n\n"
+                "REMEMBER: It is better to say 'I don't know' than to provide incorrect information, fake sources, or non-existent file references."
+            )
+            
+            assistants_list = self.pc.assistant.list_assistants()
+            if self.assistant_name not in [a.name for a in assistants_list]:
+                logger.warning(f"Assistant '{self.assistant_name}' not found. Creating...")
+                return self.pc.assistant.create_assistant(
+                    assistant_name=self.assistant_name, 
+                    instructions=instructions
+                )
+            else:
+                logger.info(f"Connected to assistant: '{self.assistant_name}'")
+                return self.pc.assistant.Assistant(assistant_name=self.assistant_name)
+        except Exception as e:
+            logger.error(f"Failed to initialize Pinecone Assistant: {e}")
+            return None
+
+    def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]:
+        if not self.assistant: 
+            return None
+        try:
+            pinecone_messages = [
+                PineconeMessage(
+                    role="user" if isinstance(msg, HumanMessage) else "assistant", 
+                    content=msg.content
+                ) for msg in chat_history
+            ]
+            
+            response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o")
+            content = response.message.content
+            has_citations = False
+            
+            if hasattr(response, 'citations') and response.citations:
+                has_citations = True
+                citations_header = "\n\n---\n**Sources:**\n"
+                citations_list = []
+                seen_items = set()
+                
+                for citation in response.citations:
+                    for reference in citation.references:
+                        if hasattr(reference, 'file') and reference.file:
+                            link_url = None
+                            if hasattr(reference.file, 'metadata') and reference.file.metadata:
+                                link_url = reference.file.metadata.get('source_url')
+                            if not link_url and hasattr(reference.file, 'signed_url') and reference.file.signed_url:
+                                link_url = reference.file.signed_url
+                            
+                            if link_url:
+                                if '?' in link_url:
+                                    link_url += '&utm_source=fifi-in'
+                                else:
+                                    link_url += '?utm_source=fifi-in'
+                                
+                                display_text = link_url
+                                if display_text not in seen_items:
+                                    link = f"[{len(seen_items) + 1}] [{display_text}]({link_url})"
+                                    citations_list.append(link)
+                                    seen_items.add(display_text)
+                            else:
+                                display_text = getattr(reference.file, 'name', 'Unknown Source')
+                                if display_text not in seen_items:
+                                    link = f"[{len(seen_items) + 1}] {display_text}"
+                                    citations_list.append(link)
+                                    seen_items.add(display_text)
+                
+                if citations_list:
+                    content += citations_header + "\n".join(citations_list)
+            
+            return {
+                "content": content, 
+                "success": True, 
+                "source": "FiFi",
+                "has_citations": has_citations,
+                "response_length": len(content),
+                "used_pinecone": True,
+                "used_search": False,
+                "has_inline_citations": bool(citations_list) if has_citations else False,
+                "safety_override": False
+            }
+        except Exception as e:
+            logger.error(f"Pinecone Assistant error: {str(e)}")
+            return None
+
+class TavilyFallbackAgent:
+    def __init__(self, tavily_api_key: str):
+        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
+
+    def add_utm_to_links(self, content: str) -> str:
+        """Finds all Markdown links in a string and appends the UTM parameters."""
+        def replacer(match):
+            url = match.group(1)
+            utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
+            if '?' in url:
+                new_url = f"{url}&{utm_params}"
+            else:
+                new_url = f"{url}?{utm_params}"
+            return f"({new_url})"
+        return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
+
+    def synthesize_search_results(self, results, query: str) -> str:
+        """Synthesize search results into a coherent response similar to LLM output."""
+        
+        # Handle string response from Tavily
+        if isinstance(results, str):
+            return f"Based on my search: {results}"
+        
+        # Handle dictionary response from Tavily (most common format)
+        if isinstance(results, dict):
+            # Check if there's a pre-made answer
+            if results.get('answer'):
+                return f"Based on my search: {results['answer']}"
+            
+            # Extract the results array
+            search_results = results.get('results', [])
+            if not search_results:
+                return "I couldn't find any relevant information for your query."
+            
+            # Process the results
+            relevant_info = []
+            sources = []
+            
+            for i, result in enumerate(search_results[:3], 1):  # Use top 3 results
+                if isinstance(result, dict):
+                    title = result.get('title', f'Result {i}')
+                    content = (result.get('content') or 
+                             result.get('snippet') or 
+                             result.get('description') or 
+                             result.get('summary', ''))
+                    url = result.get('url', '')
+                    
+                    if content:
+                        # Clean up content
+                        if len(content) > 400:
+                            content = content[:400] + "..."
+                        relevant_info.append(content)
+                        
+                        if url and title:
+                            sources.append(f"[{title}]({url})")
+            
+            if not relevant_info:
+                return "I found search results but couldn't extract readable content. Please try rephrasing your query."
+            
+            # Build synthesized response
+            response_parts = []
+            
+            if len(relevant_info) == 1:
+                response_parts.append(f"Based on my search: {relevant_info[0]}")
+            else:
+                response_parts.append("Based on my search, here's what I found:")
+                for i, info in enumerate(relevant_info, 1):
+                    response_parts.append(f"\n\n**{i}.** {info}")
+            
+            # Add sources
+            if sources:
+                response_parts.append(f"\n\n**Sources:**")
+                for i, source in enumerate(sources, 1):
+                    response_parts.append(f"\n{i}. {source}")
+            
+            return "".join(response_parts)
+        
+        # Handle direct list (fallback)
+        if isinstance(results, list):
+            relevant_info = []
+            sources = []
+            
+            for i, result in enumerate(results[:3], 1):
+                if isinstance(result, dict):
+                    title = result.get('title', f'Result {i}')
+                    content = (result.get('content') or 
+                             result.get('snippet') or 
+                             result.get('description', ''))
+                    url = result.get('url', '')
+                    
+                    if content:
+                        if len(content) > 400:
+                            content = content[:400] + "..."
+                        relevant_info.append(content)
+                        if url:
+                            sources.append(f"[{title}]({url})")
+            
+            if not relevant_info:
+                return "I couldn't find relevant information for your query."
+            
+            response_parts = []
+            if len(relevant_info) == 1:
+                response_parts.append(f"Based on my search: {relevant_info[0]}")
+            else:
+                response_parts.append("Based on my search:")
+                for info in relevant_info:
+                    response_parts.append(f"\n{info}")
+            
+            if sources:
+                response_parts.append(f"\n\n**Sources:**")
+                for i, source in enumerate(sources, 1):
+                    response_parts.append(f"{i}. {source}")
+            
+            return "".join(response_parts)
+        
+        # Fallback for unknown formats
+        return "I couldn't find any relevant information for your query."
+
+    def query(self, message: str, chat_history: List[BaseMessage]) -> Dict[str, Any]:
+        try:
+            search_results = self.tavily_tool.invoke({"query": message})
+            synthesized_content = self.synthesize_search_results(search_results, message)
+            final_content = self.add_utm_to_links(synthesized_content)
+            
+            return {
+                "content": final_content,
+                "success": True,
+                "source": "FiFi Web Search",
+                "used_pinecone": False,
+                "used_search": True,
+                "has_citations": True,
+                "has_inline_citations": True,
+                "safety_override": False
+            }
+        except Exception as e:
+            return {
+                "content": f"I apologize, but an error occurred while searching: {str(e)}",
+                "success": False,
+                "source": "error",
+                "used_pinecone": False,
+                "used_search": False,
+                "has_citations": False,
+                "has_inline_citations": False,
+                "safety_override": False
+            }
     
 class EnhancedAI:
-    """Placeholder for the AI interaction logic."""
+    """Enhanced AI system with Pinecone knowledge base, web search fallback, content moderation, and anti-hallucination safety."""
+    
     def __init__(self, config: Config):
         self.config = config
         self.openai_client = None
+        self.pinecone_tool = None
+        self.tavily_agent = None
+        
+        # Initialize OpenAI client (for both AI responses and content moderation)
         if OPENAI_AVAILABLE and self.config.OPENAI_API_KEY:
             try:
                 self.openai_client = openai.OpenAI(api_key=self.config.OPENAI_API_KEY)
                 error_handler.mark_component_healthy("OpenAI")
             except Exception as e:
                 logger.error(f"OpenAI client initialization failed: {e}")
+        
+        # Initialize Pinecone tool
+        if PINECONE_AVAILABLE and self.config.PINECONE_API_KEY and self.config.PINECONE_ASSISTANT_NAME:
+            try:
+                self.pinecone_tool = PineconeAssistantTool(
+                    self.config.PINECONE_API_KEY, 
+                    self.config.PINECONE_ASSISTANT_NAME
+                )
+                logger.info("✅ Pinecone Assistant initialized successfully")
+            except Exception as e:
+                logger.error(f"Pinecone tool initialization failed: {e}")
+                self.pinecone_tool = None
+        
+        # Initialize Tavily agent
+        if TAVILY_AVAILABLE and self.config.TAVILY_API_KEY:
+            try:
+                self.tavily_agent = TavilyFallbackAgent(self.config.TAVILY_API_KEY)
+                logger.info("✅ Tavily Web Search initialized successfully")
+            except Exception as e:
+                logger.error(f"Tavily agent initialization failed: {e}")
+                self.tavily_agent = None
+
+    def should_use_web_fallback(self, pinecone_response: Dict[str, Any]) -> bool:
+        """EXTREMELY aggressive fallback detection to prevent any hallucination."""
+        content = pinecone_response.get("content", "").lower()
+        content_raw = pinecone_response.get("content", "")
+        
+        # PRIORITY 1: Always fallback for current/recent information requests
+        current_info_indicators = [
+            "today", "yesterday", "this week", "this month", "this year", "2025", "2024",
+            "current", "latest", "recent", "now", "currently", "updated",
+            "news", "weather", "stock", "price", "event", "happening"
+        ]
+        if any(indicator in content for indicator in current_info_indicators):
+            return True
+        
+        # PRIORITY 2: Explicit "don't know" statements (allow these to pass)
+        explicit_unknown = [
+            "i don't have specific information", "i don't know", "i'm not sure",
+            "i cannot help", "i cannot provide", "cannot find specific information",
+            "no specific information", "no information about", "don't have information",
+            "not available in my knowledge", "unable to find", "no data available",
+            "insufficient information", "outside my knowledge", "cannot answer"
+        ]
+        if any(keyword in content for keyword in explicit_unknown):
+            return False  # Don't fallback for explicit "don't know" responses
+        
+        # PRIORITY 3: Detect fake files/images/paths (CRITICAL SAFETY)
+        fake_file_patterns = [
+            ".jpg", ".jpeg", ".png", ".html", ".gif", ".doc", ".docx",
+            ".xls", ".xlsx", ".ppt", ".pptx", ".mp4", ".avi", ".mp3",
+            "/uploads/", "/files/", "/images/", "/documents/", "/media/",
+            "file://", "ftp://", "path:", "directory:", "folder:"
+        ]
+        
+        has_real_citations = pinecone_response.get("has_citations", False)
+        if any(pattern in content_raw for pattern in fake_file_patterns):
+            if not has_real_citations:
+                logger.warning("🚨 SAFETY: Detected fake file references without real citations")
+                return True
+        
+        # PRIORITY 4: Detect potential fake citations (CRITICAL)
+        if "[1]" in content_raw or "**Sources:**" in content_raw:
+            suspicious_patterns = [
+                "http://", ".org", ".net",
+                "example.com", "website.com", "source.com", "domain.com"
+            ]
+            if not has_real_citations and any(pattern in content_raw for pattern in suspicious_patterns):
+                logger.warning("🚨 SAFETY: Detected fake citations")
+                return True
+        
+        # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short or explicit "don't know")
+        if not has_real_citations:
+            if "[1]" not in content_raw and "**Sources:**" not in content_raw:
+                if len(content_raw.strip()) > 30:
+                    logger.warning("🚨 SAFETY: Long response without citations")
+                    return True
+        
+        # PRIORITY 6: General knowledge indicators (likely hallucination)
+        general_knowledge_red_flags = [
+            "generally", "typically", "usually", "commonly", "often", "most",
+            "according to", "it is known", "studies show", "research indicates",
+            "experts say", "based on", "in general", "as a rule"
+        ]
+        if any(flag in content for flag in general_knowledge_red_flags):
+            logger.warning("🚨 SAFETY: Detected general knowledge indicators")
+            return True
+        
+        # PRIORITY 7: Question-answering patterns that suggest general knowledge
+        qa_patterns = [
+            "the answer is", "this is because", "the reason", "due to the fact",
+            "this happens when", "the cause of", "this occurs"
+        ]
+        if any(pattern in content for pattern in qa_patterns):
+            if not pinecone_response.get("has_citations", False):
+                logger.warning("🚨 SAFETY: QA patterns without citations")
+                return True
+        
+        # PRIORITY 8: Response length suggests substantial answer without sources
+        response_length = pinecone_response.get("response_length", 0)
+        if response_length > 100 and not pinecone_response.get("has_citations", False):
+            logger.warning("🚨 SAFETY: Long response without sources")
+            return True
+        
+        return False
 
     @handle_api_errors("AI System", "Get Response", show_to_user=True)
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """Provides a simplified AI response."""
+        """Enhanced AI response with content moderation, Pinecone, web search, and safety features."""
+        
+        # STEP 1: Content Moderation Check (using the existing function)
+        moderation_result = check_content_moderation(prompt, self.openai_client)
+        if moderation_result and moderation_result.get('flagged'):
+            logger.warning(f"Content moderation flagged prompt: {moderation_result.get('categories', [])}")
+            return {
+                "content": moderation_result.get('message', 'Your message violates our content policy.'),
+                "success": False,
+                "source": "Content Moderation",
+                "used_search": False,
+                "used_pinecone": False,
+                "has_citations": False,
+                "has_inline_citations": False,
+                "safety_override": False
+            }
+        
+        # STEP 2: Convert chat history to LangChain format if needed
+        if chat_history:
+            # Take only the last message (current prompt) and convert format
+            langchain_history = []
+            for msg in chat_history[-10:]:  # Limit to last 10 messages
+                if msg.get("role") == "user":
+                    langchain_history.append(HumanMessage(content=msg.get("content", "")))
+                elif msg.get("role") == "assistant":
+                    langchain_history.append(AIMessage(content=msg.get("content", "")))
+            
+            # Add current prompt
+            langchain_history.append(HumanMessage(content=prompt))
+        else:
+            langchain_history = [HumanMessage(content=prompt)]
+        
+        # STEP 3: Try Pinecone first if available
+        if self.pinecone_tool:
+            try:
+                logger.info("🔍 Querying Pinecone knowledge base...")
+                pinecone_response = self.pinecone_tool.query(langchain_history)
+                
+                if pinecone_response and pinecone_response.get("success"):
+                    # Check if we should fallback to web search
+                    should_fallback = self.should_use_web_fallback(pinecone_response)
+                    
+                    if not should_fallback:
+                        logger.info("✅ Using Pinecone response (passed safety checks)")
+                        return pinecone_response
+                    else:
+                        logger.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switching to verified web sources.")
+                        # Mark that safety override occurred but continue to web search
+                        
+            except Exception as e:
+                logger.error(f"Pinecone query failed: {e}")
+        
+        # STEP 4: Fallback to web search if available
+        if self.tavily_agent:
+            try:
+                logger.info("🌐 Falling back to web search...")
+                web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
+                
+                if web_response and web_response.get("success"):
+                    logger.info("✅ Using web search response")
+                    return web_response
+                    
+            except Exception as e:
+                logger.error(f"Web search failed: {e}")
+        
+        # STEP 5: Final fallback - basic response
+        logger.warning("⚠️ All AI tools unavailable, using basic fallback")
         return {
-            "content": f"I understand you're asking about: '{prompt}'. This is the integrated FiFi AI. Your question is processed based on your user tier and system limits.",
-            "source": "Integrated FiFi AI System Placeholder",
+            "content": "I apologize, but I'm unable to process your request at the moment due to technical issues. Please try again later.",
+            "success": False,
+            "source": "System Fallback",
             "used_search": False,
             "used_pinecone": False,
             "has_citations": False,
             "has_inline_citations": False,
-            "safety_override": False,
-            "success": True
+            "safety_override": False
         }
 
 @handle_api_errors("Content Moderation", "Check Prompt", show_to_user=False)
@@ -3248,6 +3680,38 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             st.caption("Starting fingerprinting...")
 
         render_timeout_status_sidebar(session)
+
+        # AI Tools Status
+        st.divider()
+        st.markdown("**🤖 AI Tools Status**")
+        
+        ai_system = session_manager.ai
+        if ai_system:
+            # Pinecone status
+            if ai_system.pinecone_tool and ai_system.pinecone_tool.assistant:
+                st.success("🧠 Knowledge Base: Ready")
+            elif ai_system.config.PINECONE_API_KEY:
+                st.warning("🧠 Knowledge Base: Error")
+            else:
+                st.info("🧠 Knowledge Base: Not configured")
+            
+            # Tavily status  
+            if ai_system.tavily_agent:
+                st.success("🌐 Web Search: Ready")
+            elif ai_system.config.TAVILY_API_KEY:
+                st.warning("🌐 Web Search: Error")
+            else:
+                st.info("🌐 Web Search: Not configured")
+            
+            # OpenAI status
+            if ai_system.openai_client:
+                st.success("💬 OpenAI: Ready")
+            elif ai_system.config.OPENAI_API_KEY:
+                st.warning("💬 OpenAI: Error")
+            else:
+                st.info("💬 OpenAI: Not configured")
+        else:
+            st.error("🤖 AI System: Not available")
         
         if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
             if session.zoho_contact_id: 
@@ -3778,14 +4242,23 @@ def render_chat_interface_with_exact_timeout(session_manager: 'SessionManager', 
             return
 
     # Display chat messages
+    # Display chat messages
     for msg in session.messages:
         with st.chat_message(msg.get("role", "user")):
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
             if msg.get("role") == "assistant":
+                # Source attribution
                 if "source" in msg:
-                    st.caption(f"Source: {msg['source']}")
+                    source_color = {
+                        "FiFi": "🧠",
+                        "FiFi Web Search": "🌐", 
+                        "System Fallback": "⚠️",
+                        "error": "❌"
+                    }.get(msg['source'], "🤖")
+                    st.caption(f"{source_color} Source: {msg['source']}")
                 
+                # Tool usage indicators
                 indicators = []
                 if msg.get("used_pinecone"):
                     indicators.append("🧠 Knowledge Base")
@@ -3794,6 +4267,14 @@ def render_chat_interface_with_exact_timeout(session_manager: 'SessionManager', 
                 
                 if indicators:
                     st.caption(f"Enhanced with: {', '.join(indicators)}")
+                
+                # Safety override warning
+                if msg.get("safety_override"):
+                    st.warning("🛡️ Safety Override: Switched to verified sources to prevent misinformation")
+                
+                # Citation indicators
+                if msg.get("has_citations") and msg.get("has_inline_citations"):
+                    st.caption("📚 Response includes verified citations")
 
     # Chat input
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
