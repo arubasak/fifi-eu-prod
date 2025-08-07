@@ -4289,56 +4289,79 @@ def render_timeout_status_sidebar(session):
                 st.sidebar.warning(f"⏰ Session expires in: {minutes}m {seconds}s")
             st.sidebar.caption("Any activity resets the timer")
 
-def render_chat_interface_complete_fix(session_manager: 'SessionManager', session: UserSession):
-    """Complete fix for all chat issues"""
+def render_chat_interface_with_timeout_system(session_manager: 'SessionManager', session: UserSession):
+    """Complete chat interface with new timeout system - maintains ALL existing features"""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # ENHANCEMENT A: Session refresh at interface start
+    # PRESERVE: All existing session recovery and database health checks
     try:
         fresh_session = session_manager.db.load_session(session.session_id)
         if fresh_session and fresh_session.active:
             session = fresh_session
     except Exception as refresh_error:
-        logger.error(f"Interface session refresh failed: {refresh_error}")
+        logger.error(f"Session refresh failed: {refresh_error}")
 
-    # ENHANCEMENT B: Database health check
     try:
         session_manager.db._ensure_connection_healthy(session_manager.config)
     except Exception as db_error:
         logger.error(f"Database check failed: {db_error}")
 
-    # Server timeout check
-    time_since_activity = datetime.now() - session.last_activity
-    if time_since_activity.total_seconds() > (15 * 60):
-        st.error("⏰ **Session Timeout:** Your session expired due to 15 minutes of inactivity.")
-        if session_manager._is_crm_save_eligible(session, "Server Timeout"):
-            with st.spinner("💾 Saving conversation..."):
+    # NEW: Timeout polling and status checking (every 60 seconds via rerun)
+    polling_result = add_activity_detection_with_polling(session.session_id, session_manager, session)
+    timeout_status = session_manager.check_timeout_status(session)
+    
+    # TIMEOUT HANDLING: If 15+ minutes, redirect immediately
+    if timeout_status["status"] == "timeout":
+        logger.info(f"⏰ Timeout detected for {session.session_id[:8]}")
+        
+        # PRESERVE: Same CRM saving logic as before
+        if session_manager._is_crm_save_eligible(session, "15-Minute Inactivity Timeout"):
+            with st.spinner("💾 Saving your conversation before ending session..."):
                 try:
-                    session_manager.zoho.save_chat_transcript_sync(session, "Server Timeout")
-                    st.success("✅ Conversation saved")
+                    session_manager.zoho.save_chat_transcript_sync(session, "15-Minute Inactivity Timeout")
+                    st.success("✅ Conversation saved to CRM")
+                    session.timeout_saved_to_crm = True
                 except Exception as e:
                     logger.error(f"CRM save failed: {e}")
         
+        # End session and redirect using st.switch_page
         session.active = False
         try:
             session_manager.db.save_session(session)
         except Exception as e:
             logger.error(f"Failed to save ended session: {e}")
         
+        # Clear Streamlit session state
         for key in ['current_session_id', 'page']:
             if key in st.session_state:
                 del st.session_state[key]
         
-        st.info("🏠 Please start a new session from the welcome page.")
-        time.sleep(2)
-        st.rerun()
+        st.info("🏠 Redirecting to welcome page due to inactivity...")
+        time.sleep(1)
+        st.switch_page("fifi.py")  # Redirect to main page
         return
 
-    # ENHANCEMENT C: Keep your working meta refresh + add activity detection
-    
-    # Your existing functionality (fingerprinting, error handler, etc.)
+    # WARNING PHASE: Show prominent warning at 14+ minutes
+    if timeout_status["status"] == "warning":
+        st.error("🚨 **SESSION EXPIRING!** Your session expires due to inactivity.")
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.write(f"⏰ Time remaining: {timeout_status['seconds_left']} seconds")
+        with col2:
+            if st.button("Keep it Alive", type="primary", use_container_width=True):
+                session_manager.extend_session(session)
+                st.success("✅ Session extended for 15 minutes!")
+                time.sleep(1)
+                st.rerun()
+        
+        st.markdown("---")
+        # Show chat interface but make it less prominent during warning
+        st.markdown("**💬 Your conversation continues below:**")
+
+    # PRESERVE: All existing functionality exactly as before
     fingerprint_needed = (
         not session.fingerprint_id or
         session.fingerprint_method == "temporary_fallback_python" or
@@ -4356,7 +4379,7 @@ def render_chat_interface_complete_fix(session_manager: 'SessionManager', sessio
         except Exception as e:
             logger.error(f"Browser close detection failed: {e}")
 
-    # User limits check
+    # PRESERVE: User limits check exactly as before
     limit_check = session_manager.question_limits.is_within_limits(session)
     if not limit_check['allowed']:
         if limit_check.get('reason') == 'guest_limit':
@@ -4365,27 +4388,42 @@ def render_chat_interface_complete_fix(session_manager: 'SessionManager', sessio
         else:
             return
 
-    # Display chat messages
+    # PRESERVE: Display chat messages exactly as before
     for msg in session.messages:
         with st.chat_message(msg.get("role", "user")):
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
-            if msg.get("role") == "assistant" and "source" in msg:
-                source_color = {
-                    "FiFi": "🧠", "FiFi Web Search": "🌐", 
-                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                    "Error Handler": "❌"
-                }.get(msg['source'], "🤖")
-                st.caption(f"{source_color} Source: {msg['source']}")
+            if msg.get("role") == "assistant":
+                if "source" in msg:
+                    source_color = {
+                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                        "Error Handler": "❌"
+                    }.get(msg['source'], "🤖")
+                    st.caption(f"{source_color} Source: {msg['source']}")
+                
+                indicators = []
+                if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
+                if msg.get("used_search"): indicators.append("🌐 Web Search")
+                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                
+                if msg.get("safety_override"):
+                    st.warning("🛡️ Safety Override: Switched to verified sources")
+                
+                if msg.get("has_citations") and msg.get("has_inline_citations"):
+                    st.caption("📚 Response includes verified citations")
 
-    # ENHANCEMENT D: Enhanced chat input processing
-    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=session.ban_status.value != BanStatus.NONE.value)
+    # PRESERVE: Chat input processing exactly as before (unless in warning phase)
+    if timeout_status["status"] != "warning":  # Normal chat input
+        prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                                disabled=session.ban_status.value != BanStatus.NONE.value)
+    else:  # During warning, show disabled input with message
+        prompt = st.chat_input("Click 'Keep it Alive' above to continue chatting...", disabled=True)
     
-    if prompt:
+    if prompt and timeout_status["status"] != "warning":
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
-        # CRITICAL: Refresh session again before processing
+        # PRESERVE: All existing processing logic
         try:
             fresh_session = session_manager.db.load_session(session.session_id)
             if fresh_session and fresh_session.active:
@@ -4393,7 +4431,6 @@ def render_chat_interface_complete_fix(session_manager: 'SessionManager', sessio
         except Exception as refresh_error:
             logger.error(f"Pre-processing refresh failed: {refresh_error}")
         
-        # Update activity immediately
         session.last_activity = datetime.now()
         try:
             session_manager.db.save_session(session)
@@ -4431,13 +4468,26 @@ def render_chat_interface_complete_fix(session_manager: 'SessionManager', sessio
                             }.get(response['source'], "🤖")
                             st.caption(f"{source_color} Source: {response['source']}")
                         
-                        logger.info(f"✅ Question processed successfully for {session.session_id[:8]}")
+                        logger.info(f"✅ Question processed successfully")
                         
                 except Exception as e:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
         
         st.rerun()
+    
+    # NEW: Automatic polling (triggers rerun every 60 seconds during normal operation)
+    if timeout_status["status"] == "active":
+        # Only poll every 60 seconds, not on every rerun
+        current_time = datetime.now()
+        last_poll = st.session_state.get('last_timeout_poll', current_time - timedelta(seconds=61))
+        
+        if (current_time - last_poll).total_seconds() >= 60:
+            st.session_state.last_timeout_poll = current_time
+            logger.debug(f"🔄 Timeout poll triggered for {session.session_id[:8]}")
+            time.sleep(0.1)  # Brief delay to prevent tight loops
+            st.rerun()
+
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
 # =============================================================================
@@ -4630,7 +4680,7 @@ def main_fixed():
                         return  # Session timed out and was reset, stop here
                         
                     render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-                    render_chat_interface_complete_fix(session_manager, session)
+                    render_chat_interface_with_timeout_system(session_manager, session)
                 else:
                     logger.warning(f"🔍 MAIN ROUTING: Session inactive or None, redirecting to welcome")
                     st.session_state['page'] = None
