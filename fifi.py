@@ -2299,8 +2299,8 @@ def extend_session(self, session: UserSession):
                 return session
             
             else:
-            st.error("Invalid username or password.")
-            return None
+                st.error("Invalid username or password.")
+                return None
             
         except Exception as e:
             logger.error(f"WordPress authentication failed: {e}")
