@@ -1948,6 +1948,20 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
 
+    def _save_session_with_retry(self, session: UserSession, max_retries: int = 3):
+    """Save session with retry logic"""
+    for attempt in range(max_retries):
+        try:
+            self.db.save_session(session)
+            return
+        except Exception as e:
+            logger.warning(f"Session save attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(0.5)
+            else:
+                logger.error(f"All session save attempts failed for {session.session_id[:8]}")
+                raise
+
     def _create_new_session(self) -> UserSession:
         """Creates a new user session with temporary fingerprint until JS fingerprinting completes."""
         session_id = str(uuid.uuid4())
