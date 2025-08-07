@@ -2301,10 +2301,10 @@ class SessionManager:
             }
 
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-    """Gets AI response for user prompt with all checks and limits."""
-    try:
-        # Rate limiting check
-        if not self.rate_limiter.is_allowed(session.session_id):
+        """Gets AI response for user prompt with all checks and limits."""
+        try:
+            # Rate limiting check
+            if not self.rate_limiter.is_allowed(session.session_id):
             return {
                 'content': 'Please slow down - you are sending requests too quickly.',
                 'success': False
