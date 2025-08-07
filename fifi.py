@@ -1752,7 +1752,20 @@ class EnhancedAI:
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """Enhanced AI response with content moderation, Pinecone, web search, and safety features."""
         
-       
+        # ADD THIS CONTENT MODERATION CHECK AT THE BEGINNING:
+        moderation_result = check_content_moderation(prompt, self.openai_client)
+        if moderation_result and moderation_result.get("flagged"):
+            logger.warning(f"Content moderation flagged input: {moderation_result.get('categories', [])}")
+            return {
+                "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
+                "success": False,
+                "source": "Content Moderation",
+                "used_search": False,
+                "used_pinecone": False,
+                "has_citations": False,
+                "has_inline_citations": False,
+                "safety_override": False
+            }
         # STEP 2: Convert chat history to LangChain format if needed
         if chat_history:
             # Take only the last message (current prompt) and convert format
@@ -2287,7 +2300,7 @@ class SessionManager:
                 'message': "Verification failed due to a technical error."
             }
 
-def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
     """Gets AI response for user prompt with all checks and limits."""
     try:
         # Rate limiting check
