@@ -4626,7 +4626,7 @@ def main_fixed():
                         return  # Session timed out and was reset, stop here
                         
                     render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-                    render_chat_interface_with_exact_timeout(session_manager, session)
+                    render_chat_interface_complete_fix(session_manager, session)
                 else:
                     logger.warning(f"🔍 MAIN ROUTING: Session inactive or None, redirecting to welcome")
                     st.session_state['page'] = None
