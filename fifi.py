@@ -3467,33 +3467,32 @@ def calculate_seconds_until_timeout(session, timeout_minutes=15):
 
 
 def inject_dynamic_timeout_refresh(session):
-    """
-    Injects a meta refresh that will trigger EXACTLY when the session should timeout.
-    This updates dynamically based on user activity.
-    """
-    logger.info(f"🔍 DEBUG: Dynamic timeout refresh called for {session.session_id[:8]}")
+    """Enhanced meta refresh that works with activity detection"""
+    time_since_activity = datetime.now() - session.last_activity
+    timeout_seconds = 15 * 60
+    seconds_until_timeout = timeout_seconds - time_since_activity.total_seconds()
+    refresh_at = max(5, min(int(seconds_until_timeout) + 1, timeout_seconds))
     
-    seconds_until_timeout = calculate_seconds_until_timeout(session)
-    
-    # Add 1 second buffer to ensure we're past the timeout
-    refresh_at = seconds_until_timeout + 1
-    
-    # 🔧 SET TIMEOUT CONTEXT BEFORE META REFRESH
+    # Set timeout context
     timeout_context_js = """
     <script>
     try {
         sessionStorage.setItem('fifi_timeout_reason', 'meta_refresh_timeout_15min');
-        window.postMessage({
-            type: 'fifi_timeout_context',
-            reason: 'meta_refresh_timeout_15min'
-        }, '*');
-        console.log('⏰ Meta refresh timeout context set for', window.location.href);
-    } catch (e) {
-        console.error('Failed to set meta refresh timeout context:', e);
-    }
+        console.log('⏰ Meta refresh timeout context set');
+    } catch (e) { console.error('Failed to set timeout context:', e); }
     </script>
     """
     st.components.v1.html(timeout_context_js, height=0, width=0)
+    
+    # Enhanced meta refresh
+    dynamic_refresh_html = f"""
+    <meta http-equiv="refresh" content="{refresh_at}">
+    <script>
+        console.log('🕐 Meta Refresh: Will redirect in {refresh_at} seconds');
+        console.log('📊 Activity age:', Math.floor((Date.now() - {int(session.last_activity.timestamp() * 1000)}) / 1000), 'seconds');
+    </script>
+    """
+    st.markdown(dynamic_refresh_html, unsafe_allow_html=True)
     
     # ORIGINAL META REFRESH WITH TIMEOUT CONTEXT
     dynamic_refresh_html = f"""
