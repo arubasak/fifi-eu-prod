@@ -2352,40 +2352,40 @@ class SessionManager:
         
             return ai_response
         
-    except Exception as e:
-        logger.error(f"AI response generation failed: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"AI response generation failed: {e}", exc_info=True)
         
-        # Even in case of error, try to save what we can
-        try:
-            if 'user_message' in locals():
-                # Save the user message if it was created
-                if user_message not in session.messages:
-                    session.messages.append(user_message)
+            # Even in case of error, try to save what we can
+            try:
+                if 'user_message' in locals():
+                    # Save the user message if it was created
+                    if user_message not in session.messages:
+                        session.messages.append(user_message)
             
-            # Add error response
-            error_message = {
-                "role": "assistant",
-                "content": "I encountered an error processing your request. Please try again.",
-                "source": "Error Handler",
-                "used_search": False,
-                "used_pinecone": False,
-                "has_citations": False,
-                "has_inline_citations": False,
-                "safety_override": False
+                # Add error response
+                error_message = {
+                    "role": "assistant",
+                    "content": "I encountered an error processing your request. Please try again.",
+                    "source": "Error Handler",
+                    "used_search": False,
+                    "used_pinecone": False,
+                    "has_citations": False,
+                    "has_inline_citations": False,
+                    "safety_override": False
+                }
+                session.messages.append(error_message)
+            
+                # Save session
+                session.last_activity = datetime.now()
+                self.db.save_session(session)
+            except Exception as save_error:
+                logger.error(f"Failed to save session after error: {save_error}")
+        
+            return {
+                'content': 'I encountered an error processing your request. Please try again.',
+                'success': False,
+                'source': 'Error Handler'
             }
-            session.messages.append(error_message)
-            
-            # Save session
-            session.last_activity = datetime.now()
-            self.db.save_session(session)
-        except Exception as save_error:
-            logger.error(f"Failed to save session after error: {save_error}")
-        
-        return {
-            'content': 'I encountered an error processing your request. Please try again.',
-            'success': False,
-            'source': 'Error Handler'
-        }
         
     def clear_chat_history(self, session: UserSession):
         """Enhanced clear chat history with CRM save functionality."""
