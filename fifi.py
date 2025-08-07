@@ -1752,21 +1752,7 @@ class EnhancedAI:
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """Enhanced AI response with content moderation, Pinecone, web search, and safety features."""
         
-        # STEP 1: Content Moderation Check (using the existing function)
-        moderation_result = check_content_moderation(prompt, self.openai_client)
-        if moderation_result and moderation_result.get('flagged'):
-            logger.warning(f"Content moderation flagged prompt: {moderation_result.get('categories', [])}")
-            return {
-                "content": moderation_result.get('message', 'Your message violates our content policy.'),
-                "success": False,
-                "source": "Content Moderation",
-                "used_search": False,
-                "used_pinecone": False,
-                "has_citations": False,
-                "has_inline_citations": False,
-                "safety_override": False
-            }
-        
+       
         # STEP 2: Convert chat history to LangChain format if needed
         if chat_history:
             # Take only the last message (current prompt) and convert format
@@ -2301,73 +2287,92 @@ class SessionManager:
                 'message': "Verification failed due to a technical error."
             }
 
-    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-        """Gets AI response for user prompt with all checks and limits."""
-        try:
-            # Rate limiting check
-            if not self.rate_limiter.is_allowed(session.session_id):
-                return {
-                    'content': 'Please slow down - you are sending requests too quickly.',
-                    'success': False
-                }
-            
-            # Question limit check
-            limit_check = self.question_limits.is_within_limits(session)
-            if not limit_check['allowed']:
-                if limit_check['reason'] == 'guest_limit':
-                    return {'requires_email': True}
-                elif limit_check['reason'] in ['banned', 'daily_limit', 'total_limit']:
-                    return {
-                        'banned': True,
-                        'content': limit_check.get('message', 'Access restricted.'),
-                        'time_remaining': limit_check.get('time_remaining')
-                    }
-            
-            # Content moderation (if available)
-            sanitized_prompt = sanitize_input(prompt)
-            moderation_result = check_content_moderation(sanitized_prompt, self.ai.openai_client)
-            if moderation_result and moderation_result.get('flagged'):
-                return {
-                    'content': moderation_result.get('message', 'Your message violates content policy.'),
-                    'success': False
-                }
-            
-            # Record the question
-            self.question_limits.record_question(session)
-            
-            # Add user message to session
-            user_message = {"role": "user", "content": sanitized_prompt}
-            session.messages.append(user_message)
-            
-            # Get AI response
-            ai_response = self.ai.get_response(sanitized_prompt, session.messages[-10:])
-            
-            # Add AI response to session
-            assistant_message = {
-                "role": "assistant",
-                "content": ai_response.get("content", "No response generated."),
-                "source": ai_response.get("source", "FiFi AI"),
-                "used_search": ai_response.get("used_search", False),
-                "used_pinecone": ai_response.get("used_pinecone", False),
-                "has_citations": ai_response.get("has_citations", False),
-                "has_inline_citations": ai_response.get("has_inline_citations", False),
-                "safety_override": ai_response.get("safety_override", False)
+def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+    """Gets AI response for user prompt with all checks and limits."""
+    try:
+        # Rate limiting check
+        if not self.rate_limiter.is_allowed(session.session_id):
+            return {
+                'content': 'Please slow down - you are sending requests too quickly.',
+                'success': False
             }
-            session.messages.append(assistant_message)
+        
+        # Question limit check
+        limit_check = self.question_limits.is_within_limits(session)
+        if not limit_check['allowed']:
+            if limit_check['reason'] == 'guest_limit':
+                return {'requires_email': True}
+            elif limit_check['reason'] in ['banned', 'daily_limit', 'total_limit']:
+                return {
+                    'banned': True,
+                    'content': limit_check.get('message', 'Access restricted.'),
+                    'time_remaining': limit_check.get('time_remaining')
+                }
+        
+        # Sanitize and record the question FIRST
+        sanitized_prompt = sanitize_input(prompt)
+        self.question_limits.record_question(session)
+        
+        # Add user message to session BEFORE any AI processing
+        user_message = {"role": "user", "content": sanitized_prompt}
+        session.messages.append(user_message)
+        
+        # Get AI response (which includes content moderation)
+        ai_response = self.ai.get_response(sanitized_prompt, session.messages[-10:])
+        
+        # Add AI response to session (ALWAYS, even if it's a moderation error)
+        assistant_message = {
+            "role": "assistant",
+            "content": ai_response.get("content", "No response generated."),
+            "source": ai_response.get("source", "FiFi AI"),
+            "used_search": ai_response.get("used_search", False),
+            "used_pinecone": ai_response.get("used_pinecone", False),
+            "has_citations": ai_response.get("has_citations", False),
+            "has_inline_citations": ai_response.get("has_inline_citations", False),
+            "safety_override": ai_response.get("safety_override", False)
+        }
+        session.messages.append(assistant_message)
+        
+        # Save session with new messages (ALWAYS)
+        session.last_activity = datetime.now()
+        self.db.save_session(session)
+        
+        return ai_response
+        
+    except Exception as e:
+        logger.error(f"AI response generation failed: {e}", exc_info=True)
+        
+        # Even in case of error, try to save what we can
+        try:
+            if 'user_message' in locals():
+                # Save the user message if it was created
+                if user_message not in session.messages:
+                    session.messages.append(user_message)
             
-            # Save session with new messages
+            # Add error response
+            error_message = {
+                "role": "assistant",
+                "content": "I encountered an error processing your request. Please try again.",
+                "source": "Error Handler",
+                "used_search": False,
+                "used_pinecone": False,
+                "has_citations": False,
+                "has_inline_citations": False,
+                "safety_override": False
+            }
+            session.messages.append(error_message)
+            
+            # Save session
             session.last_activity = datetime.now()
             self.db.save_session(session)
-            
-            return ai_response
-            
-        except Exception as e:
-            logger.error(f"AI response generation failed: {e}", exc_info=True)
-            return {
-                'content': 'I encountered an error processing your request. Please try again.',
-                'success': False,
-                'source': 'Error Handler'
-            }
+        except Exception as save_error:
+            logger.error(f"Failed to save session after error: {save_error}")
+        
+        return {
+            'content': 'I encountered an error processing your request. Please try again.',
+            'success': False,
+            'source': 'Error Handler'
+        }
 
     def clear_chat_history(self, session: UserSession):
         """Enhanced clear chat history with CRM save functionality."""
