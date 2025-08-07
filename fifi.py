@@ -2301,81 +2301,81 @@ class SessionManager:
             }
 
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-    """Enhanced version that prevents first-attempt failures"""
-    try:
-        # STEP A: Session refresh BEFORE any processing (prevents stale session issues)
+        """Enhanced version that prevents first-attempt failures"""
         try:
-            fresh_session = self.db.load_session(session.session_id)
-            if fresh_session and fresh_session.active:
-                session = fresh_session
-                session.last_activity = datetime.now()
-                logger.debug(f"✅ Session refreshed before processing: {session.session_id[:8]}")
-        except Exception as refresh_error:
-            logger.error(f"Session refresh failed: {refresh_error}")
+            # STEP A: Session refresh BEFORE any processing (prevents stale session issues)
+            try:
+                fresh_session = self.db.load_session(session.session_id)
+                if fresh_session and fresh_session.active:
+                    session = fresh_session
+                    session.last_activity = datetime.now()
+                    logger.debug(f"✅ Session refreshed before processing: {session.session_id[:8]}")
+            except Exception as refresh_error:
+                logger.error(f"Session refresh failed: {refresh_error}")
 
-        # STEP B: Database connection health check (prevents connection failures)
-        try:
-            self.db._ensure_connection_healthy(self.config)
-        except Exception as db_error:
-            logger.error(f"Database connection check failed: {db_error}")
+            # STEP B: Database connection health check (prevents connection failures)
+            try:
+                self.db._ensure_connection_healthy(self.config)
+            except Exception as db_error:
+                logger.error(f"Database connection check failed: {db_error}")
 
-        # Rest of your existing logic remains the same...
-        if not self.rate_limiter.is_allowed(session.session_id):
-            return {'content': 'Please slow down - you are sending requests too quickly.', 'success': False}
+            # Rest of your existing logic remains the same...
+            if not self.rate_limiter.is_allowed(session.session_id):
+                return {'content': 'Please slow down - you are sending requests too quickly.', 'success': False}
         
-        limit_check = self.question_limits.is_within_limits(session)
-        if not limit_check['allowed']:
-            if limit_check['reason'] == 'guest_limit':
-                return {'requires_email': True}
-            elif limit_check['reason'] in ['banned', 'daily_limit', 'total_limit']:
-                return {'banned': True, 'content': limit_check.get('message', 'Access restricted.'), 'time_remaining': limit_check.get('time_remaining')}
+            limit_check = self.question_limits.is_within_limits(session)
+            if not limit_check['allowed']:
+                if limit_check['reason'] == 'guest_limit':
+                    return {'requires_email': True}
+                elif limit_check['reason'] in ['banned', 'daily_limit', 'total_limit']:
+                    return {'banned': True, 'content': limit_check.get('message', 'Access restricted.'), 'time_remaining': limit_check.get('time_remaining')}
         
-        sanitized_prompt = sanitize_input(prompt)
-        self.question_limits.record_question(session)
+            sanitized_prompt = sanitize_input(prompt)
+            self.question_limits.record_question(session)
         
-        user_message = {"role": "user", "content": sanitized_prompt}
-        session.messages.append(user_message)
+            user_message = {"role": "user", "content": sanitized_prompt}
+            session.messages.append(user_message)
         
-        ai_response = self.ai.get_response(sanitized_prompt, session.messages[-10:])
+            ai_response = self.ai.get_response(sanitized_prompt, session.messages[-10:])
         
-        assistant_message = {
-            "role": "assistant",
-            "content": ai_response.get("content", "No response generated."),
-            "source": ai_response.get("source", "FiFi AI"),
-            "used_search": ai_response.get("used_search", False),
-            "used_pinecone": ai_response.get("used_pinecone", False),
-            "has_citations": ai_response.get("has_citations", False),
-            "has_inline_citations": ai_response.get("has_inline_citations", False),
-            "safety_override": ai_response.get("safety_override", False)
-        }
-        session.messages.append(assistant_message)
-        
-        # STEP C: Enhanced session save with retry
-        session.last_activity = datetime.now()
-        self._save_session_with_retry(session)
-        
-        return ai_response
-        
-    except Exception as e:
-        logger.error(f"AI response generation failed: {e}", exc_info=True)
-        
-        try:
-            if 'user_message' in locals() and user_message not in session.messages:
-                session.messages.append(user_message)
-            
-            error_message = {
-                "role": "assistant", "content": "I encountered an error processing your request. Please try again.",
-                "source": "Error Handler", "used_search": False, "used_pinecone": False, 
-                "has_citations": False, "has_inline_citations": False, "safety_override": False
+            assistant_message = {
+                "role": "assistant",
+                "content": ai_response.get("content", "No response generated."),
+                "source": ai_response.get("source", "FiFi AI"),
+                "used_search": ai_response.get("used_search", False),
+                "used_pinecone": ai_response.get("used_pinecone", False),
+                "has_citations": ai_response.get("has_citations", False),
+                "has_inline_citations": ai_response.get("has_inline_citations", False),
+                "safety_override": ai_response.get("safety_override", False)
             }
-            session.messages.append(error_message)
-            
+            session.messages.append(assistant_message)
+        
+            # STEP C: Enhanced session save with retry
             session.last_activity = datetime.now()
             self._save_session_with_retry(session)
-        except Exception as save_error:
-            logger.error(f"Failed to save session after error: {save_error}")
         
-        return {'content': 'I encountered an error processing your request. Please try again.', 'success': False, 'source': 'Error Handler'}
+            return ai_response
+        
+        except Exception as e:
+            logger.error(f"AI response generation failed: {e}", exc_info=True)
+        
+            try:
+                if 'user_message' in locals() and user_message not in session.messages:
+                    session.messages.append(user_message)
+            
+                error_message = {
+                    "role": "assistant", "content": "I encountered an error processing your request. Please try again.",
+                    "source": "Error Handler", "used_search": False, "used_pinecone": False, 
+                    "has_citations": False, "has_inline_citations": False, "safety_override": False
+                }
+                session.messages.append(error_message)
+            
+                session.last_activity = datetime.now()
+                self._save_session_with_retry(session)
+            except Exception as save_error:
+                logger.error(f"Failed to save session after error: {save_error}")
+        
+            return {'content': 'I encountered an error processing your request. Please try again.', 'success': False, 'source': 'Error Handler'}
         
     def clear_chat_history(self, session: UserSession):
         """Enhanced clear chat history with CRM save functionality."""
