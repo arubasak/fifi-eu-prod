@@ -2310,47 +2310,47 @@ class SessionManager:
                 'success': False
                 }
         
-        # Question limit check
-        limit_check = self.question_limits.is_within_limits(session)
-        if not limit_check['allowed']:
-            if limit_check['reason'] == 'guest_limit':
-                return {'requires_email': True}
-            elif limit_check['reason'] in ['banned', 'daily_limit', 'total_limit']:
-                return {
+            # Question limit check
+            limit_check = self.question_limits.is_within_limits(session)
+            if not limit_check['allowed']:
+                if limit_check['reason'] == 'guest_limit':
+                    return {'requires_email': True}
+                elif limit_check['reason'] in ['banned', 'daily_limit', 'total_limit']:
+                    return {
                     'banned': True,
                     'content': limit_check.get('message', 'Access restricted.'),
                     'time_remaining': limit_check.get('time_remaining')
-                }
+                    }
         
-        # Sanitize and record the question FIRST
-        sanitized_prompt = sanitize_input(prompt)
-        self.question_limits.record_question(session)
+            # Sanitize and record the question FIRST
+            sanitized_prompt = sanitize_input(prompt)
+            self.question_limits.record_question(session)
         
-        # Add user message to session BEFORE any AI processing
-        user_message = {"role": "user", "content": sanitized_prompt}
-        session.messages.append(user_message)
+            # Add user message to session BEFORE any AI processing
+            user_message = {"role": "user", "content": sanitized_prompt}
+            session.messages.append(user_message)
         
-        # Get AI response (which includes content moderation)
-        ai_response = self.ai.get_response(sanitized_prompt, session.messages[-10:])
+            # Get AI response (which includes content moderation)
+            ai_response = self.ai.get_response(sanitized_prompt, session.messages[-10:])
         
-        # Add AI response to session (ALWAYS, even if it's a moderation error)
-        assistant_message = {
-            "role": "assistant",
-            "content": ai_response.get("content", "No response generated."),
-            "source": ai_response.get("source", "FiFi AI"),
-            "used_search": ai_response.get("used_search", False),
-            "used_pinecone": ai_response.get("used_pinecone", False),
-            "has_citations": ai_response.get("has_citations", False),
-            "has_inline_citations": ai_response.get("has_inline_citations", False),
-            "safety_override": ai_response.get("safety_override", False)
-        }
-        session.messages.append(assistant_message)
+            # Add AI response to session (ALWAYS, even if it's a moderation error)
+            assistant_message = {
+                "role": "assistant",
+                "content": ai_response.get("content", "No response generated."),
+                "source": ai_response.get("source", "FiFi AI"),
+                "used_search": ai_response.get("used_search", False),
+                "used_pinecone": ai_response.get("used_pinecone", False),
+                "has_citations": ai_response.get("has_citations", False),
+                "has_inline_citations": ai_response.get("has_inline_citations", False),
+                "safety_override": ai_response.get("safety_override", False)
+            }
+            session.messages.append(assistant_message)
         
-        # Save session with new messages (ALWAYS)
-        session.last_activity = datetime.now()
-        self.db.save_session(session)
+            # Save session with new messages (ALWAYS)
+            session.last_activity = datetime.now()
+            self.db.save_session(session)
         
-        return ai_response
+            return ai_response
         
     except Exception as e:
         logger.error(f"AI response generation failed: {e}", exc_info=True)
