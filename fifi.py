@@ -2305,10 +2305,10 @@ class SessionManager:
         try:
             # Rate limiting check
             if not self.rate_limiter.is_allowed(session.session_id):
-            return {
-                'content': 'Please slow down - you are sending requests too quickly.',
-                'success': False
-            }
+                return {
+                    'content': 'Please slow down - you are sending requests too quickly.',
+                    'success': False
+                }
         
         # Question limit check
         limit_check = self.question_limits.is_within_limits(session)
