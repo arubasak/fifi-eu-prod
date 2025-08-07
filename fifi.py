@@ -3516,54 +3516,6 @@ def calculate_seconds_until_timeout(session, timeout_minutes=15):
     # Return at least 5 seconds to prevent immediate refresh loops
     return max(5, int(seconds_until_timeout))
 
-
-def inject_dynamic_timeout_refresh(session):
-    """Enhanced meta refresh that works with activity detection"""
-    time_since_activity = datetime.now() - session.last_activity
-    timeout_seconds = 15 * 60
-    seconds_until_timeout = timeout_seconds - time_since_activity.total_seconds()
-    refresh_at = max(5, min(int(seconds_until_timeout) + 1, timeout_seconds))
-    
-    # Set timeout context
-    timeout_context_js = """
-    <script>
-    try {
-        sessionStorage.setItem('fifi_timeout_reason', 'meta_refresh_timeout_15min');
-        console.log('⏰ Meta refresh timeout context set');
-    } catch (e) { console.error('Failed to set timeout context:', e); }
-    </script>
-    """
-    st.components.v1.html(timeout_context_js, height=0, width=0)
-    
-    # Enhanced meta refresh
-    dynamic_refresh_html = f"""
-    <meta http-equiv="refresh" content="{refresh_at}">
-    <script>
-        console.log('🕐 Meta Refresh: Will redirect in {refresh_at} seconds');
-        console.log('📊 Activity age:', Math.floor((Date.now() - {int(session.last_activity.timestamp() * 1000)}) / 1000), 'seconds');
-    </script>
-    """
-    st.markdown(dynamic_refresh_html, unsafe_allow_html=True)
-    
-    # ORIGINAL META REFRESH WITH TIMEOUT CONTEXT
-    dynamic_refresh_html = f"""
-    <meta http-equiv="refresh" content="{refresh_at}">
-    <script>
-        console.log('⏰ Session will be checked for timeout in {refresh_at} seconds');
-        
-        // Visual countdown (optional - remove if you don't want users to see)
-        let secondsLeft = {refresh_at};
-        setInterval(() => {{
-            secondsLeft--;
-            if (secondsLeft <= 300 && secondsLeft > 0) {{ // Last 5 minutes
-                console.log(`⏰ Timeout in ${{Math.floor(secondsLeft/60)}}m ${{secondsLeft%60}}s`);
-            }}
-        }}, 1000);
-    </script>
-    """
-    
-    st.markdown(dynamic_refresh_html, unsafe_allow_html=True)
-
 def completely_reset_session():
     """
     Completely clears the session and creates a new one.
@@ -4331,7 +4283,7 @@ def render_chat_interface_complete_fix(session_manager: 'SessionManager', sessio
         return
 
     # ENHANCEMENT C: Keep your working meta refresh + add activity detection
-    inject_dynamic_timeout_refresh(session)
+    
     add_activity_detection(session.session_id, session_manager, session)
 
     # Your existing functionality (fingerprinting, error handler, etc.)
