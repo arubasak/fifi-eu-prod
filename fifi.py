@@ -2954,7 +2954,7 @@ def global_message_channel_error_handler():
 
 def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession) -> bool:
     """
-    SIMPLIFIED: Check if 15 minutes have passed and trigger browser reload if needed.
+    ENHANCED UX: Check if 15 minutes have passed with user warnings and clear messaging.
     Returns True if timeout was triggered (and page reload initiated).
     """
     if not session:
@@ -2964,41 +2964,76 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
     time_since_activity = datetime.now() - session.last_activity
     minutes_inactive = time_since_activity.total_seconds() / 60
     
-    # Check if 15 minutes have passed
-    if minutes_inactive >= 15:
+    # PHASE 1: Warning in last 1 minute (14-15 minutes inactive)
+    if 14 <= minutes_inactive < 15:
+        seconds_remaining = int((15 * 60) - time_since_activity.total_seconds())
+        
+        # Main area warning banner
+        st.error("⚠️ **Session Expiring Soon**")
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.warning(f"Your session expires in {seconds_remaining} seconds due to inactivity.")
+        with col2:
+            if st.button("Keep Active", type="primary", use_container_width=True):
+                # Extend session by resetting last_activity
+                session.last_activity = datetime.now()
+                try:
+                    session_manager._save_session_with_retry(session)
+                    st.success("✅ Session extended for 15 minutes!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    logger.error(f"Failed to extend session: {e}")
+                    st.error("❌ Failed to extend session. Please refresh the page.")
+        
+        st.markdown("---")  # Separator from main content
+        return False  # Continue normal operation during warning phase
+    
+    # PHASE 2 & 3: Handle actual timeout (15+ minutes)
+    elif minutes_inactive >= 15:
         logger.info(f"⏰ TIMEOUT DETECTED: {session.session_id[:8]} inactive for {minutes_inactive:.1f} minutes")
         
-        # Save to CRM if eligible BEFORE reload
+        # PHASE 2: Clear timeout messaging
+        st.error("🚨 **Session Timeout**")
+        st.info("Your session expired due to inactivity.")
+        
+        # Save to CRM if eligible with brief user feedback
+        crm_saved = False
         if session_manager._is_crm_save_eligible(session, "timeout_auto_reload"):
-            logger.info(f"💾 Performing emergency save before auto-reload for {session.session_id[:8]}")
-            
-            # Send to FastAPI for emergency save
-            try:
-                emergency_data = {
-                    "session_id": session.session_id,
-                    "reason": "timeout_auto_reload", # Clear reason name
-                    "timestamp": int(time.time() * 1000)
-                }
-                
-                # Use requests to send to FastAPI (as backup to beacon)
-                fastapi_url = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save'
-                response = requests.post(fastapi_url, json=emergency_data, timeout=5)
-                if response.status_code == 200:
-                    logger.info(f"✅ Emergency save sent to FastAPI successfully")
-                else:
-                    logger.warning(f"⚠️ FastAPI returned status {response.status_code}")
-            except Exception as e:
-                logger.error(f"❌ Failed to send emergency save to FastAPI: {e}")
-                # Continue with local save as fallback
+            with st.spinner("💾 Saving conversation..."):
                 try:
-                    session_manager.zoho.save_chat_transcript_sync(session, "timeout_auto_reload")
-                    session.timeout_saved_to_crm = True
-                except Exception as save_e:
-                    logger.error(f"❌ Local CRM save also failed: {save_e}")
+                    # Send to FastAPI for emergency save
+                    emergency_data = {
+                        "session_id": session.session_id,
+                        "reason": "timeout_auto_reload",
+                        "timestamp": int(time.time() * 1000)
+                    }
+                    
+                    fastapi_url = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save'
+                    response = requests.post(fastapi_url, json=emergency_data, timeout=5)
+                    if response.status_code == 200:
+                        crm_saved = True
+                        st.success("✅ Conversation saved!")
+                    else:
+                        # Fallback to local save
+                        local_success = session_manager.zoho.save_chat_transcript_sync(session, "timeout_auto_reload")
+                        if local_success:
+                            crm_saved = True
+                            st.success("✅ Conversation saved!")
+                        else:
+                            st.warning("⚠️ Unable to save conversation.")
+                except Exception as e:
+                    logger.error(f"❌ Emergency save failed: {e}")
+                    st.warning("⚠️ Unable to save conversation.")
+        else:
+            st.info("ℹ️ No conversation to save.")
         
         # Mark session as inactive
         session.active = False
         session.last_activity = datetime.now()
+        if crm_saved:
+            session.timeout_saved_to_crm = True
+        
         try:
             session_manager.db.save_session(session)
         except Exception as e:
@@ -3009,21 +3044,27 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
             if key in st.session_state:
                 del st.session_state[key]
         
-        # Show timeout message
-        st.error("⏰ **Session Timeout**")
-        st.info("Your session has expired due to 15 minutes of inactivity.")
+        # PHASE 3: 5-second countdown before redirect
+        st.info("🔄 **Redirecting to home page...**")
+        countdown_placeholder = st.empty()
+        
+        for i in range(5, 0, -1):
+            countdown_placeholder.info(f"Redirecting in {i} seconds...")
+            time.sleep(1)
+        
+        countdown_placeholder.info("Redirecting now...")
         
         # TRIGGER BROWSER RELOAD using streamlit_js_eval
         if JS_EVAL_AVAILABLE:
             try:
-                logger.info(f"🔄 Triggering browser reload for timeout")
+                logger.info(f"🔄 Triggering browser reload after timeout with user feedback")
                 streamlit_js_eval(js_expressions="parent.window.location.reload()")
                 return True
             except Exception as e:
                 logger.error(f"Browser reload failed: {e}")
         
         # Fallback: Force Streamlit rerun to home page
-        st.info("🏠 Redirecting to home page...")
+        st.info("🏠 Loading home page...")
         time.sleep(1)
         st.rerun()
         return True
@@ -3593,10 +3634,15 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # SIMPLIFIED TIMEOUT CHECK: Just check and trigger reload if needed
+    # SIMPLIFIED TIMEOUT CHECK: Enhanced UX with user warnings
     timeout_triggered = check_timeout_and_trigger_reload(session_manager, session)
     if timeout_triggered:
         return  # Page reload was triggered, stop execution
+    
+    # Check if session is in warning phase (14-15 minutes) to disable chat during warning
+    time_since_activity = datetime.now() - session.last_activity
+    minutes_inactive = time_since_activity.total_seconds() / 60
+    session_expiring = minutes_inactive >= 14
     
     # Simple activity tracking (no complex polling)
     activity_result = render_simple_activity_tracker(session.session_id)
@@ -3669,11 +3715,16 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 if msg.get("has_citations") and msg.get("has_inline_citations"):
                     st.caption("📚 Response includes verified citations")
 
-    # Chat input (unchanged)
-    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=session.ban_status.value != BanStatus.NONE.value)
+    # Chat input with enhanced UX (Phase 3: Disable when expiring)
+    if session_expiring:
+        # Disabled chat input during warning/timeout phase
+        st.chat_input("Session expiring - click 'Keep Active' above to continue...", disabled=True)
+    else:
+        # Normal chat input
+        prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                                disabled=session.ban_status.value != BanStatus.NONE.value)
     
-    if prompt:
+    if prompt and not session_expiring:  # Only process if session not expiring
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
         # Update activity and process
@@ -3721,6 +3772,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.error("⚠️ I encountered an error. Please try again.")
         
         st.rerun()
+    elif prompt and session_expiring:
+        # User tried to send message during expiring phase
+        st.warning("⚠️ Your session is expiring. Please click 'Keep Active' to continue chatting.")
 
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
