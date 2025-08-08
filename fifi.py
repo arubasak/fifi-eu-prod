@@ -3152,57 +3152,90 @@ def render_browser_close_detection_enhanced(session_id: str):
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
 
-def add_activity_detection(session_id: str, session_manager, session):
-    """Simple activity detection for meta refresh"""
+def add_activity_detection_with_polling(session_id: str, session_manager, session):
+    """Enhanced activity detection with timeout polling"""
     if not session_id:
-        return
+        return None
     
     safe_session_id = session_id.replace('-', '_')
     
     activity_js = f"""
     (() => {{
         const sessionId = "{session_id}";
-        const stateKey = 'fifi_activity_{safe_session_id}';
+        const stateKey = 'fifi_timeout_{safe_session_id}';
         
         if (!window[stateKey]) {{
-            window[stateKey] = {{ lastActivity: Date.now(), lastUpdate: 0, initialized: false }};
+            window[stateKey] = {{ 
+                lastActivity: Date.now(), 
+                lastUpdate: 0, 
+                initialized: false,
+                pollCount: 0
+            }};
         }}
         
         const state = window[stateKey];
         
         if (!state.initialized) {{
-            function track() {{ state.lastActivity = Date.now(); }}
-            ['mousedown', 'keydown', 'click', 'scroll', 'touchstart'].forEach(e => {{
-                document.addEventListener(e, track, {{passive: true}});
+            function trackActivity() {{ 
+                state.lastActivity = Date.now(); 
+                console.log('💓 Activity detected, timer reset');
+            }}
+            
+            ['mousedown', 'keydown', 'click', 'scroll', 'touchstart', 'focus'].forEach(e => {{
+                document.addEventListener(e, trackActivity, {{passive: true}});
             }});
+            
+            // Try parent document for iframe scenarios
+            try {{
+                if (window.parent && window.parent !== window) {{
+                    ['mousedown', 'keydown', 'click', 'scroll', 'touchstart'].forEach(e => {{
+                        window.parent.document.addEventListener(e, trackActivity, {{passive: true}});
+                    }});
+                }}
+            }} catch (e) {{ console.debug('Parent monitoring not available:', e); }}
+            
             state.initialized = true;
-            console.log('✅ Activity tracking enabled');
+            console.log('✅ Enhanced timeout system initialized');
         }}
         
         const now = Date.now();
-        if (now - state.lastUpdate > 30000) {{
-            state.lastUpdate = now;
-            return {{ type: 'activity_ping', session_id: sessionId, last_activity: state.lastActivity }};
+        const timeSinceActivity = now - state.lastActivity;
+        const minutesSinceActivity = timeSinceActivity / (1000 * 60);
+        
+        // Return status for Python polling
+        state.pollCount++;
+        if (state.pollCount % 10 === 1) {{ // Log every 10th poll
+            console.log(`📊 Poll #${{state.pollCount}}: Inactive for ${{Math.floor(minutesSinceActivity)}} minutes`);
         }}
-        return null;
+        
+        return {{
+            type: 'timeout_poll',
+            session_id: sessionId,
+            minutes_inactive: minutesSinceActivity,
+            last_activity: state.lastActivity,
+            poll_count: state.pollCount
+        }};
     }})()
     """
     
     try:
         result = st_javascript(activity_js)
-        if result and result.get('type') == 'activity_ping':
+        if result and result.get('type') == 'timeout_poll':
             js_activity = result.get('last_activity')
             if js_activity:
                 try:
                     new_activity = datetime.fromtimestamp(js_activity / 1000)
                     if new_activity > session.last_activity:
                         session.last_activity = new_activity
-                        session_manager.db.save_session(session)
-                        logger.debug(f"💓 Activity updated for {session_id[:8]}")
+                        session_manager._save_session_with_retry(session)
+                        logger.debug(f"💓 Activity updated from polling for {session_id[:8]}")
                 except Exception as e:
                     logger.error(f"Activity processing failed: {e}")
+        
+        return result
     except Exception as e:
-        logger.error(f"Activity detection failed: {e}")
+        logger.error(f"Activity detection polling failed: {e}")
+        return None
         
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
     """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
