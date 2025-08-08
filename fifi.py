@@ -1999,6 +1999,27 @@ class SessionManager:
                     logger.error(f"All session save attempts failed for {session.session_id[:8]}")
                     raise
 
+    def check_timeout_status(self, session: UserSession) -> Dict[str, Any]:
+    """Check timeout status and return current state"""
+    time_since_activity = datetime.now() - session.last_activity
+    minutes_inactive = time_since_activity.total_seconds() / 60
+    
+    if minutes_inactive >= 15:
+        return {"status": "timeout", "minutes": minutes_inactive}
+    elif minutes_inactive >= 14:
+        return {"status": "warning", "minutes": minutes_inactive, "seconds_left": int(60 - (minutes_inactive - 14) * 60)}
+    else:
+        return {"status": "active", "minutes": minutes_inactive}
+
+def extend_session(self, session: UserSession):
+    """Extend session for another 15 minutes"""
+    session.last_activity = datetime.now()
+    try:
+        self._save_session_with_retry(session)
+        logger.info(f"Session extended for {session.session_id[:8]}")
+    except Exception as e:
+        logger.error(f"Failed to extend session: {e}")
+    
     def _create_new_session(self) -> UserSession:
         """Creates a new user session with temporary fingerprint until JS fingerprinting completes."""
         session_id = str(uuid.uuid4())
