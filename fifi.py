@@ -2306,6 +2306,7 @@ class SessionManager:
         if len(local) <= 2:
             return f"{local[0]}***@{domain}"
         return f"{local[0]}{'*' * (len(local) - 2)}{local[-1]}@{domain}"
+    
 
     def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
         """Handles email verification for guest users."""
