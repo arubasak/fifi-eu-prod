@@ -2717,3 +2717,7 @@ def render_working_timeout_system(session_id: str):
         console.log('✅ 5-minute timeout system active');
     }})();
     </script>
+    """  # This line was missing - closing the triple quotes
+    
+    # Render the HTML/JavaScript
+    st.components.v1.html(timeout_system_js, height=0)
