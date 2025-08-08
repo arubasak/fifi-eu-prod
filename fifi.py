@@ -4338,8 +4338,6 @@ def render_chat_interface_complete_fix(session_manager: 'SessionManager', sessio
 
     # ENHANCEMENT C: Keep your working meta refresh + add activity detection
     
-    add_activity_detection(session.session_id, session_manager, session)
-
     # Your existing functionality (fingerprinting, error handler, etc.)
     fingerprint_needed = (
         not session.fingerprint_id or
