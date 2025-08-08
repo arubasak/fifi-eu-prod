@@ -30,19 +30,8 @@ import requests
 import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
-# NEW: Import for simplified browser reload
-try:
-    from streamlit_js_eval import streamlit_js_eval
-    JS_EVAL_AVAILABLE = True
-    logger = logging.getLogger(__name__)
-    logger.info("✅ streamlit_js_eval available for browser reload")
-except ImportError:
-    JS_EVAL_AVAILABLE = False
-    logger = logging.getLogger(__name__)
-    logger.warning("⚠️ streamlit_js_eval not available, using fallback timeout mechanism")
-
 # =============================================================================
-# FINAL INTEGRATED FIFI AI - SIMPLIFIED TIMEOUT SYSTEM
+# FINAL INTEGRATED FIFI AI - WITH TRUE 15-MIN SESSION TIMEOUT
 # =============================================================================
 
 # Setup logging
@@ -425,6 +414,34 @@ class DatabaseManager:
             logger.error(f"Database health check failed: {e}")
             return False
     
+    def _ensure_connection(self, config_instance: Any):
+        """Ensure database connection is healthy, reconnect if needed"""
+        if not self._check_connection_health():
+            logger.warning("Database connection unhealthy, attempting reconnection...")
+            old_conn = self.conn
+            self.conn = None
+            
+            # Try to close old connection
+            if old_conn:
+                try:
+                    old_conn.close()
+                except Exception as e:
+                    logger.debug(f"Error closing old DB connection: {e}")
+            
+            # Attempt reconnection
+            if self.db_type == "cloud" and SQLITECLOUD_AVAILABLE:
+                self.conn, _ = self._try_sqlite_cloud(config_instance.SQLITE_CLOUD_CONNECTION)
+            elif self.db_type == "file":
+                self.conn, _ = self._try_local_sqlite()
+                
+            if not self.conn:
+                logger.error("Database reconnection failed, falling back to in-memory storage")
+                self.db_type = "memory"
+                if not hasattr(self, 'local_sessions'):
+                    self.local_sessions = {}
+
+    @handle_api_errors("Database", "Save Session")
+
     def _ensure_connection_healthy(self, config_instance: Any):
         """Ensure database connection is healthy, reconnect if needed"""
         if not self._check_connection_health():
@@ -460,15 +477,14 @@ class DatabaseManager:
             self.db_type = "memory"
             if not hasattr(self, 'local_sessions'):
                 self.local_sessions = {}
-
-    @handle_api_errors("Database", "Save Session")
+            
     def save_session(self, session: UserSession):
         """Save session with SQLite Cloud compatibility and connection health check"""
         with self.lock:
             # Check and ensure connection health before any DB operation
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
             if current_config:
-                self._ensure_connection_healthy(current_config)
+                self._ensure_connection(current_config)
 
             if self.db_type == "memory":
                 self.local_sessions[session.session_id] = copy.deepcopy(session)
@@ -532,7 +548,7 @@ class DatabaseManager:
             # Check and ensure connection health before any DB operation
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
             if current_config:
-                self._ensure_connection_healthy(current_config)
+                self._ensure_connection(current_config)
 
             if self.db_type == "memory":
                 session = self.local_sessions.get(session_id)
@@ -614,7 +630,7 @@ class DatabaseManager:
         with self.lock:
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
             if current_config:
-                self._ensure_connection_healthy(current_config)
+                self._ensure_connection(current_config)
 
             if self.db_type == "memory":
                 return [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fingerprint_id]
@@ -679,7 +695,7 @@ class DatabaseManager:
         with self.lock:
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
             if current_config:
-                self._ensure_connection_healthy(current_config)
+                self._ensure_connection(current_config)
 
             if self.db_type == "memory":
                 return [copy.deepcopy(s) for s in self.local_sessions.values() if s.email == email]
@@ -2215,52 +2231,6 @@ class SessionManager:
         
         return {'has_history': False}
 
-    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        """Authenticates user with WordPress and creates/updates session."""
-        if not self.config.WORDPRESS_URL:
-            st.error("WordPress authentication is not configured.")
-            return None
-    
-        try:
-            auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
-            response = requests.post(auth_url, json={
-                'username': username,
-                'password': password
-            }, timeout=10)
-        
-            if response.status_code == 200:
-                data = response.json()
-                wp_token = data.get('token')
-                email = data.get('user_email')
-                display_name = data.get('user_display_name')
-            
-                # Get current session
-                session = self.get_session()
-            
-                # Update session to registered user
-                session.user_type = UserType.REGISTERED_USER
-                session.email = email
-                session.full_name = display_name
-                session.wp_token = wp_token
-            
-                # Add email to email history if not already there
-                if email not in session.email_addresses_used:
-                    session.email_addresses_used.append(email)
-            
-                self.db.save_session(session)
-            
-                logger.info(f"WordPress authentication successful for {email}")
-                return session
-            
-            else:
-                st.error("Invalid username or password.")
-                return None
-            
-        except Exception as e:
-            logger.error(f"WordPress authentication failed: {e}")
-            st.error("Authentication service is temporarily unavailable.")
-            return None
-
     def _mask_email(self, email: str) -> str:
         """Masks an email address for privacy."""
         if '@' not in email:
@@ -2269,6 +2239,52 @@ class SessionManager:
         if len(local) <= 2:
             return f"{local[0]}***@{domain}"
         return f"{local[0]}{'*' * (len(local) - 2)}{local[-1]}@{domain}"
+
+    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+        """Authenticates user with WordPress and creates/updates session."""
+        if not self.config.WORDPRESS_URL:
+            st.error("WordPress authentication is not configured.")
+            return None
+        
+        try:
+            auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
+            response = requests.post(auth_url, json={
+                'username': username,
+                'password': password
+            }, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                wp_token = data.get('token')
+                email = data.get('user_email')
+                display_name = data.get('user_display_name')
+                
+                # Get current session
+                session = self.get_session()
+                
+                # Update session to registered user
+                session.user_type = UserType.REGISTERED_USER
+                session.email = email
+                session.full_name = display_name
+                session.wp_token = wp_token
+                
+                # Add email to email history if not already there
+                if email not in session.email_addresses_used:
+                    session.email_addresses_used.append(email)
+                
+                self.db.save_session(session)
+                
+                logger.info(f"WordPress authentication successful for {email}")
+                return session
+                
+            else:
+                st.error("Invalid username or password.")
+                return None
+                
+        except Exception as e:
+            logger.error(f"WordPress authentication failed: {e}")
+            st.error("Authentication service is temporarily unavailable.")
+            return None
 
     def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
         """Handles email verification for guest users."""
@@ -2502,260 +2518,333 @@ class SessionManager:
             st.error("❌ Failed to save to CRM. Please try again later.")
 
 # =============================================================================
-# SIMPLIFIED TIMEOUT SYSTEM - NEW APPROACH
+# JAVASCRIPT COMPONENTS & EVENT HANDLING
 # =============================================================================
 
-def render_simple_activity_tracker(session_id: str) -> Optional[Dict[str, Any]]:
+def render_activity_timer_component_15min_fixed_v2(session_id: str) -> Optional[Dict[str, Any]]:
     """
-    SIMPLIFIED: Just tracks user activity and returns minutes since last activity.
-    No redirects, no complex logic - pure activity tracking only.
+    Enhanced timer component V2 that automatically redirects after 15 minutes of inactivity.
+    Handles both iframe and non-iframe scenarios by detecting and redirecting the appropriate window.
     """
+    logger.info(f"🔍 DEBUG: JavaScript timer component called for {session_id[:8]}")
+    
     if not session_id:
+        logger.warning("❌ Timer component: No session ID provided")
         return None
     
-    safe_session_id = session_id.replace('-', '_')
+    safe_session_id_js = session_id.replace('-', '_')
     
-    simple_tracker_js = f"""
+    js_timer_code = f"""
     (() => {{
-        const sessionId = "{session_id}";
-        const stateKey = 'fifi_activity_{safe_session_id}';
-        
-        // Initialize or get existing state
-        if (!window[stateKey]) {{
-            window[stateKey] = {{
-                lastActivity: Date.now(),
-                listenersInitialized: false,
-                sessionId: sessionId
+        try {{
+            const sessionId = "{session_id}";
+            const SESSION_TIMEOUT_MS = 900000; // 15 minutes
+            
+            console.log("🕐 FiFi 15-Minute Timer V2: Initializing for session", sessionId.substring(0, 8));
+            
+            // Detect if we're in an iframe
+            const isInIframe = () => {{
+                try {{
+                    return window !== window.parent || window !== window.top;
+                }} catch (e) {{
+                    // Cross-origin iframe will throw error
+                    return true;
+                }}
+            }};
+            
+            const inIframe = isInIframe();
+            console.log(`📍 Running in ${{inIframe ? 'IFRAME' : 'TOP WINDOW'}}`);
+            
+            // Initialize or reset timer state
+            if (typeof window.fifi_timer_state_{safe_session_id_js} === 'undefined' || 
+                window.fifi_timer_state_{safe_session_id_js} === null || 
+                window.fifi_timer_state_{safe_session_id_js}.sessionId !== sessionId) {{
+                
+                console.log("🆕 Starting new timer for session", sessionId.substring(0, 8)); 
+                window.fifi_timer_state_{safe_session_id_js} = {{
+                    lastActivityTime: Date.now(),
+                    expired: false,
+                    listenersInitialized: false,
+                    timeoutCheckInterval: null,
+                    sessionId: sessionId,
+                    isInIframe: inIframe
+                }};
+            }}
+            
+            const state = window.fifi_timer_state_{safe_session_id_js};
+            
+            // Setup activity listeners (only once)
+            if (!state.listenersInitialized) {{
+                console.log("👂 Setting up activity listeners...");
+                
+                function resetActivity() {{
+                    try {{
+                        const now = Date.now();
+                        if (state.lastActivityTime !== now) {{
+                            state.lastActivityTime = now;
+                            if (state.expired) {{
+                                console.log("🔄 Activity detected, resetting expired flag");
+                                state.expired = false;
+                            }}
+                        }}
+                    }} catch (e) {{
+                        console.debug("Error in resetActivity:", e);
+                    }}
+                }}
+                
+                // Activity event types to monitor
+                const events = [
+                    'mousedown', 'mousemove', 'mouseup', 'click', 'dblclick',
+                    'keydown', 'keyup', 'keypress',
+                    'scroll', 'wheel',
+                    'touchstart', 'touchmove', 'touchend',
+                    'focus'
+                ];
+                
+                // Add listeners to current document
+                events.forEach(eventType => {{
+                    try {{
+                        document.addEventListener(eventType, resetActivity, {{ 
+                            passive: true, 
+                            capture: true
+                        }});
+                    }} catch (e) {{
+                        console.debug(`Failed to add ${{eventType}} listener:`, e);
+                    }}
+                }});
+                
+                // Try to add listeners to parent document (for iframes)
+                if (inIframe) {{
+                    try {{
+                        if (window.parent && window.parent.document && 
+                            window.parent.location.origin === window.location.origin) {{
+                            
+                            events.forEach(eventType => {{
+                                try {{
+                                    window.parent.document.addEventListener(eventType, resetActivity, {{ 
+                                        passive: true, 
+                                        capture: true
+                                    }});
+                                }} catch (e) {{
+                                    console.debug(`Failed to add parent ${{eventType}} listener:`, e);
+                                }}
+                            }});
+                            console.log("👂 Parent document listeners added successfully.");
+                        }}
+                    }} catch (e) {{
+                        console.debug("Cannot access parent document for listeners (likely cross-origin):", e);
+                    }}
+                }}
+                
+                // Visibility change handlers
+                const handleVisibilityChange = () => {{
+                    try {{
+                        if (document.visibilityState === 'visible') {{
+                            resetActivity();
+                        }}
+                    }} catch (e) {{
+                        console.debug("Visibility change error:", e);
+                    }}
+                }};
+                
+                document.addEventListener('visibilitychange', handleVisibilityChange, {{ passive: true }});
+                
+                // CRITICAL: Clear any existing interval before setting a new one
+                if (state.timeoutCheckInterval) {{
+                    clearInterval(state.timeoutCheckInterval);
+                }}
+                
+                // NEW V2: Enhanced automatic timeout checking with iframe handling
+                state.timeoutCheckInterval = setInterval(() => {{
+                    const currentTime = Date.now();
+                    const inactiveTimeMs = currentTime - state.lastActivityTime;
+                    const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
+                    const inactiveSeconds = Math.floor((inactiveTimeMs % 60000) / 1000);
+                    
+                    // Log every 5 minutes
+                    if (inactiveMinutes > 0 && inactiveMinutes % 5 === 0 && inactiveSeconds < 2) {{
+                        console.log(`⏰ Session ${{sessionId.substring(0, 8)}} inactive: ${{inactiveMinutes}}m${{inactiveSeconds}}s`);
+                    }}
+                    
+                    // Check if timeout reached
+                    if (inactiveTimeMs >= SESSION_TIMEOUT_MS && !state.expired) {{
+                        state.expired = true;
+                        console.log("🚨 15-MINUTE TIMEOUT REACHED - TRIGGERING AUTO-REDIRECT");
+                        console.log(`📍 Redirect mode: ${{state.isInIframe ? 'IFRAME → PARENT' : 'DIRECT'}}`);
+                        
+                        // Clear the interval to stop checking
+                        clearInterval(state.timeoutCheckInterval);
+                        
+                        // Build the timeout URL
+                        const timeoutUrl = `${{window.location.origin}}${{window.location.pathname}}?event=session_timeout_auto&session_id=${{sessionId}}&inactive_minutes=${{inactiveMinutes}}`;
+                        
+                        // V2: Smart redirect based on iframe status
+                        const performRedirect = () => {{
+                            console.log("🔄 Performing redirect to:", timeoutUrl);
+                            
+                            if (state.isInIframe) {{
+                                // We're in an iframe - try to redirect parent/top window
+                                console.log("🔄 Attempting parent/top window redirect...");
+                                
+                                try {{
+                                    // Try top window first (handles nested iframes)
+                                    if (window.top && window.top.location) {{
+                                        console.log("✅ Redirecting TOP window");
+                                        window.top.location.href = timeoutUrl;
+                                        return;
+                                    }}
+                                }} catch (e) {{
+                                    console.log("⚠️ Cannot access top window (cross-origin?):", e.message);
+                                }}
+                                
+                                try {{
+                                    // Fallback to parent window
+                                    if (window.parent && window.parent.location) {{
+                                        console.log("✅ Redirecting PARENT window");
+                                        window.parent.location.href = timeoutUrl;
+                                        return;
+                                    }}
+                                }} catch (e) {{
+                                    console.log("⚠️ Cannot access parent window (cross-origin?):", e.message);
+                                }}
+                                
+                                // If we can't access parent/top, try postMessage as last resort
+                                try {{
+                                    console.log("📡 Attempting postMessage to parent for redirect");
+                                    window.parent.postMessage({{
+                                        type: 'fifi_timeout_redirect',
+                                        url: timeoutUrl,
+                                        sessionId: sessionId
+                                    }}, '*');
+                                    
+                                    // Also redirect iframe itself as fallback
+                                    setTimeout(() => {{
+                                        console.log("🔄 Fallback: Redirecting iframe itself");
+                                        window.location.href = timeoutUrl;
+                                    }}, 1000);
+                                }} catch (e) {{
+                                    console.error("❌ postMessage failed:", e);
+                                    // Last resort: redirect iframe only
+                                    window.location.href = timeoutUrl;
+                                }}
+                                
+                            }} else {{
+                                // We're in the top window - direct redirect
+                                console.log("✅ Redirecting current window (not in iframe)");
+                                window.location.href = timeoutUrl;
+                            }}
+                        }};
+                        
+                        try {{
+                            performRedirect();
+                        }} catch (redirectError) {{
+                            console.error("❌ Redirect failed:", redirectError);
+                            
+                            // Ultimate fallback: Try base URL
+                            try {{
+                                const fallbackUrl = window.location.origin + window.location.pathname;
+                                console.log("🔄 Ultimate fallback redirect to:", fallbackUrl);
+                                
+                                if (state.isInIframe) {{
+                                    try {{
+                                        window.top.location.href = fallbackUrl;
+                                    }} catch (e) {{
+                                        window.parent.location.href = fallbackUrl;
+                                    }}
+                                }} else {{
+                                    window.location.href = fallbackUrl;
+                                }}
+                            }} catch (fallbackError) {{
+                                console.error("❌ All redirect attempts failed:", fallbackError);
+                            }}
+                        }}
+                    }}
+                }}, 10000); // Check every 10 seconds for timeout
+                
+                // V2: Setup parent message listener for cross-origin iframe scenarios
+                if (inIframe) {{
+                    try {{
+                        // Tell parent to listen for timeout messages
+                        window.parent.postMessage({{
+                            type: 'fifi_timer_ready',
+                            sessionId: sessionId
+                        }}, '*');
+                    }} catch (e) {{
+                        console.debug("Could not notify parent of timer readiness:", e);
+                    }}
+                }}
+                
+                state.listenersInitialized = true;
+                console.log("✅ Activity listeners and auto-timeout checker V2 initialized");
+                console.log(`📍 Context: ${{state.isInIframe ? 'IFRAME' : 'TOP'}} | Session: ${{sessionId.substring(0, 8)}}`);
+            }}
+            
+            // Still return timeout status for Python-side checking (backward compatibility)
+            const currentTime = Date.now();
+            const inactiveTimeMs = currentTime - state.lastActivityTime;
+            const inactiveMinutes = Math.floor(inactiveTimeMs / 60000);
+            const inactiveSeconds = Math.floor((inactiveTimeMs % 60000) / 1000);
+            
+            if (inactiveTimeMs >= SESSION_TIMEOUT_MS && !state.expired) {{
+                state.expired = true;
+                return {{
+                    event: "session_timeout_15min",
+                    session_id: sessionId,
+                    inactive_time_ms: inactiveTimeMs,
+                    inactive_minutes: inactiveMinutes,
+                    inactive_seconds: inactiveSeconds,
+                    timestamp: currentTime,
+                    is_iframe: state.isInIframe
+                }};
+            }}
+            
+            return null;
+            
+        }} catch (error) {{
+            console.error("🚨 Timer component V2 error:", error);
+            return {{
+                event: "timer_error",
+                session_id: "{session_id}",
+                error: error.message,
+                timestamp: Date.now()
             }};
         }}
-        
-        const state = window[stateKey];
-        
-        // Setup activity listeners (only once)
-        if (!state.listenersInitialized) {{
-            console.log('📍 Simple activity tracker starting for', sessionId.substring(0, 8));
-            
-            function updateActivity() {{
-                state.lastActivity = Date.now();
-                console.log('💓 Activity updated');
-            }}
-            
-            // Monitor user activity
-            const events = ['mousedown', 'mousemove', 'keydown', 'click', 'scroll', 'touchstart', 'focus'];
-            events.forEach(eventType => {{
-                document.addEventListener(eventType, updateActivity, {{ passive: true, capture: true }});
-            }});
-            
-            // Try to monitor parent document (for iframes)
-            try {{
-                if (window.parent && window.parent !== window && window.parent.document) {{
-                    events.forEach(eventType => {{
-                        window.parent.document.addEventListener(eventType, updateActivity, {{ passive: true, capture: true }});
-                    }});
-                    console.log('📍 Parent document activity monitoring enabled');
-                }}
-            }} catch (e) {{
-                console.debug('Cannot monitor parent activity (cross-origin):', e);
-            }}
-            
-            state.listenersInitialized = true;
-            console.log('✅ Simple activity tracker initialized');
-        }}
-        
-        // Return current activity status
-        const now = Date.now();
-        const timeSinceActivity = now - state.lastActivity;
-        const minutesSinceActivity = Math.floor(timeSinceActivity / 60000);
-        
-        return {{
-            type: 'activity_status',
-            session_id: sessionId,
-            minutes_inactive: minutesSinceActivity,
-            last_activity: state.lastActivity,
-            timestamp: now
-        }};
     }})()
     """
     
     try:
-        result = st_javascript(simple_tracker_js)
-        if result and isinstance(result, dict) and result.get('type') == 'activity_status':
-            return result
+        # Execute the timer JavaScript code
+        timer_result = st_javascript(js_timer_code)
+        
+        # Validate the result (still works if Python checks it)
+        if timer_result is None or timer_result == 0 or timer_result == "" or timer_result == False:
+            return None
+        
+        if isinstance(timer_result, dict):
+            if timer_result.get('event') == "session_timeout_15min":
+                if timer_result.get('session_id') == session_id:
+                    logger.info(f"✅ Valid 15-min timer event received: {timer_result.get('event')} for session {session_id[:8]}.")
+                    if timer_result.get('is_iframe'):
+                        logger.info("📍 Timer detected iframe context")
+                    return timer_result
+                else:
+                    logger.warning(f"⚠️ Timer event session ID mismatch")
+                    return None
+            elif timer_result.get('event') == "timer_error":
+                logger.error(f"❌ Timer component error: {timer_result.get('error', 'Unknown error')}")
+                return None
+        
         return None
+        
     except Exception as e:
-        logger.error(f"Simple activity tracker failed: {e}")
+        logger.error(f"❌ JavaScript timer component V2 execution error: {e}", exc_info=True)
         return None
+        
 
-def render_simplified_browser_close_detection(session_id: str):
-    """
-    SIMPLIFIED: Detects actual browser close with tab switching detection to prevent false positives.
-    Sends clear reasons to FastAPI only for real browser closes.
-    """
-    if not session_id:
-        return
-
-    simple_close_js = f"""
-    <script>
-    (function() {{
-        const sessionId = '{session_id}';
-        const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
-        
-        if (window.fifi_close_simple_initialized) return;
-        window.fifi_close_simple_initialized = true;
-        
-        let saveTriggered = false;
-        let isTabSwitching = false;
-        let tabSwitchTimeout = null;
-        
-        console.log('🛡️ Simplified browser close detection with tab switching protection initialized');
-        
-        function performEmergencySave(reason) {{
-            if (saveTriggered) return;
-            saveTriggered = true;
-            
-            console.log('🚨 Browser close detected, sending emergency save:', reason);
-            
-            const emergencyData = JSON.stringify({{
-                session_id: sessionId,
-                reason: reason, // Clear, simple reason
-                timestamp: Date.now()
-            }});
-            
-            // Send beacon to FastAPI
-            if (navigator.sendBeacon) {{
-                try {{
-                    const sent = navigator.sendBeacon(
-                        FASTAPI_URL,
-                        new Blob([emergencyData], {{type: 'application/json'}})
-                    );
-                    if (sent) {{
-                        console.log('✅ Emergency save beacon sent successfully');
-                        return;
-                    }}
-                }} catch (e) {{
-                    console.error('❌ Beacon failed:', e);
-                }}
-            }}
-            
-            // Fallback: redirect to Streamlit
-            try {{
-                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}`;
-                window.location.href = saveUrl;
-            }} catch (e) {{
-                console.error('❌ Fallback redirect failed:', e);
-            }}
-        }}
-        
-        function triggerEmergencySave(reason = 'browser_close') {{
-            if (saveTriggered) return;
-            
-            // RESTORED: Tab switching detection to prevent false positives
-            if (isTabSwitching) {{
-                console.log('🔍 Potential tab switch detected, delaying emergency save by 100ms...');
-                
-                setTimeout(() => {{
-                    if (document.visibilityState === 'visible') {{
-                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
-                        isTabSwitching = false;
-                        return; // CANCEL the emergency save
-                    }}
-                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
-                    performEmergencySave(reason);
-                }}, 100);
-                
-                return;
-            }}
-            
-            // Immediate save for non-tab-switch scenarios
-            performEmergencySave(reason);
-        }}
-        
-        // RESTORED: Tab switching detection via visibility change
-        document.addEventListener('visibilitychange', function() {{
-            if (document.visibilityState === 'hidden') {{
-                console.log('👁️ Tab switched away - marking as potential tab switch');
-                isTabSwitching = true;
-                
-                if (tabSwitchTimeout) {{
-                    clearTimeout(tabSwitchTimeout);
-                }}
-                
-                tabSwitchTimeout = setTimeout(() => {{
-                    console.log('⏰ Tab switch timeout - assuming real navigation');
-                    isTabSwitching = false;
-                }}, 2000);
-                
-            }} else {{
-                console.log('👁️ Tab switched back - confirmed tab switch (not real exit)');
-                isTabSwitching = false;
-                
-                if (tabSwitchTimeout) {{
-                    clearTimeout(tabSwitchTimeout);
-                    tabSwitchTimeout = null;
-                }}
-            }}
-        }}, {{ passive: true }});
-        
-        // Listen for actual browser close events with tab switching protection
-        window.addEventListener('beforeunload', () => {{
-            triggerEmergencySave('browser_close');
-        }}, {{ capture: true, passive: true }});
-        
-        window.addEventListener('unload', () => {{
-            triggerEmergencySave('browser_close');
-        }}, {{ capture: true, passive: true }});
-        
-        // Try to monitor parent window as well (for iframes)
-        try {{
-            if (window.parent && window.parent !== window) {{
-                window.parent.addEventListener('beforeunload', () => {{
-                    triggerEmergencySave('browser_close');
-                }}, {{ capture: true, passive: true }});
-            }}
-        }} catch (e) {{
-            console.debug('Cannot monitor parent close events:', e);
-        }}
-        
-        console.log('✅ Browser close detection with tab switching protection ready');
-    }})();
-    </script>
-    """
-    
-    try:
-        st.components.v1.html(simple_close_js, height=0, width=0)
-    except Exception as e:
-        logger.error(f"Failed to render simplified browser close detection: {e}")
-
-def completely_reset_session():
-    """
-    UTILITY: Completely clears the session and creates a new one.
-    This is like the user closing and reopening the browser.
-    """
-    logger.info("🔄 Completely resetting session due to timeout")
-    
-    # Clear ALL session state
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-    
-    # This will force a new session to be created on next rerun
-    st.session_state.clear()
-    
-    logger.info("✅ Session state completely cleared")
-
-def calculate_seconds_until_timeout(session, timeout_minutes=15):
-    """
-    UTILITY: Calculates exactly how many seconds until this session will timeout.
-    """
-    time_since_activity = datetime.now() - session.last_activity
-    timeout_seconds = timeout_minutes * 60
-    seconds_until_timeout = timeout_seconds - time_since_activity.total_seconds()
-    
-    # Return at least 5 seconds to prevent immediate refresh loops
-    return max(5, int(seconds_until_timeout))
 
 def handle_auto_timeout_from_query():
     """
-    UTILITY: Handles automatic timeout redirects triggered by the JavaScript timer.
+    Handles automatic timeout redirects triggered by the JavaScript timer.
     Add this to your query parameter handlers.
     """
     logger.info("🔍 DEBUG: handle_auto_timeout_from_query called")
@@ -2835,200 +2924,340 @@ def handle_auto_timeout_from_query():
         # Force rerun to show welcome page
         st.rerun()
 
-def handle_timeout_redirect():
-    """
-    UTILITY: Set timeout context when redirecting
-    """
-    logger.info("🔍 DEBUG: handle_timeout_redirect called")
+def render_browser_close_detection_enhanced(session_id: str):
+    """Enhanced browser close detection - FIXED to pass timeout context when available"""
+    if not session_id:
+        return
 
-    if st.query_params.get("timeout_redirect") == "true":
-        # Set timeout context in JavaScript
-        timeout_context_js = """
-        <script>
-        try {
-            // Store timeout reason in sessionStorage
-            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
-            
-            // Also send message to browser close detection
-            window.postMessage({
-                type: 'fifi_timeout_context',
-                reason: 'session_timeout_15min_inactivity'
-            }, '*');
-            
-            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
-        } catch (e) {
-            console.error('Failed to set timeout context:', e);
-        }
-        </script>
-        """
-        st.components.v1.html(timeout_context_js, height=0, width=0)
-        
-        # Clear the flag
-        if "timeout_redirect" in st.query_params:
-            del st.query_params["timeout_redirect"]
-        
-        # Clear session state to show welcome page
-        for key in ['current_session_id', 'page']:
-            if key in st.session_state:
-                del st.session_state[key]
+    safe_session_id_js = session_id.replace('-', '_')
 
-def global_message_channel_error_handler():
-    """
-    UTILITY: Enhanced global error handler for component messages with better communication handling
-    """
-    js_error_handler = """
-    (function() {
-        if (window.fifi_error_handler_initialized) return;
-        window.fifi_error_handler_initialized = true;
+    js_code = f"""
+    <script>
+    (function() {{
+        const scriptIdentifier = 'fifi_close_enhanced_' + '{safe_session_id_js}';
+        if (window[scriptIdentifier]) return;
+        window[scriptIdentifier] = true;
         
-        // Global error handlers
-        window.addEventListener('error', function(e) {
-            console.error('🚨 Global JS Error:', e.error, 'at', e.filename, ':', e.lineno);
-        });
+        const sessionId = '{session_id}';
+        const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         
-        window.addEventListener('unhandledrejection', function(e) {
-            console.error('🚨 Unhandled Promise Rejection:', e.reason);
-        });
+        // ENHANCED: Check for timeout context
+        let saveTriggered = false;
+        let isTabSwitching = false;
+        let tabSwitchTimeout = null;
+        let timeoutContext = null; // NEW: Store timeout context
         
-        // Enhanced component communication handler
-        window.addEventListener('message', function(event) {
-            try {
-                if (event.data && typeof event.data === 'object') {
-                    if (event.data.type === 'streamlit:setComponentValue') {
-                        console.log('📡 Received component message:', event.data.type);
-                        
-                        // Try to forward to Streamlit if available
-                        if (window.Streamlit && window.Streamlit.setComponentValue) {
-                            window.Streamlit.setComponentValue(event.data.value);
-                        }
-                    } else if (event.data.type === 'fingerprint_fallback') {
-                        console.log('📡 Received fingerprint fallback message');
-                        
-                        // Store fallback data for retrieval - this is not used in the current Python code
-                        // but keeping it for future potential direct JS fallback integration if needed.
-                        window.fingerprint_fallback_data = event.data;
-                    }
-                }
-            } catch (e) {
-                console.error('🚨 Message handler error:', e);
-            }
-        });
+        console.log('🛡️ Browser close detection initialized (ENHANCED with timeout context)');
+
+        // NEW: Listen for timeout context from Streamlit
+        window.addEventListener('message', function(event) {{
+            if (event.data && event.data.type === 'fifi_timeout_context') {{
+                timeoutContext = event.data.reason;
+                console.log('⏰ Timeout context received:', timeoutContext);
+            }}
+        }});
         
-        // Component readiness checker
-        let componentReadyChecks = 0;
-        const maxComponentChecks = 50; // 5 seconds max wait
-        
-        function checkComponentReady() {
-            componentReadyChecks++;
+        // ENHANCED: Check for timeout context in sessionStorage
+        function getActualReason(defaultReason) {{
+            // Check for timeout context first
+            if (timeoutContext) {{
+                console.log('✅ Using timeout context:', timeoutContext);
+                return timeoutContext;
+            }}
             
-            if (window.Streamlit && window.Streamlit.setComponentReady) {
-                console.log('✅ Streamlit component system ready');
-                window.Streamlit.setComponentReady();
+            // Check sessionStorage for timeout flag
+            try {{
+                const timeoutFlag = sessionStorage.getItem('fifi_timeout_reason');
+                if (timeoutFlag) {{
+                    console.log('✅ Found timeout reason in sessionStorage:', timeoutFlag);
+                    // sessionStorage.removeItem('fifi_timeout_reason');
+                    return timeoutFlag;
+                }}
+            }} catch (e) {{
+                console.debug('SessionStorage not available:', e);
+            }}
+            
+            // Check for timeout indicators in URL
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.get('timeout_redirect') === 'true') {{
+                console.log('✅ Detected timeout redirect in URL');
+                return 'session_timeout_redirect';
+            }}
+            
+            console.log('ℹ️ No timeout context found, using browser event:', defaultReason);
+            return defaultReason;
+        }}
+
+        function performActualEmergencySave(browserReason) {{
+            if (saveTriggered) return;
+            saveTriggered = true;
+            
+            // ENHANCED: Get the actual reason (timeout context or browser event)
+            const actualReason = getActualReason(browserReason);
+            console.log('🚨 Emergency save triggered - Browser:', browserReason, 'Actual:', actualReason);
+            
+            // PRIMARY METHOD: Send beacon to FastAPI with correct reason
+            if (navigator.sendBeacon) {{
+                try {{
+                    const emergencyData = JSON.stringify({{
+                        session_id: sessionId,
+                        reason: actualReason, // Use actual reason, not browser reason
+                        browser_event: browserReason, // Include browser event for debugging
+                        timestamp: Date.now()
+                    }});
+                    
+                    const beaconSent = navigator.sendBeacon(
+                        FASTAPI_URL,
+                        new Blob([emergencyData], {{type: 'application/json'}})
+                    );
+                    
+                    if (beaconSent) {{
+                        console.log('✅ Emergency save beacon sent with correct reason:', actualReason);
+                        return;
+                    }} else {{
+                        console.error('❌ Beacon failed to send');
+                    }}
+                }} catch (beaconError) {{
+                    console.error('❌ Beacon error:', beaconError);
+                }}
+            }}
+            
+            // FALLBACK: Redirect to Streamlit with correct reason
+            try {{
+                console.log('🔄 Beacon failed, trying redirect fallback...');
+                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{actualReason}}`;
+                window.location.href = saveUrl;
+            }} catch (e) {{
+                console.error('❌ Both beacon and redirect failed:', e);
+            }}
+        }}
+
+        // FIXED: Enhanced emergency save that checks for tab switches and timeout context
+        function triggerEmergencySave(reason = 'unknown') {{
+            if (saveTriggered) return;
+            
+            // Check for timeout context first
+            const actualReason = getActualReason(reason);
+            
+            // If this is a timeout, skip tab switch detection
+            if (actualReason.includes('timeout') || actualReason.includes('inactivity')) {{
+                console.log('⏰ Timeout detected, bypassing tab switch detection');
+                performActualEmergencySave(reason);
                 return;
-            }
+            }}
             
-            if (componentReadyChecks < maxComponentChecks) {
-                setTimeout(checkComponentReady, 100);
-            } else {
-                console.warn('⚠️ Streamlit component system not ready after 5 seconds');
-            }
-        }
+            // ORIGINAL tab switch detection logic for non-timeout events
+            if (isTabSwitching) {{
+                console.log('🔍 Potential tab switch detected, delaying emergency save by 100ms...');
+                
+                setTimeout(() => {{
+                    if (document.visibilityState === 'visible') {{
+                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
+                        isTabSwitching = false;
+                        return;
+                    }}
+                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
+                    performActualEmergencySave(reason);
+                }}, 100);
+                
+                return;
+            }}
+            
+            // Immediate save for non-tab-switch scenarios
+            performActualEmergencySave(reason);
+        }}
         
-        // Start checking for component readiness
-        setTimeout(checkComponentReady, 100);
+        // ... rest of the existing browser close detection code ...
+        // (Enhanced visibility change tracking, exit event listeners, etc.)
         
-        console.log('✅ Enhanced global error handlers and component communication initialized');
-    })();
+        // Enhanced visibility change tracking
+        document.addEventListener('visibilitychange', function() {{
+            if (document.visibilityState === 'hidden') {{
+                console.log('👁️ Tab switched away - marking as potential tab switch');
+                isTabSwitching = true;
+                
+                if (tabSwitchTimeout) {{
+                    clearTimeout(tabSwitchTimeout);
+                }}
+                
+                tabSwitchTimeout = setTimeout(() => {{
+                    console.log('⏰ Tab switch timeout - assuming real navigation');
+                    isTabSwitching = false;
+                }}, 2000);
+                
+            }} else {{
+                console.log('👁️ Tab switched back - confirmed tab switch (not real exit)');
+                isTabSwitching = false;
+                
+                if (tabSwitchTimeout) {{
+                    clearTimeout(tabSwitchTimeout);
+                    tabSwitchTimeout = null;
+                }}
+            }}
+        }}, {{ passive: true }});
+        
+        // Listen to exit events
+        const realExitEvents = ['beforeunload', 'unload'];
+        realExitEvents.forEach(eventType => {{
+            try {{
+                window.addEventListener(eventType, (event) => {{
+                    console.log('🚨 Exit event detected:', eventType, 'TabSwitching:', isTabSwitching);
+                    triggerEmergencySave(eventType);
+                }}, {{ capture: true, passive: true }});
+                
+                if (window.parent && window.parent !== window) {{
+                    window.parent.addEventListener(eventType, (event) => {{
+                        console.log('🚨 Parent exit event detected:', eventType, 'TabSwitching:', isTabSwitching);
+                        triggerEmergencySave('parent_' + eventType);
+                    }}, {{ capture: true, passive: true }});
+                }}
+            }} catch (e) {{
+                console.debug(`Failed to add ${{eventType}} listener:`, e);
+            }}
+        }});
+        
+        // LOG pagehide but DON'T trigger saves
+        window.addEventListener('pagehide', function(event) {{
+            console.log('📄 pagehide detected - persisted:', event.persisted, 'TabSwitching:', isTabSwitching, '(NOT triggering save - relying on beforeunload/unload)');
+        }}, {{ passive: true }});
+        
+        console.log('✅ Enhanced browser close detection ready - Smart timeout context detection enabled');
+    }})();
+    </script>
     """
     
     try:
-        # Use st_javascript instead of st.components.v1.html for better reliability
-        st_javascript(js_error_handler)
+        st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
-        logger.error(f"Failed to initialize enhanced global error handler: {e}")
-        # Fallback to basic version
-        try:
-            st.components.v1.html(f"<script>{js_error_handler}</script>", height=0, width=0)
-        except Exception as fallback_e:
-            logger.error(f"Fallback global error handler also failed: {fallback_e}")
+        logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
 
-def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession) -> bool:
+def add_activity_detection(session_id: str, session_manager, session):
+    """Simple activity detection for meta refresh"""
+    if not session_id:
+        return
+    
+    safe_session_id = session_id.replace('-', '_')
+    
+    activity_js = f"""
+    (() => {{
+        const sessionId = "{session_id}";
+        const stateKey = 'fifi_activity_{safe_session_id}';
+        
+        if (!window[stateKey]) {{
+            window[stateKey] = {{ lastActivity: Date.now(), lastUpdate: 0, initialized: false }};
+        }}
+        
+        const state = window[stateKey];
+        
+        if (!state.initialized) {{
+            function track() {{ state.lastActivity = Date.now(); }}
+            ['mousedown', 'keydown', 'click', 'scroll', 'touchstart'].forEach(e => {{
+                document.addEventListener(e, track, {{passive: true}});
+            }});
+            state.initialized = true;
+            console.log('✅ Activity tracking enabled');
+        }}
+        
+        const now = Date.now();
+        if (now - state.lastUpdate > 30000) {{
+            state.lastUpdate = now;
+            return {{ type: 'activity_ping', session_id: sessionId, last_activity: state.lastActivity }};
+        }}
+        return null;
+    }})()
     """
-    SIMPLIFIED: Check if 15 minutes have passed and trigger browser reload if needed.
-    Returns True if timeout was triggered (and page reload initiated).
-    """
-    if not session:
+    
+    try:
+        result = st_javascript(activity_js)
+        if result and result.get('type') == 'activity_ping':
+            js_activity = result.get('last_activity')
+            if js_activity:
+                try:
+                    new_activity = datetime.fromtimestamp(js_activity / 1000)
+                    if new_activity > session.last_activity:
+                        session.last_activity = new_activity
+                        session_manager.db.save_session(session)
+                        logger.debug(f"💓 Activity updated for {session_id[:8]}")
+                except Exception as e:
+                    logger.error(f"Activity processing failed: {e}")
+    except Exception as e:
+        logger.error(f"Activity detection failed: {e}")
+        
+def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
+    """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
+    if not timer_result or not isinstance(timer_result, dict):
         return False
     
-    # Calculate time since last activity
-    time_since_activity = datetime.now() - session.last_activity
-    minutes_inactive = time_since_activity.total_seconds() / 60
+    event = timer_result.get('event')
+    session_id = timer_result.get('session_id')
+    inactive_minutes = timer_result.get('inactive_minutes', 0)
     
-    # Check if 15 minutes have passed
-    if minutes_inactive >= 15:
-        logger.info(f"⏰ TIMEOUT DETECTED: {session.session_id[:8]} inactive for {minutes_inactive:.1f} minutes")
+    logger.info(f"🎯 Processing timer event: '{event}' for session {session_id[:8] if session_id else 'unknown'}.")
+    
+    try:
+        session = session_manager._validate_session(session)
         
-        # Save to CRM if eligible BEFORE reload
-        if session_manager._is_crm_save_eligible(session, "timeout_auto_reload"):
-            logger.info(f"💾 Performing emergency save before auto-reload for {session.session_id[:8]}")
+        if event == 'session_timeout_15min':
+            st.info(f"⏰ **Session timeout:** Detected {inactive_minutes} minutes of inactivity.")
+            st.info("🔄 **Your session is being closed due to inactivity.**")
             
-            # Send to FastAPI for emergency save
-            try:
-                emergency_data = {
-                    "session_id": session.session_id,
-                    "reason": "timeout_auto_reload", # Clear reason name
-                    "timestamp": int(time.time() * 1000)
-                }
+            # Save to CRM if eligible before closing session
+            if session_manager._is_crm_save_eligible(session, "15-Minute Session Inactivity Timeout"):
+                with st.spinner("💾 Auto-saving chat to CRM before closing session..."):
+                    try:
+                        save_success = session_manager.zoho.save_chat_transcript_sync(session, "15-Minute Session Inactivity Timeout")
+                    except Exception as e:
+                        logger.error(f"15-min timeout CRM save failed during execution: {e}", exc_info=True)
+                        save_success = False
                 
-                # Use requests to send to FastAPI (as backup to beacon)
-                fastapi_url = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save'
-                response = requests.post(fastapi_url, json=emergency_data, timeout=5)
-                if response.status_code == 200:
-                    logger.info(f"✅ Emergency save sent to FastAPI successfully")
-                else:
-                    logger.warning(f"⚠️ FastAPI returned status {response.status_code}")
-            except Exception as e:
-                logger.error(f"❌ Failed to send emergency save to FastAPI: {e}")
-                # Continue with local save as fallback
-                try:
-                    session_manager.zoho.save_chat_transcript_sync(session, "timeout_auto_reload")
+                if save_success:
+                    st.success("✅ Chat automatically saved to CRM!")
                     session.timeout_saved_to_crm = True
-                except Exception as save_e:
-                    logger.error(f"❌ Local CRM save also failed: {save_e}")
-        
-        # Mark session as inactive
-        session.active = False
-        session.last_activity = datetime.now()
-        try:
-            session_manager.db.save_session(session)
-        except Exception as e:
-            logger.error(f"Failed to save session during timeout: {e}")
-        
-        # Clear Streamlit session state
-        for key in ['current_session_id', 'page']:
-            if key in st.session_state:
-                del st.session_state[key]
-        
-        # Show timeout message
-        st.error("⏰ **Session Timeout**")
-        st.info("Your session has expired due to 15 minutes of inactivity.")
-        
-        # TRIGGER BROWSER RELOAD using streamlit_js_eval
-        if JS_EVAL_AVAILABLE:
+                else:
+                    st.warning("⚠️ Auto-save to CRM failed. Please check your credentials or contact support if issue persists.")
+            else:
+                st.info("ℹ️ Session timeout detected, but no CRM save was performed (not eligible based on activity, user type, or duration).")
+                logger.info(f"15-min timeout CRM save eligibility check failed for {session_id[:8]}: UserType={session.user_type.value}, Email={bool(session.email)}, Messages={len(session.messages)}, Questions={session.daily_question_count}, Saved Status={session.timeout_saved_to_crm}.")
+            
+            # TRUE SESSION TIMEOUT: Close session and redirect to home
             try:
-                logger.info(f"🔄 Triggering browser reload for timeout")
-                streamlit_js_eval(js_expressions="parent.window.location.reload()")
-                return True
-            except Exception as e:
-                logger.error(f"Browser reload failed: {e}")
-        
-        # Fallback: Force Streamlit rerun to home page
-        st.info("🏠 Redirecting to home page...")
-        time.sleep(1)
-        st.rerun()
-        return True
-    
-    return False
+                # Mark session as inactive
+                session.active = False
+                session.last_activity = datetime.now()
+                session_manager.db.save_session(session)
+                
+                # Clear Streamlit session state to force new session
+                if 'current_session_id' in st.session_state:
+                    del st.session_state['current_session_id']
+                if 'page' in st.session_state:
+                    del st.session_state['page']
+                
+                logger.info(f"🔒 Session {session_id[:8]} closed due to 15-minute timeout")
+                
+                # Show redirect message and redirect to home
+                st.info("🏠 **Redirecting to home page...**")
+                st.info("You can start a new session from the welcome page.")
+                
+                # Force redirect to home after a brief delay
+                time.sleep(2)
+                st.rerun()
+                
+            except Exception as close_error:
+                logger.error(f"Error closing session during timeout for {session_id[:8]}: {close_error}")
+                # Force redirect even if session close fails
+                st.session_state['page'] = None
+                st.rerun()
+                
+            return True  # Indicate that session was closed
+                
+        else:
+            logger.warning(f"⚠️ Received unhandled timer event type: '{event}'.")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Error processing timer event '{event}' for session {session_id[:8]}: {e}", exc_info=True)
+        st.error(f"⚠️ An internal error occurred while processing activity. Please try refreshing if issues persist.")
+        return False
 
 def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
     """Processes fingerprint data received via URL query parameters."""
@@ -3197,6 +3426,174 @@ def handle_fingerprint_requests_from_query():
         return
     else:
         logger.info("ℹ️ No fingerprint requests found in current URL query parameters.")
+        
+def global_message_channel_error_handler():
+    """Enhanced global error handler for component messages with better communication handling"""
+    js_error_handler = """
+    (function() {
+        if (window.fifi_error_handler_initialized) return;
+        window.fifi_error_handler_initialized = true;
+        
+        // Global error handlers
+        window.addEventListener('error', function(e) {
+            console.error('🚨 Global JS Error:', e.error, 'at', e.filename, ':', e.lineno);
+        });
+        
+        window.addEventListener('unhandledrejection', function(e) {
+            console.error('🚨 Unhandled Promise Rejection:', e.reason);
+        });
+        
+        // Enhanced component communication handler
+        window.addEventListener('message', function(event) {
+            try {
+                if (event.data && typeof event.data === 'object') {
+                    if (event.data.type === 'streamlit:setComponentValue') {
+                        console.log('📡 Received component message:', event.data.type);
+                        
+                        // Try to forward to Streamlit if available
+                        if (window.Streamlit && window.Streamlit.setComponentValue) {
+                            window.Streamlit.setComponentValue(event.data.value);
+                        }
+                    } else if (event.data.type === 'fingerprint_fallback') {
+                        console.log('📡 Received fingerprint fallback message');
+                        
+                        // Store fallback data for retrieval - this is not used in the current Python code
+                        // but keeping it for future potential direct JS fallback integration if needed.
+                        window.fingerprint_fallback_data = event.data;
+                    }
+                }
+            } catch (e) {
+                console.error('🚨 Message handler error:', e);
+            }
+        });
+        
+        // Component readiness checker
+        let componentReadyChecks = 0;
+        const maxComponentChecks = 50; // 5 seconds max wait
+        
+        function checkComponentReady() {
+            componentReadyChecks++;
+            
+            if (window.Streamlit && window.Streamlit.setComponentReady) {
+                console.log('✅ Streamlit component system ready');
+                window.Streamlit.setComponentReady();
+                return;
+            }
+            
+            if (componentReadyChecks < maxComponentChecks) {
+                setTimeout(checkComponentReady, 100);
+            } else {
+                console.warn('⚠️ Streamlit component system not ready after 5 seconds');
+            }
+        }
+        
+        // Start checking for component readiness
+        setTimeout(checkComponentReady, 100);
+        
+        console.log('✅ Enhanced global error handlers and component communication initialized');
+    })();
+    """
+    
+    try:
+        # Use st_javascript instead of st.components.v1.html for better reliability
+        st_javascript(js_error_handler)
+    except Exception as e:
+        logger.error(f"Failed to initialize enhanced global error handler: {e}")
+        # Fallback to basic version
+        try:
+            st.components.v1.html(f"<script>{js_error_handler}</script>", height=0, width=0)
+        except Exception as fallback_e:
+            logger.error(f"Fallback global error handler also failed: {fallback_e}")
+
+def calculate_seconds_until_timeout(session, timeout_minutes=15):
+    """
+    Calculates exactly how many seconds until this session will timeout.
+    """
+    time_since_activity = datetime.now() - session.last_activity
+    timeout_seconds = timeout_minutes * 60
+    seconds_until_timeout = timeout_seconds - time_since_activity.total_seconds()
+    
+    # Return at least 5 seconds to prevent immediate refresh loops
+    return max(5, int(seconds_until_timeout))
+
+def completely_reset_session():
+    """
+    Completely clears the session and creates a new one.
+    This is like the user closing and reopening the browser.
+    """
+    logger.info("🔄 Completely resetting session due to timeout")
+    
+    # Clear ALL session state
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    
+    # This will force a new session to be created on next rerun
+    st.session_state.clear()
+    
+    logger.info("✅ Session state completely cleared")
+
+def check_and_handle_timeout_with_reset(session_manager, session, timeout_minutes=15):
+    """
+    Checks for timeout and completely resets the session if timed out.
+    """
+    logger.info(f"🔍 DEBUG: check_and_handle_timeout_with_reset called for {session.session_id[:8] if session else 'None'}")
+
+    if not session or not session.active:
+        return True
+        
+    # Calculate time since last activity
+    time_since_activity = datetime.now() - session.last_activity
+    
+    # Check if timeout reached
+    if time_since_activity.total_seconds() > (timeout_minutes * 60):
+        logger.info(f"⏰ Session timeout: {session.session_id[:8]} inactive for {time_since_activity}")
+        
+        # Set timeout context before any UI changes
+        timeout_context_js = """
+        <script>
+        try {
+            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
+            window.postMessage({
+                type: 'fifi_timeout_context', 
+                reason: 'session_timeout_15min_inactivity'
+            }, '*');
+            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
+        } catch (e) {
+            console.error('Failed to set timeout context:', e);
+        }
+        </script>
+        """
+        st.components.v1.html(timeout_context_js, height=0, width=0)
+        
+        # Show timeout message
+        st.error("⏰ **Session Timeout**")
+        st.info("Your session has expired due to 15 minutes of inactivity. Please start a new session.")
+        
+        # Save to CRM if eligible (before clearing)
+        if session_manager._is_crm_save_eligible(session, "15-Minute Timeout"):
+            with st.spinner("Saving conversation before ending session..."):
+                try:
+                    session_manager.zoho.save_chat_transcript_sync(session, "15-Minute Timeout")
+                    st.success("✅ Conversation saved")
+                except Exception as e:
+                    logger.error(f"CRM save failed: {e}")
+        
+        # Mark session as inactive in database
+        session.active = False
+        session_manager.db.save_session(session)
+        
+        # COMPLETELY RESET SESSION
+        completely_reset_session()
+        
+        # Add a button to start fresh
+        if st.button("🔄 Start New Session", type="primary"):
+            st.rerun()
+        
+        st.stop()  # Stop execution
+        return True
+        
+    return False
+     
 
 # =============================================================================
 # UI COMPONENTS
@@ -3343,17 +3740,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             st.markdown("**Device ID:** Initializing...")
             st.caption("Starting fingerprinting...")
 
-        # SIMPLIFIED: Show time until timeout (no warnings or buttons)
-        time_since_activity = datetime.now() - session.last_activity
-        minutes_inactive = time_since_activity.total_seconds() / 60
-        if minutes_inactive < 15:
-            minutes_remaining = 15 - minutes_inactive
-            if minutes_remaining <= 5:  # Only show in last 5 minutes
-                if minutes_remaining <= 2:
-                    st.sidebar.error(f"⏰ Session expires in: {int(minutes_remaining)}m")
-                else:
-                    st.sidebar.warning(f"⏰ Session expires in: {int(minutes_remaining)}m")
-                st.sidebar.caption("Activity resets the timer")
+        render_timeout_status_sidebar(session)
 
         # AI Tools Status
         st.divider()
@@ -3584,35 +3971,322 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                 else:
                     st.error("Please enter the verification code you received.")
 
-def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession):
+# =============================================================================
+# ADD THESE FUNCTIONS ANYWHERE BEFORE render_chat_interface
+# (e.g., after your existing JavaScript components section)
+# =============================================================================
+
+def inject_activity_heartbeat_monitor(session_id: str, heartbeat_interval_seconds: int = 30):
     """
-    SIMPLIFIED: Chat interface with clean timeout system.
-    No warnings, no extend buttons - just clean timeout detection and browser reload.
+    Injects JavaScript that monitors activity and sends heartbeats to Python.
+    This is more reliable than expecting JS to run for 15 minutes straight.
     """
+    
+    heartbeat_js = f"""
+    (() => {{
+        // Unique namespace for this session
+        const SESSION_ID = '{session_id}';
+        const HEARTBEAT_INTERVAL = {heartbeat_interval_seconds * 1000};
+        const TIMEOUT_MS = 900000; // 15 minutes
+        
+        // Initialize or retrieve state
+        if (!window.fifiHeartbeatMonitor) {{
+            window.fifiHeartbeatMonitor = {{
+                lastActivityTime: Date.now(),
+                lastHeartbeatTime: 0,
+                isActive: true,
+                sessionId: SESSION_ID
+            }};
+            
+            console.log('💓 Heartbeat monitor initialized for session', SESSION_ID.substring(0, 8));
+            
+            // Activity tracking
+            function trackActivity() {{
+                window.fifiHeartbeatMonitor.lastActivityTime = Date.now();
+                window.fifiHeartbeatMonitor.isActive = true;
+            }}
+            
+            // Monitor all activity types
+            const events = ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart', 'click', 'focus'];
+            events.forEach(event => {{
+                document.addEventListener(event, trackActivity, {{ passive: true, capture: true }});
+            }});
+            
+            // Also monitor parent if in iframe
+            try {{
+                if (window.parent && window.parent !== window) {{
+                    events.forEach(event => {{
+                        window.parent.document.addEventListener(event, trackActivity, {{ passive: true, capture: true }});
+                    }});
+                }}
+            }} catch (e) {{
+                console.debug('Cannot monitor parent activity:', e);
+            }}
+            
+            // Heartbeat sender
+            setInterval(() => {{
+                const monitor = window.fifiHeartbeatMonitor;
+                const now = Date.now();
+                const timeSinceActivity = now - monitor.lastActivityTime;
+                const timeSinceHeartbeat = now - monitor.lastHeartbeatTime;
+                
+                // Check if we should send a heartbeat
+                if (timeSinceActivity < TIMEOUT_MS && timeSinceHeartbeat >= HEARTBEAT_INTERVAL) {{
+                    monitor.lastHeartbeatTime = now;
+                    
+                    const heartbeatData = {{
+                        type: 'activity_heartbeat',
+                        session_id: SESSION_ID,
+                        last_activity: monitor.lastActivityTime,
+                        time_since_activity: timeSinceActivity,
+                        timestamp: now
+                    }};
+                    
+                    console.log('💓 Sending heartbeat, inactive for', Math.floor(timeSinceActivity / 1000), 'seconds');
+                    
+                    // Return data for st_javascript to capture
+                    return heartbeatData;
+                }}
+                
+                // Check for client-side timeout
+                if (timeSinceActivity >= TIMEOUT_MS && monitor.isActive) {{
+                    monitor.isActive = false;
+                    console.log('⏰ Client-side timeout detected!');
+                    
+                    // Try to notify Python about timeout
+                    return {{
+                        type: 'client_timeout',
+                        session_id: SESSION_ID,
+                        inactive_minutes: Math.floor(timeSinceActivity / 60000),
+                        timestamp: now
+                    }};
+                }}
+            }}, 5000); // Check every 5 seconds
+        }}
+        
+        // Return current status
+        const monitor = window.fifiHeartbeatMonitor;
+        const now = Date.now();
+        const timeSinceActivity = now - monitor.lastActivityTime;
+        
+        return {{
+            type: 'status_check',
+            session_id: SESSION_ID,
+            time_since_activity: timeSinceActivity,
+            is_active: monitor.isActive,
+            timestamp: now
+        }};
+    }})()
+    """
+    
+    # Execute and capture result
+    result = st_javascript(heartbeat_js)
+    return result
+
+
+def update_session_heartbeat(session_manager, session, heartbeat_data: dict):
+    """
+    Updates session based on heartbeat data from JavaScript.
+    """
+    if not heartbeat_data or not isinstance(heartbeat_data, dict):
+        return
+    
+    heartbeat_type = heartbeat_data.get('type')
+    
+    if heartbeat_type == 'activity_heartbeat':
+        # Update last activity time based on client report
+        client_activity_time = heartbeat_data.get('last_activity')
+        if client_activity_time:
+            # Convert JS timestamp to Python datetime
+            client_activity = datetime.fromtimestamp(client_activity_time / 1000)
+            
+            # Only update if client reports more recent activity
+            if client_activity > session.last_activity:
+                session.last_activity = client_activity
+                session_manager.db.save_session(session)
+                logger.debug(f"💓 Heartbeat updated activity for {session.session_id[:8]}")
+    
+    elif heartbeat_type == 'client_timeout':
+        logger.info(f"⏰ Client reported timeout for {session.session_id[:8]}")
+        # Client detected timeout, but server makes final decision
+
+def check_server_side_timeout(session_manager, session, timeout_minutes: int = 15) -> bool:
+    """ENHANCED: Server-side timeout check with context setting"""
+    time_since_activity = datetime.now() - session.last_activity
+    timeout_seconds = timeout_minutes * 60
+    
+    if time_since_activity.total_seconds() > timeout_seconds:
+        logger.info(f"⏰ Server-side timeout confirmed for {session.session_id[:8]}")
+        
+        # ENHANCED: Set timeout context before any redirects
+        timeout_context_js = """
+        <script>
+        try {
+            // Set timeout context immediately
+            sessionStorage.setItem('fifi_timeout_reason', 'server_side_timeout_15min');
+            
+            // Send message to browser close detection
+            if (window.postMessage) {
+                window.postMessage({
+                    type: 'fifi_timeout_context',
+                    reason: 'server_side_timeout_15min'
+                }, '*');
+            }
+            
+            console.log('⏰ Server-side timeout context set');
+        } catch (e) {
+            console.error('Failed to set server timeout context:', e);
+        }
+        </script>
+        """
+        st.components.v1.html(timeout_context_js, height=0, width=0)
+        
+        # Display timeout message
+        st.error("⏰ **Session Timeout:** Your session has expired due to 15 minutes of inactivity.")
+        
+        # Save to CRM if eligible
+        if session_manager._is_crm_save_eligible(session, "15-Minute Inactivity Timeout"):
+            with st.spinner("💾 Saving conversation to CRM..."):
+                try:
+                    save_success = session_manager.zoho.save_chat_transcript_sync(
+                        session, 
+                        "15-Minute Inactivity Timeout"
+                    )
+                    if save_success:
+                        st.success("✅ Conversation saved to CRM")
+                        session.timeout_saved_to_crm = True
+                except Exception as e:
+                    logger.error(f"CRM save failed during timeout: {e}")
+        
+        # End the session
+        session.active = False
+        session.last_activity = datetime.now()
+        session_manager.db.save_session(session)
+        
+        # Clear session state
+        for key in ['current_session_id', 'page']:
+            if key in st.session_state:
+                del st.session_state[key]
+        
+        st.info("🏠 Redirecting to home page...")
+        
+        # ENHANCED: Force redirect with timeout flag
+        st.query_params["timeout_redirect"] = "true"
+        time.sleep(1)
+        st.rerun()
+        
+        return True
+    
+    return False
+
+def handle_timeout_redirect():
+    """ENHANCED: Set timeout context when redirecting"""
+    logger.info("🔍 DEBUG: handle_timeout_redirect called")
+
+    if st.query_params.get("timeout_redirect") == "true":
+        # Set timeout context in JavaScript
+        timeout_context_js = """
+        <script>
+        try {
+            // Store timeout reason in sessionStorage
+            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
+            
+            // Also send message to browser close detection
+            window.postMessage({
+                type: 'fifi_timeout_context',
+                reason: 'session_timeout_15min_inactivity'
+            }, '*');
+            
+            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
+        } catch (e) {
+            console.error('Failed to set timeout context:', e);
+        }
+        </script>
+        """
+        st.components.v1.html(timeout_context_js, height=0, width=0)
+        
+        # Clear the flag
+        if "timeout_redirect" in st.query_params:
+            del st.query_params["timeout_redirect"]
+        
+        # Clear session state to show welcome page
+        for key in ['current_session_id', 'page']:
+            if key in st.session_state:
+                del st.session_state[key]        
+        
+def render_timeout_status_sidebar(session):
+    """
+    Shows timeout countdown in sidebar ONLY in the last 5 minutes.
+    """
+    TIMEOUT_MINUTES = 15
+    time_since_activity = datetime.now() - session.last_activity
+    time_remaining = timedelta(minutes=TIMEOUT_MINUTES) - time_since_activity
+    
+    if time_remaining.total_seconds() > 0:
+        total_seconds = int(time_remaining.total_seconds())
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        
+        # ONLY show warning in last 5 minutes
+        if minutes < 5:
+            if minutes < 2:
+                st.sidebar.error(f"⏰ Session expires in: {minutes}m {seconds}s")
+            else:
+                st.sidebar.warning(f"⏰ Session expires in: {minutes}m {seconds}s")
+            st.sidebar.caption("Any activity resets the timer")
+
+def render_chat_interface_complete_fix(session_manager: 'SessionManager', session: UserSession):
+    """Complete fix for all chat issues"""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # SIMPLIFIED TIMEOUT CHECK: Just check and trigger reload if needed
-    timeout_triggered = check_timeout_and_trigger_reload(session_manager, session)
-    if timeout_triggered:
-        return  # Page reload was triggered, stop execution
-    
-    # Simple activity tracking (no complex polling)
-    activity_result = render_simple_activity_tracker(session.session_id)
-    if activity_result:
-        # Update session activity if JavaScript reports more recent activity
-        js_activity_time = activity_result.get('last_activity')
-        if js_activity_time:
-            try:
-                new_activity = datetime.fromtimestamp(js_activity_time / 1000)
-                if new_activity > session.last_activity:
-                    session.last_activity = new_activity
-                    session_manager._save_session_with_retry(session)
-            except Exception as e:
-                logger.error(f"Failed to update activity from JavaScript: {e}")
+    # ENHANCEMENT A: Session refresh at interface start
+    try:
+        fresh_session = session_manager.db.load_session(session.session_id)
+        if fresh_session and fresh_session.active:
+            session = fresh_session
+    except Exception as refresh_error:
+        logger.error(f"Interface session refresh failed: {refresh_error}")
 
-    # Fingerprinting (unchanged)
+    # ENHANCEMENT B: Database health check
+    try:
+        session_manager.db._ensure_connection_healthy(session_manager.config)
+    except Exception as db_error:
+        logger.error(f"Database check failed: {db_error}")
+
+    # Server timeout check
+    time_since_activity = datetime.now() - session.last_activity
+    if time_since_activity.total_seconds() > (15 * 60):
+        st.error("⏰ **Session Timeout:** Your session expired due to 15 minutes of inactivity.")
+        if session_manager._is_crm_save_eligible(session, "Server Timeout"):
+            with st.spinner("💾 Saving conversation..."):
+                try:
+                    session_manager.zoho.save_chat_transcript_sync(session, "Server Timeout")
+                    st.success("✅ Conversation saved")
+                except Exception as e:
+                    logger.error(f"CRM save failed: {e}")
+        
+        session.active = False
+        try:
+            session_manager.db.save_session(session)
+        except Exception as e:
+            logger.error(f"Failed to save ended session: {e}")
+        
+        for key in ['current_session_id', 'page']:
+            if key in st.session_state:
+                del st.session_state[key]
+        
+        st.info("🏠 Please start a new session from the welcome page.")
+        time.sleep(2)
+        st.rerun()
+        return
+
+    # ENHANCEMENT C: Keep your working meta refresh + add activity detection
+    
+    add_activity_detection(session.session_id, session_manager, session)
+
+    # Your existing functionality (fingerprinting, error handler, etc.)
     fingerprint_needed = (
         not session.fingerprint_id or
         session.fingerprint_method == "temporary_fallback_python" or
@@ -3622,20 +4296,15 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     if fingerprint_needed:
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
 
-    # RESTORED: Global error handler for component communication 
-    try:
-        global_message_channel_error_handler()
-    except Exception as e:
-        logger.error(f"Global error handler failed: {e}")
-
-    # Browser close detection for emergency saves (simplified)
+    global_message_channel_error_handler()
+    
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
-            render_simplified_browser_close_detection(session.session_id)
+            render_browser_close_detection_enhanced(session.session_id)
         except Exception as e:
             logger.error(f"Browser close detection failed: {e}")
 
-    # User limits check (unchanged)
+    # User limits check
     limit_check = session_manager.question_limits.is_within_limits(session)
     if not limit_check['allowed']:
         if limit_check.get('reason') == 'guest_limit':
@@ -3644,39 +4313,35 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         else:
             return
 
-    # Display chat messages (unchanged)
+    # Display chat messages
     for msg in session.messages:
         with st.chat_message(msg.get("role", "user")):
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
-            if msg.get("role") == "assistant":
-                if "source" in msg:
-                    source_color = {
-                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
-                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                        "Error Handler": "❌"
-                    }.get(msg['source'], "🤖")
-                    st.caption(f"{source_color} Source: {msg['source']}")
-                
-                indicators = []
-                if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
-                if msg.get("used_search"): indicators.append("🌐 Web Search")
-                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-                
-                if msg.get("safety_override"):
-                    st.warning("🛡️ Safety Override: Switched to verified sources")
-                
-                if msg.get("has_citations") and msg.get("has_inline_citations"):
-                    st.caption("📚 Response includes verified citations")
+            if msg.get("role") == "assistant" and "source" in msg:
+                source_color = {
+                    "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                    "Error Handler": "❌"
+                }.get(msg['source'], "🤖")
+                st.caption(f"{source_color} Source: {msg['source']}")
 
-    # Chat input (unchanged)
+    # ENHANCEMENT D: Enhanced chat input processing
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=session.ban_status.value != BanStatus.NONE.value)
     
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
-        # Update activity and process
+        # CRITICAL: Refresh session again before processing
+        try:
+            fresh_session = session_manager.db.load_session(session.session_id)
+            if fresh_session and fresh_session.active:
+                session = fresh_session
+        except Exception as refresh_error:
+            logger.error(f"Pre-processing refresh failed: {refresh_error}")
+        
+        # Update activity immediately
         session.last_activity = datetime.now()
         try:
             session_manager.db.save_session(session)
@@ -3714,14 +4379,13 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             }.get(response['source'], "🤖")
                             st.caption(f"{source_color} Source: {response['source']}")
                         
-                        logger.info(f"✅ Question processed successfully")
+                        logger.info(f"✅ Question processed successfully for {session.session_id[:8]}")
                         
                 except Exception as e:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
         
         st.rerun()
-
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
 # =============================================================================
@@ -3850,7 +4514,7 @@ def ensure_initialization_fixed():
     return True
 
 def main_fixed():
-    """SIMPLIFIED MAIN: Fixed main entry point with clean timeout system"""
+    """Fixed main entry point with better error handling and timeout prevention"""
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
@@ -3880,16 +4544,10 @@ def main_fixed():
     try:
         handle_emergency_save_requests_from_query()
         handle_fingerprint_requests_from_query()
-        handle_auto_timeout_from_query()  # RESTORED: Handle auto timeout redirects
-        handle_timeout_redirect()         # RESTORED: Handle timeout redirects
+        handle_auto_timeout_from_query()
+        handle_timeout_redirect()
     except Exception as e:
         logger.error(f"Query parameter handling failed: {e}")
-
-    # RESTORED: Global error handler for component communication
-    try:
-        global_message_channel_error_handler()
-    except Exception as e:
-        logger.error(f"Global error handler failed: {e}")
 
     # Get session manager
     session_manager = st.session_state.get('session_manager')
@@ -3915,8 +4573,12 @@ def main_fixed():
                 if session and session.active:
                     logger.info(f"🔍 MAIN ROUTING: Session is active, rendering sidebar and chat interface")
                     
+                     # ADD THIS CHECK HERE - Check timeout BEFORE rendering anything
+                    if check_and_handle_timeout_with_reset(session_manager, session):
+                        return  # Session timed out and was reset, stop here
+                        
                     render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-                    render_chat_interface_simplified(session_manager, session)
+                    render_chat_interface_complete_fix(session_manager, session)
                 else:
                     logger.warning(f"🔍 MAIN ROUTING: Session inactive or None, redirecting to welcome")
                     st.session_state['page'] = None
