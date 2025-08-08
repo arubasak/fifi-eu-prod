@@ -2011,14 +2011,14 @@ class SessionManager:
         else:
             return {"status": "active", "minutes": minutes_inactive}
 
-def extend_session(self, session: UserSession):
-    """Extend session for another 15 minutes"""
-    session.last_activity = datetime.now()
-    try:
-        self._save_session_with_retry(session)
-        logger.info(f"Session extended for {session.session_id[:8]}")
-    except Exception as e:
-        logger.error(f"Failed to extend session: {e}")
+    def extend_session(self, session: UserSession):
+        """Extend session for another 15 minutes"""
+        session.last_activity = datetime.now()
+        try:
+            self._save_session_with_retry(session)
+            logger.info(f"Session extended for {session.session_id[:8]}")
+        except Exception as e:
+            logger.error(f"Failed to extend session: {e}")
     
     def _create_new_session(self) -> UserSession:
         """Creates a new user session with temporary fingerprint until JS fingerprinting completes."""
@@ -2252,6 +2252,52 @@ def extend_session(self, session: UserSession):
         
         return {'has_history': False}
 
+    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+        """Authenticates user with WordPress and creates/updates session."""
+        if not self.config.WORDPRESS_URL:
+            st.error("WordPress authentication is not configured.")
+            return None
+    
+        try:
+            auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
+            response = requests.post(auth_url, json={
+                'username': username,
+                'password': password
+            }, timeout=10)
+        
+            if response.status_code == 200:
+                data = response.json()
+                wp_token = data.get('token')
+                email = data.get('user_email')
+                display_name = data.get('user_display_name')
+            
+                # Get current session
+                session = self.get_session()
+            
+                # Update session to registered user
+                session.user_type = UserType.REGISTERED_USER
+                session.email = email
+                session.full_name = display_name
+                session.wp_token = wp_token
+            
+                # Add email to email history if not already there
+                if email not in session.email_addresses_used:
+                    session.email_addresses_used.append(email)
+            
+                self.db.save_session(session)
+            
+                logger.info(f"WordPress authentication successful for {email}")
+                return session
+            
+            else:
+                st.error("Invalid username or password.")
+                return None
+            
+        except Exception as e:
+            logger.error(f"WordPress authentication failed: {e}")
+            st.error("Authentication service is temporarily unavailable.")
+            return None
+
     def _mask_email(self, email: str) -> str:
         """Masks an email address for privacy."""
         if '@' not in email:
@@ -2260,98 +2306,6 @@ def extend_session(self, session: UserSession):
         if len(local) <= 2:
             return f"{local[0]}***@{domain}"
         return f"{local[0]}{'*' * (len(local) - 2)}{local[-1]}@{domain}"
-
-    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-    """Authenticates user with WordPress and creates/updates session."""
-    if not self.config.WORDPRESS_URL:
-        st.error("WordPress authentication is not configured.")
-        return None
-    
-    try:
-        auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
-        response = requests.post(auth_url, json={
-            'username': username,
-            'password': password
-        }, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            wp_token = data.get('token')
-            email = data.get('user_email')
-            display_name = data.get('user_display_name')
-            
-            # Get current session
-            session = self.get_session()
-            
-            # Update session to registered user
-            session.user_type = UserType.REGISTERED_USER
-            session.email = email
-            session.full_name = display_name
-            session.wp_token = wp_token
-            
-            # Add email to email history if not already there
-            if email not in session.email_addresses_used:
-                session.email_addresses_used.append(email)
-            
-            self.db.save_session(session)
-            
-            logger.info(f"WordPress authentication successful for {email}")
-            return session
-            
-        else:
-            st.error("Invalid username or password.")
-            return None
-            
-    except Exception as e:
-        logger.error(f"WordPress authentication failed: {e}")
-        st.error("Authentication service is temporarily unavailable.")
-        return None
-
-    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        """Authenticates user with WordPress and creates/updates session."""
-        if not self.config.WORDPRESS_URL:
-            st.error("WordPress authentication is not configured.")
-            return None
-        
-        try:
-            auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
-            response = requests.post(auth_url, json={
-                'username': username,
-                'password': password
-            }, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                wp_token = data.get('token')
-                email = data.get('user_email')
-                display_name = data.get('user_display_name')
-                
-                # Get current session
-                session = self.get_session()
-                
-                # Update session to registered user
-                session.user_type = UserType.REGISTERED_USER
-                session.email = email
-                session.full_name = display_name
-                session.wp_token = wp_token
-                
-                # Add email to email history if not already there
-                if email not in session.email_addresses_used:
-                    session.email_addresses_used.append(email)
-                
-                self.db.save_session(session)
-                
-                logger.info(f"WordPress authentication successful for {email}")
-                return session
-                
-            else:
-                st.error("Invalid username or password.")
-                return None
-                
-        except Exception as e:
-            logger.error(f"WordPress authentication failed: {e}")
-            st.error("Authentication service is temporarily unavailable.")
-            return None
 
     def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
         """Handles email verification for guest users."""
