@@ -42,7 +42,7 @@ except ImportError:
     logger.warning("⚠️ streamlit_js_eval not available, using fallback timeout mechanism")
 
 # =============================================================================
-# FINAL INTEGRATED FIFI AI - WITH WORKING 5-MINUTE TIMEOUT SYSTEM
+# FINAL INTEGRATED FIFI AI - SIMPLIFIED TIMEOUT SYSTEM
 # =============================================================================
 
 # Setup logging
@@ -1899,7 +1899,7 @@ class SessionManager:
 
     def get_session_timeout_minutes(self) -> int:
         """Returns the configured session timeout duration in minutes."""
-        return 5  # CHANGED: 5 minute timeout for testing
+        return 15
     
     def _periodic_cleanup(self):
         """Perform periodic cleanup of memory and resources"""
@@ -1998,8 +1998,8 @@ class SessionManager:
         logger.info(f"Created new session {session_id[:8]} with temporary fingerprint - waiting for JS fingerprinting")
         return session
 
-    def _check_5min_eligibility(self, session: UserSession) -> bool:
-        """Check if session has been active for at least 5 minutes to be eligible for CRM save."""
+    def _check_15min_eligibility(self, session: UserSession) -> bool:
+        """Check if session has been active for at least 15 minutes to be eligible for CRM save."""
         try:
             # Use the earliest of session creation time or first question time
             start_time = session.created_at
@@ -2009,11 +2009,11 @@ class SessionManager:
             elapsed_time = datetime.now() - start_time
             elapsed_minutes = elapsed_time.total_seconds() / 60
             
-            logger.info(f"5-min eligibility check for {session.session_id[:8]}: {elapsed_minutes:.1f} minutes elapsed")
-            return elapsed_minutes >= 5.0  # CHANGED: 5 minute requirement
+            logger.info(f"15-min eligibility check for {session.session_id[:8]}: {elapsed_minutes:.1f} minutes elapsed")
+            return elapsed_minutes >= 15.0
             
         except Exception as e:
-            logger.error(f"Error checking 5-min eligibility for {session.session_id[:8]}: {e}")
+            logger.error(f"Error checking 15-min eligibility for {session.session_id[:8]}: {e}")
             return False
 
     def _is_crm_save_eligible(self, session: UserSession, trigger_reason: str) -> bool:
@@ -2039,13 +2039,13 @@ class SessionManager:
                 logger.info(f"CRM save not eligible - no questions asked for {session.session_id[:8]}")
                 return False
             
-            # 5-minute eligibility check (CHANGED from 15 minutes)
-            if not self._check_5min_eligibility(session):
-                logger.info(f"CRM save not eligible - less than 5 minutes active for {session.session_id[:8]}")
+            # 15-minute eligibility check
+            if not self._check_15min_eligibility(session):
+                logger.info(f"CRM save not eligible - less than 15 minutes active for {session.session_id[:8]}")
                 return False
             
             # All conditions met
-            logger.info(f"CRM save eligible for {session.session_id[:8]}: UserType={session.user_type.value}, Questions={session.daily_question_count}, 5min+")
+            logger.info(f"CRM save eligible for {session.session_id[:8]}: UserType={session.user_type.value}, Questions={session.daily_question_count}, 15min+")
             return True
             
         except Exception as e:
@@ -2502,222 +2502,1145 @@ class SessionManager:
             st.error("❌ Failed to save to CRM. Please try again later.")
 
 # =============================================================================
-# WORKING 5-MINUTE TIMEOUT SYSTEM
+# SIMPLIFIED TIMEOUT SYSTEM - NEW APPROACH
 # =============================================================================
 
-def render_working_timeout_system(session_id: str):
+def render_simple_activity_tracker(session_id: str) -> Optional[Dict[str, Any]]:
     """
-    WORKING: Complete JavaScript-controlled 5-minute timeout system.
-    Shows warnings, countdown, extend button, and handles redirect.
+    SIMPLIFIED: Just tracks user activity and returns minutes since last activity.
+    No redirects, no complex logic - pure activity tracking only.
+    """
+    if not session_id:
+        return None
+    
+    safe_session_id = session_id.replace('-', '_')
+    
+    simple_tracker_js = f"""
+    (() => {{
+        const sessionId = "{session_id}";
+        const stateKey = 'fifi_activity_{safe_session_id}';
+        
+        // Initialize or get existing state
+        if (!window[stateKey]) {{
+            window[stateKey] = {{
+                lastActivity: Date.now(),
+                listenersInitialized: false,
+                sessionId: sessionId
+            }};
+        }}
+        
+        const state = window[stateKey];
+        
+        // Setup activity listeners (only once)
+        if (!state.listenersInitialized) {{
+            console.log('📍 Simple activity tracker starting for', sessionId.substring(0, 8));
+            
+            function updateActivity() {{
+                state.lastActivity = Date.now();
+                console.log('💓 Activity updated');
+            }}
+            
+            // Monitor user activity
+            const events = ['mousedown', 'mousemove', 'keydown', 'click', 'scroll', 'touchstart', 'focus'];
+            events.forEach(eventType => {{
+                document.addEventListener(eventType, updateActivity, {{ passive: true, capture: true }});
+            }});
+            
+            // Try to monitor parent document (for iframes)
+            try {{
+                if (window.parent && window.parent !== window && window.parent.document) {{
+                    events.forEach(eventType => {{
+                        window.parent.document.addEventListener(eventType, updateActivity, {{ passive: true, capture: true }});
+                    }});
+                    console.log('📍 Parent document activity monitoring enabled');
+                }}
+            }} catch (e) {{
+                console.debug('Cannot monitor parent activity (cross-origin):', e);
+            }}
+            
+            state.listenersInitialized = true;
+            console.log('✅ Simple activity tracker initialized');
+        }}
+        
+        // Return current activity status
+        const now = Date.now();
+        const timeSinceActivity = now - state.lastActivity;
+        const minutesSinceActivity = Math.floor(timeSinceActivity / 60000);
+        
+        return {{
+            type: 'activity_status',
+            session_id: sessionId,
+            minutes_inactive: minutesSinceActivity,
+            last_activity: state.lastActivity,
+            timestamp: now
+        }};
+    }})()
+    """
+    
+    try:
+        result = st_javascript(simple_tracker_js)
+        if result and isinstance(result, dict) and result.get('type') == 'activity_status':
+            return result
+        return None
+    except Exception as e:
+        logger.error(f"Simple activity tracker failed: {e}")
+        return None
+
+def render_simplified_browser_close_detection(session_id: str):
+    """
+    SIMPLIFIED: Only detects actual browser close and sends clear reasons to FastAPI.
+    No timeout context complexity - just browser close detection.
     """
     if not session_id:
         return
-    
-    timeout_system_js = f"""
-    <div id="timeout-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 10000; color: white; font-family: Arial;">
-        <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #ff4444; padding: 30px; border-radius: 10px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.5);">
-            <h2 style="margin: 0 0 15px 0;">⚠️ Session Expiring Soon!</h2>
-            <p style="margin: 0 0 15px 0; font-size: 18px;">Your session expires in <span id="countdown-timer">60</span> seconds</p>
-            <button id="extend-btn" style="background: #28a745; color: white; border: none; padding: 10px 20px; border-radius: 5px; font-size: 16px; cursor: pointer; margin-right: 10px;">Extend for 5 Minutes</button>
-            <button id="signout-btn" style="background: #6c757d; color: white; border: none; padding: 10px 20px; border-radius: 5px; font-size: 16px; cursor: pointer;">Sign Out Now</button>
-        </div>
-    </div>
 
+    simple_close_js = f"""
     <script>
     (function() {{
-        const SESSION_ID = '{session_id}';
-        const TIMEOUT_MINUTES = 5;  // 5 minute timeout
-        const WARNING_SECONDS = 60; // Show warning 60 seconds before timeout
+        const sessionId = '{session_id}';
+        const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         
-        if (window.fifi_timeout_system_active) return;
-        window.fifi_timeout_system_active = true;
+        if (window.fifi_close_simple_initialized) return;
+        window.fifi_close_simple_initialized = true;
         
-        console.log('🕐 Starting 5-minute timeout system for session:', SESSION_ID.substring(0, 8));
+        let saveTriggered = false;
         
-        let startTime = Date.now();
-        let lastActivity = Date.now();
-        let warningShown = false;
-        let timeoutTriggered = false;
-        let countdownInterval = null;
+        console.log('🛡️ Simplified browser close detection initialized');
         
-        // Get overlay elements
-        const overlay = document.getElementById('timeout-overlay');
-        const countdownTimer = document.getElementById('countdown-timer');
-        const extendBtn = document.getElementById('extend-btn');
-        const signoutBtn = document.getElementById('signout-btn');
-        
-        function updateActivity() {{
-            lastActivity = Date.now();
-            console.log('💓 Activity updated');
+        function performEmergencySave(reason) {{
+            if (saveTriggered) return;
+            saveTriggered = true;
             
-            // Hide warning if shown
-            if (warningShown && overlay) {{
-                hideWarning();
-            }}
-        }}
-        
-        function showWarning() {{
-            if (warningShown || timeoutTriggered) return;
-            warningShown = true;
+            console.log('🚨 Browser close detected, sending emergency save:', reason);
             
-            console.log('⚠️ Showing timeout warning');
-            
-            if (overlay) {{
-                overlay.style.display = 'block';
-                startCountdown();
-            }}
-        }}
-        
-        function hideWarning() {{
-            if (!warningShown) return;
-            warningShown = false;
-            
-            console.log('✅ Hiding timeout warning');
-            
-            if (overlay) {{
-                overlay.style.display = 'none';
-            }}
-            
-            if (countdownInterval) {{
-                clearInterval(countdownInterval);
-                countdownInterval = null;
-            }}
-        }}
-        
-        function startCountdown() {{
-            let secondsLeft = WARNING_SECONDS;
-            
-            if (countdownTimer) {{
-                countdownTimer.textContent = secondsLeft;
-            }}
-            
-            countdownInterval = setInterval(() => {{
-                secondsLeft--;
-                
-                if (countdownTimer) {{
-                    countdownTimer.textContent = secondsLeft;
-                }}
-                
-                if (secondsLeft <= 0) {{
-                    clearInterval(countdownInterval);
-                    triggerTimeout('timeout_5min_automatic');
-                }}
-            }}, 1000);
-        }}
-        
-        function extendSession() {{
-            console.log('🔄 Extending session for 5 minutes');
-            
-            // Reset timers
-            startTime = Date.now();
-            lastActivity = Date.now();
-            hideWarning();
-            
-            // Notify Streamlit via query param
-            const currentUrl = new URL(window.location.href);
-            currentUrl.searchParams.set('extend_session', 'true');
-            currentUrl.searchParams.set('session_id', SESSION_ID);
-            window.location.href = currentUrl.toString();
-        }}
-        
-        function signOutNow() {{
-            console.log('🚪 Manual sign out requested');
-            triggerTimeout('manual_signout_from_warning');
-        }}
-        
-        function triggerTimeout(reason) {{
-            if (timeoutTriggered) return;
-            timeoutTriggered = true;
-            
-            console.log('🚨 Triggering timeout:', reason);
-            
-            // First try emergency save
             const emergencyData = JSON.stringify({{
-                session_id: SESSION_ID,
-                reason: reason,
+                session_id: sessionId,
+                reason: reason, // Clear, simple reason
                 timestamp: Date.now()
             }});
             
+            // Send beacon to FastAPI
             if (navigator.sendBeacon) {{
                 try {{
                     const sent = navigator.sendBeacon(
-                        'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save',
+                        FASTAPI_URL,
                         new Blob([emergencyData], {{type: 'application/json'}})
                     );
-                    console.log('📡 Emergency save beacon sent:', sent);
+                    if (sent) {{
+                        console.log('✅ Emergency save beacon sent successfully');
+                        return;
+                    }}
                 }} catch (e) {{
                     console.error('❌ Beacon failed:', e);
                 }}
             }}
             
-            // Redirect to timeout handler
-            const timeoutUrl = new URL(window.location.href);
-            timeoutUrl.searchParams.set('event', 'session_timeout_5min');
-            timeoutUrl.searchParams.set('session_id', SESSION_ID);
-            timeoutUrl.searchParams.set('reason', reason);
-            timeoutUrl.searchParams.set('timestamp', Date.now());
-            
-            window.location.href = timeoutUrl.toString();
+            // Fallback: redirect to Streamlit
+            try {{
+                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}`;
+                window.location.href = saveUrl;
+            }} catch (e) {{
+                console.error('❌ Fallback redirect failed:', e);
+            }}
         }}
         
-        // Set up activity listeners
-        const events = ['mousedown', 'mousemove', 'keydown', 'click', 'scroll', 'touchstart', 'focus'];
-        events.forEach(eventType => {{
-            document.addEventListener(eventType, updateActivity, {{ passive: true, capture: true }});
-        }});
+        // Listen for actual browser close events
+        window.addEventListener('beforeunload', () => {{
+            performEmergencySave('browser_close');
+        }}, {{ capture: true, passive: true }});
         
-        // Try to monitor parent document
+        window.addEventListener('unload', () => {{
+            performEmergencySave('browser_close');
+        }}, {{ capture: true, passive: true }});
+        
+        // Try to monitor parent window as well (for iframes)
         try {{
-            if (window.parent && window.parent !== window && window.parent.document) {{
-                events.forEach(eventType => {{
-                    window.parent.document.addEventListener(eventType, updateActivity, {{ passive: true, capture: true }});
-                }});
-                console.log('📍 Parent activity monitoring enabled');
+            if (window.parent && window.parent !== window) {{
+                window.parent.addEventListener('beforeunload', () => {{
+                    performEmergencySave('browser_close');
+                }}, {{ capture: true, passive: true }});
             }}
         }} catch (e) {{
-            console.debug('Cannot monitor parent activity:', e);
+            console.debug('Cannot monitor parent close events:', e);
         }}
         
-        // Set up extend and signout button handlers
-        if (extendBtn) {{
-            extendBtn.addEventListener('click', extendSession);
-        }}
-        
-        if (signoutBtn) {{
-            signoutBtn.addEventListener('click', signOutNow);
-        }}
-        
-        // Main timeout checker - runs every 10 seconds
-        const checker = setInterval(() => {{
-            if (timeoutTriggered) {{
-                clearInterval(checker);
-                return;
-            }}
-            
-            const now = Date.now();
-            const inactiveTime = now - lastActivity;
-            const totalTime = now - startTime;
-            const inactiveMinutes = inactiveTime / (1000 * 60);
-            const totalMinutes = totalTime / (1000 * 60);
-            
-            console.log(`🕐 Timer check: ${{inactiveMinutes.toFixed(1)}}min inactive, ${{totalMinutes.toFixed(1)}}min total`);
-            
-            // Show warning at 4 minutes of inactivity
-            if (inactiveMinutes >= 4 && !warningShown) {{
-                showWarning();
-            }}
-            
-            // Force timeout at 5 minutes of inactivity
-            if (inactiveMinutes >= 5) {{
-                clearInterval(checker);
-                triggerTimeout('timeout_5min_inactivity');
-            }}
-        }}, 10000); // Check every 10 seconds
-        
-        console.log('✅ 5-minute timeout system active');
+        console.log('✅ Browser close detection ready');
     }})();
     </script>
-    """  # This line was missing - closing the triple quotes
+    """
     
-    # Render the HTML/JavaScript
-    st.components.v1.html(timeout_system_js, height=0)
+    try:
+        st.components.v1.html(simple_close_js, height=0, width=0)
+    except Exception as e:
+        logger.error(f"Failed to render simplified browser close detection: {e}")
+
+def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession) -> bool:
+    """
+    SIMPLIFIED: Check if 15 minutes have passed and trigger browser reload if needed.
+    Returns True if timeout was triggered (and page reload initiated).
+    """
+    if not session:
+        return False
+    
+    # Calculate time since last activity
+    time_since_activity = datetime.now() - session.last_activity
+    minutes_inactive = time_since_activity.total_seconds() / 60
+    
+    # Check if 15 minutes have passed
+    if minutes_inactive >= 15:
+        logger.info(f"⏰ TIMEOUT DETECTED: {session.session_id[:8]} inactive for {minutes_inactive:.1f} minutes")
+        
+        # Save to CRM if eligible BEFORE reload
+        if session_manager._is_crm_save_eligible(session, "timeout_auto_reload"):
+            logger.info(f"💾 Performing emergency save before auto-reload for {session.session_id[:8]}")
+            
+            # Send to FastAPI for emergency save
+            try:
+                emergency_data = {
+                    "session_id": session.session_id,
+                    "reason": "timeout_auto_reload", # Clear reason name
+                    "timestamp": int(time.time() * 1000)
+                }
+                
+                # Use requests to send to FastAPI (as backup to beacon)
+                fastapi_url = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save'
+                response = requests.post(fastapi_url, json=emergency_data, timeout=5)
+                if response.status_code == 200:
+                    logger.info(f"✅ Emergency save sent to FastAPI successfully")
+                else:
+                    logger.warning(f"⚠️ FastAPI returned status {response.status_code}")
+            except Exception as e:
+                logger.error(f"❌ Failed to send emergency save to FastAPI: {e}")
+                # Continue with local save as fallback
+                try:
+                    session_manager.zoho.save_chat_transcript_sync(session, "timeout_auto_reload")
+                    session.timeout_saved_to_crm = True
+                except Exception as save_e:
+                    logger.error(f"❌ Local CRM save also failed: {save_e}")
+        
+        # Mark session as inactive
+        session.active = False
+        session.last_activity = datetime.now()
+        try:
+            session_manager.db.save_session(session)
+        except Exception as e:
+            logger.error(f"Failed to save session during timeout: {e}")
+        
+        # Clear Streamlit session state
+        for key in ['current_session_id', 'page']:
+            if key in st.session_state:
+                del st.session_state[key]
+        
+        # Show timeout message
+        st.error("⏰ **Session Timeout**")
+        st.info("Your session has expired due to 15 minutes of inactivity.")
+        
+        # TRIGGER BROWSER RELOAD using streamlit_js_eval
+        if JS_EVAL_AVAILABLE:
+            try:
+                logger.info(f"🔄 Triggering browser reload for timeout")
+                streamlit_js_eval(js_expressions="parent.window.location.reload()")
+                return True
+            except Exception as e:
+                logger.error(f"Browser reload failed: {e}")
+        
+        # Fallback: Force Streamlit rerun to home page
+        st.info("🏠 Redirecting to home page...")
+        time.sleep(1)
+        st.rerun()
+        return True
+    
+    return False
+
+def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
+    """Processes fingerprint data received via URL query parameters."""
+    try:
+        session_manager = st.session_state.get('session_manager')
+        if not session_manager:
+            logger.error("❌ Session manager not available during fingerprint processing from query.")
+            return False
+        
+        session = session_manager.db.load_session(session_id)
+        if not session:
+            logger.error(f"❌ Fingerprint processing: Session '{session_id[:8]}' not found in database.")
+            return False
+        
+        logger.info(f"✅ Processing fingerprint for session '{session_id[:8]}': ID={fingerprint_id[:8]}, Method={method}, Privacy={privacy}")
+        
+        # Create processed fingerprint data
+        processed_data = {
+            'fingerprint_id': fingerprint_id,
+            'fingerprint_method': method,
+            'visitor_type': 'new_visitor',  # Can be enhanced later with cache checking
+            'browser_privacy_level': privacy,
+            'working_methods': working_methods
+        }
+        
+        # Apply fingerprinting to session
+        session_manager.apply_fingerprinting(session, processed_data)
+        
+        logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
+        return False
+
+def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
+    """Processes emergency save request from query parameters."""
+    try:
+        session_manager = st.session_state.get('session_manager')
+        if not session_manager:
+            logger.error("❌ Session manager not available during emergency save processing.")
+            return False
+        
+        session = session_manager.db.load_session(session_id)
+        if not session:
+            logger.error(f"❌ Emergency save: Session '{session_id[:8]}' not found in database.")
+            return False
+        
+        logger.info(f"🚨 Processing emergency save for session '{session_id[:8]}', reason: {reason}")
+        
+        # Check if eligible for CRM save
+        if session_manager._is_crm_save_eligible(session, f"Emergency Save: {reason}"):
+            success = session_manager.zoho.save_chat_transcript_sync(session, f"Emergency Save: {reason}")
+            if success:
+                session.timeout_saved_to_crm = True
+                session.last_activity = datetime.now()
+                session_manager.db.save_session(session)
+                logger.info(f"✅ Emergency save completed successfully for session {session_id[:8]}")
+                return True
+            else:
+                logger.warning(f"⚠️ Emergency save CRM operation failed for session {session_id[:8]}")
+                return False
+        else:
+            logger.info(f"ℹ️ Emergency save not eligible for CRM save for session {session_id[:8]}")
+            return False
+        
+    except Exception as e:
+        logger.error(f"Emergency save processing failed: {e}", exc_info=True)
+        return False
+
+def handle_emergency_save_requests_from_query():
+    """Checks for and processes emergency save requests sent via URL query parameters."""
+    logger.info("🔍 EMERGENCY SAVE HANDLER: Checking for query parameter requests for emergency save...")
+    
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    reason = query_params.get("reason", "unknown")
+
+    if event == "emergency_close" and session_id:
+        logger.info("=" * 80)
+        logger.info("🚨 EMERGENCY SAVE REQUEST DETECTED VIA URL QUERY PARAMETERS!")
+        logger.info(f"Session ID: {session_id}, Event: {event}, Reason: {reason}")
+        logger.info("=" * 80)
+        
+        st.error("🚨 **Emergency Save Detected** - Processing browser close save...")
+        st.info("Please wait, your conversation is being saved...")
+        
+        # Clear query parameters to prevent re-triggering on rerun
+        if "event" in st.query_params:
+            del st.query_params["event"]
+        if "session_id" in st.query_params:
+            del st.query_params["session_id"]
+        if "reason" in st.query_params:
+            del st.query_params["reason"]
+        
+        try:
+            success = process_emergency_save_from_query(session_id, reason)
+            
+            if success:
+                st.success("✅ Emergency save completed successfully!")
+                logger.info("✅ Emergency save completed via query parameter successfully.")
+            else:
+                st.info("ℹ️ Emergency save completed (no CRM save needed or failed).")
+                logger.info("ℹ️ Emergency save completed via query parameter (not eligible for CRM save or internal error).")
+                
+        except Exception as e:
+            st.error(f"❌ An unexpected error occurred during emergency save: {str(e)}")
+            logger.critical(f"Emergency save processing crashed from query parameter: {e}", exc_info=True)
+        
+        time.sleep(2)
+        st.stop()
+    else:
+        logger.info("ℹ️ No emergency save requests found in current URL query parameters.")
+
+def handle_fingerprint_requests_from_query():
+    """Checks for and processes fingerprint data sent via URL query parameters."""
+    logger.info("🔍 FINGERPRINT HANDLER: Checking for query parameter fingerprint data...")
+    
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    
+    if event == "fingerprint_complete" and session_id:
+        logger.info("=" * 80)
+        logger.info("🔍 FINGERPRINT DATA DETECTED VIA URL QUERY PARAMETERS!")
+        logger.info(f"Session ID: {session_id}, Event: {event}")
+        logger.info("=" * 80)
+        
+        # EXTRACT PARAMETERS BEFORE CLEARING THEM
+        fingerprint_id = query_params.get("fingerprint_id")
+        method = query_params.get("method")
+        privacy = query_params.get("privacy")
+        working_methods = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
+        
+        # DEBUG: Log what we extracted
+        logger.info(f"Extracted - ID: {fingerprint_id}, Method: {method}, Privacy: {privacy}, Working Methods: {working_methods}")
+        
+        # Clear query parameters AFTER extraction
+        params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
+        for param in params_to_clear:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        # Validate we have the required data
+        if not fingerprint_id or not method:
+            st.error("❌ **Fingerprint Error** - Missing required data in redirect")
+            logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
+            time.sleep(2) # Give user time to read the error
+            st.rerun()
+            return
+        
+        # Process silently and stop execution
+        try:
+            success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
+            logger.info(f"✅ Silent fingerprint processing: {success}")
+            
+            if success:
+            # Stop execution - user stays on current page, next interaction will show updated fingerprint
+                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
+                st.stop()
+        except Exception as e:
+            logger.error(f"Silent fingerprint processing failed: {e}")
+        
+        # If we get here, processing failed - let normal flow continue
+        return
+    else:
+        logger.info("ℹ️ No fingerprint requests found in current URL query parameters.")
+
+# =============================================================================
+# UI COMPONENTS
+# =============================================================================
+
+def render_welcome_page(session_manager: 'SessionManager'):
+    """Renders the application's welcome page, including sign-in and guest options."""
+    st.title("🤖 Welcome to FiFi AI Assistant")
+    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
+    
+    st.markdown("---")
+    st.subheader("🎯 Usage Tiers")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.success("👤 **Guest Users**")
+        st.markdown("• **4 questions** to try FiFi AI")
+        st.markdown("• Email verification required to continue")
+        st.markdown("• Quick start, no registration needed")
+    
+    with col2:
+        st.info("📧 **Email Verified Guest**")
+        st.markdown("• **10 questions per day** (rolling 24-hour period)")
+        st.markdown("• Email verification for access")
+        st.markdown("• No full registration required")
+    
+    with col3:
+        st.warning("🔐 **Registered Users**")
+        st.markdown("• **40 questions per day** (across devices)")
+        st.markdown("• Cross-device tracking & consistent experience")
+        st.markdown("• Automatic chat saving to Zoho CRM")
+        st.markdown("• Priority access during high usage")
+    
+    tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
+    
+    with tab1:
+        if not session_manager.config.WORDPRESS_URL:
+            st.warning("Sign-in is currently disabled because the authentication service (WordPress URL) is not configured in application secrets.")
+        else:
+            with st.form("login_form", clear_on_submit=True):
+                st.markdown("### 🔐 Sign In to Your Account")
+                username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
+                password = st.text_input("Password", type="password", help="Enter your WordPress password.")
+                
+                st.markdown("")
+                
+                col1, col2, col3 = st.columns(3)
+                with col2:
+                    submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
+                
+                if submit_button:
+                    if not username or not password:
+                        st.error("Please enter both username and password to sign in.")
+                    else:
+                        with st.spinner("🔐 Authenticating..."):
+                            authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                            
+                        if authenticated_session:
+                            st.balloons()
+                            st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
+                            logger.info(f"🔍 AUTHENTICATION SUCCESS: Setting page to 'chat' for session {authenticated_session.session_id[:8]}")
+                            st.session_state.page = "chat"
+                            time.sleep(1)
+                            logger.info(f"🔍 AUTHENTICATION SUCCESS: About to rerun, page state = '{st.session_state.get('page')}'")
+                            st.rerun()
+            
+            st.markdown("---")
+            st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
+    
+    with tab2:
+        st.markdown("""
+        **Continue as a guest** to to get a quick start and try FiFi AI Assistant without signing in.
+        
+        ℹ️ **What to expect as a Guest:**
+        - You get an initial allowance of **4 questions** to explore FiFi AI's capabilities.
+        - After these 4 questions, **email verification will be required** to continue (unlocks 10 questions/day).
+        - Our system utilizes **universal device fingerprinting** for security and to track usage across sessions.
+        - You can always choose to **upgrade to a full registration** later for extended benefits.
+        """)
+        
+        st.markdown("")
+        col1, col2, col3 = st.columns(3)
+        with col2:
+            if st.button("👤 Start as Guest", use_container_width=True):
+                logger.info("🔍 GUEST BUTTON: Setting page to 'chat'")
+                st.session_state.page = "chat"
+                logger.info(f"🔍 GUEST BUTTON: Page state set to '{st.session_state.get('page')}', about to rerun")
+                st.rerun()
+
+def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
+    """Renders the application's sidebar."""
+    with st.sidebar:
+        st.title("🎛️ Dashboard")
+        
+        if session.user_type.value == UserType.REGISTERED_USER.value:
+            st.success("✅ **Registered User**")
+            if session.full_name: 
+                st.markdown(f"**Name:** {session.full_name}")
+            if session.email: 
+                st.markdown(f"**Email:** {session.email}")
+            
+            st.markdown(f"**Questions Today:** {session.total_question_count}/40")
+            if session.total_question_count <= 20:
+                st.progress(min(session.total_question_count / 20, 1.0), text="Tier 1 (up to 20 questions)")
+            else:
+                progress_value = min((session.total_question_count - 20) / 20, 1.0)
+                st.progress(progress_value, text="Tier 2 (21-40 questions)")
+            
+        elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
+            st.info("📧 **Email Verified Guest**")
+            if session.email:
+                st.markdown(f"**Email:** {session.email}")
+            
+            st.markdown(f"**Daily Questions:** {session.daily_question_count}/10")
+            st.progress(min(session.daily_question_count / 10, 1.0))
+            
+            if session.last_question_time:
+                next_reset = session.last_question_time + timedelta(hours=24)
+                time_to_reset = next_reset - datetime.now()
+                if time_to_reset.total_seconds() > 0:
+                    hours = int(time_to_reset.total_seconds() // 3600)
+                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
+                    st.caption(f"Resets in: {hours}h {minutes}m")
+                else:
+                    st.caption("Daily questions have reset!")
+            
+        else:
+            st.warning("👤 **Guest User**")
+            st.markdown(f"**Questions:** {session.daily_question_count}/4")
+            st.progress(min(session.daily_question_count / 4, 1.0))
+            st.caption("Email verification unlocks 10 questions/day.")
+        
+        # Show fingerprint status properly
+        if session.fingerprint_id:
+            # Check if it's a temporary or fallback fingerprint
+            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                st.markdown("**Device ID:** Identifying...")
+                st.caption("Fingerprinting in progress...")                
+            else:
+                # Real fingerprint ID from JavaScript
+                st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
+                st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
+        else:
+            st.markdown("**Device ID:** Initializing...")
+            st.caption("Starting fingerprinting...")
+
+        # SIMPLIFIED: Show time until timeout (no warnings or buttons)
+        time_since_activity = datetime.now() - session.last_activity
+        minutes_inactive = time_since_activity.total_seconds() / 60
+        if minutes_inactive < 15:
+            minutes_remaining = 15 - minutes_inactive
+            if minutes_remaining <= 5:  # Only show in last 5 minutes
+                if minutes_remaining <= 2:
+                    st.sidebar.error(f"⏰ Session expires in: {int(minutes_remaining)}m")
+                else:
+                    st.sidebar.warning(f"⏰ Session expires in: {int(minutes_remaining)}m")
+                st.sidebar.caption("Activity resets the timer")
+
+        # AI Tools Status
+        st.divider()
+        st.markdown("**🤖 AI Tools Status**")
+        
+        ai_system = session_manager.ai
+        if ai_system:
+            # Pinecone status
+            if ai_system.pinecone_tool and ai_system.pinecone_tool.assistant:
+                st.success("🧠 Knowledge Base: Ready")
+            elif ai_system.config.PINECONE_API_KEY:
+                st.warning("🧠 Knowledge Base: Error")
+            else:
+                st.info("🧠 Knowledge Base: Not configured")
+            
+            # Tavily status  
+            if ai_system.tavily_agent:
+                st.success("🌐 Web Search: Ready")
+            elif ai_system.config.TAVILY_API_KEY:
+                st.warning("🌐 Web Search: Error")
+            else:
+                st.info("🌐 Web Search: Not configured")
+            
+            # OpenAI status
+            if ai_system.openai_client:
+                st.success("💬 OpenAI: Ready")
+            elif ai_system.config.OPENAI_API_KEY:
+                st.warning("💬 OpenAI: Error")
+            else:
+                st.info("💬 OpenAI: Not configured")
+        else:
+            st.error("🤖 AI System: Not available")
+        
+        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
+            if session.zoho_contact_id: 
+                st.success("🔗 **CRM Linked**")
+            else: 
+                st.info("📋 **CRM Ready** (will link on first save)")
+            if session.timeout_saved_to_crm:
+                st.caption("💾 Auto-saved to CRM (after inactivity)")
+            else:
+                st.caption("💾 Auto-save enabled (after 15 min inactivity)")
+        else: 
+            st.caption("🚫 CRM Integration: Registered users & verified guests only")
+        
+        st.divider()
+        
+        st.markdown(f"**Messages in Chat:** {len(session.messages)}")
+        st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
+        
+        if session.ban_status.value != BanStatus.NONE.value:
+            st.error(f"🚫 **STATUS: RESTRICTED**")
+            if session.ban_end_time:
+                time_remaining = session.ban_end_time - datetime.now()
+                hours = int(time_remaining.total_seconds() // 3600)
+                minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
+            st.markdown(f"Reason: {session.ban_reason or 'Usage policy violation'}")
+        elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: 
+            st.warning("⚠️ **ACTION REQUIRED: Email Verification**")
+        
+        st.divider()
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            # Enhanced Clear Chat button with tooltip about CRM save
+            clear_chat_help = "Clears all messages from the current conversation."
+            if (session.user_type in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST] and 
+                session.email and session.messages and session.daily_question_count >= 1):
+                
+                # Check 15-minute eligibility
+                if session_manager._check_15min_eligibility(session):
+                    clear_chat_help += " Your conversation will be automatically saved to CRM before clearing."
+                else:
+                    clear_chat_help += " (CRM save requires 15+ minutes of activity)"
+            
+            if st.button("🗑️ Clear Chat", use_container_width=True, help=clear_chat_help):
+                # Show appropriate messaging based on CRM save eligibility
+                if session_manager._is_crm_save_eligible(session, "Clear Chat Request"):
+                    with st.spinner("💾 Saving conversation to CRM before clearing..."):
+                        session_manager.clear_chat_history(session)
+                    st.success("✅ Chat saved to CRM and cleared!")
+                else:
+                    session_manager.clear_chat_history(session)
+                    st.info("🗑️ Chat history cleared.")
+                
+                st.rerun()
+        with col2:
+            if st.button("🚪 Sign Out", use_container_width=True, help="Ends your current session and returns to the welcome page."):
+                session_manager.end_session(session)
+                st.rerun()
+
+        if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and session.messages:
+            st.divider()
+            
+            pdf_buffer = pdf_exporter.generate_chat_pdf(session)
+            if pdf_buffer:
+                st.download_button(
+                    label="📄 Download Chat PDF",
+                    data=pdf_buffer,
+                    file_name=f"fifi_chat_transcript_{session.session_id[:8]}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    help="Download the current chat conversation as a PDF document."
+                )
+            
+            if session_manager.zoho.config.ZOHO_ENABLED and session.email:
+                if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Manually save your current chat transcript to your linked Zoho CRM contact."):
+                    session_manager.manual_save_to_crm(session)
+                st.caption("💡 Chat automatically saves to CRM after 15 minutes of inactivity.")
+
+def render_email_verification_dialog(session_manager: 'SessionManager', session: UserSession):
+    """Renders the email verification dialog for guest users who have hit their initial question limit (4 questions)."""
+    st.error("📧 **Email Verification Required**")
+    st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
+    
+    if 'verification_stage' not in st.session_state:
+        st.session_state.verification_stage = 'initial_check'
+
+    if st.session_state.verification_stage == 'initial_check':
+        fingerprint_history = session_manager.check_fingerprint_history(session.fingerprint_id)
+        
+        if fingerprint_history.get('has_history') and fingerprint_history.get('email'):
+            masked_email = session_manager._mask_email(fingerprint_history['email'])
+            st.info(f"🤝 **We seem to recognize this device!**")
+            st.markdown(f"Are you **{masked_email}**?")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Yes, that's my email", use_container_width=True, key="recognize_yes_btn"):
+                    session.recognition_response = "yes"
+                    st.session_state.verification_email = fingerprint_history['email']
+                    st.session_state.verification_stage = "send_code_recognized"
+                    st.rerun()
+            with col2:
+                if st.button("❌ No, use a different email", use_container_width=True, key="recognize_no_btn"):
+                    session.recognition_response = "no"
+                    st.session_state.verification_stage = "email_entry"
+                    st.rerun()
+        else:
+            st.session_state.verification_stage = "email_entry"
+            st.rerun()
+
+    if st.session_state.verification_stage == 'send_code_recognized':
+        email_to_verify = st.session_state.get('verification_email')
+        if email_to_verify:
+            with st.spinner(f"Sending verification code to {email_to_verify}..."):
+                result = session_manager.handle_guest_email_verification(session, email_to_verify)
+                if result['success']:
+                    st.success(result['message'])
+                    st.session_state.verification_stage = "code_entry"
+                else:
+                    st.error(result['message'])
+                    st.session_state.verification_stage = "email_entry"
+            st.rerun()
+        else:
+            st.error("Error: No recognized email found to send the code. Please enter your email manually.")
+            st.session_state.verification_stage = "email_entry"
+            st.rerun()
+
+    if st.session_state.verification_stage == 'email_entry':
+        with st.form("email_verification_form", clear_on_submit=False):
+            st.markdown("**Please enter your email address to receive a verification code:**")
+            current_email_input = st.text_input("Email Address", placeholder="your@email.com", value=st.session_state.get('verification_email', session.email or ""), key="manual_email_input")
+            submit_email = st.form_submit_button("Send Verification Code", use_container_width=True)
+            
+            if submit_email:
+                if current_email_input:
+                    if session.email and current_email_input != session.email:
+                        session.email_switches_count += 1
+                        session.email = current_email_input
+                        session_manager.db.save_session(session)
+                        
+                    result = session_manager.handle_guest_email_verification(session, current_email_input)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.session_state.verification_email = current_email_input
+                        st.session_state.verification_stage = "code_entry"
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter an email address to receive the code.")
+    
+    if st.session_state.verification_stage == 'code_entry':
+        verification_email = st.session_state.get('verification_email', session.email)
+        
+        st.success(f"📧 A verification code has been sent to **{verification_email}**.")
+        st.info("Please check your email, including spam/junk folders. The code is valid for 10 minutes.")
+        
+        with st.form("code_verification_form", clear_on_submit=False):
+            code = st.text_input("Enter Verification Code", placeholder="e.g., 123456", max_chars=6, key="verification_code_input")
+            
+            col_code1, col_code2 = st.columns(2)
+            with col_code1:
+                submit_code = st.form_submit_button("Verify Code", use_container_width=True)
+            with col_code2:
+                resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
+            
+            if resend_code:
+                if verification_email:
+                    with st.spinner("Resending code..."):
+                        verification_sent = session_manager.email_verification.send_verification_code(verification_email)
+                        if verification_sent:
+                            st.success("Verification code resent successfully!")
+                            st.session_state.verification_stage = "code_entry"
+                        else:
+                            st.error("Failed to resend code. Please try again later.")
+                else:
+                    st.error("Error: No email address found to resend the code. Please go back and enter your email.")
+                    st.session_state.verification_stage = "email_entry"
+                st.rerun()
+
+            if submit_code:
+                if code:
+                    with st.spinner("Verifying code..."):
+                        result = session_manager.verify_email_code(session, code)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.balloons()
+                        for key in ['verification_email', 'verification_stage']:
+                            if key in st.session_state:
+                                del st.session_state[key]
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter the verification code you received.")
+
+def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession):
+    """
+    SIMPLIFIED: Chat interface with clean timeout system.
+    No warnings, no extend buttons - just clean timeout detection and browser reload.
+    """
+    
+    st.title("🤖 FiFi AI Assistant")
+    st.caption("Your intelligent food & beverage sourcing companion.")
+
+    # SIMPLIFIED TIMEOUT CHECK: Just check and trigger reload if needed
+    timeout_triggered = check_timeout_and_trigger_reload(session_manager, session)
+    if timeout_triggered:
+        return  # Page reload was triggered, stop execution
+    
+    # Simple activity tracking (no complex polling)
+    activity_result = render_simple_activity_tracker(session.session_id)
+    if activity_result:
+        # Update session activity if JavaScript reports more recent activity
+        js_activity_time = activity_result.get('last_activity')
+        if js_activity_time:
+            try:
+                new_activity = datetime.fromtimestamp(js_activity_time / 1000)
+                if new_activity > session.last_activity:
+                    session.last_activity = new_activity
+                    session_manager._save_session_with_retry(session)
+            except Exception as e:
+                logger.error(f"Failed to update activity from JavaScript: {e}")
+
+    # Fingerprinting (unchanged)
+    fingerprint_needed = (
+        not session.fingerprint_id or
+        session.fingerprint_method == "temporary_fallback_python" or
+        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+    )
+    
+    if fingerprint_needed:
+        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+
+    # Browser close detection for emergency saves (simplified)
+    if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
+        try:
+            render_simplified_browser_close_detection(session.session_id)
+        except Exception as e:
+            logger.error(f"Browser close detection failed: {e}")
+
+    # User limits check (unchanged)
+    limit_check = session_manager.question_limits.is_within_limits(session)
+    if not limit_check['allowed']:
+        if limit_check.get('reason') == 'guest_limit':
+            render_email_verification_dialog(session_manager, session)
+            return
+        else:
+            return
+
+    # Display chat messages (unchanged)
+    for msg in session.messages:
+        with st.chat_message(msg.get("role", "user")):
+            st.markdown(msg.get("content", ""), unsafe_allow_html=True)
+            
+            if msg.get("role") == "assistant":
+                if "source" in msg:
+                    source_color = {
+                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                        "Error Handler": "❌"
+                    }.get(msg['source'], "🤖")
+                    st.caption(f"{source_color} Source: {msg['source']}")
+                
+                indicators = []
+                if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
+                if msg.get("used_search"): indicators.append("🌐 Web Search")
+                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                
+                if msg.get("safety_override"):
+                    st.warning("🛡️ Safety Override: Switched to verified sources")
+                
+                if msg.get("has_citations") and msg.get("has_inline_citations"):
+                    st.caption("📚 Response includes verified citations")
+
+    # Chat input (unchanged)
+    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                            disabled=session.ban_status.value != BanStatus.NONE.value)
+    
+    if prompt:
+        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
+        
+        # Update activity and process
+        session.last_activity = datetime.now()
+        try:
+            session_manager.db.save_session(session)
+        except Exception as save_error:
+            logger.error(f"Failed to save activity: {save_error}")
+        
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Processing your question..."):
+                try:
+                    response = session_manager.get_ai_response(session, prompt)
+                    
+                    if response.get('requires_email'):
+                        st.error("📧 Please verify your email to continue.")
+                        st.session_state.verification_stage = 'email_entry'
+                        st.rerun()
+                    elif response.get('banned'):
+                        st.error(response.get("content", 'Access restricted.'))
+                        if response.get('time_remaining'):
+                            time_remaining = response['time_remaining']
+                            hours = int(time_remaining.total_seconds() // 3600)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.rerun()
+                    else:
+                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                        
+                        if response.get("source"):
+                            source_color = {
+                                "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                "Error Handler": "❌"
+                            }.get(response['source'], "🤖")
+                            st.caption(f"{source_color} Source: {response['source']}")
+                        
+                        logger.info(f"✅ Question processed successfully")
+                        
+                except Exception as e:
+                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
+                    st.error("⚠️ I encountered an error. Please try again.")
+        
+        st.rerun()
+
+# =============================================================================
+# INITIALIZATION & MAIN FUNCTIONS
+# =============================================================================
+
+def ensure_initialization_fixed():
+    """Fixed version of ensure_initialization with better error handling and timeout prevention"""
+    if 'initialized' not in st.session_state or not st.session_state.initialized:
+        logger.info("Starting application initialization sequence...")
+        
+        try:
+            progress_placeholder = st.empty()
+            with progress_placeholder.container():
+                st.info("🔄 Initializing FiFi AI Assistant...")
+                init_progress = st.progress(0)
+                status_text = st.empty()
+            
+            status_text.text("Loading configuration...")
+            init_progress.progress(0.1)
+            config = Config()
+            
+            status_text.text("Setting up PDF exporter...")
+            init_progress.progress(0.2)
+            pdf_exporter = PDFExporter()
+            
+            status_text.text("Connecting to database...")
+            init_progress.progress(0.3)
+            try:
+                db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+                st.session_state.db_manager = db_manager
+            except Exception as db_e:
+                logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
+                st.session_state.db_manager = type('FallbackDB', (), {
+                    'db_type': 'memory',
+                    'local_sessions': {},
+                    'save_session': lambda self, session: None,
+                    'load_session': lambda self, session_id: None,
+                    'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
+                    'find_sessions_by_email': lambda self, email: []
+                })()
+                st.warning("⚠️ Database unavailable. Using temporary storage.")
+            
+            status_text.text("Setting up managers...")
+            init_progress.progress(0.5)
+            
+            try:
+                zoho_manager = ZohoCRMManager(config, pdf_exporter)
+            except Exception as e:
+                logger.error(f"Zoho manager failed: {e}")
+                zoho_manager = type('FallbackZoho', (), {
+                    'config': config,
+                    'save_chat_transcript_sync': lambda self, session, reason: False
+                })()
+            
+            init_progress.progress(0.6)
+            
+            try:
+                ai_system = EnhancedAI(config)
+            except Exception as e:
+                logger.error(f"AI system failed: {e}")
+                ai_system = type('FallbackAI', (), {
+                    'openai_client': None,
+                    'get_response': lambda self, prompt, history=None: {
+                        "content": "AI system temporarily unavailable.",
+                        "success": False
+                    }
+                })()
+            
+            init_progress.progress(0.7)
+            
+            rate_limiter = RateLimiter()
+            fingerprinting_manager = FingerprintingManager()
+            
+            init_progress.progress(0.8)
+            
+            try:
+                email_verification_manager = EmailVerificationManager(config)
+                if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
+                    email_verification_manager = type('DummyEmail', (), {
+                        'send_verification_code': lambda self, email: False,
+                        'verify_code': lambda self, email, code: False
+                    })()
+            except Exception as e:
+                logger.error(f"Email verification failed: {e}")
+                email_verification_manager = type('DummyEmail', (), {
+                    'send_verification_code': lambda self, email: False,
+                    'verify_code': lambda self, email, code: False
+                })()
+            
+            init_progress.progress(0.9)
+            
+            question_limit_manager = QuestionLimitManager()
+            
+            status_text.text("Finalizing initialization...")
+            init_progress.progress(0.95)
+            
+            st.session_state.session_manager = SessionManager(
+                config, st.session_state.db_manager, zoho_manager, ai_system, 
+                rate_limiter, fingerprinting_manager, email_verification_manager, 
+                question_limit_manager
+            )
+            
+            st.session_state.pdf_exporter = pdf_exporter
+            st.session_state.error_handler = error_handler
+            st.session_state.fingerprinting_manager = fingerprinting_manager
+            st.session_state.email_verification_manager = email_verification_manager
+            st.session_state.question_limit_manager = question_limit_manager
+
+            init_progress.progress(1.0)
+            status_text.text("✅ Initialization complete!")
+            
+            time.sleep(0.5)
+            progress_placeholder.empty()
+            
+            st.session_state.initialized = True
+            logger.info("✅ Application initialized successfully")
+            return True
+            
+        except Exception as e:
+            st.error("💥 Critical initialization error occurred.")
+            st.error(f"Error: {str(e)}")
+            logger.critical(f"Critical initialization failure: {e}", exc_info=True)
+            
+            st.session_state.initialized = False
+            return False
+    
+    return True
+
+def main_fixed():
+    """SIMPLIFIED MAIN: Fixed main entry point with clean timeout system"""
+    try:
+        st.set_page_config(
+            page_title="FiFi AI Assistant", 
+            page_icon="🤖", 
+            layout="wide"
+        )
+    except Exception as e:
+        logger.error(f"Failed to set page config: {e}")
+
+    # Initialize
+    try:
+        with st.spinner("Initializing application..."):
+            init_success = ensure_initialization_fixed()
+            
+        if not init_success:
+            st.error("⚠️ Application failed to initialize properly.")
+            st.info("Please refresh the page to try again.")
+            return
+            
+    except Exception as init_error:
+        st.error(f"⚠️ Initialization error: {str(init_error)}")
+        st.info("Please refresh the page to try again.")
+        logger.error(f"Main initialization error: {init_error}", exc_info=True)
+        return
+
+    # Handle emergency saves AND fingerprint data first
+    try:
+        handle_emergency_save_requests_from_query()
+        handle_fingerprint_requests_from_query()
+    except Exception as e:
+        logger.error(f"Query parameter handling failed: {e}")
+
+    # Get session manager
+    session_manager = st.session_state.get('session_manager')
+    if not session_manager:
+        st.error("❌ Session Manager not available. Please refresh the page.")
+        return
+
+    # Route to appropriate page
+    current_page = st.session_state.get('page')
+    logger.info(f"🔍 MAIN ROUTING: Current page = '{current_page}'")
+    
+    try:
+        if current_page != "chat":
+            logger.info("🔍 MAIN ROUTING: Rendering welcome page")
+            render_welcome_page(session_manager)
+            
+        else:
+            logger.info("🔍 MAIN ROUTING: Should render chat interface, getting session...")
+            try:
+                session = session_manager.get_session()
+                logger.info(f"🔍 MAIN ROUTING: Got session {session.session_id[:8] if session else 'None'}")
+                
+                if session and session.active:
+                    logger.info(f"🔍 MAIN ROUTING: Session is active, rendering sidebar and chat interface")
+                    
+                    render_sidebar(session_manager, session, st.session_state.pdf_exporter)
+                    render_chat_interface_simplified(session_manager, session)
+                else:
+                    logger.warning(f"🔍 MAIN ROUTING: Session inactive or None, redirecting to welcome")
+                    st.session_state['page'] = None
+                    st.rerun()
+                    
+            except Exception as session_error:
+                logger.error(f"Session handling error: {session_error}", exc_info=True)
+                st.error("⚠️ Session error occurred. Redirecting to welcome page...")
+                st.session_state['page'] = None
+                time.sleep(2)
+                st.rerun()
+                
+    except Exception as page_error:
+        logger.error(f"Page routing error: {page_error}", exc_info=True)
+        st.error("⚠️ Page error occurred. Please refresh the page.")
+
+# Entry point
+if __name__ == "__main__":
+    main_fixed()
