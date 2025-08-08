@@ -2588,8 +2588,8 @@ def render_simple_activity_tracker(session_id: str) -> Optional[Dict[str, Any]]:
 
 def render_simplified_browser_close_detection(session_id: str):
     """
-    SIMPLIFIED: Only detects actual browser close and sends clear reasons to FastAPI.
-    No timeout context complexity - just browser close detection.
+    SIMPLIFIED: Detects actual browser close with tab switching detection to prevent false positives.
+    Sends clear reasons to FastAPI only for real browser closes.
     """
     if not session_id:
         return
@@ -2604,8 +2604,10 @@ def render_simplified_browser_close_detection(session_id: str):
         window.fifi_close_simple_initialized = true;
         
         let saveTriggered = false;
+        let isTabSwitching = false;
+        let tabSwitchTimeout = null;
         
-        console.log('🛡️ Simplified browser close detection initialized');
+        console.log('🛡️ Simplified browser close detection with tab switching protection initialized');
         
         function performEmergencySave(reason) {{
             if (saveTriggered) return;
@@ -2644,27 +2646,77 @@ def render_simplified_browser_close_detection(session_id: str):
             }}
         }}
         
-        // Listen for actual browser close events
+        function triggerEmergencySave(reason = 'browser_close') {{
+            if (saveTriggered) return;
+            
+            // RESTORED: Tab switching detection to prevent false positives
+            if (isTabSwitching) {{
+                console.log('🔍 Potential tab switch detected, delaying emergency save by 100ms...');
+                
+                setTimeout(() => {{
+                    if (document.visibilityState === 'visible') {{
+                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
+                        isTabSwitching = false;
+                        return; // CANCEL the emergency save
+                    }}
+                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
+                    performEmergencySave(reason);
+                }}, 100);
+                
+                return;
+            }}
+            
+            // Immediate save for non-tab-switch scenarios
+            performEmergencySave(reason);
+        }}
+        
+        // RESTORED: Tab switching detection via visibility change
+        document.addEventListener('visibilitychange', function() {{
+            if (document.visibilityState === 'hidden') {{
+                console.log('👁️ Tab switched away - marking as potential tab switch');
+                isTabSwitching = true;
+                
+                if (tabSwitchTimeout) {{
+                    clearTimeout(tabSwitchTimeout);
+                }}
+                
+                tabSwitchTimeout = setTimeout(() => {{
+                    console.log('⏰ Tab switch timeout - assuming real navigation');
+                    isTabSwitching = false;
+                }}, 2000);
+                
+            }} else {{
+                console.log('👁️ Tab switched back - confirmed tab switch (not real exit)');
+                isTabSwitching = false;
+                
+                if (tabSwitchTimeout) {{
+                    clearTimeout(tabSwitchTimeout);
+                    tabSwitchTimeout = null;
+                }}
+            }}
+        }}, {{ passive: true }});
+        
+        // Listen for actual browser close events with tab switching protection
         window.addEventListener('beforeunload', () => {{
-            performEmergencySave('browser_close');
+            triggerEmergencySave('browser_close');
         }}, {{ capture: true, passive: true }});
         
         window.addEventListener('unload', () => {{
-            performEmergencySave('browser_close');
+            triggerEmergencySave('browser_close');
         }}, {{ capture: true, passive: true }});
         
         // Try to monitor parent window as well (for iframes)
         try {{
             if (window.parent && window.parent !== window) {{
                 window.parent.addEventListener('beforeunload', () => {{
-                    performEmergencySave('browser_close');
+                    triggerEmergencySave('browser_close');
                 }}, {{ capture: true, passive: true }});
             }}
         }} catch (e) {{
             console.debug('Cannot monitor parent close events:', e);
         }}
         
-        console.log('✅ Browser close detection ready');
+        console.log('✅ Browser close detection with tab switching protection ready');
     }})();
     </script>
     """
@@ -2673,6 +2725,232 @@ def render_simplified_browser_close_detection(session_id: str):
         st.components.v1.html(simple_close_js, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render simplified browser close detection: {e}")
+
+def completely_reset_session():
+    """
+    UTILITY: Completely clears the session and creates a new one.
+    This is like the user closing and reopening the browser.
+    """
+    logger.info("🔄 Completely resetting session due to timeout")
+    
+    # Clear ALL session state
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    
+    # This will force a new session to be created on next rerun
+    st.session_state.clear()
+    
+    logger.info("✅ Session state completely cleared")
+
+def calculate_seconds_until_timeout(session, timeout_minutes=15):
+    """
+    UTILITY: Calculates exactly how many seconds until this session will timeout.
+    """
+    time_since_activity = datetime.now() - session.last_activity
+    timeout_seconds = timeout_minutes * 60
+    seconds_until_timeout = timeout_seconds - time_since_activity.total_seconds()
+    
+    # Return at least 5 seconds to prevent immediate refresh loops
+    return max(5, int(seconds_until_timeout))
+
+def handle_auto_timeout_from_query():
+    """
+    UTILITY: Handles automatic timeout redirects triggered by the JavaScript timer.
+    Add this to your query parameter handlers.
+    """
+    logger.info("🔍 DEBUG: handle_auto_timeout_from_query called")
+    
+    logger.info("🔍 AUTO-TIMEOUT HANDLER: Checking for timeout requests...")
+    
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    inactive_minutes = query_params.get("inactive_minutes", "15")
+    
+    if event == "session_timeout_auto" and session_id:
+        logger.info("=" * 80)
+        logger.info("⏰ AUTO-TIMEOUT DETECTED VIA URL REDIRECT!")
+        logger.info(f"Session ID: {session_id}, Inactive: {inactive_minutes} minutes")
+        logger.info("=" * 80)
+
+        # Set timeout context before any UI changes
+        timeout_context_js = """
+        <script>
+        try {
+            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
+            window.postMessage({
+                type: 'fifi_timeout_context', 
+                reason: 'session_timeout_15min_inactivity'
+            }, '*');
+            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
+        } catch (e) {
+            console.error('Failed to set timeout context:', e);
+        }
+        </script>
+        """
+        st.components.v1.html(timeout_context_js, height=0, width=0)
+        # Clear query parameters
+        for param in ["event", "session_id", "inactive_minutes"]:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        # Get session manager
+        session_manager = st.session_state.get('session_manager')
+        if not session_manager:
+            logger.error("Session manager not available during timeout handling")
+            st.session_state['page'] = None
+            st.rerun()
+            return
+        
+        # Load and process the session
+        try:
+            session = session_manager.db.load_session(session_id)
+            if session:
+                # Save to CRM if eligible
+                if session_manager._is_crm_save_eligible(session, "15-Minute Auto Timeout"):
+                    logger.info(f"Performing CRM save for auto-timeout session {session_id[:8]}")
+                    save_success = session_manager.zoho.save_chat_transcript_sync(session, "15-Minute Auto Timeout")
+                    if save_success:
+                        session.timeout_saved_to_crm = True
+                
+                # Mark session as inactive
+                session.active = False
+                session.last_activity = datetime.now()
+                session_manager.db.save_session(session)
+                logger.info(f"🔒 Session {session_id[:8]} closed due to auto-timeout")
+            
+        except Exception as e:
+            logger.error(f"Error processing auto-timeout: {e}", exc_info=True)
+        
+        # Clear session state and redirect to home
+        if 'current_session_id' in st.session_state:
+            del st.session_state['current_session_id']
+        if 'page' in st.session_state:
+            del st.session_state['page']
+        
+        # Show message and redirect
+        st.info("⏰ **Session Timeout:** Your session has been closed due to 15 minutes of inactivity.")
+        st.info("🏠 Please click 'Start as Guest' or 'Sign In' to begin a new session.")
+        
+        # Force rerun to show welcome page
+        st.rerun()
+
+def handle_timeout_redirect():
+    """
+    UTILITY: Set timeout context when redirecting
+    """
+    logger.info("🔍 DEBUG: handle_timeout_redirect called")
+
+    if st.query_params.get("timeout_redirect") == "true":
+        # Set timeout context in JavaScript
+        timeout_context_js = """
+        <script>
+        try {
+            // Store timeout reason in sessionStorage
+            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
+            
+            // Also send message to browser close detection
+            window.postMessage({
+                type: 'fifi_timeout_context',
+                reason: 'session_timeout_15min_inactivity'
+            }, '*');
+            
+            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
+        } catch (e) {
+            console.error('Failed to set timeout context:', e);
+        }
+        </script>
+        """
+        st.components.v1.html(timeout_context_js, height=0, width=0)
+        
+        # Clear the flag
+        if "timeout_redirect" in st.query_params:
+            del st.query_params["timeout_redirect"]
+        
+        # Clear session state to show welcome page
+        for key in ['current_session_id', 'page']:
+            if key in st.session_state:
+                del st.session_state[key]
+
+def global_message_channel_error_handler():
+    """
+    UTILITY: Enhanced global error handler for component messages with better communication handling
+    """
+    js_error_handler = """
+    (function() {
+        if (window.fifi_error_handler_initialized) return;
+        window.fifi_error_handler_initialized = true;
+        
+        // Global error handlers
+        window.addEventListener('error', function(e) {
+            console.error('🚨 Global JS Error:', e.error, 'at', e.filename, ':', e.lineno);
+        });
+        
+        window.addEventListener('unhandledrejection', function(e) {
+            console.error('🚨 Unhandled Promise Rejection:', e.reason);
+        });
+        
+        // Enhanced component communication handler
+        window.addEventListener('message', function(event) {
+            try {
+                if (event.data && typeof event.data === 'object') {
+                    if (event.data.type === 'streamlit:setComponentValue') {
+                        console.log('📡 Received component message:', event.data.type);
+                        
+                        // Try to forward to Streamlit if available
+                        if (window.Streamlit && window.Streamlit.setComponentValue) {
+                            window.Streamlit.setComponentValue(event.data.value);
+                        }
+                    } else if (event.data.type === 'fingerprint_fallback') {
+                        console.log('📡 Received fingerprint fallback message');
+                        
+                        // Store fallback data for retrieval - this is not used in the current Python code
+                        // but keeping it for future potential direct JS fallback integration if needed.
+                        window.fingerprint_fallback_data = event.data;
+                    }
+                }
+            } catch (e) {
+                console.error('🚨 Message handler error:', e);
+            }
+        });
+        
+        // Component readiness checker
+        let componentReadyChecks = 0;
+        const maxComponentChecks = 50; // 5 seconds max wait
+        
+        function checkComponentReady() {
+            componentReadyChecks++;
+            
+            if (window.Streamlit && window.Streamlit.setComponentReady) {
+                console.log('✅ Streamlit component system ready');
+                window.Streamlit.setComponentReady();
+                return;
+            }
+            
+            if (componentReadyChecks < maxComponentChecks) {
+                setTimeout(checkComponentReady, 100);
+            } else {
+                console.warn('⚠️ Streamlit component system not ready after 5 seconds');
+            }
+        }
+        
+        // Start checking for component readiness
+        setTimeout(checkComponentReady, 100);
+        
+        console.log('✅ Enhanced global error handlers and component communication initialized');
+    })();
+    """
+    
+    try:
+        # Use st_javascript instead of st.components.v1.html for better reliability
+        st_javascript(js_error_handler)
+    except Exception as e:
+        logger.error(f"Failed to initialize enhanced global error handler: {e}")
+        # Fallback to basic version
+        try:
+            st.components.v1.html(f"<script>{js_error_handler}</script>", height=0, width=0)
+        except Exception as fallback_e:
+            logger.error(f"Fallback global error handler also failed: {fallback_e}")
 
 def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession) -> bool:
     """
@@ -3344,6 +3622,12 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     if fingerprint_needed:
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
 
+    # RESTORED: Global error handler for component communication 
+    try:
+        global_message_channel_error_handler()
+    except Exception as e:
+        logger.error(f"Global error handler failed: {e}")
+
     # Browser close detection for emergency saves (simplified)
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
@@ -3596,8 +3880,16 @@ def main_fixed():
     try:
         handle_emergency_save_requests_from_query()
         handle_fingerprint_requests_from_query()
+        handle_auto_timeout_from_query()  # RESTORED: Handle auto timeout redirects
+        handle_timeout_redirect()         # RESTORED: Handle timeout redirects
     except Exception as e:
         logger.error(f"Query parameter handling failed: {e}")
+
+    # RESTORED: Global error handler for component communication
+    try:
+        global_message_channel_error_handler()
+    except Exception as e:
+        logger.error(f"Global error handler failed: {e}")
 
     # Get session manager
     session_manager = st.session_state.get('session_manager')
