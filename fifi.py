@@ -2084,7 +2084,7 @@ class SessionManager:
             return False
 
     def get_session(self) -> Optional[UserSession]:
-        """Gets or creates the current user session."""
+        """Gets or creates the current user session with enhanced validation."""
         # Perform periodic cleanup
         self._periodic_cleanup()
 
@@ -2093,8 +2093,11 @@ class SessionManager:
             session_id = st.session_state.get('current_session_id')
             
             if session_id:
+                logger.debug(f"🔍 GET_SESSION: Attempting to load session {session_id[:8]}")
                 session = self.db.load_session(session_id)
+                
                 if session and session.active:
+                    logger.debug(f"🔍 GET_SESSION: Loaded active session {session.session_id[:8]} (Type: {session.user_type.value})")
                     session = self._validate_session(session)
                     
                     # Enhanced session recovery - always ensure we have some fingerprint
@@ -2133,18 +2136,22 @@ class SessionManager:
                     # Update activity for allowed sessions
                     try:
                         self._update_activity(session)
+                        logger.debug(f"🔍 GET_SESSION: Activity updated for session {session.session_id[:8]}")
                     except Exception as e:
                         logger.error(f"Failed to update session activity for {session.session_id[:8]}: {e}", exc_info=True)
                     
                     return session
                 else:
-                    logger.info(f"Session {session_id[:8]} not found or inactive. Creating new session.")
+                    logger.warning(f"🔍 GET_SESSION: Session {session_id[:8]} not found or inactive (Found: {session is not None}, Active: {session.active if session else 'N/A'}). Creating new session.")
+                    # Clear invalid session ID
                     if 'current_session_id' in st.session_state:
                         del st.session_state['current_session_id']
 
             # Create new session if no valid session found
+            logger.info(f"🔍 GET_SESSION: Creating new session")
             new_session = self._create_new_session()
             st.session_state.current_session_id = new_session.session_id
+            logger.info(f"🔍 GET_SESSION: Created and stored new session {new_session.session_id[:8]}")
             return self._validate_session(new_session)
             
         except Exception as e:
@@ -2155,10 +2162,13 @@ class SessionManager:
             fallback_session.fingerprint_method = "emergency_fallback"
             st.session_state.current_session_id = fallback_session.session_id
             st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
+            logger.error(f"🔍 GET_SESSION: Emergency fallback session created {fallback_session.session_id[:8]}")
             return fallback_session
 
     def _validate_session(self, session: UserSession) -> UserSession:
-        """Validates and updates session activity."""
+        """Validates and updates session activity with enhanced logging."""
+        logger.debug(f"🔍 VALIDATE_SESSION: Validating session {session.session_id[:8]} (Type: {session.user_type.value}, Active: {session.active})")
+        
         session.last_activity = datetime.now()
         
         # Check for ban expiry
@@ -2172,8 +2182,18 @@ class SessionManager:
             session.ban_reason = None
             session.question_limit_reached = False
         
+        # Ensure session is active
+        if not session.active:
+            logger.warning(f"🔍 VALIDATE_SESSION: Reactivating inactive session {session.session_id[:8]}")
+            session.active = True
+        
         # Save updated session
-        self.db.save_session(session)
+        try:
+            self.db.save_session(session)
+            logger.debug(f"🔍 VALIDATE_SESSION: Session {session.session_id[:8]} validated and saved successfully")
+        except Exception as e:
+            logger.error(f"Failed to save validated session {session.session_id[:8]}: {e}")
+            
         return session
 
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]):
@@ -2273,12 +2293,21 @@ class SessionManager:
                 session.email = email
                 session.full_name = display_name
                 session.wp_token = wp_token
+                session.active = True  # Ensure session stays active
+                session.last_activity = datetime.now()  # Update activity timestamp
             
                 # Add email to email history if not already there
                 if email not in session.email_addresses_used:
                     session.email_addresses_used.append(email)
             
-                self.db.save_session(session)
+                # CRITICAL: Save session immediately after authentication
+                try:
+                    self.db.save_session(session)
+                    logger.info(f"✅ Session saved successfully after WordPress authentication for {email}")
+                except Exception as save_error:
+                    logger.error(f"❌ Failed to save session after authentication: {save_error}")
+                    st.error("Authentication succeeded but session save failed. Please try again.")
+                    return None
             
                 logger.info(f"WordPress authentication successful for {email}")
                 return session
@@ -2733,6 +2762,12 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
     time_since_activity = datetime.now() - session.last_activity
     minutes_inactive = time_since_activity.total_seconds() / 60
     
+    # SAFETY CHECK: Don't timeout if user just authenticated (within last 2 minutes)
+    time_since_creation = datetime.now() - session.created_at
+    if time_since_creation.total_seconds() < 120:  # 2 minutes grace period
+        logger.debug(f"Session {session.session_id[:8]} created recently ({time_since_creation.total_seconds():.1f}s ago), skipping timeout check")
+        return False
+    
     # Check if 15 minutes have passed
     if minutes_inactive >= 15:
         logger.info(f"⏰ TIMEOUT DETECTED: {session.session_id[:8]} inactive for {minutes_inactive:.1f} minutes")
@@ -3026,10 +3061,16 @@ def render_welcome_page(session_manager: 'SessionManager'):
                         if authenticated_session:
                             st.balloons()
                             st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
-                            logger.info(f"🔍 AUTHENTICATION SUCCESS: Setting page to 'chat' for session {authenticated_session.session_id[:8]}")
+                            
+                            # CRITICAL: Ensure session state is properly set
+                            st.session_state.current_session_id = authenticated_session.session_id
                             st.session_state.page = "chat"
-                            time.sleep(1)
-                            logger.info(f"🔍 AUTHENTICATION SUCCESS: About to rerun, page state = '{st.session_state.get('page')}'")
+                            
+                            logger.info(f"🔍 AUTHENTICATION SUCCESS: Session {authenticated_session.session_id[:8]} - Setting page to 'chat'")
+                            logger.info(f"🔍 AUTHENTICATION SUCCESS: current_session_id = {st.session_state.get('current_session_id', 'None')[:8] if st.session_state.get('current_session_id') else 'None'}")
+                            logger.info(f"🔍 AUTHENTICATION SUCCESS: page = '{st.session_state.get('page')}'")
+                            
+                            time.sleep(1.5)  # Give user time to see success message
                             st.rerun()
             
             st.markdown("---")
@@ -3233,7 +3274,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             if session_manager.zoho.config.ZOHO_ENABLED and session.email:
                 if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Manually save your current chat transcript to your linked Zoho CRM contact."):
                     session_manager.manual_save_to_crm(session)
-                st.caption("💡 Chat automatically saves to CRM after 15 minutes of inactivity or during Sign Out.")
+                st.caption("💡 Chat automatically saves to CRM during Sign Out or after 15 minutes of inactivity.")
 
 def render_email_verification_dialog(session_manager: 'SessionManager', session: UserSession):
     """Renders the email verification dialog for guest users who have hit their initial question limit (4 questions)."""
@@ -3656,7 +3697,9 @@ def main_fixed():
 
     # Route to appropriate page
     current_page = st.session_state.get('page')
-    logger.info(f"🔍 MAIN ROUTING: Current page = '{current_page}'")
+    current_session_id = st.session_state.get('current_session_id')
+    
+    logger.info(f"🔍 MAIN ROUTING: Current page = '{current_page}', Session ID = '{current_session_id[:8] if current_session_id else 'None'}'")
     
     try:
         if current_page != "chat":
@@ -3669,20 +3712,43 @@ def main_fixed():
                 session = session_manager.get_session()
                 logger.info(f"🔍 MAIN ROUTING: Got session {session.session_id[:8] if session else 'None'}")
                 
+                # Enhanced session validation
                 if session and session.active:
-                    logger.info(f"🔍 MAIN ROUTING: Session is active, rendering sidebar and chat interface")
+                    # Double-check that this is the expected session
+                    if current_session_id and session.session_id != current_session_id:
+                        logger.warning(f"🔍 MAIN ROUTING: Session ID mismatch! Expected: {current_session_id[:8]}, Got: {session.session_id[:8]}")
+                        # Try to load the expected session
+                        expected_session = session_manager.db.load_session(current_session_id)
+                        if expected_session and expected_session.active:
+                            session = expected_session
+                            logger.info(f"🔍 MAIN ROUTING: Successfully loaded expected session {session.session_id[:8]}")
+                        else:
+                            logger.warning(f"🔍 MAIN ROUTING: Expected session not found or inactive, using current session")
+                    
+                    logger.info(f"🔍 MAIN ROUTING: Session {session.session_id[:8]} is active (Type: {session.user_type.value}), rendering chat interface")
                     
                     render_sidebar(session_manager, session, st.session_state.pdf_exporter)
                     render_chat_interface_simplified(session_manager, session)
+                    
                 else:
-                    logger.warning(f"🔍 MAIN ROUTING: Session inactive or None, redirecting to welcome")
+                    logger.warning(f"🔍 MAIN ROUTING: Session inactive or None (Session: {session.session_id[:8] if session else 'None'}, Active: {session.active if session else 'N/A'})")
+                    logger.warning(f"🔍 MAIN ROUTING: Redirecting to welcome page")
+                    
+                    # Clear invalid session state
+                    if 'current_session_id' in st.session_state:
+                        del st.session_state['current_session_id']
                     st.session_state['page'] = None
                     st.rerun()
                     
             except Exception as session_error:
                 logger.error(f"Session handling error: {session_error}", exc_info=True)
                 st.error("⚠️ Session error occurred. Redirecting to welcome page...")
-                st.session_state['page'] = None
+                
+                # Clear potentially corrupted session state
+                for key in ['current_session_id', 'page']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                
                 time.sleep(2)
                 st.rerun()
                 
