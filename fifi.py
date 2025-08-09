@@ -2689,34 +2689,35 @@ def render_simple_activity_tracker(session_id: str) -> Optional[Dict[str, Any]]:
 
 def render_simplified_browser_close_detection(session_id: str):
     """
-    SIMPLIFIED: Only detects actual browser close and sends clear reasons to FastAPI.
-    No timeout context complexity - just browser close detection.
+    ENHANCED: Correctly distinguishes between tab switches and actual browser/tab closes.
+    Uses visibilitychange API and conditional delays to prevent false emergency saves.
     """
     if not session_id:
         return
 
-    simple_close_js = f"""
+    enhanced_close_js = f"""
     <script>
     (function() {{
         const sessionId = '{session_id}';
         const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         
-        if (window.fifi_close_simple_initialized) return;
-        window.fifi_close_simple_initialized = true;
+        if (window.fifi_close_enhanced_initialized) return;
+        window.fifi_close_enhanced_initialized = true;
         
         let saveTriggered = false;
+        let isTabSwitching = false;
         
-        console.log('🛡️ Simplified browser close detection initialized');
+        console.log('🛡️ Enhanced browser close detection initialized');
         
-        function performEmergencySave(reason) {{
+        function performActualEmergencySave(reason) {{
             if (saveTriggered) return;
             saveTriggered = true;
             
-            console.log('🚨 Browser close detected, sending emergency save:', reason);
+            console.log('🚨 Confirmed browser/tab close, sending emergency save:', reason);
             
             const emergencyData = JSON.stringify({{
                 session_id: sessionId,
-                reason: reason, // Clear, simple reason
+                reason: reason,
                 timestamp: Date.now()
             }});
             
@@ -2745,35 +2746,77 @@ def render_simplified_browser_close_detection(session_id: str):
             }}
         }}
         
-        // Listen for actual browser close events
+        function triggerEmergencySave(reason) {{
+            // If we suspect this might be a tab switch, add a verification delay
+            if (isTabSwitching) {{
+                console.log('🔍 Potential tab switch detected, delaying emergency save by 150ms...');
+                setTimeout(() => {{
+                    if (document.visibilityState === 'visible') {{
+                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
+                        isTabSwitching = false;
+                        return; // Cancel the save - it was just a tab switch
+                    }}
+                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
+                    performActualEmergencySave(reason);
+                }}, 150); // Short delay to verify if tab becomes visible again
+                return;
+            }}
+            
+            // If not a suspected tab switch, proceed immediately
+            performActualEmergencySave(reason);
+        }}
+        
+        // CRITICAL: Listen for visibility changes to track tab switching
+        document.addEventListener('visibilitychange', function() {{
+            if (document.visibilityState === 'hidden') {{
+                console.log('📱 Tab became hidden - potential tab switch');
+                isTabSwitching = true;
+            }} else if (document.visibilityState === 'visible') {{
+                console.log('👁️ Tab became visible - confirmed tab switch');
+                isTabSwitching = false;
+            }}
+        }});
+        
+        // Listen for actual browser close events with intelligent verification
         window.addEventListener('beforeunload', () => {{
-            performEmergencySave('browser_close');
+            triggerEmergencySave('browser_close');
         }}, {{ capture: true, passive: true }});
         
         window.addEventListener('unload', () => {{
-            performEmergencySave('browser_close');
+            triggerEmergencySave('browser_close');
         }}, {{ capture: true, passive: true }});
         
         // Try to monitor parent window as well (for iframes)
         try {{
             if (window.parent && window.parent !== window) {{
+                // Also add visibility change listener to parent
+                window.parent.document.addEventListener('visibilitychange', function() {{
+                    if (window.parent.document.visibilityState === 'hidden') {{
+                        console.log('📱 Parent tab became hidden - potential tab switch');
+                        isTabSwitching = true;
+                    }} else if (window.parent.document.visibilityState === 'visible') {{
+                        console.log('👁️ Parent tab became visible - confirmed tab switch');
+                        isTabSwitching = false;
+                    }}
+                }});
+                
                 window.parent.addEventListener('beforeunload', () => {{
-                    performEmergencySave('browser_close');
+                    triggerEmergencySave('browser_close');
                 }}, {{ capture: true, passive: true }});
             }}
         }} catch (e) {{
-            console.debug('Cannot monitor parent close events:', e);
+            console.debug('Cannot monitor parent events (cross-origin):', e);
         }}
         
-        console.log('✅ Browser close detection ready');
+        console.log('✅ Enhanced browser close detection ready');
     }})();
     </script>
     """
     
     try:
-        st.components.v1.html(simple_close_js, height=0, width=0)
+        st.components.v1.html(enhanced_close_js, height=0, width=0)
     except Exception as e:
-        logger.error(f"Failed to render simplified browser close detection: {e}")
+        logger.error(f"Failed to render enhanced browser close detection: {e}")
 
 def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession) -> bool:
     """
