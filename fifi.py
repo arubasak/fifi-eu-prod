@@ -441,43 +441,6 @@ class DatabaseManager:
                     self.local_sessions = {}
 
     @handle_api_errors("Database", "Save Session")
-
-    def _ensure_connection_healthy(self, config_instance: Any):
-        """Ensure database connection is healthy, reconnect if needed"""
-        if not self._check_connection_health():
-            logger.warning("Database connection unhealthy, attempting reconnection...")
-            old_conn = self.conn
-            self.conn = None
-        
-            if old_conn:
-                try:
-                    old_conn.close()
-                except Exception as e:
-                    logger.debug(f"Error closing old DB connection: {e}")
-        
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    if self.db_type == "cloud" and SQLITECLOUD_AVAILABLE and hasattr(config_instance, 'SQLITE_CLOUD_CONNECTION'):
-                        self.conn, _ = self._try_sqlite_cloud(config_instance.SQLITE_CLOUD_CONNECTION)
-                    elif self.db_type == "file":
-                        self.conn, _ = self._try_local_sqlite()
-                
-                    if self.conn:
-                        self.conn.execute("SELECT 1").fetchone()
-                        logger.info(f"✅ Database reconnection successful on attempt {attempt + 1}")
-                        return
-                        
-                except Exception as e:
-                    logger.error(f"Database reconnection attempt {attempt + 1} failed: {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(1)
-        
-            logger.error("All database reconnection attempts failed, falling back to in-memory storage")
-            self.db_type = "memory"
-            if not hasattr(self, 'local_sessions'):
-                self.local_sessions = {}
-            
     def save_session(self, session: UserSession):
         """Save session with SQLite Cloud compatibility and connection health check"""
         with self.lock:
@@ -1406,462 +1369,31 @@ def sanitize_input(text: str, max_length: int = 4000) -> str:
     if not isinstance(text, str): 
         return ""
     return html.escape(text)[:max_length].strip()
-
-# =============================================================================
-# PINECONE ASSISTANT TOOL
-# =============================================================================
-
-class PineconeAssistantTool:
-    def __init__(self, api_key: str, assistant_name: str):
-        if not PINECONE_AVAILABLE: 
-            raise ImportError("Pinecone client not available.")
-        self.pc = Pinecone(api_key=api_key)
-        self.assistant_name = assistant_name
-        self.assistant = self.initialize_assistant()
-
-    def initialize_assistant(self):
-        try:
-            instructions = (
-                "You are a document-based AI assistant with STRICT limitations.\n\n"
-                "ABSOLUTE RULES - NO EXCEPTIONS:\n"
-                "1. You can ONLY answer using information that exists in your uploaded documents\n"
-                "2. If you cannot find the answer in your documents, you MUST respond with EXACTLY: 'I don't have specific information about this topic in my knowledge base.'\n"
-                "3. NEVER create fake citations, URLs, or source references\n"
-                "4. NEVER create fake file paths, image references (.jpg, .png, etc.), or document names\n"
-                "5. NEVER use general knowledge or information not in your documents\n"
-                "6. NEVER guess or speculate about anything\n"
-                "7. NEVER make up website links, file paths, or citations\n"
-                "8. If asked about current events, news, recent information, or anything not in your documents, respond with: 'I don't have specific information about this topic in my knowledge base.'\n"
-                "9. Only include citations [1], [2], etc. if they come from your actual uploaded documents\n"
-                "10. NEVER reference images, files, or documents that were not actually uploaded to your knowledge base\n\n"
-                "REMEMBER: It is better to say 'I don't know' than to provide incorrect information, fake sources, or non-existent file references."
-            )
-            
-            assistants_list = self.pc.assistant.list_assistants()
-            if self.assistant_name not in [a.name for a in assistants_list]:
-                logger.warning(f"Assistant '{self.assistant_name}' not found. Creating...")
-                return self.pc.assistant.create_assistant(
-                    assistant_name=self.assistant_name, 
-                    instructions=instructions
-                )
-            else:
-                logger.info(f"Connected to assistant: '{self.assistant_name}'")
-                return self.pc.assistant.Assistant(assistant_name=self.assistant_name)
-        except Exception as e:
-            logger.error(f"Failed to initialize Pinecone Assistant: {e}")
-            return None
-
-    def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]:
-        if not self.assistant: 
-            return None
-        try:
-            pinecone_messages = [
-                PineconeMessage(
-                    role="user" if isinstance(msg, HumanMessage) else "assistant", 
-                    content=msg.content
-                ) for msg in chat_history
-            ]
-            
-            response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o")
-            content = response.message.content
-            has_citations = False
-            
-            if hasattr(response, 'citations') and response.citations:
-                has_citations = True
-                citations_header = "\n\n---\n**Sources:**\n"
-                citations_list = []
-                seen_items = set()
-                
-                for citation in response.citations:
-                    for reference in citation.references:
-                        if hasattr(reference, 'file') and reference.file:
-                            link_url = None
-                            if hasattr(reference.file, 'metadata') and reference.file.metadata:
-                                link_url = reference.file.metadata.get('source_url')
-                            if not link_url and hasattr(reference.file, 'signed_url') and reference.file.signed_url:
-                                link_url = reference.file.signed_url
-                            
-                            if link_url:
-                                if '?' in link_url:
-                                    link_url += '&utm_source=fifi-in'
-                                else:
-                                    link_url += '?utm_source=fifi-in'
-                                
-                                display_text = link_url
-                                if display_text not in seen_items:
-                                    link = f"[{len(seen_items) + 1}] [{display_text}]({link_url})"
-                                    citations_list.append(link)
-                                    seen_items.add(display_text)
-                            else:
-                                display_text = getattr(reference.file, 'name', 'Unknown Source')
-                                if display_text not in seen_items:
-                                    link = f"[{len(seen_items) + 1}] {display_text}"
-                                    citations_list.append(link)
-                                    seen_items.add(display_text)
-                
-                if citations_list:
-                    content += citations_header + "\n".join(citations_list)
-            
-            return {
-                "content": content, 
-                "success": True, 
-                "source": "FiFi",
-                "has_citations": has_citations,
-                "response_length": len(content),
-                "used_pinecone": True,
-                "used_search": False,
-                "has_inline_citations": bool(citations_list) if has_citations else False,
-                "safety_override": False
-            }
-        except Exception as e:
-            logger.error(f"Pinecone Assistant error: {str(e)}")
-            return None
-
-class TavilyFallbackAgent:
-    def __init__(self, tavily_api_key: str):
-        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
-
-    def add_utm_to_links(self, content: str) -> str:
-        """Finds all Markdown links in a string and appends the UTM parameters."""
-        def replacer(match):
-            url = match.group(1)
-            utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
-            if '?' in url:
-                new_url = f"{url}&{utm_params}"
-            else:
-                new_url = f"{url}?{utm_params}"
-            return f"({new_url})"
-        return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
-
-    def synthesize_search_results(self, results, query: str) -> str:
-        """Synthesize search results into a coherent response similar to LLM output."""
-        
-        # Handle string response from Tavily
-        if isinstance(results, str):
-            return f"Based on my search: {results}"
-        
-        # Handle dictionary response from Tavily (most common format)
-        if isinstance(results, dict):
-            # Check if there's a pre-made answer
-            if results.get('answer'):
-                return f"Based on my search: {results['answer']}"
-            
-            # Extract the results array
-            search_results = results.get('results', [])
-            if not search_results:
-                return "I couldn't find any relevant information for your query."
-            
-            # Process the results
-            relevant_info = []
-            sources = []
-            
-            for i, result in enumerate(search_results[:3], 1):  # Use top 3 results
-                if isinstance(result, dict):
-                    title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
-                             result.get('description') or 
-                             result.get('summary', ''))
-                    url = result.get('url', '')
-                    
-                    if content:
-                        # Clean up content
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                        relevant_info.append(content)
-                        
-                        if url and title:
-                            sources.append(f"[{title}]({url})")
-            
-            if not relevant_info:
-                return "I found search results but couldn't extract readable content. Please try rephrasing your query."
-            
-            # Build synthesized response
-            response_parts = []
-            
-            if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info[0]}")
-            else:
-                response_parts.append("Based on my search, here's what I found:")
-                for i, info in enumerate(relevant_info, 1):
-                    response_parts.append(f"\n\n**{i}.** {info}")
-            
-            # Add sources
-            if sources:
-                response_parts.append(f"\n\n**Sources:**")
-                for i, source in enumerate(sources, 1):
-                    response_parts.append(f"\n{i}. {source}")
-            
-            return "".join(response_parts)
-        
-        # Handle direct list (fallback)
-        if isinstance(results, list):
-            relevant_info = []
-            sources = []
-            
-            for i, result in enumerate(results[:3], 1):
-                if isinstance(result, dict):
-                    title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
-                             result.get('description', ''))
-                    url = result.get('url', '')
-                    
-                    if content:
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                        relevant_info.append(content)
-                        if url:
-                            sources.append(f"[{title}]({url})")
-            
-            if not relevant_info:
-                return "I couldn't find relevant information for your query."
-            
-            response_parts = []
-            if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info[0]}")
-            else:
-                response_parts.append("Based on my search:")
-                for info in relevant_info:
-                    response_parts.append(f"\n{info}")
-            
-            if sources:
-                response_parts.append(f"\n\n**Sources:**")
-                for i, source in enumerate(sources, 1):
-                    response_parts.append(f"{i}. {source}")
-            
-            return "".join(response_parts)
-        
-        # Fallback for unknown formats
-        return "I couldn't find any relevant information for your query."
-
-    def query(self, message: str, chat_history: List[BaseMessage]) -> Dict[str, Any]:
-        try:
-            search_results = self.tavily_tool.invoke({"query": message})
-            synthesized_content = self.synthesize_search_results(search_results, message)
-            final_content = self.add_utm_to_links(synthesized_content)
-            
-            return {
-                "content": final_content,
-                "success": True,
-                "source": "FiFi Web Search",
-                "used_pinecone": False,
-                "used_search": True,
-                "has_citations": True,
-                "has_inline_citations": True,
-                "safety_override": False
-            }
-        except Exception as e:
-            return {
-                "content": f"I apologize, but an error occurred while searching: {str(e)}",
-                "success": False,
-                "source": "error",
-                "used_pinecone": False,
-                "used_search": False,
-                "has_citations": False,
-                "has_inline_citations": False,
-                "safety_override": False
-            }
     
 class EnhancedAI:
-    """Enhanced AI system with Pinecone knowledge base, web search fallback, content moderation, and anti-hallucination safety."""
-    
+    """Placeholder for the AI interaction logic."""
     def __init__(self, config: Config):
         self.config = config
         self.openai_client = None
-        self.pinecone_tool = None
-        self.tavily_agent = None
-        
-        # Initialize OpenAI client (for both AI responses and content moderation)
         if OPENAI_AVAILABLE and self.config.OPENAI_API_KEY:
             try:
                 self.openai_client = openai.OpenAI(api_key=self.config.OPENAI_API_KEY)
                 error_handler.mark_component_healthy("OpenAI")
             except Exception as e:
                 logger.error(f"OpenAI client initialization failed: {e}")
-        
-        # Initialize Pinecone tool
-        if PINECONE_AVAILABLE and self.config.PINECONE_API_KEY and self.config.PINECONE_ASSISTANT_NAME:
-            try:
-                self.pinecone_tool = PineconeAssistantTool(
-                    self.config.PINECONE_API_KEY, 
-                    self.config.PINECONE_ASSISTANT_NAME
-                )
-                logger.info("✅ Pinecone Assistant initialized successfully")
-            except Exception as e:
-                logger.error(f"Pinecone tool initialization failed: {e}")
-                self.pinecone_tool = None
-        
-        # Initialize Tavily agent
-        if TAVILY_AVAILABLE and self.config.TAVILY_API_KEY:
-            try:
-                self.tavily_agent = TavilyFallbackAgent(self.config.TAVILY_API_KEY)
-                logger.info("✅ Tavily Web Search initialized successfully")
-            except Exception as e:
-                logger.error(f"Tavily agent initialization failed: {e}")
-                self.tavily_agent = None
-
-    def should_use_web_fallback(self, pinecone_response: Dict[str, Any]) -> bool:
-        """EXTREMELY aggressive fallback detection to prevent any hallucination."""
-        content = pinecone_response.get("content", "").lower()
-        content_raw = pinecone_response.get("content", "")
-        
-        # PRIORITY 1: Always fallback for current/recent information requests
-        current_info_indicators = [
-            "today", "yesterday", "this week", "this month", "this year", "2025", "2024",
-            "current", "latest", "recent", "now", "currently", "updated",
-            "news", "weather", "stock", "price", "event", "happening"
-        ]
-        if any(indicator in content for indicator in current_info_indicators):
-            return True
-        
-        # PRIORITY 2: Explicit "don't know" statements (allow these to pass)
-        explicit_unknown = [
-            "i don't have specific information", "i don't know", "i'm not sure",
-            "i cannot help", "i cannot provide", "cannot find specific information",
-            "no specific information", "no information about", "don't have information",
-            "not available in my knowledge", "unable to find", "no data available",
-            "insufficient information", "outside my knowledge", "cannot answer"
-        ]
-        if any(keyword in content for keyword in explicit_unknown):
-            return False  # Don't fallback for explicit "don't know" responses
-        
-        # PRIORITY 3: Detect fake files/images/paths (CRITICAL SAFETY)
-        fake_file_patterns = [
-            ".jpg", ".jpeg", ".png", ".html", ".gif", ".doc", ".docx",
-            ".xls", ".xlsx", ".ppt", ".pptx", ".mp4", ".avi", ".mp3",
-            "/uploads/", "/files/", "/images/", "/documents/", "/media/",
-            "file://", "ftp://", "path:", "directory:", "folder:"
-        ]
-        
-        has_real_citations = pinecone_response.get("has_citations", False)
-        if any(pattern in content_raw for pattern in fake_file_patterns):
-            if not has_real_citations:
-                logger.warning("🚨 SAFETY: Detected fake file references without real citations")
-                return True
-        
-        # PRIORITY 4: Detect potential fake citations (CRITICAL)
-        if "[1]" in content_raw or "**Sources:**" in content_raw:
-            suspicious_patterns = [
-                "http://", ".org", ".net",
-                "example.com", "website.com", "source.com", "domain.com"
-            ]
-            if not has_real_citations and any(pattern in content_raw for pattern in suspicious_patterns):
-                logger.warning("🚨 SAFETY: Detected fake citations")
-                return True
-        
-        # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short or explicit "don't know")
-        if not has_real_citations:
-            if "[1]" not in content_raw and "**Sources:**" not in content_raw:
-                if len(content_raw.strip()) > 30:
-                    logger.warning("🚨 SAFETY: Long response without citations")
-                    return True
-        
-        # PRIORITY 6: General knowledge indicators (likely hallucination)
-        general_knowledge_red_flags = [
-            "generally", "typically", "usually", "commonly", "often", "most",
-            "according to", "it is known", "studies show", "research indicates",
-            "experts say", "based on", "in general", "as a rule"
-        ]
-        if any(flag in content for flag in general_knowledge_red_flags):
-            logger.warning("🚨 SAFETY: Detected general knowledge indicators")
-            return True
-        
-        # PRIORITY 7: Question-answering patterns that suggest general knowledge
-        qa_patterns = [
-            "the answer is", "this is because", "the reason", "due to the fact",
-            "this happens when", "the cause of", "this occurs"
-        ]
-        if any(pattern in content for pattern in qa_patterns):
-            if not pinecone_response.get("has_citations", False):
-                logger.warning("🚨 SAFETY: QA patterns without citations")
-                return True
-        
-        # PRIORITY 8: Response length suggests substantial answer without sources
-        response_length = pinecone_response.get("response_length", 0)
-        if response_length > 100 and not pinecone_response.get("has_citations", False):
-            logger.warning("🚨 SAFETY: Long response without sources")
-            return True
-        
-        return False
 
     @handle_api_errors("AI System", "Get Response", show_to_user=True)
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """Enhanced AI response with content moderation, Pinecone, web search, and safety features."""
-        
-        # ADD THIS CONTENT MODERATION CHECK AT THE BEGINNING:
-        moderation_result = check_content_moderation(prompt, self.openai_client)
-        if moderation_result and moderation_result.get("flagged"):
-            logger.warning(f"Content moderation flagged input: {moderation_result.get('categories', [])}")
-            return {
-                "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
-                "success": False,
-                "source": "Content Moderation",
-                "used_search": False,
-                "used_pinecone": False,
-                "has_citations": False,
-                "has_inline_citations": False,
-                "safety_override": False
-            }
-        # STEP 2: Convert chat history to LangChain format if needed
-        if chat_history:
-            # Take only the last message (current prompt) and convert format
-            langchain_history = []
-            for msg in chat_history[-10:]:  # Limit to last 10 messages
-                if msg.get("role") == "user":
-                    langchain_history.append(HumanMessage(content=msg.get("content", "")))
-                elif msg.get("role") == "assistant":
-                    langchain_history.append(AIMessage(content=msg.get("content", "")))
-            
-            # Add current prompt
-            langchain_history.append(HumanMessage(content=prompt))
-        else:
-            langchain_history = [HumanMessage(content=prompt)]
-        
-        # STEP 3: Try Pinecone first if available
-        if self.pinecone_tool:
-            try:
-                logger.info("🔍 Querying Pinecone knowledge base...")
-                pinecone_response = self.pinecone_tool.query(langchain_history)
-                
-                if pinecone_response and pinecone_response.get("success"):
-                    # Check if we should fallback to web search
-                    should_fallback = self.should_use_web_fallback(pinecone_response)
-                    
-                    if not should_fallback:
-                        logger.info("✅ Using Pinecone response (passed safety checks)")
-                        return pinecone_response
-                    else:
-                        logger.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switching to verified web sources.")
-                        # Mark that safety override occurred but continue to web search
-                        
-            except Exception as e:
-                logger.error(f"Pinecone query failed: {e}")
-        
-        # STEP 4: Fallback to web search if available
-        if self.tavily_agent:
-            try:
-                logger.info("🌐 Falling back to web search...")
-                web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
-                
-                if web_response and web_response.get("success"):
-                    logger.info("✅ Using web search response")
-                    return web_response
-                    
-            except Exception as e:
-                logger.error(f"Web search failed: {e}")
-        
-        # STEP 5: Final fallback - basic response
-        logger.warning("⚠️ All AI tools unavailable, using basic fallback")
+        """Provides a simplified AI response."""
         return {
-            "content": "I apologize, but I'm unable to process your request at the moment due to technical issues. Please try again later.",
-            "success": False,
-            "source": "System Fallback",
+            "content": f"I understand you're asking about: '{prompt}'. This is the integrated FiFi AI. Your question is processed based on your user tier and system limits.",
+            "source": "Integrated FiFi AI System Placeholder",
             "used_search": False,
             "used_pinecone": False,
             "has_citations": False,
             "has_inline_citations": False,
-            "safety_override": False
+            "safety_override": False,
+            "success": True
         }
 
 @handle_api_errors("Content Moderation", "Check Prompt", show_to_user=False)
@@ -1985,41 +1517,6 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
 
-    def _save_session_with_retry(self, session: UserSession, max_retries: int = 3):
-        """Save session with retry logic"""
-        for attempt in range(max_retries):
-            try:
-                self.db.save_session(session)
-                return
-            except Exception as e:
-                logger.warning(f"Session save attempt {attempt + 1} failed: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(0.5)
-                else:
-                    logger.error(f"All session save attempts failed for {session.session_id[:8]}")
-                    raise
-
-    def check_timeout_status(self, session: UserSession) -> Dict[str, Any]:
-        """Check timeout status and return current state"""
-        time_since_activity = datetime.now() - session.last_activity
-        minutes_inactive = time_since_activity.total_seconds() / 60
-    
-        if minutes_inactive >= 15:
-            return {"status": "timeout", "minutes": minutes_inactive}
-        elif minutes_inactive >= 14:
-            return {"status": "warning", "minutes": minutes_inactive, "seconds_left": int(60 - (minutes_inactive - 14) * 60)}
-        else:
-            return {"status": "active", "minutes": minutes_inactive}
-
-    def extend_session(self, session: UserSession):
-        """Extend session for another 15 minutes"""
-        session.last_activity = datetime.now()
-        try:
-            self._save_session_with_retry(session)
-            logger.info(f"Session extended for {session.session_id[:8]}")
-        except Exception as e:
-            logger.error(f"Failed to extend session: {e}")
-    
     def _create_new_session(self) -> UserSession:
         """Creates a new user session with temporary fingerprint until JS fingerprinting completes."""
         session_id = str(uuid.uuid4())
@@ -2252,52 +1749,6 @@ class SessionManager:
         
         return {'has_history': False}
 
-    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        """Authenticates user with WordPress and creates/updates session."""
-        if not self.config.WORDPRESS_URL:
-            st.error("WordPress authentication is not configured.")
-            return None
-    
-        try:
-            auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
-            response = requests.post(auth_url, json={
-                'username': username,
-                'password': password
-            }, timeout=10)
-        
-            if response.status_code == 200:
-                data = response.json()
-                wp_token = data.get('token')
-                email = data.get('user_email')
-                display_name = data.get('user_display_name')
-            
-                # Get current session
-                session = self.get_session()
-            
-                # Update session to registered user
-                session.user_type = UserType.REGISTERED_USER
-                session.email = email
-                session.full_name = display_name
-                session.wp_token = wp_token
-            
-                # Add email to email history if not already there
-                if email not in session.email_addresses_used:
-                    session.email_addresses_used.append(email)
-            
-                self.db.save_session(session)
-            
-                logger.info(f"WordPress authentication successful for {email}")
-                return session
-            
-            else:
-                st.error("Invalid username or password.")
-                return None
-            
-        except Exception as e:
-            logger.error(f"WordPress authentication failed: {e}")
-            st.error("Authentication service is temporarily unavailable.")
-            return None
-
     def _mask_email(self, email: str) -> str:
         """Masks an email address for privacy."""
         if '@' not in email:
@@ -2306,6 +1757,52 @@ class SessionManager:
         if len(local) <= 2:
             return f"{local[0]}***@{domain}"
         return f"{local[0]}{'*' * (len(local) - 2)}{local[-1]}@{domain}"
+
+    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+        """Authenticates user with WordPress and creates/updates session."""
+        if not self.config.WORDPRESS_URL:
+            st.error("WordPress authentication is not configured.")
+            return None
+        
+        try:
+            auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
+            response = requests.post(auth_url, json={
+                'username': username,
+                'password': password
+            }, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                wp_token = data.get('token')
+                email = data.get('user_email')
+                display_name = data.get('user_display_name')
+                
+                # Get current session
+                session = self.get_session()
+                
+                # Update session to registered user
+                session.user_type = UserType.REGISTERED_USER
+                session.email = email
+                session.full_name = display_name
+                session.wp_token = wp_token
+                
+                # Add email to email history if not already there
+                if email not in session.email_addresses_used:
+                    session.email_addresses_used.append(email)
+                
+                self.db.save_session(session)
+                
+                logger.info(f"WordPress authentication successful for {email}")
+                return session
+                
+            else:
+                st.error("Invalid username or password.")
+                return None
+                
+        except Exception as e:
+            logger.error(f"WordPress authentication failed: {e}")
+            st.error("Authentication service is temporarily unavailable.")
+            return None
 
     def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
         """Handles email verification for guest users."""
@@ -2373,43 +1870,47 @@ class SessionManager:
             }
 
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-        """Enhanced version that prevents first-attempt failures"""
+        """Gets AI response for user prompt with all checks and limits."""
         try:
-            # STEP A: Session refresh BEFORE any processing (prevents stale session issues)
-            try:
-                fresh_session = self.db.load_session(session.session_id)
-                if fresh_session and fresh_session.active:
-                    session = fresh_session
-                    session.last_activity = datetime.now()
-                    logger.debug(f"✅ Session refreshed before processing: {session.session_id[:8]}")
-            except Exception as refresh_error:
-                logger.error(f"Session refresh failed: {refresh_error}")
-
-            # STEP B: Database connection health check (prevents connection failures)
-            try:
-                self.db._ensure_connection_healthy(self.config)
-            except Exception as db_error:
-                logger.error(f"Database connection check failed: {db_error}")
-
-            # Rest of your existing logic remains the same...
+            # Rate limiting check
             if not self.rate_limiter.is_allowed(session.session_id):
-                return {'content': 'Please slow down - you are sending requests too quickly.', 'success': False}
-        
+                return {
+                    'content': 'Please slow down - you are sending requests too quickly.',
+                    'success': False
+                }
+            
+            # Question limit check
             limit_check = self.question_limits.is_within_limits(session)
             if not limit_check['allowed']:
                 if limit_check['reason'] == 'guest_limit':
                     return {'requires_email': True}
                 elif limit_check['reason'] in ['banned', 'daily_limit', 'total_limit']:
-                    return {'banned': True, 'content': limit_check.get('message', 'Access restricted.'), 'time_remaining': limit_check.get('time_remaining')}
-        
+                    return {
+                        'banned': True,
+                        'content': limit_check.get('message', 'Access restricted.'),
+                        'time_remaining': limit_check.get('time_remaining')
+                    }
+            
+            # Content moderation (if available)
             sanitized_prompt = sanitize_input(prompt)
+            moderation_result = check_content_moderation(sanitized_prompt, self.ai.openai_client)
+            if moderation_result and moderation_result.get('flagged'):
+                return {
+                    'content': moderation_result.get('message', 'Your message violates content policy.'),
+                    'success': False
+                }
+            
+            # Record the question
             self.question_limits.record_question(session)
-        
+            
+            # Add user message to session
             user_message = {"role": "user", "content": sanitized_prompt}
             session.messages.append(user_message)
-        
+            
+            # Get AI response
             ai_response = self.ai.get_response(sanitized_prompt, session.messages[-10:])
-        
+            
+            # Add AI response to session
             assistant_message = {
                 "role": "assistant",
                 "content": ai_response.get("content", "No response generated."),
@@ -2421,34 +1922,21 @@ class SessionManager:
                 "safety_override": ai_response.get("safety_override", False)
             }
             session.messages.append(assistant_message)
-        
-            # STEP C: Enhanced session save with retry
+            
+            # Save session with new messages
             session.last_activity = datetime.now()
-            self._save_session_with_retry(session)
-        
+            self.db.save_session(session)
+            
             return ai_response
-        
+            
         except Exception as e:
             logger.error(f"AI response generation failed: {e}", exc_info=True)
-        
-            try:
-                if 'user_message' in locals() and user_message not in session.messages:
-                    session.messages.append(user_message)
-            
-                error_message = {
-                    "role": "assistant", "content": "I encountered an error processing your request. Please try again.",
-                    "source": "Error Handler", "used_search": False, "used_pinecone": False, 
-                    "has_citations": False, "has_inline_citations": False, "safety_override": False
-                }
-                session.messages.append(error_message)
-            
-                session.last_activity = datetime.now()
-                self._save_session_with_retry(session)
-            except Exception as save_error:
-                logger.error(f"Failed to save session after error: {save_error}")
-        
-            return {'content': 'I encountered an error processing your request. Please try again.', 'success': False, 'source': 'Error Handler'}
-        
+            return {
+                'content': 'I encountered an error processing your request. Please try again.',
+                'success': False,
+                'source': 'Error Handler'
+            }
+
     def clear_chat_history(self, session: UserSession):
         """Enhanced clear chat history with CRM save functionality."""
         try:
@@ -2547,8 +2035,6 @@ def render_activity_timer_component_15min_fixed_v2(session_id: str) -> Optional[
     Enhanced timer component V2 that automatically redirects after 15 minutes of inactivity.
     Handles both iframe and non-iframe scenarios by detecting and redirecting the appropriate window.
     """
-    logger.info(f"🔍 DEBUG: JavaScript timer component called for {session_id[:8]}")
-    
     if not session_id:
         logger.warning("❌ Timer component: No session ID provided")
         return None
@@ -2868,8 +2354,6 @@ def handle_auto_timeout_from_query():
     Handles automatic timeout redirects triggered by the JavaScript timer.
     Add this to your query parameter handlers.
     """
-    logger.info("🔍 DEBUG: handle_auto_timeout_from_query called")
-    
     logger.info("🔍 AUTO-TIMEOUT HANDLER: Checking for timeout requests...")
     
     query_params = st.query_params
@@ -2882,23 +2366,7 @@ def handle_auto_timeout_from_query():
         logger.info("⏰ AUTO-TIMEOUT DETECTED VIA URL REDIRECT!")
         logger.info(f"Session ID: {session_id}, Inactive: {inactive_minutes} minutes")
         logger.info("=" * 80)
-
-        # Set timeout context before any UI changes
-        timeout_context_js = """
-        <script>
-        try {
-            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
-            window.postMessage({
-                type: 'fifi_timeout_context', 
-                reason: 'session_timeout_15min_inactivity'
-            }, '*');
-            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
-        } catch (e) {
-            console.error('Failed to set timeout context:', e);
-        }
-        </script>
-        """
-        st.components.v1.html(timeout_context_js, height=0, width=0)
+        
         # Clear query parameters
         for param in ["event", "session_id", "inactive_minutes"]:
             if param in st.query_params:
@@ -2946,7 +2414,7 @@ def handle_auto_timeout_from_query():
         st.rerun()
 
 def render_browser_close_detection_enhanced(session_id: str):
-    """Enhanced browser close detection - FIXED to pass timeout context when available"""
+    """Enhanced browser close detection - FIXED to properly distinguish tab switches from real exits"""
     if not session_id:
         return
 
@@ -2962,68 +2430,53 @@ def render_browser_close_detection_enhanced(session_id: str):
         const sessionId = '{session_id}';
         const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         
-        // ENHANCED: Check for timeout context
+        // FIXED: Tab switch detection state
         let saveTriggered = false;
         let isTabSwitching = false;
         let tabSwitchTimeout = null;
-        let timeoutContext = null; // NEW: Store timeout context
         
-        console.log('🛡️ Browser close detection initialized (ENHANCED with timeout context)');
+        console.log('🛡️ Browser close detection initialized (ENHANCED tab switch filtering)');
 
-        // NEW: Listen for timeout context from Streamlit
-        window.addEventListener('message', function(event) {{
-            if (event.data && event.data.type === 'fifi_timeout_context') {{
-                timeoutContext = event.data.reason;
-                console.log('⏰ Timeout context received:', timeoutContext);
-            }}
-        }});
-        
-        // ENHANCED: Check for timeout context in sessionStorage
-        function getActualReason(defaultReason) {{
-            // Check for timeout context first
-            if (timeoutContext) {{
-                console.log('✅ Using timeout context:', timeoutContext);
-                return timeoutContext;
+        // FIXED: Enhanced emergency save that checks for tab switches
+        function triggerEmergencySave(reason = 'unknown') {{
+            if (saveTriggered) return;
+            
+            // CRITICAL FIX: If we detected a recent tab switch, delay and check if we come back
+            if (isTabSwitching) {{
+                console.log('🔍 Potential tab switch detected, delaying emergency save by 100ms...');
+                
+                setTimeout(() => {{
+                    // Check if document became visible again (indicates tab switch, not real exit)
+                    if (document.visibilityState === 'visible') {{
+                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
+                        isTabSwitching = false;
+                        return;
+                    }}
+                    
+                    // Still hidden after delay, proceed with save
+                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
+                    performActualEmergencySave(reason + '_confirmed');
+                }}, 100); // Short delay to check visibility
+                
+                return;
             }}
             
-            // Check sessionStorage for timeout flag
-            try {{
-                const timeoutFlag = sessionStorage.getItem('fifi_timeout_reason');
-                if (timeoutFlag) {{
-                    console.log('✅ Found timeout reason in sessionStorage:', timeoutFlag);
-                    // sessionStorage.removeItem('fifi_timeout_reason');
-                    return timeoutFlag;
-                }}
-            }} catch (e) {{
-                console.debug('SessionStorage not available:', e);
-            }}
-            
-            // Check for timeout indicators in URL
-            const urlParams = new URLSearchParams(window.location.search);
-            if (urlParams.get('timeout_redirect') === 'true') {{
-                console.log('✅ Detected timeout redirect in URL');
-                return 'session_timeout_redirect';
-            }}
-            
-            console.log('ℹ️ No timeout context found, using browser event:', defaultReason);
-            return defaultReason;
+            // Immediate save for non-tab-switch scenarios
+            performActualEmergencySave(reason);
         }}
-
-        function performActualEmergencySave(browserReason) {{
+        
+        function performActualEmergencySave(reason) {{
             if (saveTriggered) return;
             saveTriggered = true;
             
-            // ENHANCED: Get the actual reason (timeout context or browser event)
-            const actualReason = getActualReason(browserReason);
-            console.log('🚨 Emergency save triggered - Browser:', browserReason, 'Actual:', actualReason);
+            console.log('🚨 REAL browser exit detected (' + reason + ') - triggering emergency save');
             
-            // PRIMARY METHOD: Send beacon to FastAPI with correct reason
+            // PRIMARY METHOD: Send beacon to FastAPI
             if (navigator.sendBeacon) {{
                 try {{
                     const emergencyData = JSON.stringify({{
                         session_id: sessionId,
-                        reason: actualReason, // Use actual reason, not browser reason
-                        browser_event: browserReason, // Include browser event for debugging
+                        reason: reason,
                         timestamp: Date.now()
                     }});
                     
@@ -3033,7 +2486,7 @@ def render_browser_close_detection_enhanced(session_id: str):
                     );
                     
                     if (beaconSent) {{
-                        console.log('✅ Emergency save beacon sent with correct reason:', actualReason);
+                        console.log('✅ Emergency save beacon sent successfully');
                         return;
                     }} else {{
                         console.error('❌ Beacon failed to send');
@@ -3043,64 +2496,28 @@ def render_browser_close_detection_enhanced(session_id: str):
                 }}
             }}
             
-            // FALLBACK: Redirect to Streamlit with correct reason
+            // FALLBACK: Redirect to Streamlit
             try {{
                 console.log('🔄 Beacon failed, trying redirect fallback...');
-                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{actualReason}}`;
+                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}`;
                 window.location.href = saveUrl;
             }} catch (e) {{
                 console.error('❌ Both beacon and redirect failed:', e);
             }}
         }}
-
-        // FIXED: Enhanced emergency save that checks for tab switches and timeout context
-        function triggerEmergencySave(reason = 'unknown') {{
-            if (saveTriggered) return;
-            
-            // Check for timeout context first
-            const actualReason = getActualReason(reason);
-            
-            // If this is a timeout, skip tab switch detection
-            if (actualReason.includes('timeout') || actualReason.includes('inactivity')) {{
-                console.log('⏰ Timeout detected, bypassing tab switch detection');
-                performActualEmergencySave(reason);
-                return;
-            }}
-            
-            // ORIGINAL tab switch detection logic for non-timeout events
-            if (isTabSwitching) {{
-                console.log('🔍 Potential tab switch detected, delaying emergency save by 100ms...');
-                
-                setTimeout(() => {{
-                    if (document.visibilityState === 'visible') {{
-                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
-                        isTabSwitching = false;
-                        return;
-                    }}
-                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
-                    performActualEmergencySave(reason);
-                }}, 100);
-                
-                return;
-            }}
-            
-            // Immediate save for non-tab-switch scenarios
-            performActualEmergencySave(reason);
-        }}
         
-        // ... rest of the existing browser close detection code ...
-        // (Enhanced visibility change tracking, exit event listeners, etc.)
-        
-        // Enhanced visibility change tracking
+        // ENHANCED: Improved visibility change tracking
         document.addEventListener('visibilitychange', function() {{
             if (document.visibilityState === 'hidden') {{
                 console.log('👁️ Tab switched away - marking as potential tab switch');
                 isTabSwitching = true;
                 
+                // Clear any existing timeout
                 if (tabSwitchTimeout) {{
                     clearTimeout(tabSwitchTimeout);
                 }}
                 
+                // Reset tab switching flag after 2 seconds
                 tabSwitchTimeout = setTimeout(() => {{
                     console.log('⏰ Tab switch timeout - assuming real navigation');
                     isTabSwitching = false;
@@ -3110,6 +2527,7 @@ def render_browser_close_detection_enhanced(session_id: str):
                 console.log('👁️ Tab switched back - confirmed tab switch (not real exit)');
                 isTabSwitching = false;
                 
+                // Clear the timeout since we're back
                 if (tabSwitchTimeout) {{
                     clearTimeout(tabSwitchTimeout);
                     tabSwitchTimeout = null;
@@ -3117,7 +2535,7 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }}, {{ passive: true }});
         
-        // Listen to exit events
+        // ONLY listen to REAL exit events with enhanced filtering
         const realExitEvents = ['beforeunload', 'unload'];
         realExitEvents.forEach(eventType => {{
             try {{
@@ -3126,6 +2544,7 @@ def render_browser_close_detection_enhanced(session_id: str):
                     triggerEmergencySave(eventType);
                 }}, {{ capture: true, passive: true }});
                 
+                // Also listen on parent window (for iframe scenarios)
                 if (window.parent && window.parent !== window) {{
                     window.parent.addEventListener(eventType, (event) => {{
                         console.log('🚨 Parent exit event detected:', eventType, 'TabSwitching:', isTabSwitching);
@@ -3137,12 +2556,12 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }});
         
-        // LOG pagehide but DON'T trigger saves
+        // LOG pagehide but DON'T trigger saves (too unreliable for tab vs close detection)
         window.addEventListener('pagehide', function(event) {{
             console.log('📄 pagehide detected - persisted:', event.persisted, 'TabSwitching:', isTabSwitching, '(NOT triggering save - relying on beforeunload/unload)');
         }}, {{ passive: true }});
         
-        console.log('✅ Enhanced browser close detection ready - Smart timeout context detection enabled');
+        console.log('✅ Enhanced browser close detection ready - Smart tab switch filtering enabled');
     }})();
     </script>
     """
@@ -3151,91 +2570,6 @@ def render_browser_close_detection_enhanced(session_id: str):
         st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
-
-def add_activity_detection_with_polling(session_id: str, session_manager, session):
-    """Enhanced activity detection with timeout polling"""
-    if not session_id:
-        return None
-    
-    safe_session_id = session_id.replace('-', '_')
-    
-    activity_js = f"""
-    (() => {{
-        const sessionId = "{session_id}";
-        const stateKey = 'fifi_timeout_{safe_session_id}';
-        
-        if (!window[stateKey]) {{
-            window[stateKey] = {{ 
-                lastActivity: Date.now(), 
-                lastUpdate: 0, 
-                initialized: false,
-                pollCount: 0
-            }};
-        }}
-        
-        const state = window[stateKey];
-        
-        if (!state.initialized) {{
-            function trackActivity() {{ 
-                state.lastActivity = Date.now(); 
-                console.log('💓 Activity detected, timer reset');
-            }}
-            
-            ['mousedown', 'keydown', 'click', 'scroll', 'touchstart', 'focus'].forEach(e => {{
-                document.addEventListener(e, trackActivity, {{passive: true}});
-            }});
-            
-            // Try parent document for iframe scenarios
-            try {{
-                if (window.parent && window.parent !== window) {{
-                    ['mousedown', 'keydown', 'click', 'scroll', 'touchstart'].forEach(e => {{
-                        window.parent.document.addEventListener(e, trackActivity, {{passive: true}});
-                    }});
-                }}
-            }} catch (e) {{ console.debug('Parent monitoring not available:', e); }}
-            
-            state.initialized = true;
-            console.log('✅ Enhanced timeout system initialized');
-        }}
-        
-        const now = Date.now();
-        const timeSinceActivity = now - state.lastActivity;
-        const minutesSinceActivity = timeSinceActivity / (1000 * 60);
-        
-        // Return status for Python polling
-        state.pollCount++;
-        if (state.pollCount % 10 === 1) {{ // Log every 10th poll
-            console.log(`📊 Poll #${{state.pollCount}}: Inactive for ${{Math.floor(minutesSinceActivity)}} minutes`);
-        }}
-        
-        return {{
-            type: 'timeout_poll',
-            session_id: sessionId,
-            minutes_inactive: minutesSinceActivity,
-            last_activity: state.lastActivity,
-            poll_count: state.pollCount
-        }};
-    }})()
-    """
-    
-    try:
-        result = st_javascript(activity_js)
-        if result and result.get('type') == 'timeout_poll':
-            js_activity = result.get('last_activity')
-            if js_activity:
-                try:
-                    new_activity = datetime.fromtimestamp(js_activity / 1000)
-                    if new_activity > session.last_activity:
-                        session.last_activity = new_activity
-                        session_manager._save_session_with_retry(session)
-                        logger.debug(f"💓 Activity updated from polling for {session_id[:8]}")
-                except Exception as e:
-                    logger.error(f"Activity processing failed: {e}")
-        
-        return result
-    except Exception as e:
-        logger.error(f"Activity detection polling failed: {e}")
-        return None
         
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
     """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
@@ -3570,6 +2904,36 @@ def calculate_seconds_until_timeout(session, timeout_minutes=15):
     # Return at least 5 seconds to prevent immediate refresh loops
     return max(5, int(seconds_until_timeout))
 
+
+def inject_dynamic_timeout_refresh(session):
+    """
+    Injects a meta refresh that will trigger EXACTLY when the session should timeout.
+    This updates dynamically based on user activity.
+    """
+    seconds_until_timeout = calculate_seconds_until_timeout(session)
+    
+    # Add 1 second buffer to ensure we're past the timeout
+    refresh_at = seconds_until_timeout + 1
+    
+    dynamic_refresh_html = f"""
+    <meta http-equiv="refresh" content="{refresh_at}">
+    <script>
+        console.log('⏰ Session will be checked for timeout in {refresh_at} seconds');
+        
+        // Visual countdown (optional - remove if you don't want users to see)
+        let secondsLeft = {refresh_at};
+        setInterval(() => {{
+            secondsLeft--;
+            if (secondsLeft <= 300 && secondsLeft > 0) {{ // Last 5 minutes
+                console.log(`⏰ Timeout in ${{Math.floor(secondsLeft/60)}}m ${{secondsLeft%60}}s`);
+            }}
+        }}, 1000);
+    </script>
+    """
+    
+    st.markdown(dynamic_refresh_html, unsafe_allow_html=True)
+
+
 def completely_reset_session():
     """
     Completely clears the session and creates a new one.
@@ -3586,12 +2950,11 @@ def completely_reset_session():
     
     logger.info("✅ Session state completely cleared")
 
+
 def check_and_handle_timeout_with_reset(session_manager, session, timeout_minutes=15):
     """
     Checks for timeout and completely resets the session if timed out.
     """
-    logger.info(f"🔍 DEBUG: check_and_handle_timeout_with_reset called for {session.session_id[:8] if session else 'None'}")
-
     if not session or not session.active:
         return True
         
@@ -3601,23 +2964,6 @@ def check_and_handle_timeout_with_reset(session_manager, session, timeout_minute
     # Check if timeout reached
     if time_since_activity.total_seconds() > (timeout_minutes * 60):
         logger.info(f"⏰ Session timeout: {session.session_id[:8]} inactive for {time_since_activity}")
-        
-        # Set timeout context before any UI changes
-        timeout_context_js = """
-        <script>
-        try {
-            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
-            window.postMessage({
-                type: 'fifi_timeout_context', 
-                reason: 'session_timeout_15min_inactivity'
-            }, '*');
-            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
-        } catch (e) {
-            console.error('Failed to set timeout context:', e);
-        }
-        </script>
-        """
-        st.components.v1.html(timeout_context_js, height=0, width=0)
         
         # Show timeout message
         st.error("⏰ **Session Timeout**")
@@ -3647,7 +2993,6 @@ def check_and_handle_timeout_with_reset(session_manager, session, timeout_minute
         return True
         
     return False
-     
 
 # =============================================================================
 # UI COMPONENTS
@@ -3795,38 +3140,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             st.caption("Starting fingerprinting...")
 
         render_timeout_status_sidebar(session)
-
-        # AI Tools Status
-        st.divider()
-        st.markdown("**🤖 AI Tools Status**")
-        
-        ai_system = session_manager.ai
-        if ai_system:
-            # Pinecone status
-            if ai_system.pinecone_tool and ai_system.pinecone_tool.assistant:
-                st.success("🧠 Knowledge Base: Ready")
-            elif ai_system.config.PINECONE_API_KEY:
-                st.warning("🧠 Knowledge Base: Error")
-            else:
-                st.info("🧠 Knowledge Base: Not configured")
-            
-            # Tavily status  
-            if ai_system.tavily_agent:
-                st.success("🌐 Web Search: Ready")
-            elif ai_system.config.TAVILY_API_KEY:
-                st.warning("🌐 Web Search: Error")
-            else:
-                st.info("🌐 Web Search: Not configured")
-            
-            # OpenAI status
-            if ai_system.openai_client:
-                st.success("💬 OpenAI: Ready")
-            elif ai_system.config.OPENAI_API_KEY:
-                st.warning("💬 OpenAI: Error")
-            else:
-                st.info("💬 OpenAI: Not configured")
-        else:
-            st.error("🤖 AI System: Not available")
         
         if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
             if session.zoho_contact_id: 
@@ -4164,36 +3477,16 @@ def update_session_heartbeat(session_manager, session, heartbeat_data: dict):
         logger.info(f"⏰ Client reported timeout for {session.session_id[:8]}")
         # Client detected timeout, but server makes final decision
 
+
 def check_server_side_timeout(session_manager, session, timeout_minutes: int = 15) -> bool:
-    """ENHANCED: Server-side timeout check with context setting"""
+    """
+    Server-side timeout check - the authoritative source of truth.
+    """
     time_since_activity = datetime.now() - session.last_activity
     timeout_seconds = timeout_minutes * 60
     
     if time_since_activity.total_seconds() > timeout_seconds:
         logger.info(f"⏰ Server-side timeout confirmed for {session.session_id[:8]}")
-        
-        # ENHANCED: Set timeout context before any redirects
-        timeout_context_js = """
-        <script>
-        try {
-            // Set timeout context immediately
-            sessionStorage.setItem('fifi_timeout_reason', 'server_side_timeout_15min');
-            
-            // Send message to browser close detection
-            if (window.postMessage) {
-                window.postMessage({
-                    type: 'fifi_timeout_context',
-                    reason: 'server_side_timeout_15min'
-                }, '*');
-            }
-            
-            console.log('⏰ Server-side timeout context set');
-        } catch (e) {
-            console.error('Failed to set server timeout context:', e);
-        }
-        </script>
-        """
-        st.components.v1.html(timeout_context_js, height=0, width=0)
         
         # Display timeout message
         st.error("⏰ **Session Timeout:** Your session has expired due to 15 minutes of inactivity.")
@@ -4224,7 +3517,7 @@ def check_server_side_timeout(session_manager, session, timeout_minutes: int = 1
         
         st.info("🏠 Redirecting to home page...")
         
-        # ENHANCED: Force redirect with timeout flag
+        # Force redirect using query params
         st.query_params["timeout_redirect"] = "true"
         time.sleep(1)
         st.rerun()
@@ -4233,32 +3526,12 @@ def check_server_side_timeout(session_manager, session, timeout_minutes: int = 1
     
     return False
 
-def handle_timeout_redirect():
-    """ENHANCED: Set timeout context when redirecting"""
-    logger.info("🔍 DEBUG: handle_timeout_redirect called")
 
+def handle_timeout_redirect():
+    """
+    Handles the timeout redirect flag in query params.
+    """
     if st.query_params.get("timeout_redirect") == "true":
-        # Set timeout context in JavaScript
-        timeout_context_js = """
-        <script>
-        try {
-            // Store timeout reason in sessionStorage
-            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
-            
-            // Also send message to browser close detection
-            window.postMessage({
-                type: 'fifi_timeout_context',
-                reason: 'session_timeout_15min_inactivity'
-            }, '*');
-            
-            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
-        } catch (e) {
-            console.error('Failed to set timeout context:', e);
-        }
-        </script>
-        """
-        st.components.v1.html(timeout_context_js, height=0, width=0)
-        
         # Clear the flag
         if "timeout_redirect" in st.query_params:
             del st.query_params["timeout_redirect"]
@@ -4266,8 +3539,11 @@ def handle_timeout_redirect():
         # Clear session state to show welcome page
         for key in ['current_session_id', 'page']:
             if key in st.session_state:
-                del st.session_state[key]        
+                del st.session_state[key]
         
+        # The main routing logic will now show welcome page
+
+
 def render_timeout_status_sidebar(session):
     """
     Shows timeout countdown in sidebar ONLY in the last 5 minutes.
@@ -4289,79 +3565,21 @@ def render_timeout_status_sidebar(session):
                 st.sidebar.warning(f"⏰ Session expires in: {minutes}m {seconds}s")
             st.sidebar.caption("Any activity resets the timer")
 
-def render_chat_interface_with_timeout_system(session_manager: 'SessionManager', session: UserSession):
-    """Complete chat interface with new timeout system - maintains ALL existing features"""
+def render_chat_interface_with_exact_timeout(session_manager: 'SessionManager', session: UserSession):
+    """
+    Chat interface that refreshes exactly at the timeout moment.
+    """
+    # Check if already timed out
+    if check_and_handle_timeout_with_reset(session_manager, session):
+        return  # Session was reset, stop here
+    
+    # Inject dynamic refresh that will trigger exactly at timeout
+    inject_dynamic_timeout_refresh(session)
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # PRESERVE: All existing session recovery and database health checks
-    try:
-        fresh_session = session_manager.db.load_session(session.session_id)
-        if fresh_session and fresh_session.active:
-            session = fresh_session
-    except Exception as refresh_error:
-        logger.error(f"Session refresh failed: {refresh_error}")
-
-    try:
-        session_manager.db._ensure_connection_healthy(session_manager.config)
-    except Exception as db_error:
-        logger.error(f"Database check failed: {db_error}")
-
-    # NEW: Timeout polling and status checking (every 60 seconds via rerun)
-    polling_result = add_activity_detection_with_polling(session.session_id, session_manager, session)
-    timeout_status = session_manager.check_timeout_status(session)
-    
-    # TIMEOUT HANDLING: If 15+ minutes, redirect immediately
-    if timeout_status["status"] == "timeout":
-        logger.info(f"⏰ Timeout detected for {session.session_id[:8]}")
-        
-        # PRESERVE: Same CRM saving logic as before
-        if session_manager._is_crm_save_eligible(session, "15-Minute Inactivity Timeout"):
-            with st.spinner("💾 Saving your conversation before ending session..."):
-                try:
-                    session_manager.zoho.save_chat_transcript_sync(session, "15-Minute Inactivity Timeout")
-                    st.success("✅ Conversation saved to CRM")
-                    session.timeout_saved_to_crm = True
-                except Exception as e:
-                    logger.error(f"CRM save failed: {e}")
-        
-        # End session and redirect using st.switch_page
-        session.active = False
-        try:
-            session_manager.db.save_session(session)
-        except Exception as e:
-            logger.error(f"Failed to save ended session: {e}")
-        
-        # Clear Streamlit session state
-        for key in ['current_session_id', 'page']:
-            if key in st.session_state:
-                del st.session_state[key]
-        
-        st.info("🏠 Redirecting to welcome page due to inactivity...")
-        time.sleep(1)
-        st.switch_page("fifi.py")  # Redirect to main page
-        return
-
-    # WARNING PHASE: Show prominent warning at 14+ minutes
-    if timeout_status["status"] == "warning":
-        st.error("🚨 **SESSION EXPIRING!** Your session expires due to inactivity.")
-        
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.write(f"⏰ Time remaining: {timeout_status['seconds_left']} seconds")
-        with col2:
-            if st.button("Keep it Alive", type="primary", use_container_width=True):
-                session_manager.extend_session(session)
-                st.success("✅ Session extended for 15 minutes!")
-                time.sleep(1)
-                st.rerun()
-        
-        st.markdown("---")
-        # Show chat interface but make it less prominent during warning
-        st.markdown("**💬 Your conversation continues below:**")
-
-    # PRESERVE: All existing functionality exactly as before
+    # Check if session needs fingerprinting - FIXED CONDITION
     fingerprint_needed = (
         not session.fingerprint_id or
         session.fingerprint_method == "temporary_fallback_python" or
@@ -4369,17 +3587,43 @@ def render_chat_interface_with_timeout_system(session_manager: 'SessionManager',
     )
     
     if fingerprint_needed:
+        logger.info(f"🔄 Enhanced fingerprinting needed for session {session.session_id[:8]} (current: {session.fingerprint_id})")
+        
+        # Render fingerprinting component silently
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+        # Don't exit here - let the user continue using the app with fallback fingerprint
+        # The enhanced fingerprint will be applied on the next redirect
 
+    # Initialize global error handler
     global_message_channel_error_handler()
     
+    # Add browser close detection for all user types (since all can now have CRM saves)
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
             render_browser_close_detection_enhanced(session.session_id)
         except Exception as e:
-            logger.error(f"Browser close detection failed: {e}")
+            logger.error(f"Failed to render browser close detection for {session.session_id[:8]}: {e}", exc_info=True)
 
-    # PRESERVE: User limits check exactly as before
+    # REPLACE THE OLD TIMER WITH THIS:
+    # Inject heartbeat monitor and capture any data
+    heartbeat_data = inject_activity_heartbeat_monitor(session.session_id)
+    
+    # Process heartbeat data if received
+    if heartbeat_data:
+        update_session_heartbeat(session_manager, session, heartbeat_data)
+    
+    # Force a periodic check even if no heartbeat (fallback)
+    # This uses a less aggressive approach - only every 2 minutes
+    if 'last_timeout_check' not in st.session_state:
+        st.session_state.last_timeout_check = time.time()
+    
+    if time.time() - st.session_state.last_timeout_check > 120:  # 2 minutes
+        st.session_state.last_timeout_check = time.time()
+        # Add a small random delay to prevent all sessions rerunning at once
+        time.sleep(0.1)
+        st.rerun()
+
+    # Check user limits
     limit_check = session_manager.question_limits.is_within_limits(session)
     if not limit_check['allowed']:
         if limit_check.get('reason') == 'guest_limit':
@@ -4388,55 +3632,29 @@ def render_chat_interface_with_timeout_system(session_manager: 'SessionManager',
         else:
             return
 
-    # PRESERVE: Display chat messages exactly as before
+    # Display chat messages
     for msg in session.messages:
         with st.chat_message(msg.get("role", "user")):
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
             if msg.get("role") == "assistant":
                 if "source" in msg:
-                    source_color = {
-                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
-                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                        "Error Handler": "❌"
-                    }.get(msg['source'], "🤖")
-                    st.caption(f"{source_color} Source: {msg['source']}")
+                    st.caption(f"Source: {msg['source']}")
                 
                 indicators = []
-                if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
-                if msg.get("used_search"): indicators.append("🌐 Web Search")
-                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                if msg.get("used_pinecone"):
+                    indicators.append("🧠 Knowledge Base")
+                if msg.get("used_search"):
+                    indicators.append("🌐 Web Search")
                 
-                if msg.get("safety_override"):
-                    st.warning("🛡️ Safety Override: Switched to verified sources")
-                
-                if msg.get("has_citations") and msg.get("has_inline_citations"):
-                    st.caption("📚 Response includes verified citations")
+                if indicators:
+                    st.caption(f"Enhanced with: {', '.join(indicators)}")
 
-    # PRESERVE: Chat input processing exactly as before (unless in warning phase)
-    if timeout_status["status"] != "warning":  # Normal chat input
-        prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                                disabled=session.ban_status.value != BanStatus.NONE.value)
-    else:  # During warning, show disabled input with message
-        prompt = st.chat_input("Click 'Keep it Alive' above to continue chatting...", disabled=True)
+    # Chat input
+    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                            disabled=session.ban_status.value != BanStatus.NONE.value)
     
-    if prompt and timeout_status["status"] != "warning":
-        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
-        
-        # PRESERVE: All existing processing logic
-        try:
-            fresh_session = session_manager.db.load_session(session.session_id)
-            if fresh_session and fresh_session.active:
-                session = fresh_session
-        except Exception as refresh_error:
-            logger.error(f"Pre-processing refresh failed: {refresh_error}")
-        
-        session.last_activity = datetime.now()
-        try:
-            session_manager.db.save_session(session)
-        except Exception as save_error:
-            logger.error(f"Failed to save activity: {save_error}")
-        
+    if prompt:
         with st.chat_message("user"):
             st.markdown(prompt)
         
@@ -4446,7 +3664,7 @@ def render_chat_interface_with_timeout_system(session_manager: 'SessionManager',
                     response = session_manager.get_ai_response(session, prompt)
                     
                     if response.get('requires_email'):
-                        st.error("📧 Please verify your email to continue.")
+                        st.error("📧 Please verify your email to continue using FiFi AI.")
                         st.session_state.verification_stage = 'email_entry'
                         st.rerun()
                     elif response.get('banned'):
@@ -4457,37 +3675,30 @@ def render_chat_interface_with_timeout_system(session_manager: 'SessionManager',
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.rerun()
+                    elif response.get('evasion_penalty'):
+                        st.error("🚫 Evasion detected - Your access has been temporarily restricted.")
+                        st.error(f"Penalty duration: {response.get('penalty_hours', 0)} hours.")
+                        st.rerun()
                     else:
                         st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         
                         if response.get("source"):
-                            source_color = {
-                                "FiFi": "🧠", "FiFi Web Search": "🌐",
-                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                                "Error Handler": "❌"
-                            }.get(response['source'], "🤖")
-                            st.caption(f"{source_color} Source: {response['source']}")
+                            st.caption(f"Source: {response['source']}")
                         
-                        logger.info(f"✅ Question processed successfully")
+                        indicators = []
+                        if response.get("used_pinecone"):
+                            indicators.append("🧠 Knowledge Base")
+                        if response.get("used_search"):
+                            indicators.append("🌐 Web Search")
+                        
+                        if indicators:
+                            st.caption(f"Enhanced with: {', '.join(indicators)}")
                         
                 except Exception as e:
-                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
-                    st.error("⚠️ I encountered an error. Please try again.")
+                    logger.error(f"AI response generation failed due to an unexpected error: {e}", exc_info=True)
+                    st.error("⚠️ Sorry, I encountered an unexpected error processing your request. Please try again.")
         
         st.rerun()
-    
-    # NEW: Automatic polling (triggers rerun every 60 seconds during normal operation)
-    if timeout_status["status"] == "active":
-        # Only poll every 60 seconds, not on every rerun
-        current_time = datetime.now()
-        last_poll = st.session_state.get('last_timeout_poll', current_time - timedelta(seconds=61))
-        
-        if (current_time - last_poll).total_seconds() >= 60:
-            st.session_state.last_timeout_poll = current_time
-            logger.debug(f"🔄 Timeout poll triggered for {session.session_id[:8]}")
-            time.sleep(0.1)  # Brief delay to prevent tight loops
-            st.rerun()
-
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
 # =============================================================================
@@ -4680,7 +3891,7 @@ def main_fixed():
                         return  # Session timed out and was reset, stop here
                         
                     render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-                    render_chat_interface_with_timeout_system(session_manager, session)
+                    render_chat_interface_with_exact_timeout(session_manager, session)
                 else:
                     logger.warning(f"🔍 MAIN ROUTING: Session inactive or None, redirecting to welcome")
                     st.session_state['page'] = None
