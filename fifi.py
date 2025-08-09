@@ -2366,23 +2366,7 @@ def handle_auto_timeout_from_query():
         logger.info("⏰ AUTO-TIMEOUT DETECTED VIA URL REDIRECT!")
         logger.info(f"Session ID: {session_id}, Inactive: {inactive_minutes} minutes")
         logger.info("=" * 80)
-
-        # Set timeout context before any UI changes
-        timeout_context_js = """
-        <script>
-        try {
-            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
-            window.postMessage({
-                type: 'fifi_timeout_context', 
-                reason: 'session_timeout_15min_inactivity'
-            }, '*');
-            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
-        } catch (e) {
-            console.error('Failed to set timeout context:', e);
-        }
-        </script>
-        """
-        st.components.v1.html(timeout_context_js, height=0, width=0)
+        
         # Clear query parameters
         for param in ["event", "session_id", "inactive_minutes"]:
             if param in st.query_params:
@@ -2430,7 +2414,7 @@ def handle_auto_timeout_from_query():
         st.rerun()
 
 def render_browser_close_detection_enhanced(session_id: str):
-    """Enhanced browser close detection - FIXED to pass timeout context when available"""
+    """Enhanced browser close detection - FIXED to properly distinguish tab switches from real exits"""
     if not session_id:
         return
 
@@ -2446,68 +2430,53 @@ def render_browser_close_detection_enhanced(session_id: str):
         const sessionId = '{session_id}';
         const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         
-        // ENHANCED: Check for timeout context
+        // FIXED: Tab switch detection state
         let saveTriggered = false;
         let isTabSwitching = false;
         let tabSwitchTimeout = null;
-        let timeoutContext = null; // NEW: Store timeout context
         
-        console.log('🛡️ Browser close detection initialized (ENHANCED with timeout context)');
+        console.log('🛡️ Browser close detection initialized (ENHANCED tab switch filtering)');
 
-        // NEW: Listen for timeout context from Streamlit
-        window.addEventListener('message', function(event) {{
-            if (event.data && event.data.type === 'fifi_timeout_context') {{
-                timeoutContext = event.data.reason;
-                console.log('⏰ Timeout context received:', timeoutContext);
-            }}
-        }});
-        
-        // ENHANCED: Check for timeout context in sessionStorage
-        function getActualReason(defaultReason) {{
-            // Check for timeout context first
-            if (timeoutContext) {{
-                console.log('✅ Using timeout context:', timeoutContext);
-                return timeoutContext;
+        // FIXED: Enhanced emergency save that checks for tab switches
+        function triggerEmergencySave(reason = 'unknown') {{
+            if (saveTriggered) return;
+            
+            // CRITICAL FIX: If we detected a recent tab switch, delay and check if we come back
+            if (isTabSwitching) {{
+                console.log('🔍 Potential tab switch detected, delaying emergency save by 100ms...');
+                
+                setTimeout(() => {{
+                    // Check if document became visible again (indicates tab switch, not real exit)
+                    if (document.visibilityState === 'visible') {{
+                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
+                        isTabSwitching = false;
+                        return;
+                    }}
+                    
+                    // Still hidden after delay, proceed with save
+                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
+                    performActualEmergencySave(reason + '_confirmed');
+                }}, 100); // Short delay to check visibility
+                
+                return;
             }}
             
-            // Check sessionStorage for timeout flag
-            try {{
-                const timeoutFlag = sessionStorage.getItem('fifi_timeout_reason');
-                if (timeoutFlag) {{
-                    console.log('✅ Found timeout reason in sessionStorage:', timeoutFlag);
-                    sessionStorage.removeItem('fifi_timeout_reason'); // Clean up
-                    return timeoutFlag;
-                }}
-            }} catch (e) {{
-                console.debug('SessionStorage not available:', e);
-            }}
-            
-            // Check for timeout indicators in URL
-            const urlParams = new URLSearchParams(window.location.search);
-            if (urlParams.get('timeout_redirect') === 'true') {{
-                console.log('✅ Detected timeout redirect in URL');
-                return 'session_timeout_redirect';
-            }}
-            
-            console.log('ℹ️ No timeout context found, using browser event:', defaultReason);
-            return defaultReason;
+            // Immediate save for non-tab-switch scenarios
+            performActualEmergencySave(reason);
         }}
-
-        function performActualEmergencySave(browserReason) {{
+        
+        function performActualEmergencySave(reason) {{
             if (saveTriggered) return;
             saveTriggered = true;
             
-            // ENHANCED: Get the actual reason (timeout context or browser event)
-            const actualReason = getActualReason(browserReason);
-            console.log('🚨 Emergency save triggered - Browser:', browserReason, 'Actual:', actualReason);
+            console.log('🚨 REAL browser exit detected (' + reason + ') - triggering emergency save');
             
-            // PRIMARY METHOD: Send beacon to FastAPI with correct reason
+            // PRIMARY METHOD: Send beacon to FastAPI
             if (navigator.sendBeacon) {{
                 try {{
                     const emergencyData = JSON.stringify({{
                         session_id: sessionId,
-                        reason: actualReason, // Use actual reason, not browser reason
-                        browser_event: browserReason, // Include browser event for debugging
+                        reason: reason,
                         timestamp: Date.now()
                     }});
                     
@@ -2517,7 +2486,7 @@ def render_browser_close_detection_enhanced(session_id: str):
                     );
                     
                     if (beaconSent) {{
-                        console.log('✅ Emergency save beacon sent with correct reason:', actualReason);
+                        console.log('✅ Emergency save beacon sent successfully');
                         return;
                     }} else {{
                         console.error('❌ Beacon failed to send');
@@ -2527,64 +2496,28 @@ def render_browser_close_detection_enhanced(session_id: str):
                 }}
             }}
             
-            // FALLBACK: Redirect to Streamlit with correct reason
+            // FALLBACK: Redirect to Streamlit
             try {{
                 console.log('🔄 Beacon failed, trying redirect fallback...');
-                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{actualReason}}`;
+                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}`;
                 window.location.href = saveUrl;
             }} catch (e) {{
                 console.error('❌ Both beacon and redirect failed:', e);
             }}
         }}
-
-        // FIXED: Enhanced emergency save that checks for tab switches and timeout context
-        function triggerEmergencySave(reason = 'unknown') {{
-            if (saveTriggered) return;
-            
-            // Check for timeout context first
-            const actualReason = getActualReason(reason);
-            
-            // If this is a timeout, skip tab switch detection
-            if (actualReason.includes('timeout') || actualReason.includes('inactivity')) {{
-                console.log('⏰ Timeout detected, bypassing tab switch detection');
-                performActualEmergencySave(reason);
-                return;
-            }}
-            
-            // ORIGINAL tab switch detection logic for non-timeout events
-            if (isTabSwitching) {{
-                console.log('🔍 Potential tab switch detected, delaying emergency save by 100ms...');
-                
-                setTimeout(() => {{
-                    if (document.visibilityState === 'visible') {{
-                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
-                        isTabSwitching = false;
-                        return;
-                    }}
-                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
-                    performActualEmergencySave(reason);
-                }}, 100);
-                
-                return;
-            }}
-            
-            // Immediate save for non-tab-switch scenarios
-            performActualEmergencySave(reason);
-        }}
         
-        // ... rest of the existing browser close detection code ...
-        // (Enhanced visibility change tracking, exit event listeners, etc.)
-        
-        // Enhanced visibility change tracking
+        // ENHANCED: Improved visibility change tracking
         document.addEventListener('visibilitychange', function() {{
             if (document.visibilityState === 'hidden') {{
                 console.log('👁️ Tab switched away - marking as potential tab switch');
                 isTabSwitching = true;
                 
+                // Clear any existing timeout
                 if (tabSwitchTimeout) {{
                     clearTimeout(tabSwitchTimeout);
                 }}
                 
+                // Reset tab switching flag after 2 seconds
                 tabSwitchTimeout = setTimeout(() => {{
                     console.log('⏰ Tab switch timeout - assuming real navigation');
                     isTabSwitching = false;
@@ -2594,6 +2527,7 @@ def render_browser_close_detection_enhanced(session_id: str):
                 console.log('👁️ Tab switched back - confirmed tab switch (not real exit)');
                 isTabSwitching = false;
                 
+                // Clear the timeout since we're back
                 if (tabSwitchTimeout) {{
                     clearTimeout(tabSwitchTimeout);
                     tabSwitchTimeout = null;
@@ -2601,7 +2535,7 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }}, {{ passive: true }});
         
-        // Listen to exit events
+        // ONLY listen to REAL exit events with enhanced filtering
         const realExitEvents = ['beforeunload', 'unload'];
         realExitEvents.forEach(eventType => {{
             try {{
@@ -2610,6 +2544,7 @@ def render_browser_close_detection_enhanced(session_id: str):
                     triggerEmergencySave(eventType);
                 }}, {{ capture: true, passive: true }});
                 
+                // Also listen on parent window (for iframe scenarios)
                 if (window.parent && window.parent !== window) {{
                     window.parent.addEventListener(eventType, (event) => {{
                         console.log('🚨 Parent exit event detected:', eventType, 'TabSwitching:', isTabSwitching);
@@ -2621,12 +2556,12 @@ def render_browser_close_detection_enhanced(session_id: str):
             }}
         }});
         
-        // LOG pagehide but DON'T trigger saves
+        // LOG pagehide but DON'T trigger saves (too unreliable for tab vs close detection)
         window.addEventListener('pagehide', function(event) {{
             console.log('📄 pagehide detected - persisted:', event.persisted, 'TabSwitching:', isTabSwitching, '(NOT triggering save - relying on beforeunload/unload)');
         }}, {{ passive: true }});
         
-        console.log('✅ Enhanced browser close detection ready - Smart timeout context detection enabled');
+        console.log('✅ Enhanced browser close detection ready - Smart tab switch filtering enabled');
     }})();
     </script>
     """
@@ -2635,7 +2570,6 @@ def render_browser_close_detection_enhanced(session_id: str):
         st.components.v1.html(js_code, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close component: {e}", exc_info=True)
-
         
 def handle_timer_event(timer_result: Dict[str, Any], session_manager: 'SessionManager', session: UserSession) -> bool:
     """Processes events triggered by the JavaScript activity timer with TRUE session timeout."""
@@ -3016,6 +2950,7 @@ def completely_reset_session():
     
     logger.info("✅ Session state completely cleared")
 
+
 def check_and_handle_timeout_with_reset(session_manager, session, timeout_minutes=15):
     """
     Checks for timeout and completely resets the session if timed out.
@@ -3029,23 +2964,6 @@ def check_and_handle_timeout_with_reset(session_manager, session, timeout_minute
     # Check if timeout reached
     if time_since_activity.total_seconds() > (timeout_minutes * 60):
         logger.info(f"⏰ Session timeout: {session.session_id[:8]} inactive for {time_since_activity}")
-        
-        # Set timeout context before any UI changes
-        timeout_context_js = """
-        <script>
-        try {
-            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
-            window.postMessage({
-                type: 'fifi_timeout_context', 
-                reason: 'session_timeout_15min_inactivity'
-            }, '*');
-            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
-        } catch (e) {
-            console.error('Failed to set timeout context:', e);
-        }
-        </script>
-        """
-        st.components.v1.html(timeout_context_js, height=0, width=0)
         
         # Show timeout message
         st.error("⏰ **Session Timeout**")
@@ -3075,7 +2993,6 @@ def check_and_handle_timeout_with_reset(session_manager, session, timeout_minute
         return True
         
     return False
-     
 
 # =============================================================================
 # UI COMPONENTS
@@ -3560,36 +3477,16 @@ def update_session_heartbeat(session_manager, session, heartbeat_data: dict):
         logger.info(f"⏰ Client reported timeout for {session.session_id[:8]}")
         # Client detected timeout, but server makes final decision
 
+
 def check_server_side_timeout(session_manager, session, timeout_minutes: int = 15) -> bool:
-    """ENHANCED: Server-side timeout check with context setting"""
+    """
+    Server-side timeout check - the authoritative source of truth.
+    """
     time_since_activity = datetime.now() - session.last_activity
     timeout_seconds = timeout_minutes * 60
     
     if time_since_activity.total_seconds() > timeout_seconds:
         logger.info(f"⏰ Server-side timeout confirmed for {session.session_id[:8]}")
-        
-        # ENHANCED: Set timeout context before any redirects
-        timeout_context_js = """
-        <script>
-        try {
-            // Set timeout context immediately
-            sessionStorage.setItem('fifi_timeout_reason', 'server_side_timeout_15min');
-            
-            // Send message to browser close detection
-            if (window.postMessage) {
-                window.postMessage({
-                    type: 'fifi_timeout_context',
-                    reason: 'server_side_timeout_15min'
-                }, '*');
-            }
-            
-            console.log('⏰ Server-side timeout context set');
-        } catch (e) {
-            console.error('Failed to set server timeout context:', e);
-        }
-        </script>
-        """
-        st.components.v1.html(timeout_context_js, height=0, width=0)
         
         # Display timeout message
         st.error("⏰ **Session Timeout:** Your session has expired due to 15 minutes of inactivity.")
@@ -3620,7 +3517,7 @@ def check_server_side_timeout(session_manager, session, timeout_minutes: int = 1
         
         st.info("🏠 Redirecting to home page...")
         
-        # ENHANCED: Force redirect with timeout flag
+        # Force redirect using query params
         st.query_params["timeout_redirect"] = "true"
         time.sleep(1)
         st.rerun()
@@ -3629,30 +3526,12 @@ def check_server_side_timeout(session_manager, session, timeout_minutes: int = 1
     
     return False
 
+
 def handle_timeout_redirect():
-    """ENHANCED: Set timeout context when redirecting"""
+    """
+    Handles the timeout redirect flag in query params.
+    """
     if st.query_params.get("timeout_redirect") == "true":
-        # Set timeout context in JavaScript
-        timeout_context_js = """
-        <script>
-        try {
-            // Store timeout reason in sessionStorage
-            sessionStorage.setItem('fifi_timeout_reason', 'session_timeout_15min_inactivity');
-            
-            // Also send message to browser close detection
-            window.postMessage({
-                type: 'fifi_timeout_context',
-                reason: 'session_timeout_15min_inactivity'
-            }, '*');
-            
-            console.log('⏰ Timeout context set: session_timeout_15min_inactivity');
-        } catch (e) {
-            console.error('Failed to set timeout context:', e);
-        }
-        </script>
-        """
-        st.components.v1.html(timeout_context_js, height=0, width=0)
-        
         # Clear the flag
         if "timeout_redirect" in st.query_params:
             del st.query_params["timeout_redirect"]
@@ -3660,8 +3539,11 @@ def handle_timeout_redirect():
         # Clear session state to show welcome page
         for key in ['current_session_id', 'page']:
             if key in st.session_state:
-                del st.session_state[key]        
+                del st.session_state[key]
         
+        # The main routing logic will now show welcome page
+
+
 def render_timeout_status_sidebar(session):
     """
     Shows timeout countdown in sidebar ONLY in the last 5 minutes.
