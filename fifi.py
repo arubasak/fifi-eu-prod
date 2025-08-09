@@ -399,6 +399,14 @@ class DatabaseManager:
                     )
                 ''')
                 
+                # Add display_message_offset column if it doesn't exist (for existing databases)
+                try:
+                    self.conn.execute("ALTER TABLE sessions ADD COLUMN display_message_offset INTEGER DEFAULT 0")
+                    logger.info("✅ Added display_message_offset column to existing database")
+                except Exception as alter_error:
+                    # Column likely already exists, which is fine
+                    logger.debug(f"ALTER TABLE for display_message_offset failed (likely already exists): {alter_error}")
+                
                 # Create essential indexes
                 self.conn.execute("CREATE INDEX IF NOT EXISTS idx_session_lookup ON sessions(session_id, active)")
                 self.conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint_id ON sessions(fingerprint_id)")
@@ -545,6 +553,12 @@ class DatabaseManager:
                         session.user_type = UserType(session.user_type)
                     except ValueError:
                         session.user_type = UserType.GUEST
+                
+                # Ensure backward compatibility for in-memory sessions too
+                if session and not hasattr(session, 'display_message_offset'):
+                    session.display_message_offset = 0
+                    logger.debug(f"Added missing display_message_offset to in-memory session {session_id[:8]}")
+                
                 return copy.deepcopy(session)
             
             try:
@@ -561,11 +575,14 @@ class DatabaseManager:
                 
                 # Handle as tuple (SQLite Cloud returns tuples)
                 expected_cols = 32  # Updated from 31 to 32 for new display_message_offset column
-                if len(row) < expected_cols:
-                    logger.error(f"Row has insufficient columns: {len(row)} (expected {expected_cols}) for session {session_id[:8]}. Data corruption suspected.")
+                if len(row) < 31:  # Must have at least 31 columns for basic functionality
+                    logger.error(f"Row has insufficient columns: {len(row)} (expected at least 31) for session {session_id[:8]}. Data corruption suspected.")
                     return None
                     
                 try:
+                    # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
+                    loaded_display_message_offset = row[31] if len(row) > 31 else 0
+                    
                     user_session = UserSession(
                         session_id=row[0], 
                         user_type=UserType(row[1]) if row[1] else UserType.GUEST,
@@ -598,7 +615,7 @@ class DatabaseManager:
                         registration_prompted=bool(row[28]),
                         registration_link_clicked=bool(row[29]),
                         recognition_response=row[30],
-                        display_message_offset=row[31] or 0  # NEW: Soft clear display offset
+                        display_message_offset=loaded_display_message_offset  # Use the safely loaded value
                     )
                     
                     logger.info(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}")
@@ -622,7 +639,12 @@ class DatabaseManager:
                 self._ensure_connection_healthy(current_config)
 
             if self.db_type == "memory":
-                return [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fingerprint_id]
+                sessions = [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fingerprint_id]
+                # Ensure backward compatibility for in-memory sessions
+                for session in sessions:
+                    if not hasattr(session, 'display_message_offset'):
+                        session.display_message_offset = 0
+                return sessions
             
             try:
                 if hasattr(self.conn, 'row_factory'):
@@ -630,12 +652,14 @@ class DatabaseManager:
 
                 cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
                 sessions = []
-                expected_cols = 32  # Updated from 31 to 32
                 for row in cursor.fetchall():
-                    if len(row) < expected_cols:
-                        logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected {expected_cols}). Skipping row.")
+                    if len(row) < 31:  # Must have at least 31 columns for basic functionality
+                        logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected at least 31). Skipping row.")
                         continue
                     try:
+                        # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
+                        loaded_display_message_offset = row[31] if len(row) > 31 else 0
+                        
                         s = UserSession(
                             session_id=row[0], 
                             user_type=UserType(row[1]) if row[1] else UserType.GUEST,
@@ -668,7 +692,7 @@ class DatabaseManager:
                             registration_prompted=bool(row[28]),
                             registration_link_clicked=bool(row[29]),
                             recognition_response=row[30],
-                            display_message_offset=row[31] or 0  # NEW: Soft clear display offset
+                            display_message_offset=loaded_display_message_offset  # Use the safely loaded value
                         )
                         sessions.append(s)
                     except Exception as e:
@@ -688,7 +712,12 @@ class DatabaseManager:
                 self._ensure_connection_healthy(current_config)
 
             if self.db_type == "memory":
-                return [copy.deepcopy(s) for s in self.local_sessions.values() if s.email == email]
+                sessions = [copy.deepcopy(s) for s in self.local_sessions.values() if s.email == email]
+                # Ensure backward compatibility for in-memory sessions
+                for session in sessions:
+                    if not hasattr(session, 'display_message_offset'):
+                        session.display_message_offset = 0
+                return sessions
             
             try:
                 if hasattr(self.conn, 'row_factory'):
@@ -696,12 +725,14 @@ class DatabaseManager:
 
                 cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset FROM sessions WHERE email = ? ORDER BY last_activity DESC", (email,))
                 sessions = []
-                expected_cols = 32  # Updated from 31 to 32
                 for row in cursor.fetchall():
-                    if len(row) < expected_cols:
-                        logger.warning(f"Row has insufficient columns in find_sessions_by_email: {len(row)} (expected {expected_cols}). Skipping row.")
+                    if len(row) < 31:  # Must have at least 31 columns for basic functionality
+                        logger.warning(f"Row has insufficient columns in find_sessions_by_email: {len(row)} (expected at least 31). Skipping row.")
                         continue
                     try:
+                        # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
+                        loaded_display_message_offset = row[31] if len(row) > 31 else 0
+                        
                         s = UserSession(
                             session_id=row[0], 
                             user_type=UserType(row[1]) if row[1] else UserType.GUEST,
@@ -734,7 +765,7 @@ class DatabaseManager:
                             registration_prompted=bool(row[28]),
                             registration_link_clicked=bool(row[29]),
                             recognition_response=row[30],
-                            display_message_offset=row[31] or 0  # NEW: Soft clear display offset
+                            display_message_offset=loaded_display_message_offset  # Use the safely loaded value
                         )
                         sessions.append(s)
                     except Exception as e:
