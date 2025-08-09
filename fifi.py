@@ -2249,12 +2249,45 @@ class SessionManager:
             try:
                 existing_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
                 if existing_sessions:
-                    # Inherit recognition data from most recent session
+                    # Sort by last_activity to get the most recent relevant session
                     recent_session = max(existing_sessions, key=lambda s: s.last_activity)
-                    if recent_session.email and recent_session.user_type != UserType.GUEST:
+                    
+                    # Inherit complete user state from the most recent session IF it's a non-guest type
+                    # This ensures historical usage is restored for returning visitors who get a new session ID
+                    if recent_session.user_type != UserType.GUEST:
+                        # Inherit user identity
+                        session.user_type = recent_session.user_type
+                        session.email = recent_session.email
+                        session.full_name = recent_session.full_name
+                        session.zoho_contact_id = recent_session.zoho_contact_id
                         session.visitor_type = "returning_visitor"
+                        
+                        # CRITICAL: Inherit usage counters and history to restore user's progress
+                        session.daily_question_count = recent_session.daily_question_count
+                        session.total_question_count = recent_session.total_question_count
+                        session.last_question_time = recent_session.last_question_time
+                        session.question_limit_reached = recent_session.question_limit_reached
+                        
+                        # Inherit ban status if applicable
+                        session.ban_status = recent_session.ban_status
+                        session.ban_start_time = recent_session.ban_start_time
+                        session.ban_end_time = recent_session.ban_end_time
+                        session.ban_reason = recent_session.ban_reason
+                        
+                        # Inherit tracking data
+                        session.email_addresses_used = recent_session.email_addresses_used
+                        session.email_switches_count = recent_session.email_switches_count
+                        session.evasion_count = recent_session.evasion_count
+                        session.current_penalty_hours = recent_session.current_penalty_hours
+                        session.escalation_level = recent_session.escalation_level
+                        
+                        logger.info(f"✅ Inherited complete session data for {session.session_id[:8]} from recognized fingerprint: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}")
+                    else:
+                        # If only guest sessions are found for this fingerprint, treat as new visitor
+                        session.visitor_type = "new_visitor"
+                        logger.info(f"🆕 Fingerprint {session.fingerprint_id[:8]} has only guest history, treating as new visitor")
             except Exception as e:
-                logger.error(f"Failed to check fingerprint history: {e}")
+                logger.error(f"Failed to check fingerprint history or inherit data: {e}")
                 # Continue without history check
             
             # Save session with new fingerprint data
@@ -3489,7 +3522,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     if fingerprint_needed:
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
 
-    # Browser close detection for emergency saves (simplified)
+    # Browser close detection for emergency saves (enhanced to avoid tab switch false positives)
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
             render_simplified_browser_close_detection(session.session_id)
