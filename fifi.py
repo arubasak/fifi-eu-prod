@@ -296,6 +296,9 @@ class UserSession:
     # Registration Tracking
     registration_prompted: bool = False
     registration_link_clicked: bool = False
+    
+    # NEW: Soft Clear Mechanism - preserves all messages in DB while clearing UI display
+    display_message_offset: int = 0
 
 class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
@@ -358,7 +361,7 @@ class DatabaseManager:
                 if hasattr(self.conn, 'row_factory'): 
                     self.conn.row_factory = None
 
-                # Create table with all columns upfront
+                # Create table with all columns upfront, including display_message_offset
                 self.conn.execute('''
                     CREATE TABLE IF NOT EXISTS sessions (
                         session_id TEXT PRIMARY KEY,
@@ -391,7 +394,8 @@ class DatabaseManager:
                         registration_link_clicked INTEGER DEFAULT 0,
                         wp_token TEXT,
                         timeout_saved_to_crm INTEGER DEFAULT 0,
-                        recognition_response TEXT
+                        recognition_response TEXT,
+                        display_message_offset INTEGER DEFAULT 0
                     )
                 ''')
                 
@@ -497,7 +501,7 @@ class DatabaseManager:
                     session.email_addresses_used = []
                 
                 self.conn.execute(
-                    '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                     (session.session_id, session.user_type.value, session.email, session.full_name,
                      session.zoho_contact_id, session.created_at.isoformat(),
                      session.last_activity.isoformat(), json_messages, int(session.active),
@@ -511,7 +515,7 @@ class DatabaseManager:
                      session.ban_reason, session.evasion_count, session.current_penalty_hours,
                      session.escalation_level, json_emails_used,
                      session.email_switches_count, session.browser_privacy_level, int(session.registration_prompted),
-                     int(session.registration_link_clicked), session.recognition_response))
+                     int(session.registration_link_clicked), session.recognition_response, session.display_message_offset))
                 self.conn.commit()
                 
                 logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}")
@@ -548,7 +552,7 @@ class DatabaseManager:
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
                 
-                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
                 row = cursor.fetchone()
                 
                 if not row: 
@@ -556,7 +560,7 @@ class DatabaseManager:
                     return None
                 
                 # Handle as tuple (SQLite Cloud returns tuples)
-                expected_cols = 31
+                expected_cols = 32  # Updated from 31 to 32 for new display_message_offset column
                 if len(row) < expected_cols:
                     logger.error(f"Row has insufficient columns: {len(row)} (expected {expected_cols}) for session {session_id[:8]}. Data corruption suspected.")
                     return None
@@ -593,7 +597,8 @@ class DatabaseManager:
                         browser_privacy_level=row[27],
                         registration_prompted=bool(row[28]),
                         registration_link_clicked=bool(row[29]),
-                        recognition_response=row[30]
+                        recognition_response=row[30],
+                        display_message_offset=row[31] or 0  # NEW: Soft clear display offset
                     )
                     
                     logger.info(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}")
@@ -623,9 +628,9 @@ class DatabaseManager:
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
 
-                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
+                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
                 sessions = []
-                expected_cols = 31
+                expected_cols = 32  # Updated from 31 to 32
                 for row in cursor.fetchall():
                     if len(row) < expected_cols:
                         logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected {expected_cols}). Skipping row.")
@@ -662,7 +667,8 @@ class DatabaseManager:
                             browser_privacy_level=row[27],
                             registration_prompted=bool(row[28]),
                             registration_link_clicked=bool(row[29]),
-                            recognition_response=row[30]
+                            recognition_response=row[30],
+                            display_message_offset=row[31] or 0  # NEW: Soft clear display offset
                         )
                         sessions.append(s)
                     except Exception as e:
@@ -688,9 +694,9 @@ class DatabaseManager:
                 if hasattr(self.conn, 'row_factory'):
                     self.conn.row_factory = None
 
-                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response FROM sessions WHERE email = ? ORDER BY last_activity DESC", (email,))
+                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset FROM sessions WHERE email = ? ORDER BY last_activity DESC", (email,))
                 sessions = []
-                expected_cols = 31
+                expected_cols = 32  # Updated from 31 to 32
                 for row in cursor.fetchall():
                     if len(row) < expected_cols:
                         logger.warning(f"Row has insufficient columns in find_sessions_by_email: {len(row)} (expected {expected_cols}). Skipping row.")
@@ -727,7 +733,8 @@ class DatabaseManager:
                             browser_privacy_level=row[27],
                             registration_prompted=bool(row[28]),
                             registration_link_clicked=bool(row[29]),
-                            recognition_response=row[30]
+                            recognition_response=row[30],
+                            display_message_offset=row[31] or 0  # NEW: Soft clear display offset
                         )
                         sessions.append(s)
                     except Exception as e:
@@ -2039,17 +2046,41 @@ class SessionManager:
                 logger.info(f"CRM save not eligible - no questions asked for {session.session_id[:8]}")
                 return False
             
-            # 15-minute eligibility check
-            if not self._check_15min_eligibility(session):
-                logger.info(f"CRM save not eligible - less than 15 minutes active for {session.session_id[:8]}")
-                return False
+            # 15-minute eligibility check ONLY for timeout/automatic saves
+            if "timeout" in trigger_reason.lower() or "emergency" in trigger_reason.lower():
+                if not self._check_15min_eligibility(session):
+                    logger.info(f"CRM save not eligible - less than 15 minutes active for automatic save for {session.session_id[:8]}")
+                    return False
             
             # All conditions met
-            logger.info(f"CRM save eligible for {session.session_id[:8]}: UserType={session.user_type.value}, Questions={session.daily_question_count}, 15min+")
+            logger.info(f"CRM save eligible for {session.session_id[:8]}: UserType={session.user_type.value}, Questions={session.daily_question_count}")
             return True
             
         except Exception as e:
             logger.error(f"Error checking CRM eligibility for {session.session_id[:8]}: {e}")
+            return False
+
+    def _is_manual_crm_save_eligible(self, session: UserSession) -> bool:
+        """Simple eligibility check for manual CRM saves (Sign Out, Manual Save button) - NO 15-minute requirement."""
+        try:
+            # Basic eligibility requirements
+            if not session.email or not session.messages:
+                return False
+            
+            # User type eligibility: registered_user OR email_verified_guest
+            if session.user_type not in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]:
+                return False
+            
+            # Question count requirement: at least 1 question asked
+            if session.daily_question_count < 1:
+                return False
+            
+            # All conditions met - NO 15-minute check for manual saves
+            logger.info(f"Manual CRM save eligible for {session.session_id[:8]}: UserType={session.user_type.value}, Questions={session.daily_question_count}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error checking manual CRM eligibility for {session.session_id[:8]}: {e}")
             return False
 
     def get_session(self) -> Optional[UserSession]:
@@ -2392,7 +2423,7 @@ class SessionManager:
             return ai_response
         
         except Exception as e:
-            logger.error(f"AI response generation failed: {e}", exc_info=True)
+            logger.error(f"❌ AI response failed: {e}", exc_info=True)
         
             try:
                 if 'user_message' in locals() and user_message not in session.messages:
@@ -2413,57 +2444,48 @@ class SessionManager:
             return {'content': 'I encountered an error processing your request. Please try again.', 'success': False, 'source': 'Error Handler'}
         
     def clear_chat_history(self, session: UserSession):
-        """Enhanced clear chat history with CRM save functionality."""
+        """Soft clear chat history - preserves all messages in DB but hides them from UI display."""
         try:
-            logger.info(f"Clear chat requested for session {session.session_id[:8]} with {len(session.messages)} messages")
+            messages_count_before = len(session.messages)
+            logger.info(f"Soft clear chat requested for session {session.session_id[:8]} with {messages_count_before} messages")
             
-            # Check if eligible for CRM save before clearing
-            if self._is_crm_save_eligible(session, "Clear Chat Request"):
-                logger.info(f"Performing CRM save before clearing chat for {session.session_id[:8]}")
-                
-                try:
-                    # Save to CRM directly (no tab switching protection)
-                    save_success = self.zoho.save_chat_transcript_sync(session, "Clear Chat Request")
-                    
-                    if save_success:
-                        session.timeout_saved_to_crm = True
-                        logger.info(f"✅ CRM save completed successfully before clearing chat for {session.session_id[:8]}")
-                    else:
-                        logger.warning(f"⚠️ CRM save failed before clearing chat for {session.session_id[:8]}")
-                        
-                except Exception as crm_error:
-                    logger.error(f"CRM save error during clear chat for {session.session_id[:8]}: {crm_error}")
-                    # Continue with clearing chat even if CRM save fails
-            
-            # Clear the chat messages
-            session.messages = []
+            # SOFT CLEAR: Set display offset to current message count
+            # This preserves all messages in the database while hiding them from UI
+            session.display_message_offset = len(session.messages)
             session.last_activity = datetime.now()
             
-            # Save to database (always happens regardless of CRM save status)
+            # Save to database - messages are preserved, only offset changes
             self.db.save_session(session)
-            logger.info(f"Chat history cleared and saved to DB for session {session.session_id[:8]}")
+            logger.info(f"Soft clear completed for session {session.session_id[:8]}: offset set to {session.display_message_offset}, {messages_count_before} messages preserved in DB")
             
         except Exception as e:
-            logger.error(f"Error clearing chat history for session {session.session_id[:8]}: {e}", exc_info=True)
-            # Fallback: just clear and save to DB
-            session.messages = []
-            session.last_activity = datetime.now()
-            try:
-                self.db.save_session(session)
-            except Exception as db_error:
-                logger.error(f"Database save also failed during clear chat fallback: {db_error}")
+            logger.error(f"Error during soft clear for session {session.session_id[:8]}: {e}", exc_info=True)
+            # No fallback needed since we're not actually clearing data
 
     def end_session(self, session: UserSession):
-        """Ends the current session and performs cleanup."""
+        """Enhanced session ending with improved CRM save functionality and user feedback."""
         try:
-            # Save to CRM if eligible (using the enhanced eligibility check)
-            if self._is_crm_save_eligible(session, "Manual Sign Out"):
-                logger.info(f"Performing CRM save during session end for {session.session_id[:8]}")
+            logger.info(f"End session requested for {session.session_id[:8]}")
+            
+            # Check if eligible for CRM save before ending session (NO 15-minute requirement)
+            if self._is_manual_crm_save_eligible(session):
+                logger.info(f"Session eligible for CRM save during sign out: {session.session_id[:8]}")
                 
-                # For sign out, save directly to CRM (no tab switching protection)
-                save_success = self.zoho.save_chat_transcript_sync(session, "Manual Sign Out")
+                # Show user feedback about CRM save during sign out
+                with st.spinner("💾 Saving your conversation to CRM before signing out..."):
+                    save_success = self.zoho.save_chat_transcript_sync(session, "Manual Sign Out")
+                    
                 if save_success:
                     session.timeout_saved_to_crm = True
+                    logger.info(f"✅ CRM save completed successfully during sign out for {session.session_id[:8]}")
+                    st.success("✅ Conversation saved to CRM successfully!")
+                    time.sleep(1)  # Give user time to see the success message
+                else:
+                    logger.warning(f"⚠️ CRM save failed during sign out for {session.session_id[:8]}")
+                    st.warning("⚠️ Failed to save conversation to CRM, but signing out anyway.")
+                    time.sleep(1)
+            else:
+                logger.info(f"Session not eligible for CRM save during sign out: {session.session_id[:8]}")
             
             # Mark session as inactive
             session.active = False
@@ -2480,9 +2502,25 @@ class SessionManager:
             
         except Exception as e:
             logger.error(f"Error ending session {session.session_id[:8]}: {e}", exc_info=True)
+            # Still try to end the session even if there were errors
+            try:
+                session.active = False
+                session.last_activity = datetime.now()
+                self.db.save_session(session)
+                
+                # Clear Streamlit session state
+                if 'current_session_id' in st.session_state:
+                    del st.session_state['current_session_id']
+                if 'page' in st.session_state:
+                    del st.session_state['page']
+                    
+                st.error("⚠️ Some issues occurred during sign out, but you have been signed out.")
+            except Exception as fallback_error:
+                logger.error(f"Fallback session end also failed: {fallback_error}")
+                st.error("❌ Critical error during sign out. Please refresh the page.")
 
     def manual_save_to_crm(self, session: UserSession):
-        """Manually saves chat transcript to CRM."""
+        """Manually saves chat transcript to CRM with enhanced user feedback."""
         if not session.messages:
             st.warning("No conversation to save.")
             return
@@ -2491,7 +2529,16 @@ class SessionManager:
             st.error("CRM saving is only available for registered users and email-verified guests.")
             return
         
-        with st.spinner("Saving conversation to Zoho CRM..."):
+        # Check eligibility (NO 15-minute requirement for manual saves)
+        if not self._is_manual_crm_save_eligible(session):
+            st.warning("Your conversation doesn't meet the requirements for CRM saving:")
+            if session.daily_question_count < 1:
+                st.info("• At least 1 question must be asked")
+            if not session.email:
+                st.info("• Email address is required")
+            return
+        
+        with st.spinner("💾 Saving conversation to Zoho CRM..."):
             success = self.zoho.save_chat_transcript_sync(session, "Manual Save Request")
             
         if success:
@@ -3009,7 +3056,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 st.rerun()
 
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
-    """Renders the application's sidebar."""
+    """Renders the application's sidebar with enhanced CRM save information."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
@@ -3123,7 +3170,16 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         
         st.divider()
         
-        st.markdown(f"**Messages in Chat:** {len(session.messages)}")
+        # Show total messages in session (never resets - good for anti-manipulation)
+        total_messages = len(session.messages)
+        visible_messages = len(session.messages) - session.display_message_offset
+        
+        if session.display_message_offset > 0:
+            st.markdown(f"**Messages in Chat:** {visible_messages} (Total: {total_messages})")
+            st.caption(f"💡 {session.display_message_offset} messages hidden by Clear Chat")
+        else:
+            st.markdown(f"**Messages in Chat:** {total_messages}")
+            
         st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
         
         if session.ban_status.value != BanStatus.NONE.value:
@@ -3141,30 +3197,22 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         
         col1, col2 = st.columns(2)
         with col1:
-            # Enhanced Clear Chat button with tooltip about CRM save
-            clear_chat_help = "Clears all messages from the current conversation."
-            if (session.user_type in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST] and 
-                session.email and session.messages and session.daily_question_count >= 1):
-                
-                # Check 15-minute eligibility
-                if session_manager._check_15min_eligibility(session):
-                    clear_chat_help += " Your conversation will be automatically saved to CRM before clearing."
-                else:
-                    clear_chat_help += " (CRM save requires 15+ minutes of activity)"
+            # Updated Clear Chat button - no longer mentions CRM save (since it uses soft clear)
+            clear_chat_help = "Hides all messages from the current conversation display. Messages are preserved in the database and new messages can still be added."
             
             if st.button("🗑️ Clear Chat", use_container_width=True, help=clear_chat_help):
-                # Show appropriate messaging based on CRM save eligibility
-                if session_manager._is_crm_save_eligible(session, "Clear Chat Request"):
-                    with st.spinner("💾 Saving conversation to CRM before clearing..."):
-                        session_manager.clear_chat_history(session)
-                    st.success("✅ Chat saved to CRM and cleared!")
-                else:
-                    session_manager.clear_chat_history(session)
-                    st.info("🗑️ Chat history cleared.")
-                
+                session_manager.clear_chat_history(session)
+                st.success("🗑️ Chat display cleared! Messages preserved in database.")
                 st.rerun()
+                
         with col2:
-            if st.button("🚪 Sign Out", use_container_width=True, help="Ends your current session and returns to the welcome page."):
+            # Enhanced Sign Out button with tooltip about CRM save (NO 15-minute requirement)
+            signout_help = "Ends your current session and returns to the welcome page."
+            if (session.user_type in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST] and 
+                session.email and session.messages and session.daily_question_count >= 1):
+                signout_help += " Your conversation will be automatically saved to CRM before signing out."
+            
+            if st.button("🚪 Sign Out", use_container_width=True, help=signout_help):
                 session_manager.end_session(session)
                 st.rerun()
 
@@ -3185,7 +3233,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             if session_manager.zoho.config.ZOHO_ENABLED and session.email:
                 if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Manually save your current chat transcript to your linked Zoho CRM contact."):
                     session_manager.manual_save_to_crm(session)
-                st.caption("💡 Chat automatically saves to CRM after 15 minutes of inactivity.")
+                st.caption("💡 Chat automatically saves to CRM after 15 minutes of inactivity or during Sign Out.")
 
 def render_email_verification_dialog(session_manager: 'SessionManager', session: UserSession):
     """Renders the email verification dialog for guest users who have hit their initial question limit (4 questions)."""
@@ -3360,8 +3408,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         else:
             return
 
-    # Display chat messages (unchanged)
-    for msg in session.messages:
+    # Display chat messages (respects soft clear offset)
+    visible_messages = session.messages[session.display_message_offset:]
+    for msg in visible_messages:
         with st.chat_message(msg.get("role", "user")):
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
