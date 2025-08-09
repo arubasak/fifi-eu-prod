@@ -2754,7 +2754,7 @@ def render_simplified_browser_close_detection(session_id: str):
                 timestamp: Date.now()
             }});
             
-            // Send beacon to FastAPI
+            // PRIMARY: Try navigator.sendBeacon to FastAPI
             if (navigator.sendBeacon) {{
                 try {{
                     const sent = navigator.sendBeacon(
@@ -2762,20 +2762,56 @@ def render_simplified_browser_close_detection(session_id: str):
                         new Blob([emergencyData], {{type: 'application/json'}})
                     );
                     if (sent) {{
-                        console.log('✅ Emergency save beacon sent successfully');
+                        console.log('✅ Emergency save beacon sent successfully to FastAPI');
                         return;
+                    }} else {{
+                        console.warn('⚠️ Beacon send returned false, trying fallback...');
                     }}
                 }} catch (e) {{
                     console.error('❌ Beacon failed:', e);
                 }}
             }}
             
-            // Fallback: redirect to Streamlit
+            // FALLBACK 1: Try fetch with very short timeout
             try {{
-                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}`;
+                fetch(FASTAPI_URL, {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json',
+                    }},
+                    body: emergencyData,
+                    keepalive: true,  // Important for browser close
+                    signal: AbortSignal.timeout(3000)  // 3 second timeout
+                }}).then(response => {{
+                    if (response.ok) {{
+                        console.log('✅ Emergency save via fetch successful');
+                    }} else {{
+                        console.warn('⚠️ Fetch response not OK, status:', response.status);
+                        // Still proceed to Streamlit fallback
+                        redirectToStreamlitFallback(reason);
+                    }}
+                }}).catch(error => {{
+                    console.error('❌ Fetch failed:', error);
+                    redirectToStreamlitFallback(reason);
+                }});
+            }} catch (e) {{
+                console.error('❌ Fetch setup failed:', e);
+                redirectToStreamlitFallback(reason);
+            }}
+            
+            // FALLBACK 2: Always redirect to Streamlit as final backup (with delay)
+            setTimeout(() => {{
+                redirectToStreamlitFallback(reason);
+            }}, 1000);  // Give fetch 1 second, then force Streamlit fallback
+        }}
+        
+        function redirectToStreamlitFallback(reason) {{
+            try {{
+                console.log('🔄 Using Streamlit fallback for emergency save');
+                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}&fallback=true`;
                 window.location.href = saveUrl;
             }} catch (e) {{
-                console.error('❌ Fallback redirect failed:', e);
+                console.error('❌ Streamlit fallback redirect failed:', e);
             }}
         }}
         
@@ -2871,11 +2907,11 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         if session_manager._is_crm_save_eligible(session, "timeout_auto_reload"):
             logger.info(f"💾 Performing emergency save before auto-reload for {session.session_id[:8]}")
             
-            # Send to FastAPI for emergency save
+            # Try FastAPI first, then fallback to local save
             try:
                 emergency_data = {
                     "session_id": session.session_id,
-                    "reason": "timeout_auto_reload", # Clear reason name
+                    "reason": "timeout_auto_reload",
                     "timestamp": int(time.time() * 1000)
                 }
                 
@@ -2885,12 +2921,16 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
                 if response.status_code == 200:
                     logger.info(f"✅ Emergency save sent to FastAPI successfully")
                 else:
-                    logger.warning(f"⚠️ FastAPI returned status {response.status_code}")
+                    logger.warning(f"⚠️ FastAPI returned status {response.status_code}, using local fallback")
+                    # Use local save as fallback
+                    session_manager.zoho.save_chat_transcript_sync(session, "timeout_auto_reload_fallback")
+                    session.timeout_saved_to_crm = True
             except Exception as e:
                 logger.error(f"❌ Failed to send emergency save to FastAPI: {e}")
                 # Continue with local save as fallback
                 try:
-                    session_manager.zoho.save_chat_transcript_sync(session, "timeout_auto_reload")
+                    logger.info(f"🔄 Using local CRM save as fallback for timeout")
+                    session_manager.zoho.save_chat_transcript_sync(session, "timeout_auto_reload_fallback")
                     session.timeout_saved_to_crm = True
                 except Exception as save_e:
                     logger.error(f"❌ Local CRM save also failed: {save_e}")
@@ -3006,26 +3046,31 @@ def handle_emergency_save_requests_from_query():
     event = query_params.get("event")
     session_id = query_params.get("session_id")
     reason = query_params.get("reason", "unknown")
+    fallback = query_params.get("fallback", "false")
 
     if event == "emergency_close" and session_id:
         logger.info("=" * 80)
         logger.info("🚨 EMERGENCY SAVE REQUEST DETECTED VIA URL QUERY PARAMETERS!")
         logger.info(f"Session ID: {session_id}, Event: {event}, Reason: {reason}")
+        if fallback == "true":
+            logger.warning("⚠️ THIS IS A FALLBACK SAVE - FastAPI beacon likely failed!")
         logger.info("=" * 80)
         
         st.error("🚨 **Emergency Save Detected** - Processing browser close save...")
+        if fallback == "true":
+            st.warning("⚠️ Using backup save method (primary method failed)")
         st.info("Please wait, your conversation is being saved...")
         
         # Clear query parameters to prevent re-triggering on rerun
-        if "event" in st.query_params:
-            del st.query_params["event"]
-        if "session_id" in st.query_params:
-            del st.query_params["session_id"]
-        if "reason" in st.query_params:
-            del st.query_params["reason"]
+        params_to_clear = ["event", "session_id", "reason", "fallback"]
+        for param in params_to_clear:
+            if param in st.query_params:
+                del st.query_params[param]
         
         try:
-            success = process_emergency_save_from_query(session_id, reason)
+            # Add fallback indicator to reason for tracking
+            save_reason = f"{reason}_fallback" if fallback == "true" else reason
+            success = process_emergency_save_from_query(session_id, save_reason)
             
             if success:
                 st.success("✅ Emergency save completed successfully!")
