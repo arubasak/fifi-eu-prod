@@ -260,7 +260,8 @@ class UserSession:
     wp_token: Optional[str] = None
     messages: List[Dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
-    last_activity: datetime = field(default_factory=datetime.now)
+    # Changed last_activity default to None for timer start logic
+    last_activity: Optional[datetime] = None
     timeout_saved_to_crm: bool = False
     
     # Universal Fingerprinting (ALL sessions)
@@ -370,7 +371,7 @@ class DatabaseManager:
                         full_name TEXT,
                         zoho_contact_id TEXT,
                         created_at TEXT DEFAULT '',
-                        last_activity TEXT DEFAULT '',
+                        last_activity TEXT, -- Changed to allow NULL initially
                         messages TEXT DEFAULT '[]',
                         active INTEGER DEFAULT 1,
                         fingerprint_id TEXT,
@@ -508,11 +509,14 @@ class DatabaseManager:
                     session.messages = []
                     session.email_addresses_used = []
                 
+                # Handle None for last_activity before saving
+                last_activity_iso = session.last_activity.isoformat() if session.last_activity else None
+
                 self.conn.execute(
                     '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                     (session.session_id, session.user_type.value, session.email, session.full_name,
                      session.zoho_contact_id, session.created_at.isoformat(),
-                     session.last_activity.isoformat(), json_messages, int(session.active),
+                     last_activity_iso, json_messages, int(session.active),
                      session.wp_token, int(session.timeout_saved_to_crm), session.fingerprint_id,
                      session.fingerprint_method, session.visitor_type, session.daily_question_count,
                      session.total_question_count, 
@@ -583,6 +587,9 @@ class DatabaseManager:
                     # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
                     loaded_display_message_offset = row[31] if len(row) > 31 else 0
                     
+                    # Convert last_activity from ISO format string or None
+                    loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
+
                     user_session = UserSession(
                         session_id=row[0], 
                         user_type=UserType(row[1]) if row[1] else UserType.GUEST,
@@ -590,7 +597,7 @@ class DatabaseManager:
                         full_name=row[3],
                         zoho_contact_id=row[4],
                         created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
-                        last_activity=datetime.fromisoformat(row[6]) if row[6] else datetime.now(),
+                        last_activity=loaded_last_activity, # Use the safely loaded value
                         messages=safe_json_loads(row[7], default_value=[]),
                         active=bool(row[8]), 
                         wp_token=row[9],
@@ -659,7 +666,8 @@ class DatabaseManager:
                     try:
                         # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
                         loaded_display_message_offset = row[31] if len(row) > 31 else 0
-                        
+                        loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
+
                         s = UserSession(
                             session_id=row[0], 
                             user_type=UserType(row[1]) if row[1] else UserType.GUEST,
@@ -667,7 +675,7 @@ class DatabaseManager:
                             full_name=row[3],
                             zoho_contact_id=row[4],
                             created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
-                            last_activity=datetime.fromisoformat(row[6]) if row[6] else datetime.now(),
+                            last_activity=loaded_last_activity, # Use the safely loaded value
                             messages=safe_json_loads(row[7], default_value=[]),
                             active=bool(row[8]), 
                             wp_token=row[9],
@@ -732,7 +740,8 @@ class DatabaseManager:
                     try:
                         # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
                         loaded_display_message_offset = row[31] if len(row) > 31 else 0
-                        
+                        loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
+
                         s = UserSession(
                             session_id=row[0], 
                             user_type=UserType(row[1]) if row[1] else UserType.GUEST,
@@ -740,7 +749,7 @@ class DatabaseManager:
                             full_name=row[3],
                             zoho_contact_id=row[4],
                             created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
-                            last_activity=datetime.fromisoformat(row[6]) if row[6] else datetime.now(),
+                            last_activity=loaded_last_activity, # Use the safely loaded value
                             messages=safe_json_loads(row[7], default_value=[]),
                             active=bool(row[8]), 
                             wp_token=row[9],
@@ -1537,143 +1546,6 @@ class PineconeAssistantTool:
             }
         except Exception as e:
             logger.error(f"Pinecone Assistant error: {str(e)}")
-            return None
-
-class TavilyFallbackAgent:
-    def __init__(self, tavily_api_key: str):
-        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
-
-    def add_utm_to_links(self, content: str) -> str:
-        """Finds all Markdown links in a string and appends the UTM parameters."""
-        def replacer(match):
-            url = match.group(1)
-            utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
-            if '?' in url:
-                new_url = f"{url}&{utm_params}"
-            else:
-                new_url = f"{url}?{utm_params}"
-            return f"({new_url})"
-        return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
-
-    def synthesize_search_results(self, results, query: str) -> str:
-        """Synthesize search results into a coherent response similar to LLM output."""
-        
-        # Handle string response from Tavily
-        if isinstance(results, str):
-            return f"Based on my search: {results}"
-        
-        # Handle dictionary response from Tavily (most common format)
-        if isinstance(results, dict):
-            # Check if there's a pre-made answer
-            if results.get('answer'):
-                return f"Based on my search: {results['answer']}"
-            
-            # Extract the results array
-            search_results = results.get('results', [])
-            if not search_results:
-                return "I couldn't find any relevant information for your query."
-            
-            # Process the results
-            relevant_info = []
-            sources = []
-            
-            for i, result in enumerate(search_results[:3], 1): # Use top 3 results
-                if isinstance(result, dict):
-                    title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
-                             result.get('description') or 
-                             result.get('summary', ''))
-                    url = result.get('url', '')
-                    
-                    if content:
-                        # Clean up content
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                        relevant_info.append(content)
-                        
-                        if url and title:
-                            sources.append(f"[{title}]({url})")
-            
-            if not relevant_info:
-                return "I found search results but couldn't extract readable content. Please try rephrasing your query."
-            
-            # Build synthesized response
-            response_parts = []
-            
-            if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info[0]}")
-            else:
-                response_parts.append("Based on my search, here's what I found:")
-                for i, info in enumerate(relevant_info, 1):
-                    response_parts.append(f"\n\n**{i}.** {info}")
-            
-            # Add sources
-            if sources:
-                response_parts.append(f"\n\n**Sources:**")
-                for i, source in enumerate(sources, 1):
-                    response_parts.append(f"\n{i}. {source}")
-            
-            return "".join(response_parts)
-        
-        # Handle direct list (fallback)
-        if isinstance(results, list):
-            relevant_info = []
-            sources = []
-            
-            for i, result in enumerate(results[:3], 1):
-                if isinstance(result, dict):
-                    title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
-                             result.get('description', ''))
-                    url = result.get('url', '')
-                    
-                    if content:
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                        relevant_info.append(content)
-                        if url:
-                            sources.append(f"[{title}]({url})")
-            
-            if not relevant_info:
-                return "I couldn't find relevant information for your query."
-            
-            response_parts = []
-            if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info[0]}")
-            else:
-                response_parts.append("Based on my search:")
-                for info in relevant_info:
-                    response_parts.append(f"\n{info}")
-            
-            if sources:
-                response_parts.append(f"\n\n**Sources:**")
-                for i, source in enumerate(sources, 1):
-                    response_parts.append(f"{i}. {source}")
-            
-            return "".join(response_parts)
-        
-        # Fallback for unknown formats
-        return "I couldn't find any relevant information for your query."
-
-    def query(self, message: str, chat_history: List[BaseMessage]) -> Dict[str, Any]:
-        try:
-            search_results = self.tavily_tool.invoke({"query": message})
-            synthesized_content = self.synthesize_search_results(search_results, message)
-            final_content = self.add_utm_to_links(synthesized_content)
-            
-            return {
-                "content": final_content,
-                "success": True,
-                "source": "FiFi Web Search",
-                "used_pinecone": False,
-                "used_search": True,
-                "has_citations": True,
-                "has_inline_citations": True,
-                "safety_override": False
-            }
-        except Exception as e:
             return {
                 "content": f"I apologize, but an error occurred while searching: {str(e)}",
                 "success": False,
@@ -2028,7 +1900,8 @@ class SessionManager:
     def _create_new_session(self) -> UserSession:
         """Creates a new user session with temporary fingerprint until JS fingerprinting completes."""
         session_id = str(uuid.uuid4())
-        session = UserSession(session_id=session_id)
+        # Initialize last_activity to None. It will be set to datetime.now() when user enters chat.
+        session = UserSession(session_id=session_id, last_activity=None)
         
         # Apply temporary fingerprint until JS fingerprinting completes
         session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
@@ -2042,6 +1915,8 @@ class SessionManager:
 
     def _check_15min_eligibility(self, session: UserSession) -> bool:
         """Check if session has been active for at least 15 minutes to be eligible for CRM save."""
+        # This function still uses 15 minutes as a separate business logic for CRM saving
+        # It's distinct from the session timeout duration.
         try:
             # Use the earliest of session creation time or first question time
             start_time = session.created_at
@@ -2052,7 +1927,7 @@ class SessionManager:
             elapsed_minutes = elapsed_time.total_seconds() / 60
             
             logger.info(f"15-min eligibility check for {session.session_id[:8]}: {elapsed_minutes:.1f} minutes elapsed")
-            return elapsed_minutes >= 15.0
+            return elapsed_minutes >= 15.0 # Keep this at 15.0 for CRM eligibility
             
         except Exception as e:
             logger.error(f"Error checking 15-min eligibility for {session.session_id[:8]}: {e}")
@@ -2129,17 +2004,10 @@ class SessionManager:
                 
                 if session and session.active:
                     # Update activity here on every major load/rerun
-                    self._update_activity(session) 
-
-                    # Enhanced session recovery - always ensure we have some fingerprint
-                    if not session.fingerprint_id:
-                        session.fingerprint_id = f"temp_fp_{session.session_id[:8]}"
-                        session.fingerprint_method = "temporary_fallback_python"
-                        try:
-                            self.db.save_session(session)
-                            logger.info(f"Applied temporary fallback fingerprint to session {session.session_id[:8]}.")
-                        except Exception as e:
-                            logger.error(f"Failed to save temporary fingerprint for session {session.session_id[:8]}: {e}", exc_info=True)
+                    # This now relies on `check_timeout_and_trigger_reload` to update `last_activity`
+                    # from JS, or on get_ai_response to update it after user input.
+                    # We remove the direct _update_activity here to avoid premature timer starts
+                    # or redundant saves if last_activity is None initially.
 
                     # Check limits and handle bans (timeout handled by check_timeout_and_trigger_reload)
                     limit_check = self.question_limits.is_within_limits(session)
@@ -2158,6 +2026,7 @@ class SessionManager:
                         
                         # Even if banned, ensure session state is consistent in DB
                         try:
+                            # Save to persist ban state changes
                             self.db.save_session(session)
                         except Exception as e:
                             logger.error(f"Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
@@ -2173,16 +2042,16 @@ class SessionManager:
 
             # Create new session if no valid session found or loaded
             logger.info(f"Creating new session")
-            new_session = self._create_new_session()
+            new_session = self._create_new_session() # last_activity is None here
             st.session_state.current_session_id = new_session.session_id
             logger.info(f"Created and stored new session {new_session.session_id[:8]}")
-            # The newly created session is already active and its last_activity is now, so no need for _validate_session here.
             return new_session
             
         except Exception as e:
             logger.error(f"Failed to get/create session: {e}", exc_info=True)
             # Create fallback session in case of critical failure
-            fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST)
+            # Also set last_activity to None for emergency fallback.
+            fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None)
             fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
             fallback_session.fingerprint_method = "emergency_fallback"
             st.session_state.current_session_id = fallback_session.session_id
@@ -2218,7 +2087,7 @@ class SessionManager:
                 existing_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
                 if existing_sessions:
                     # Sort by last_activity to get the most recent relevant session
-                    recent_session = max(existing_sessions, key=lambda s: s.last_activity)
+                    recent_session = max(existing_sessions, key=lambda s: s.last_activity if s.last_activity is not None else datetime.min)
                     
                     # Inherit complete user state from the most recent session IF it's a non-guest type
                     # This ensures historical usage is restored for returning visitors who get a new session ID
@@ -2234,6 +2103,12 @@ class SessionManager:
                         session.daily_question_count = recent_session.daily_question_count
                         session.total_question_count = recent_session.total_question_count
                         session.last_question_time = recent_session.last_question_time
+                        
+                        # IMPORTANT: When inheriting, if new session's last_activity is None,
+                        # and old session has a valid last_activity, inherit it.
+                        if session.last_activity is None and recent_session.last_activity is not None:
+                            session.last_activity = recent_session.last_activity
+
                         session.question_limit_reached = recent_session.question_limit_reached
                         
                         # Inherit ban status if applicable
@@ -2286,7 +2161,8 @@ class SessionManager:
             non_guest_sessions = [s for s in existing_sessions if s.user_type != UserType.GUEST and s.email]
             
             if non_guest_sessions:
-                recent_session = max(non_guest_sessions, key=lambda s: s.last_activity)
+                # Sort by last_activity, treating None as very old for sorting purposes
+                recent_session = max(non_guest_sessions, key=lambda s: s.last_activity if s.last_activity is not None else datetime.min)
                 return {
                     'has_history': True,
                     'email': recent_session.email,
@@ -2330,6 +2206,10 @@ class SessionManager:
                 session.email_switches_count += 1
             session.email = sanitized_email
             
+            # Set last_activity if not already set (first time starting chat)
+            if session.last_activity is None:
+                session.last_activity = datetime.now()
+
             # Save session before sending verification
             try:
                 self.db.save_session(session)
@@ -2380,6 +2260,10 @@ class SessionManager:
                     session.daily_question_count = 0
                     session.last_question_time = None
                 
+                # Set last_activity if not already set (first time officially verified)
+                if session.last_activity is None:
+                    session.last_activity = datetime.now()
+
                 # Save upgraded session
                 try:
                     self.db.save_session(session)
@@ -2442,6 +2326,9 @@ class SessionManager:
                     current_session.total_question_count = 0
                     current_session.last_question_time = None
                     
+                    # Set last_activity to now (official start for logged-in users)
+                    current_session.last_activity = datetime.now()
+                    
                     # Save authenticated session
                     try:
                         self.db.save_session(current_session)
@@ -2453,7 +2340,6 @@ class SessionManager:
                     
                     return current_session
                 else:
-                    # --- NEW st.error() ADDED HERE ---
                     logger.error(f"WordPress authentication successful (status 200) but missing token or email in response. Response: {data}")
                     st.error("Authentication failed: Incomplete response from WordPress. Please contact support.")
                     return None # Return None if token or email are missing
@@ -2596,7 +2482,7 @@ class SessionManager:
             
             # Mark session as inactive
             session.active = False
-            session.last_activity = datetime.now()
+            session.last_activity = datetime.now() # Update last_activity before final save
             
             # Save final session state
             try:
@@ -2621,7 +2507,7 @@ class SessionManager:
                 del st.session_state[key]
             st.session_state['page'] = None
 
-def render_simple_activity_tracker(session_id: str):
+def render_simple_activity_tracker(session_id: str) -> Optional[Dict[str, Any]]:
     """
     Renders a simple activity tracker that monitors user interactions.
     Uses st_javascript with unique keys to avoid conflicts.
@@ -2634,7 +2520,6 @@ def render_simple_activity_tracker(session_id: str):
     safe_session_id = session_id.replace('-', '_')
     component_key = f"activity_tracker_{safe_session_id}"
 
-    # The actual JS logic
     simple_tracker_js = f"""
     (() => {{
         const sessionId = "{session_id}";
@@ -2698,32 +2583,23 @@ def render_simple_activity_tracker(session_id: str):
     """
     
     try:
-        # Render the st_javascript component only if it hasn't been rendered yet for this key
-        # OR if its value is None, indicating it might need to be re-initialized after a full browser reload.
-        # This is the crucial part to avoid duplicate keys.
-        if component_key not in st.session_state or st.session_state.get(component_key) is None:
-            st.session_state[component_key] = st_javascript(simple_tracker_js, key=component_key)
-        else:
-            # On subsequent reruns, just update the existing component to get its latest value.
-            # St.javascript supports being called multiple times with the same key to update itself.
-            # It's not *re-rendering* a new component from scratch, but refreshing its state.
-            st.session_state[component_key] = st_javascript(simple_tracker_js, key=component_key)
+        # CRITICAL FIX: Directly call st_javascript. It manages its own state in st.session_state[key].
+        # Do NOT explicitly assign to st.session_state[component_key] within this function.
+        result = st_javascript(simple_tracker_js, key=component_key)
         
-        result = st.session_state[component_key]
         if result and isinstance(result, dict) and result.get('type') == 'activity_status':
             return result
         return None
     except Exception as e:
         logger.error(f"Simple activity tracker failed: {e}")
-        # This error can happen if the key isn't truly unique or if there's a deeper component rendering issue.
-        # It's crucial to ensure the key is always unique per conceptual component.
+        # Log the problematic key for debugging purposes
+        logger.error(f"Problematic key in render_simple_activity_tracker: {component_key}")
         return None
 
-# RE-ADDED & MODIFIED: check_timeout_and_trigger_reload to be database-aware
 def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession) -> bool:
     """
-    Check if 15 minutes have passed (using DB's last_activity) and trigger browser reload if needed.
-    Returns True if timeout was triggered (and page reload initiated).
+    Check if `session_manager.get_session_timeout_minutes()` have passed (using DB's last_activity)
+    and trigger browser reload if needed. Returns True if timeout was triggered (and page reload initiated).
     """
     if not session or not session.session_id:
         logger.debug("No valid session for timeout check.")
@@ -2744,6 +2620,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         session.daily_question_count = fresh_session_from_db.daily_question_count # Keep counts synced
         session.total_question_count = fresh_session_from_db.total_question_count
         session.last_question_time = fresh_session_from_db.last_question_time
+        session.display_message_offset = fresh_session_from_db.display_message_offset # Ensure offset is synced
         # IMPORTANT: Do NOT copy messages here, as this function is for state management, not chat display history.
         # Chat history is loaded separately in render_chat_interface.
     else:
@@ -2778,6 +2655,11 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
 
     # --- Now proceed with actual idle timeout check ---
     
+    # NEW LOGIC: If last_activity is None, the timer hasn't officially started.
+    if session.last_activity is None:
+        logger.debug(f"Session {session.session_id[:8]}: last_activity is None, timer has not started.")
+        return False # Not timed out yet
+        
     # Get activity from JS component. This will report the actual client-side last activity.
     activity_result = render_simple_activity_tracker(session.session_id)
     js_last_activity_timestamp = activity_result.get('last_activity') if activity_result else None
@@ -2804,7 +2686,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
     
     logger.info(f"TIMEOUT CHECK: Session {session.session_id[:8]} | Inactive: {minutes_inactive:.1f}m | last_activity: {session.last_activity.strftime('%H:%M:%S')}")
     
-    # Check if 15 minutes have passed
+    # Check if timeout duration has passed
     if minutes_inactive >= session_manager.get_session_timeout_minutes():
         logger.info(f"⏰ TIMEOUT DETECTED: {session.session_id[:8]} inactive for {minutes_inactive:.1f} minutes")
         
@@ -3297,6 +3179,12 @@ def render_welcome_page(session_manager: 'SessionManager'):
         col1, col2, col3 = st.columns(3)
         with col2:
             if st.button("👤 Start as Guest", use_container_width=True):
+                # Get the existing session created by get_session()
+                session = session_manager.get_session()
+                # Set last_activity to now if it's None (first time entering chat)
+                if session.last_activity is None:
+                    session.last_activity = datetime.now()
+                    session_manager.db.save_session(session) # Save this initial activity timestamp
                 st.session_state.page = "chat"
                 st.rerun()
 
@@ -3332,7 +3220,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 time_to_reset = next_reset - datetime.now()
                 if time_to_reset.total_seconds() > 0:
                     hours = int(time_to_reset.total_seconds() // 3600)
-                    minutes = int((time_to_seconds % 3600) // 60)
+                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
                     st.caption(f"Resets in: {hours}h {minutes}m")
                 else:
                     st.caption("Daily questions have reset!")
@@ -3358,13 +3246,21 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             st.caption("Starting fingerprinting...")
 
         # Display time since last activity (calculated based on DB's last_activity)
-        time_since_activity = datetime.now() - session.last_activity
-        minutes_inactive = time_since_activity.total_seconds() / 60
-        st.caption(f"Last activity: {int(minutes_inactive)} minutes ago")
-        if minutes_inactive >= (session_manager.get_session_timeout_minutes() - 5) and minutes_inactive < session_manager.get_session_timeout_minutes():
-            st.warning(f"⚠️ Session will expire soon!")
-        elif minutes_inactive >= session_manager.get_session_timeout_minutes():
-            st.error(f"🚫 Session is likely expired. Type a question to check.")
+        if session.last_activity is not None: # Only show timer if activity has started
+            time_since_activity = datetime.now() - session.last_activity
+            minutes_inactive = time_since_activity.total_seconds() / 60
+            st.caption(f"Last activity: {int(minutes_inactive)} minutes ago")
+            
+            timeout_duration = session_manager.get_session_timeout_minutes() # This is 5
+
+            # Warn precisely 1 minute before timeout
+            if minutes_inactive >= (timeout_duration - 1) and minutes_inactive < timeout_duration:
+                minutes_remaining = timeout_duration - minutes_inactive
+                st.warning(f"⏰ Session expires in: {int(minutes_remaining)}m")
+            elif minutes_inactive >= timeout_duration: # Session has timed out (should lead to redirect)
+                st.error(f"🚫 Session is likely expired. Type a question to check.")
+        else:
+            st.caption("Session timer will start with first interaction.")
 
 
         # AI Tools Status
@@ -3610,7 +3506,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # The key is based on session_id, ensuring uniqueness across browser sessions.
     # The st_javascript component internally handles being called multiple times
     # with the same key to update its state, but not re-instantiate.
-    render_simple_activity_tracker(session.session_id)
+    # CRITICAL FIX HERE: Directly call the function without explicit session state assignments,
+    # letting Streamlit manage the widget's internal state with the provided key.
+    activity_result = render_simple_activity_tracker(session.session_id)
     
     # The robust timeout check runs on every rerun.
     # It will pull the latest last_activity from DB and trigger reload if needed.
@@ -3618,6 +3516,20 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     if timeout_triggered:
         return # Stop rendering if a timeout and reload was initiated
     
+    # Simple activity tracking (no complex polling) - use activity_result from above call
+    if activity_result:
+        # Update session activity if JavaScript reports more recent activity
+        js_activity_time = activity_result.get('last_activity')
+        if js_activity_time:
+            try:
+                new_activity = datetime.fromtimestamp(js_activity_time / 1000)
+                # Only update session.last_activity if it's currently None or if JS reports a newer time
+                if session.last_activity is None or new_activity > session.last_activity:
+                    session.last_activity = new_activity
+                    session_manager._save_session_with_retry(session)
+            except Exception as e:
+                logger.error(f"Failed to update activity from JavaScript: {e}")
+
     # Fingerprinting (unchanged)
     fingerprint_needed = (
         not session.fingerprint_id or
@@ -3685,7 +3597,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         with st.chat_message("assistant"):
             with st.spinner("🔍 Processing your question..."):
                 try:
-                    # ORIGINAL: get_ai_response no longer contains the primary timeout check logic
                     response = session_manager.get_ai_response(session, prompt)
                     
                     if response.get('requires_email'):
@@ -3779,7 +3690,7 @@ def ensure_initialization_fixed():
             except Exception as e:
                 logger.error(f"AI system failed: {e}")
                 ai_system = type('FallbackAI', (), {
-                    'openai_client': None,
+                    "openai_client": None, # Ensure fallback object has this attribute
                     'get_response': lambda self, prompt, history=None: {
                         "content": "AI system temporarily unavailable.",
                         "success": False
