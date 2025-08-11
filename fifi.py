@@ -2272,7 +2272,7 @@ class SessionManager:
                 logger.error(f"Failed to save session after fingerprinting: {e}")
                 # Restore old values on save failure
                 session.fingerprint_id = old_fingerprint_id
-                 session.fingerprint_method = old_method
+                session.fingerprint_method = old_method
         return None
     
     safe_session_id = session_id.replace('-', '_')
