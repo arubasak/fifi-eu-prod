@@ -855,7 +855,7 @@ class FingerprintingManager:
             
             # Render with minimal visibility (height=0 for silent operation)
             logger.info(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-            st.components.v1.html(html_content, height=0, width=0, scrolling=False, key=f"fingerprint_component_{session_id.replace('-', '_')}")
+            st.components.v1.html(html_content, height=0, width=0, scrolling=False)
             
             logger.info(f"✅ External fingerprint component rendered successfully for session {session_id[:8]}")
             return None # Always return None since data comes via redirect
@@ -3079,7 +3079,7 @@ def render_simplified_browser_close_detection(session_id: str):
     """
     
     try:
-        st.components.v1.html(enhanced_close_js, height=0, width=0, key=f"browser_close_detector_{session_id.replace('-', '_')}")
+        st.components.v1.html(enhanced_close_js, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close detection: {e}")
 
