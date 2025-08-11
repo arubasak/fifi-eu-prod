@@ -1937,7 +1937,7 @@ class SessionManager:
 
     def get_session_timeout_minutes(self) -> int:
         """Returns the configured session timeout duration in minutes."""
-        return 15
+        return 5
     
     def _periodic_cleanup(self):
         """Perform periodic cleanup of memory and resources"""
