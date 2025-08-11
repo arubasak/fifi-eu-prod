@@ -2273,7 +2273,8 @@ class SessionManager:
                 # Restore old values on save failure
                 session.fingerprint_id = old_fingerprint_id
                 session.fingerprint_method = old_method
-        return None
+         except Exception as e:
+            logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
     
     safe_session_id = session_id.replace('-', '_')
     component_key = f"activity_tracker_{safe_session_id}" # Use safe_session_id in key as well
