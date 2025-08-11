@@ -1974,7 +1974,7 @@ class SessionManager:
 
     def get_session_timeout_minutes(self) -> int:
         """Returns the configured session timeout duration in minutes."""
-        return 15
+        return 5
     
     def _periodic_cleanup(self):
         """Perform periodic cleanup of memory and resources"""
@@ -2896,7 +2896,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         
         # Show timeout message
         st.error("⏰ **Session Timeout**")
-        st.info("Your session has expired due to 15 minutes of inactivity.")
+        st.info("Your session has expired due to 5 minutes of inactivity.")
         
         # TRIGGER BROWSER RELOAD using streamlit_js_eval
         if JS_EVAL_AVAILABLE:
