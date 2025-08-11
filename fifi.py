@@ -2273,11 +2273,303 @@ class SessionManager:
                 # Restore old values on save failure
                 session.fingerprint_id = old_fingerprint_id
                 session.fingerprint_method = old_method
-         except Exception as e:
+        except Exception as e:
             logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
+
+    def check_fingerprint_history(self, fingerprint_id: str) -> Dict[str, Any]:
+        """Check if a fingerprint has historical sessions and return relevant information."""
+        try:
+            existing_sessions = self.db.find_sessions_by_fingerprint(fingerprint_id)
+            
+            if not existing_sessions:
+                return {'has_history': False}
+            
+            # Find the most recent non-guest session
+            non_guest_sessions = [s for s in existing_sessions if s.user_type != UserType.GUEST and s.email]
+            
+            if non_guest_sessions:
+                recent_session = max(non_guest_sessions, key=lambda s: s.last_activity)
+                return {
+                    'has_history': True,
+                    'email': recent_session.email,
+                    'full_name': recent_session.full_name,
+                    'user_type': recent_session.user_type.value,
+                    'last_activity': recent_session.last_activity
+                }
+            
+            return {'has_history': False}
+            
+        except Exception as e:
+            logger.error(f"Error checking fingerprint history: {e}")
+            return {'has_history': False}
+
+    def _mask_email(self, email: str) -> str:
+        """Masks an email address for privacy (shows first 2 chars + domain)."""
+        try:
+            local, domain = email.split('@')
+            if len(local) <= 2:
+                masked_local = local[0] + '*'
+            else:
+                masked_local = local[:2] + '*' * (len(local) - 2)
+            return f"{masked_local}@{domain}"
+        except Exception:
+            return "****@****.***"
+
+    def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
+        """Handles the email verification process for guest users."""
+        try:
+            sanitized_email = sanitize_input(email, 100).lower().strip()
+            
+            if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', sanitized_email):
+                return {'success': False, 'message': 'Please enter a valid email address.'}
+            
+            # Track email usage for this session
+            if sanitized_email not in session.email_addresses_used:
+                session.email_addresses_used.append(sanitized_email)
+            
+            # Update session email
+            if session.email and session.email != sanitized_email:
+                session.email_switches_count += 1
+            session.email = sanitized_email
+            
+            # Save session before sending verification
+            try:
+                self.db.save_session(session)
+            except Exception as e:
+                logger.error(f"Failed to save session before email verification: {e}")
+            
+            # Send verification code
+            code_sent = self.email_verification.send_verification_code(sanitized_email)
+            
+            if code_sent:
+                return {
+                    'success': True,
+                    'message': f'✅ Email verified successfully! You now have 10 questions per day.'
+                }
+            else:
+                return {
+                    'success': False, 
+                    'message': 'Invalid verification code. Please check the code and try again.'
+                }
+                
+        except Exception as e:
+            logger.error(f"Email code verification failed: {e}")
+            return {
+                'success': False, 
+                'message': 'Verification failed. Please try again.'
+            }
+
+    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+        """Authenticates user with WordPress and creates/updates session."""
+        if not self.config.WORDPRESS_URL:
+            logger.warning("WordPress authentication attempted but URL not configured.")
+            return None
+        
+        try:
+            auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
+            
+            response = requests.post(auth_url, json={
+                'username': username,
+                'password': password
+            }, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                token = data.get('token')
+                user_email = data.get('user_email')
+                user_display_name = data.get('user_display_name')
+                
+                if token and user_email:
+                    # Get current session or create new one
+                    current_session = self.get_session()
+                    
+                    # Upgrade to registered user
+                    current_session.user_type = UserType.REGISTERED_USER
+                    current_session.email = user_email
+                    current_session.full_name = user_display_name
+                    current_session.wp_token = token
+                    current_session.question_limit_reached = False
+                    
+                    # Reset question counts for fresh start as registered user
+                    current_session.daily_question_count = 0
+                    current_session.total_question_count = 0
+                    current_session.last_question_time = None
+                    
+                    # Save authenticated session
+                    try:
+                        self.db.save_session(current_session)
+                        logger.info(f"User authenticated and upgraded to REGISTERED_USER: {user_email}")
+                    except Exception as e:
+                        logger.error(f"Failed to save authenticated session: {e}")
+                    
+                    return current_session
+                else:
+                    logger.error("WordPress authentication response missing required fields.")
+                    return None
+            else:
+                logger.warning(f"WordPress authentication failed: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"WordPress authentication error: {e}")
+            return None
+
+    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+        """Gets AI response and manages session state."""
+        try:
+            # Check rate limiting
+            if not self.rate_limiter.is_allowed(session.session_id):
+                return {
+                    'content': 'Too many requests. Please wait a moment before asking another question.',
+                    'success': False,
+                    'source': 'Rate Limiter'
+                }
+            
+            # Check question limits
+            limit_check = self.question_limits.is_within_limits(session)
+            if not limit_check['allowed']:
+                if limit_check.get('reason') == 'guest_limit':
+                    return {'requires_email': True, 'content': 'Email verification required.'}
+                else:
+                    return {
+                        'banned': True,
+                        'content': limit_check.get('message', 'Access restricted.'),
+                        'time_remaining': limit_check.get('time_remaining')
+                    }
+            
+            # Sanitize input
+            sanitized_prompt = sanitize_input(prompt, 4000)
+            if not sanitized_prompt:
+                return {
+                    'content': 'Please enter a valid question.',
+                    'success': False,
+                    'source': 'Input Validation'
+                }
+            
+            # Record question
+            self.question_limits.record_question(session)
+            
+            # Get AI response
+            ai_response = self.ai.get_response(sanitized_prompt, session.messages)
+            
+            # Add messages to session
+            user_message = {'role': 'user', 'content': sanitized_prompt}
+            assistant_message = {
+                'role': 'assistant',
+                'content': ai_response.get('content', 'No response generated.'),
+                'source': ai_response.get('source'),
+                'used_pinecone': ai_response.get('used_pinecone', False),
+                'used_search': ai_response.get('used_search', False),
+                'has_citations': ai_response.get('has_citations', False),
+                'has_inline_citations': ai_response.get('has_inline_citations', False),
+                'safety_override': ai_response.get('safety_override', False)
+            }
+            
+            session.messages.extend([user_message, assistant_message])
+            
+            # Update activity and save session
+            self._update_activity(session)
+            
+            return ai_response
+            
+        except Exception as e:
+            logger.error(f"AI response generation failed: {e}", exc_info=True)
+            return {
+                'content': 'I encountered an error processing your request. Please try again.',
+                'success': False,
+                'source': 'Error Handler'
+            }
+
+    def clear_chat_history(self, session: UserSession):
+        """Clears chat history using soft clear mechanism."""
+        try:
+            # Soft clear: set offset to hide all current messages
+            session.display_message_offset = len(session.messages)
+            
+            # Save the updated session
+            self.db.save_session(session)
+            
+            logger.info(f"Soft cleared chat for session {session.session_id[:8]}: offset set to {session.display_message_offset}")
+            
+        except Exception as e:
+            logger.error(f"Failed to clear chat history for session {session.session_id[:8]}: {e}")
+
+    def manual_save_to_crm(self, session: UserSession):
+        """Manually saves chat transcript to CRM (no 15-minute requirement)."""
+        try:
+            if self._is_manual_crm_save_eligible(session):
+                with st.spinner("Saving chat transcript to CRM..."):
+                    success = self.zoho.save_chat_transcript_sync(session, "Manual Save")
+                    
+                if success:
+                    st.success("✅ Chat transcript saved to CRM successfully!")
+                    logger.info(f"Manual CRM save successful for session {session.session_id[:8]}")
+                else:
+                    st.error("❌ Failed to save to CRM. Please try again later.")
+                    logger.warning(f"Manual CRM save failed for session {session.session_id[:8]}")
+            else:
+                st.warning("⚠️ CRM save not available. Ensure you have an email verified and at least 1 question asked.")
+                logger.info(f"Manual CRM save not eligible for session {session.session_id[:8]}")
+                
+        except Exception as e:
+            logger.error(f"Manual CRM save error: {e}")
+            st.error("❌ An error occurred while saving to CRM.")
+
+    def end_session(self, session: UserSession):
+        """Ends the current session and performs cleanup."""
+        try:
+            # Attempt CRM save for eligible users (manual save - no 15-minute requirement)
+            if self._is_manual_crm_save_eligible(session):
+                with st.spinner("Saving your conversation..."):
+                    try:
+                        success = self.zoho.save_chat_transcript_sync(session, "Sign Out")
+                        if success:
+                            st.success("✅ Conversation saved successfully!")
+                        else:
+                            st.warning("⚠️ Conversation save failed, but sign out will continue.")
+                    except Exception as e:
+                        logger.error(f"CRM save during sign out failed: {e}")
+                        st.warning("⚠️ Conversation save failed, but sign out will continue.")
+            
+            # Mark session as inactive
+            session.active = False
+            session.last_activity = datetime.now()
+            
+            # Save final session state
+            try:
+                self.db.save_session(session)
+            except Exception as e:
+                logger.error(f"Failed to save session during end_session: {e}")
+            
+            # Clear Streamlit session state
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            
+            # Reset to welcome page
+            st.session_state['page'] = None
+            
+            st.success("👋 You have been signed out successfully!")
+            logger.info(f"Session {session.session_id[:8]} ended by user.")
+            
+        except Exception as e:
+            logger.error(f"Session end failed: {e}")
+            # Force clear session state even if save fails
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.session_state['page'] = None
+
+def render_simple_activity_tracker(session_id: str):
+    """
+    Renders a simple activity tracker that monitors user interactions.
+    Uses st_javascript with unique keys to avoid conflicts.
+    """
+    if not session_id:
+        logger.warning("render_simple_activity_tracker called without session_id")
+        return None
     
+    # Create a unique, filesystem-safe key for this session
     safe_session_id = session_id.replace('-', '_')
-    component_key = f"activity_tracker_{safe_session_id}" # Use safe_session_id in key as well
+    component_key = f"activity_tracker_{safe_session_id}"
 
     # The actual JS logic
     simple_tracker_js = f"""
@@ -2363,7 +2655,6 @@ class SessionManager:
         # This error can happen if the key isn't truly unique or if there's a deeper component rendering issue.
         # It's crucial to ensure the key is always unique per conceptual component.
         return None
-
 
 # RE-ADDED & MODIFIED: check_timeout_and_trigger_reload to be database-aware
 def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession) -> bool:
@@ -3572,4 +3863,51 @@ def main_fixed():
 
 # Entry point
 if __name__ == "__main__":
-    main_fixed()
+    main_fixed() 
+                    'message': f'Verification code sent to {sanitized_email}. Please check your email.'
+                }
+            else:
+                return {
+                    'success': False, 
+                    'message': 'Failed to send verification code. Please try again later.'
+                }
+                
+        except Exception as e:
+            logger.error(f"Email verification handling failed: {e}")
+            return {
+                'success': False, 
+                'message': 'An error occurred. Please try again.'
+            }
+
+    def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
+        """Verifies the email verification code and upgrades user status."""
+        try:
+            if not session.email:
+                return {'success': False, 'message': 'No email address found for verification.'}
+            
+            sanitized_code = sanitize_input(code, 10).strip()
+            
+            if not sanitized_code:
+                return {'success': False, 'message': 'Please enter the verification code.'}
+            
+            verification_success = self.email_verification.verify_code(session.email, sanitized_code)
+            
+            if verification_success:
+                # Upgrade user to email verified guest
+                session.user_type = UserType.EMAIL_VERIFIED_GUEST
+                session.question_limit_reached = False  # Reset limit flag
+                
+                # Reset daily question count if needed (give them a fresh start)
+                if session.daily_question_count >= 4:  # If they were at guest limit
+                    session.daily_question_count = 0
+                    session.last_question_time = None
+                
+                # Save upgraded session
+                try:
+                    self.db.save_session(session)
+                    logger.info(f"User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email}")
+                except Exception as e:
+                    logger.error(f"Failed to save upgraded session: {e}")
+                
+                return {
+                    'success': True,
