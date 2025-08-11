@@ -2813,7 +2813,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         
         # Fallback: Force Streamlit rerun to home page if JS reload fails or is not available
         st.info("🏠 Redirecting to home page...")
-        time.sleep(10) # Give user a moment to read
+        time.sleep(5) # Give user a moment to read
         st.rerun()
         st.stop() # CRITICAL: Ensure script stops here too
         return True # Indicate that a reload was triggered
@@ -2909,7 +2909,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         
         # Fallback: Force Streamlit rerun to home page if JS reload fails or is not available
         st.info("🏠 Redirecting to home page...")
-        time.sleep(1) # Give user a moment to read
+        time.sleep(5) # Give user a moment to read
         st.rerun()
         st.stop() # CRITICAL: Ensure script stops here too
         return True # Indicate that a reload was triggered
