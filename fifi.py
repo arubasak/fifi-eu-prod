@@ -827,7 +827,7 @@ class FingerprintingManager:
             
             # Render with minimal visibility (height=0 for silent operation)
             logger.info(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-            st.components.v1.html(html_content, height=0, width=0, scrolling=False)
+            st.components.v1.html(html_content, height=0, width=0, scrolling=False, key=f"fingerprint_component_{session_id.replace('-', '_')}")
             
             logger.info(f"✅ External fingerprint component rendered successfully for session {session_id[:8]}")
             return None # Always return None since data comes via redirect
@@ -1546,6 +1546,143 @@ class PineconeAssistantTool:
             }
         except Exception as e:
             logger.error(f"Pinecone Assistant error: {str(e)}")
+            return None
+
+class TavilyFallbackAgent:
+    def __init__(self, tavily_api_key: str):
+        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
+
+    def add_utm_to_links(self, content: str) -> str:
+        """Finds all Markdown links in a string and appends the UTM parameters."""
+        def replacer(match):
+            url = match.group(1)
+            utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
+            if '?' in url:
+                new_url = f"{url}&{utm_params}"
+            else:
+                new_url = f"{url}?{utm_params}"
+            return f"({new_url})"
+        return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
+
+    def synthesize_search_results(self, results, query: str) -> str:
+        """Synthesize search results into a coherent response similar to LLM output."""
+        
+        # Handle string response from Tavily
+        if isinstance(results, str):
+            return f"Based on my search: {results}"
+        
+        # Handle dictionary response from Tavily (most common format)
+        if isinstance(results, dict):
+            # Check if there's a pre-made answer
+            if results.get('answer'):
+                return f"Based on my search: {results['answer']}"
+            
+            # Extract the results array
+            search_results = results.get('results', [])
+            if not search_results:
+                return "I couldn't find any relevant information for your query."
+            
+            # Process the results
+            relevant_info = []
+            sources = []
+            
+            for i, result in enumerate(search_results[:3], 1):  # Use top 3 results
+                if isinstance(result, dict):
+                    title = result.get('title', f'Result {i}')
+                    content = (result.get('content') or 
+                             result.get('snippet') or 
+                             result.get('description') or 
+                             result.get('summary', ''))
+                    url = result.get('url', '')
+                    
+                    if content:
+                        # Clean up content
+                        if len(content) > 400:
+                            content = content[:400] + "..."
+                        relevant_info.append(content)
+                        
+                        if url and title:
+                            sources.append(f"[{title}]({url})")
+            
+            if not relevant_info:
+                return "I found search results but couldn't extract readable content. Please try rephrasing your query."
+            
+            # Build synthesized response
+            response_parts = []
+            
+            if len(relevant_info) == 1:
+                response_parts.append(f"Based on my search: {relevant_info[0]}")
+            else:
+                response_parts.append("Based on my search, here's what I found:")
+                for i, info in enumerate(relevant_info, 1):
+                    response_parts.append(f"\n\n**{i}.** {info}")
+            
+            # Add sources
+            if sources:
+                response_parts.append(f"\n\n**Sources:**")
+                for i, source in enumerate(sources, 1):
+                    response_parts.append(f"\n{i}. {source}")
+            
+            return "".join(response_parts)
+        
+        # Handle direct list (fallback)
+        if isinstance(results, list):
+            relevant_info = []
+            sources = []
+            
+            for i, result in enumerate(results[:3], 1):
+                if isinstance(result, dict):
+                    title = result.get('title', f'Result {i}')
+                    content = (result.get('content') or 
+                             result.get('snippet') or 
+                             result.get('description', ''))
+                    url = result.get('url', '')
+                    
+                    if content:
+                        if len(content) > 400:
+                            content = content[:400] + "..."
+                        relevant_info.append(content)
+                        if url:
+                            sources.append(f"[{title}]({url})")
+            
+            if not relevant_info:
+                return "I couldn't find relevant information for your query."
+            
+            response_parts = []
+            if len(relevant_info) == 1:
+                response_parts.append(f"Based on my search: {relevant_info[0]}")
+            else:
+                response_parts.append("Based on my search:")
+                for info in relevant_info:
+                    response_parts.append(f"\n{info}")
+            
+            if sources:
+                response_parts.append(f"\n\n**Sources:**")
+                for i, source in enumerate(sources, 1):
+                    response_parts.append(f"{i}. {source}")
+            
+            return "".join(response_parts)
+        
+        # Fallback for unknown formats
+        return "I couldn't find any relevant information for your query."
+
+    def query(self, message: str, chat_history: List[BaseMessage]) -> Dict[str, Any]:
+        try:
+            search_results = self.tavily_tool.invoke({"query": message})
+            synthesized_content = self.synthesize_search_results(search_results, message)
+            final_content = self.add_utm_to_links(synthesized_content)
+            
+            return {
+                "content": final_content,
+                "success": True,
+                "source": "FiFi Web Search",
+                "used_pinecone": False,
+                "used_search": True,
+                "has_citations": True,
+                "has_inline_citations": True,
+                "safety_override": False
+            }
+        except Exception as e:
             return {
                 "content": f"I apologize, but an error occurred while searching: {str(e)}",
                 "success": False,
@@ -1809,7 +1946,7 @@ class SessionManager:
 
     def get_session_timeout_minutes(self) -> int:
         """Returns the configured session timeout duration in minutes."""
-        return 5 # Adjusted to 5 mins as requested earlier.
+        return 15
     
     def _periodic_cleanup(self):
         """Perform periodic cleanup of memory and resources"""
@@ -1835,7 +1972,7 @@ class SessionManager:
             if hasattr(self.rate_limiter, 'requests'):
                 old_limit_entries = []
                 for identifier, timestamps in self.rate_limiter.requests.items():
-                    cutoff = time.time() - self.rate_limiter.window_seconds
+                    cutoff = time.time() - self.rate_limer.window_seconds
                     self.rate_limiter.requests[identifier] = [t for t in timestamps if t > cutoff]
                     
                     if not self.rate_limiter.requests[identifier]:
@@ -2596,7 +2733,7 @@ def render_simple_activity_tracker(session_id: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Problematic key in render_simple_activity_tracker: {component_key}")
         return None
 
-def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession) -> bool:
+def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]) -> bool:
     """
     Check if `session_manager.get_session_timeout_minutes()` have passed (using DB's last_activity)
     and trigger browser reload if needed. Returns True if timeout was triggered (and page reload initiated).
@@ -2661,22 +2798,23 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         return False # Not timed out yet
         
     # Get activity from JS component. This will report the actual client-side last activity.
-    activity_result = render_simple_activity_tracker(session.session_id)
-    js_last_activity_timestamp = activity_result.get('last_activity') if activity_result else None
+    # Now `activity_result` is passed as an argument from main_fixed
     
-    if js_last_activity_timestamp:
+    if activity_result:
         try:
-            # Convert JS timestamp (milliseconds) to datetime
-            new_activity_dt = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
-            
-            # Update session.last_activity in Python (and DB) if JS reports newer activity
-            # This ensures `session.last_activity` in the DB is always the freshest.
-            if new_activity_dt > session.last_activity:
-                logger.debug(f"Updating last_activity for {session.session_id[:8]} from JS: {session.last_activity.strftime('%H:%M:%S')} -> {new_activity_dt.strftime('%H:%M:%S')}")
-                session.last_activity = new_activity_dt
-                # IMPORTANT: Save the session immediately after updating last_activity from JS
-                # This ensures persistence across server restarts
-                session_manager._save_session_with_retry(session) 
+            js_last_activity_timestamp = activity_result.get('last_activity')
+            if js_last_activity_timestamp:
+                # Convert JS timestamp (milliseconds) to datetime
+                new_activity_dt = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
+                
+                # Update session.last_activity in Python (and DB) if JS reports newer activity
+                # This ensures `session.last_activity` in the DB is always the freshest.
+                if new_activity_dt > session.last_activity:
+                    logger.debug(f"Updating last_activity for {session.session_id[:8]} from JS: {session.last_activity.strftime('%H:%M:%S')} -> {new_activity_dt.strftime('%H:%M:%S')}")
+                    session.last_activity = new_activity_dt
+                    # IMPORTANT: Save the session immediately after updating last_activity from JS
+                    # This ensures persistence across server restarts
+                    session_manager._save_session_with_retry(session) 
         except Exception as e:
             logger.error(f"Error processing client JS activity timestamp for session {session.session_id[:8]}: {e}")
 
@@ -2913,7 +3051,7 @@ def render_simplified_browser_close_detection(session_id: str):
     """
     
     try:
-        st.components.v1.html(enhanced_close_js, height=0, width=0)
+        st.components.v1.html(enhanced_close_js, height=0, width=0, key=f"browser_close_detector_{session_id.replace('-', '_')}")
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close detection: {e}")
 
@@ -3493,7 +3631,7 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                 else:
                     st.error("Please enter the verification code you received.")
 
-def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession):
+def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """
     Chat interface with robust timeout system.
     """
@@ -3501,28 +3639,12 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # FIX: Ensure render_simple_activity_tracker is called only ONCE per Streamlit session.
-    # It will store its value in st.session_state for later retrieval.
-    # The key is based on session_id, ensuring uniqueness across browser sessions.
-    # The st_javascript component internally handles being called multiple times
-    # with the same key to update its state, but not re-instantiate.
-    # CRITICAL FIX HERE: Directly call the function without explicit session state assignments,
-    # letting Streamlit manage the widget's internal state with the provided key.
-    activity_result = render_simple_activity_tracker(session.session_id)
-    
-    # The robust timeout check runs on every rerun.
-    # It will pull the latest last_activity from DB and trigger reload if needed.
-    timeout_triggered = check_timeout_and_trigger_reload(session_manager, session)
-    if timeout_triggered:
-        return # Stop rendering if a timeout and reload was initiated
-    
-    # Simple activity tracking (no complex polling) - use activity_result from above call
+    # Simple activity tracking (no complex polling) - use activity_result from main_fixed
     if activity_result:
-        # Update session activity if JavaScript reports more recent activity
-        js_activity_time = activity_result.get('last_activity')
-        if js_activity_time:
+        js_last_activity_timestamp = activity_result.get('last_activity')
+        if js_last_activity_timestamp:
             try:
-                new_activity = datetime.fromtimestamp(js_activity_time / 1000)
+                new_activity = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
                 # Only update session.last_activity if it's currently None or if JS reports a newer time
                 if session.last_activity is None or new_activity > session.last_activity:
                     session.last_activity = new_activity
@@ -3815,6 +3937,31 @@ def main_fixed():
         st.rerun()
         return
 
+    # --- Start of new/modified logic for activity tracker and timeout ---
+    activity_data_from_js = None
+    if session and session.session_id: # Only render if we have a valid session object and ID
+        # Render the activity tracker only once per session/rerun from the top level
+        # This prevents the "multiple elements with same key" error
+        # Use a more robust key check for re-rendering
+        activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
+        
+        if activity_tracker_key_state_flag not in st.session_state or \
+           st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
+            
+            logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
+            activity_data_from_js = render_simple_activity_tracker(session.session_id)
+            st.session_state[activity_tracker_key_state_flag] = True
+            st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
+            st.session_state.latest_activity_data_from_js = activity_data_from_js
+        else:
+            activity_data_from_js = st.session_state.latest_activity_data_from_js
+    
+    # Now pass this data to the timeout checker
+    # The timeout checker will manage updating session.last_activity in DB
+    timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+    if timeout_triggered:
+        return # Stop execution if a reload was initiated
+    # --- End of new/modified logic for activity tracker and timeout ---
 
     # Route to appropriate page based on st.session_state['page']
     current_page = st.session_state.get('page')
@@ -3826,7 +3973,7 @@ def main_fixed():
         else:
             # If we are on the chat page, render sidebar and chat interface
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_simplified(session_manager, session)
+            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
                     
     except Exception as page_error:
         logger.error(f"Page routing error: {page_error}", exc_info=True)
