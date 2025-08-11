@@ -1030,7 +1030,7 @@ class QuestionLimitManager:
         session.evasion_count += 1
         session.escalation_level = min(session.evasion_count, len(self.evasion_penalties))
         
-        penalty_hours = self.evasion_penalties[session.escalation_level - 1]
+        penalty_hours = self.evasion_penalties[session.escalation_hours]
         session.current_penalty_hours = penalty_hours
         
         self._apply_ban(session, BanStatus.EVASION_BLOCK, f"Evasion attempt #{session.evasion_count}")
@@ -2196,12 +2196,12 @@ class SessionManager:
             logger.error(f"Emergency fallback session created {fallback_session.session_id[:8]}")
             return fallback_session
 
-    def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]):
+    def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]) -> bool:
         """Applies fingerprinting data from custom component to the session with better validation."""
-        try:
+        try: # Outermost try block for the entire method
             if not fingerprint_data or not isinstance(fingerprint_data, dict):
                 logger.warning("Invalid fingerprint data provided to apply_fingerprinting")
-                return
+                return False # Indicate failure due to invalid input
             
             old_fingerprint_id = session.fingerprint_id
             old_method = session.fingerprint_method
@@ -2217,10 +2217,10 @@ class SessionManager:
                 # Restore old values if they existed
                 session.fingerprint_id = old_fingerprint_id
                 session.fingerprint_method = old_method
-                return
+                return False # Indicate failure due to missing essential data
             
             # Check for existing sessions with same fingerprint
-            try:
+            try: # Inner try block for DB interaction (find_sessions_by_fingerprint)
                 existing_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
                 if existing_sessions:
                     # Sort by last_activity to get the most recent relevant session
@@ -2260,21 +2260,25 @@ class SessionManager:
                         # If only guest sessions are found for this fingerprint, treat as new visitor
                         session.visitor_type = "new_visitor"
                         logger.info(f"🆕 Fingerprint {session.fingerprint_id[:8]} has only guest history, treating as new visitor")
-            except Exception as e:
+            except Exception as e: # Corresponding except for the inner try block
                 logger.error(f"Failed to check fingerprint history or inherit data: {e}")
-                # Continue without history check
+                # Continue without history check - don't return here, proceed to save current session data.
             
             # Save session with new fingerprint data
-            try:
+            try: # Inner try block for DB interaction (save_session)
                 self.db.save_session(session)
                 logger.info(f"✅ Fingerprinting applied to {session.session_id[:8]}: {session.fingerprint_method} (ID: {session.fingerprint_id[:8]}...)")
-            except Exception as e:
+            except Exception as e: # Corresponding except for the inner try block
                 logger.error(f"Failed to save session after fingerprinting: {e}")
                 # Restore old values on save failure
                 session.fingerprint_id = old_fingerprint_id
                 session.fingerprint_method = old_method
-        except Exception as e:
+                # No return here, as the outermost except will catch the final outcome of the method.
+        except Exception as e: # Outermost except block
             logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
+            return False # Indicate complete failure of the fingerprinting process
+        # If no exception caught by the outermost block, it means processing completed without major failure.
+        return True # Indicate success
 
     def check_fingerprint_history(self, fingerprint_id: str) -> Dict[str, Any]:
         """Check if a fingerprint has historical sessions and return relevant information."""
@@ -2316,7 +2320,7 @@ class SessionManager:
             return "****@****.***"
 
     def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
-        """Handles the email verification process for guest users."""
+        """Handles the email verification process for guest users by sending a code."""
         try:
             sanitized_email = sanitize_input(email, 100).lower().strip()
             
@@ -2344,18 +2348,65 @@ class SessionManager:
             if code_sent:
                 return {
                     'success': True,
-                    'message': f'✅ Email verified successfully! You now have 10 questions per day.'
+                    'message': f'Verification code sent to {sanitized_email}. Please check your email.'
                 }
             else:
                 return {
                     'success': False, 
+                    'message': 'Failed to send verification code. Please try again later.'
+                }
+                
+        except Exception as e:
+            logger.error(f"Email verification handling failed: {e}")
+            return {
+                'success': False, 
+                'message': 'An error occurred. Please try again.'
+            }
+
+    def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
+        """Verifies the email verification code and upgrades user status."""
+        try:
+            if not session.email:
+                return {'success': False, 'message': 'No email address found for verification.'}
+            
+            sanitized_code = sanitize_input(code, 10).strip()
+            
+            if not sanitized_code:
+                return {'success': False, 'message': 'Please enter the verification code.'}
+            
+            verification_success = self.email_verification.verify_code(session.email, sanitized_code)
+            
+            if verification_success:
+                # Upgrade user to email verified guest
+                session.user_type = UserType.EMAIL_VERIFIED_GUEST
+                session.question_limit_reached = False  # Reset limit flag
+                
+                # Reset daily question count if needed (give them a fresh start)
+                if session.daily_question_count >= 4:  # If they were at guest limit
+                    session.daily_question_count = 0
+                    session.last_question_time = None
+                
+                # Save upgraded session
+                try:
+                    self.db.save_session(session)
+                    logger.info(f"User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email}")
+                except Exception as e:
+                    logger.error(f"Failed to save upgraded session: {e}")
+                
+                return {
+                    'success': True,
+                    'message': f'✅ Email verified successfully! You now have 10 questions per day.'
+                }
+            else:
+                return {
+                    'success': False,
                     'message': 'Invalid verification code. Please check the code and try again.'
                 }
                 
         except Exception as e:
             logger.error(f"Email code verification failed: {e}")
             return {
-                'success': False, 
+                'success': False,
                 'message': 'Verification failed. Please try again.'
             }
 
@@ -2997,10 +3048,14 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         }
         
         # Apply fingerprinting to session
-        session_manager.apply_fingerprinting(session, processed_data)
+        success = session_manager.apply_fingerprinting(session, processed_data)
         
-        logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
-        return True
+        if success:
+            logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
+            return True
+        else:
+            logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
+            return False
         
     except Exception as e:
         logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
@@ -3863,51 +3918,4 @@ def main_fixed():
 
 # Entry point
 if __name__ == "__main__":
-    main_fixed() 
-                    'message': f'Verification code sent to {sanitized_email}. Please check your email.'
-                }
-            else:
-                return {
-                    'success': False, 
-                    'message': 'Failed to send verification code. Please try again later.'
-                }
-                
-        except Exception as e:
-            logger.error(f"Email verification handling failed: {e}")
-            return {
-                'success': False, 
-                'message': 'An error occurred. Please try again.'
-            }
-
-    def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
-        """Verifies the email verification code and upgrades user status."""
-        try:
-            if not session.email:
-                return {'success': False, 'message': 'No email address found for verification.'}
-            
-            sanitized_code = sanitize_input(code, 10).strip()
-            
-            if not sanitized_code:
-                return {'success': False, 'message': 'Please enter the verification code.'}
-            
-            verification_success = self.email_verification.verify_code(session.email, sanitized_code)
-            
-            if verification_success:
-                # Upgrade user to email verified guest
-                session.user_type = UserType.EMAIL_VERIFIED_GUEST
-                session.question_limit_reached = False  # Reset limit flag
-                
-                # Reset daily question count if needed (give them a fresh start)
-                if session.daily_question_count >= 4:  # If they were at guest limit
-                    session.daily_question_count = 0
-                    session.last_question_time = None
-                
-                # Save upgraded session
-                try:
-                    self.db.save_session(session)
-                    logger.info(f"User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email}")
-                except Exception as e:
-                    logger.error(f"Failed to save upgraded session: {e}")
-                
-                return {
-                    'success': True,
+    main_fixed()
