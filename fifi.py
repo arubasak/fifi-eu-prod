@@ -16,7 +16,7 @@ import hashlib
 import secrets
 from enum import Enum
 from urllib.parse import urlparse
-from reportlab.platypus import SimpleDocDocument, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib.pagesizes import letter
