@@ -2277,7 +2277,14 @@ class SessionManager:
             session_id = st.session_state.get('current_session_id')
             
             if session_id:
+                # ADD THIS: Check if session loading is already in progress
+                if st.session_state.get(f'loading_{session_id}', False):
+                    logger.warning(f"Session {session_id[:8]} already being loaded, skipping")
+                    return None
+    
+                st.session_state[f'loading_{session_id}'] = True
                 session = self.db.load_session(session_id)
+                st.session_state[f'loading_{session_id}'] = False  # Clear the flag
                 
                 if session and session.active:
                     # Check limits and handle bans
