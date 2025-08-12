@@ -2980,9 +2980,28 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
     return False
 
 def render_simplified_browser_close_detection(session_id: str):
-    """Enhanced browser close detection with tab switch distinction."""
+    """Enhanced browser close detection with eligibility check."""
     if not session_id:
         return
+
+    # NEW: Check if user is eligible for emergency save before setting up detection
+    session_manager = st.session_state.get('session_manager')
+    if not session_manager:
+        logger.debug("No session manager available for browser close detection")
+        return
+        
+    session = session_manager.db.load_session(session_id)
+    if not session:
+        logger.debug(f"No session found for browser close detection: {session_id[:8]}")
+        return
+        
+    # Check if user is eligible for CRM save - if not, skip emergency save setup entirely
+    if not session_manager._is_crm_save_eligible(session, "browser_close_check"):
+        logger.info(f"🚫 Session {session_id[:8]} not eligible for CRM save - skipping browser close detection")
+        return
+
+    # Only set up emergency save for eligible users
+    logger.info(f"✅ Setting up browser close detection for eligible session {session_id[:8]}")
 
     enhanced_close_js = f"""
     <script>
@@ -2996,8 +3015,9 @@ def render_simplified_browser_close_detection(session_id: str):
         let saveTriggered = false;
         let isTabSwitching = false;
         
-        console.log('🛡️ Enhanced browser close detection initialized');
+        console.log('🛡️ Enhanced browser close detection initialized for eligible user');
         
+        // ... rest of the existing JavaScript code remains unchanged ...
         function performActualEmergencySave(reason) {{
             if (saveTriggered) return;
             saveTriggered = true;
