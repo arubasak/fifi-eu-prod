@@ -621,98 +621,101 @@ class DatabaseManager:
                         email_switches_count=row[26] or 0,
                         browser_privacy_level=row[27],
                         registration_prompted=bool(row[28]),
-                        int(session.registration_link_clicked), session.recognition_response, session.display_message_offset))
-                        
-                        logger.info(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}")
-                        return user_session
-                        
-                    except Exception as e:
-                        logger.error(f"Failed to create UserSession object from row for session {session_id[:8]}: {e}", exc_info=True)
-                        logger.error(f"Problematic row data (truncated): {str(row)[:200]}")
-                        return None
-                        
+                        registration_link_clicked=bool(row[29]), # FIXED: Correct argument (bool(row[29]))
+                        recognition_response=row[30],
+                        display_message_offset=loaded_display_message_offset # Use the safely loaded value
+                    )
+                    
+                    logger.info(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}")
+                    return user_session
+                    
                 except Exception as e:
-                    logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
+                    logger.error(f"Failed to create UserSession object from row for session {session_id[:8]}: {e}", exc_info=True)
+                    logger.error(f"Problematic row data (truncated): {str(row)[:200]}")
                     return None
+                    
+            except Exception as e:
+                logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
+                return None
 
-        @handle_api_errors("Database", "Find by Fingerprint")
-        def find_sessions_by_fingerprint(self, fingerprint_id: str) -> List[UserSession]:
-            """Find all sessions with the same fingerprint_id."""
-            logger.warning(f"🔍 SEARCHING FOR FINGERPRINT: {fingerprint_id[:8]}...")
-            with self.lock:
-                current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
-                if current_config:
-                    self._ensure_connection_healthy(current_config)
+    @handle_api_errors("Database", "Find by Fingerprint")
+    def find_sessions_by_fingerprint(self, fingerprint_id: str) -> List[UserSession]:
+        """Find all sessions with the same fingerprint_id."""
+        logger.warning(f"🔍 SEARCHING FOR FINGERPRINT: {fingerprint_id[:8]}...")
+        with self.lock:
+            current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
+            if current_config:
+                self._ensure_connection_healthy(current_config)
 
-                if self.db_type == "memory":
-                    sessions = [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fingerprint_id]
-                    # Ensure backward compatibility for in-memory sessions
-                    for session in sessions:
-                        if not hasattr(session, 'display_message_offset'):
-                            session.display_message_offset = 0
-                    logger.warning(f"📊 FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
-                    return sessions
-                
-                try:
-                    if hasattr(self.conn, 'row_factory'):
-                        self.conn.row_factory = None
+            if self.db_type == "memory":
+                sessions = [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fingerprint_id]
+                # Ensure backward compatibility for in-memory sessions
+                for session in sessions:
+                    if not hasattr(session, 'display_message_offset'):
+                        session.display_message_offset = 0
+                logger.warning(f"📊 FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
+                return sessions
+            
+            try:
+                if hasattr(self.conn, 'row_factory'):
+                    self.conn.row_factory = None
 
-                    cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
-                    sessions = []
-                    for row in cursor.fetchall():
-                        if len(row) < 31: # Must have at least 31 columns for basic functionality
-                            logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected at least 31). Skipping row.")
-                            continue
-                        try:
-                            # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
-                            loaded_display_message_offset = row[31] if len(row) > 31 else 0
-                            loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
+                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
+                sessions = []
+                for row in cursor.fetchall():
+                    if len(row) < 31: # Must have at least 31 columns for basic functionality
+                        logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected at least 31). Skipping row.")
+                        continue
+                    try:
+                        # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
+                        loaded_display_message_offset = row[31] if len(row) > 31 else 0
+                        loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
 
-                            s = UserSession(
-                                session_id=row[0], 
-                                user_type=UserType(row[1]) if row[1] else UserType.GUEST,
-                                email=row[2], 
-                                full_name=row[3],
-                                zoho_contact_id=row[4],
-                                created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
-                                last_activity=loaded_last_activity, # Use the safely loaded value
-                                messages=safe_json_loads(row[7], default_value=[]),
-                                active=bool(row[8]), 
-                                wp_token=row[9],
-                                timeout_saved_to_crm=bool(row[10]),
-                                fingerprint_id=row[11],
-                                fingerprint_method=row[12],
-                                visitor_type=row[13] or 'new_visitor',
-                                daily_question_count=row[14] or 0,
-                                total_question_count=row[15] or 0,
-                                last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
-                                question_limit_reached=bool(row[17]),
-                                ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
-                                ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
-                                ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
-                                ban_reason=row[21],
-                                evasion_count=row[22] or 0,
-                                current_penalty_hours=row[23] or 0,
-                                escalation_level=row[24] or 0,
-                                email_addresses_used=safe_json_loads(row[25], default_value=[]),
-                                email_switches_count=row[26] or 0,
-                                browser_privacy_level=row[27],
-                                registration_prompted=bool(row[28]),
-                                registration_link_clicked=bool(row[29]),
-                                recognition_response=row[30],
-                                display_message_offset=loaded_display_message_offset # Use the safely loaded value
-                            )
-                            sessions.append(s)
-                        except Exception as e:
-                            logger.error(f"Error converting row to UserSession in find_sessions_by_fingerprint: {e}", exc_info=True)
-                            continue
-                    logger.warning(f"📊 FINGERPRINT SEARCH RESULTS (DB): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
-                    for s in sessions:
-                        logger.warning(f"  - {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}, active={s.active}")
-                    return sessions
-                except Exception as e:
-                    logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
-                    return []
+                        s = UserSession(
+                            session_id=row[0], 
+                            user_type=UserType(row[1]) if row[1] else UserType.GUEST,
+                            email=row[2], 
+                            full_name=row[3],
+                            zoho_contact_id=row[4],
+                            created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
+                            last_activity=loaded_last_activity, # Use the safely loaded value
+                            messages=safe_json_loads(row[7], default_value=[]),
+                            active=bool(row[8]), 
+                            wp_token=row[9],
+                            timeout_saved_to_crm=bool(row[10]),
+                            fingerprint_id=row[11],
+                            fingerprint_method=row[12],
+                            visitor_type=row[13] or 'new_visitor',
+                            daily_question_count=row[14] or 0,
+                            total_question_count=row[15] or 0,
+                            last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
+                            question_limit_reached=bool(row[17]),
+                            ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
+                            ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
+                            ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
+                            ban_reason=row[21],
+                            evasion_count=row[22] or 0,
+                            current_penalty_hours=row[23] or 0,
+                            escalation_level=row[24] or 0,
+                            email_addresses_used=safe_json_loads(row[25], default_value=[]),
+                            email_switches_count=row[26] or 0,
+                            browser_privacy_level=row[27],
+                            registration_prompted=bool(row[28]),
+                            registration_link_clicked=bool(row[29]),
+                            recognition_response=row[30],
+                            display_message_offset=loaded_display_message_offset # Use the safely loaded value
+                        )
+                        sessions.append(s)
+                    except Exception as e:
+                        logger.error(f"Error converting row to UserSession in find_sessions_by_fingerprint: {e}", exc_info=True)
+                        continue
+                logger.warning(f"📊 FINGERPRINT SEARCH RESULTS (DB): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
+                for s in sessions:
+                    logger.warning(f"  - {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}, active={s.active}")
+                return sessions
+            except Exception as e:
+                logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
+                return []
 
     # =============================================================================
     # FEATURE MANAGERS
@@ -1097,7 +1100,7 @@ class DatabaseManager:
                 story.append(Spacer(1, 8))
                 story.append(Paragraph(f"<b>{role}:</b> {content}", style))
                 
-                if msg.get('source'):
+                if msg.get("source"):
                     story.append(Paragraph(f"<i>Source: {msg['source']}</i>", self.styles['Normal']))
                     
             doc.build(story)
@@ -1649,16 +1652,8 @@ class DatabaseManager:
                     "safety_override": False
                 }
             except Exception as e:
-                return {
-                    "content": f"I apologize, but an error occurred while searching: {str(e)}",
-                    "success": False,
-                    "source": "error",
-                    "used_pinecone": False,
-                    "used_search": False,
-                    "has_citations": False,
-                    "has_inline_citations": False,
-                    "safety_override": False
-                }
+                logger.error(f"Pinecone Assistant error: {str(e)}")
+                return None
         
     class EnhancedAI:
         """Enhanced AI system with improved error handling and bidirectional fallback."""
@@ -1716,7 +1711,7 @@ class DatabaseManager:
             elif '429' in error_str:
                 error_handler.component_status["Pinecone"] = "rate_limit"
                 return "rate_limit"
-            elif any(keyword in error_str for keyword in ['500', '503']): # Changed 'code' to 'keyword' to match other lines
+            elif any(keyword in error_str for keyword in ['500', '503']): 
                 error_handler.component_status["Pinecone"] = "server_error"
                 return "server_error"
             elif any(keyword in error_str for keyword in ['timeout', 'connection', 'network']):
@@ -1884,55 +1879,55 @@ class DatabaseManager:
                     except Exception as e:
                         logger.error(f"Web search failed: {e}")
                         error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
-            
-            else:
-                # Try Tavily first (when Pinecone has major issues)
-                if self.tavily_agent:
-                    try:
-                        logger.info("🌐 Querying web search (primary due to Pinecone issues)...")
-                        web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
-                        
-                        if web_response and web_response.get("success"):
-                            logger.info("✅ Using web search response (primary)")
-                            error_handler.mark_component_healthy("Tavily")
-                            return web_response
-                            
-                    except Exception as e:
-                        logger.error(f"Web search failed: {e}")
-                        error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
                 
-                # Fallback to Pinecone (despite issues)
-                if self.pinecone_tool:
-                    try:
-                        logger.info("🔍 Falling back to Pinecone knowledge base...")
-                        pinecone_response = self.pinecone_tool.query(langchain_history)
-                        
-                        if pinecone_response and pinecone_response.get("success"):
-                            should_fallback = self.should_use_web_fallback(pinecone_response)
+                else:
+                    # Try Tavily first (when Pinecone has major issues)
+                    if self.tavily_agent:
+                        try:
+                            logger.info("🌐 Querying web search (primary due to Pinecone issues)...")
+                            web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
                             
-                            if not should_fallback:
-                                logger.info("✅ Using Pinecone response (fallback)")
-                                return pinecone_response
+                            if web_response and web_response.get("success"):
+                                logger.info("✅ Using web search response (primary)")
+                                error_handler.mark_component_healthy("Tavily")
+                                return web_response
                                 
-                    except Exception as e:
-                        error_type = self._detect_pinecone_error_type(e)
-                        logger.error(f"Pinecone fallback also failed ({error_type}): {e}")
-            
-            # Final fallback - basic response
-            logger.warning("⚠️ All AI tools unavailable, using basic fallback")
-            return {
-                "content": "I apologize, but I'm unable to process your request at the moment due to technical issues. Please try again later.",
-                "success": False,
-                "source": "System Fallback",
-                "used_search": False,
-                "used_pinecone": False,
-                "has_citations": False,
-                "has_inline_citations": False,
-                "safety_override": False
-            }
+                        except Exception as e:
+                            logger.error(f"Web search failed: {e}")
+                            error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
+                    
+                    # Fallback to Pinecone (despite issues)
+                    if self.pinecone_tool:
+                        try:
+                            logger.info("🔍 Falling back to Pinecone knowledge base...")
+                            pinecone_response = self.pinecone_tool.query(langchain_history)
+                            
+                            if pinecone_response and pinecone_response.get("success"):
+                                should_fallback = self.should_use_web_fallback(pinecone_response)
+                                
+                                if not should_fallback:
+                                    logger.info("✅ Using Pinecone response (fallback)")
+                                    return pinecone_response
+                                    
+                        except Exception as e:
+                            error_type = self._detect_pinecone_error_type(e)
+                            logger.error(f"Pinecone fallback also failed ({error_type}): {e}")
+                
+                # Final fallback - basic response
+                logger.warning("⚠️ All AI tools unavailable, using basic fallback")
+                return {
+                    "content": "I apologize, but I'm unable to process your request at the moment due to technical issues. Please try again later.",
+                    "success": False,
+                    "source": "System Fallback",
+                    "used_search": False,
+                    "used_pinecone": False,
+                    "has_citations": False,
+                    "has_inline_citations": False,
+                    "safety_override": False
+                }
 
     @handle_api_errors("Content Moderation", "Check Prompt", show_to_user=False)
-    def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]: # Removed 'session'
+    def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
         """Checks user prompt against content moderation guidelines using OpenAI's moderation API."""
         if not client or not hasattr(client, 'moderations') :
             logger.debug("OpenAI client or moderation API not available. Skipping content moderation.")
@@ -2118,7 +2113,7 @@ class DatabaseManager:
                     logger.info(f"CRM save not eligible - already saved for {session.session_id[:8]}")
                     return False
                 
-                if session.user_type not in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]:
+                if session.user_type not in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]: # Corrected to .value for enum comparison
                     logger.info(f"CRM save not eligible - user type {session.user_type.value} for {session.session_id[:8]}")
                     return False
                 
@@ -2139,7 +2134,7 @@ class DatabaseManager:
                 if not session.email or not session.messages:
                     return False
                 
-                if session.user_type not in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]:
+                if session.user_type not in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]: # Corrected to .value for enum comparison
                     return False
                 
                 if session.daily_question_count < 1:
@@ -2767,7 +2762,7 @@ class DatabaseManager:
                     del st.session_state[key]
                 st.session_state['page'] = None
 
-    def render_simple_activity_tracker(session_id: str) -> Optional[Dict[str, Any]]:
+    def render_simple_activity_tracker(session_id: str):
         """Renders a simple activity tracker that monitors user interactions."""
         if not session_id:
             logger.warning("render_simple_activity_tracker called without session_id")
@@ -3265,7 +3260,7 @@ class DatabaseManager:
             
             # Clear query parameters to prevent re-triggering on rerun
             params_to_clear = ["event", "session_id", "reason", "fallback"]
-            for param in st.query_params:
+            for param in params_to_clear:
                 if param in st.query_params:
                     del st.query_params[param]
             
@@ -3611,7 +3606,7 @@ class DatabaseManager:
                     
             with col2:
                 signout_help = "Ends your current session and returns to the welcome page."
-                if (session.user_type in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST] and 
+                if (session.user_type in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and # Corrected to .value
                     session.email and session.messages and session.daily_question_count >= 1):
                     signout_help += " Your conversation will be automatically saved to CRM before signing out."
                 
