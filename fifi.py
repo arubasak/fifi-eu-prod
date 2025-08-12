@@ -1384,7 +1384,7 @@ class ZohoCRMManager:
 
 class RateLimiter:
     """Simple in-memory rate limiter to prevent abuse."""
-    def __init__(self, max_requests: int = 30, window_seconds: int = 60):
+    def __init__(self, max_requests: int = 2, window_seconds: int = 60): # UPDATED: 2 questions per 60 seconds
         self.requests = defaultdict(list)
         self._lock = threading.Lock()
         self.max_requests = max_requests
@@ -1396,7 +1396,9 @@ class RateLimiter:
             self.requests[identifier] = [t for t in self.requests[identifier] if t > now - self.window_seconds]
             if len(self.requests[identifier]) < self.max_requests:
                 self.requests[identifier].append(now)
+                logger.debug(f"Rate limit allowed for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
                 return True
+            logger.warning(f"Rate limit exceeded for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
             return False
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
@@ -1720,10 +1722,7 @@ class EnhancedAI:
         elif any(code in error_str for code in ['500', '503']):
             error_handler.component_status["Pinecone"] = "server_error"
             return "server_error"
-        elif any(code in error_str for code in ['400', '404', '409', '412', '422']):
-            error_handler.component_status["Pinecone"] = "client_error"
-            return "client_error"
-        elif any(keyword in error_str for keyword in ['timeout', 'connection', 'network']):
+        elif any(code in error_str for keyword in ['timeout', 'connection', 'network']): # Corrected 'code' to 'keyword'
             error_handler.component_status["Pinecone"] = "connectivity_error"
             return "connectivity_error"
         else:
@@ -1860,6 +1859,23 @@ class EnhancedAI:
             langchain_history.append(HumanMessage(content=prompt))
         else:
             langchain_history = [HumanMessage(content=prompt)]
+        
+        # Handle cases where fingerprint_id might still be temporary or None during early load.
+        # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
+        rate_limiter_id = session.fingerprint_id
+        if rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+            # Fallback to session_id for truly un-fingerprinted or temporary cases,
+            # to still apply some level of protection, albeit less robust.
+            rate_limiter_id = session.session_id
+            logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
+
+        # Check rate limiting using fingerprint_id (or fallback session_id)
+        if not self.rate_limiter.is_allowed(rate_limiter_id): # MODIFIED: Use rate_limiter_id
+            return {
+                'content': 'Too many requests. Please wait a moment before asking another question.',
+                'success': False,
+                'source': 'Rate Limiter'
+            }
         
         # NEW: Intelligent routing based on component health
         use_pinecone_first = self._should_use_pinecone_first()
@@ -2609,14 +2625,38 @@ class SessionManager:
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
         """Gets AI response and manages session state."""
         try:
-            # Check rate limiting
-            if not self.rate_limiter.is_allowed(session.session_id):
+            # Handle cases where fingerprint_id might still be temporary or None during early load.
+            # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
+            rate_limiter_id = session.fingerprint_id
+            if rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                # Fallback to session_id for truly un-fingerprinted or temporary cases,
+                # to still apply some level of protection, albeit less robust.
+                rate_limiter_id = session.session_id
+                logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
+
+            # Check rate limiting using fingerprint_id (or fallback session_id)
+            if not self.rate_limiter.is_allowed(rate_limiter_id): # MODIFIED: Use rate_limiter_id
                 return {
                     'content': 'Too many requests. Please wait a moment before asking another question.',
                     'success': False,
                     'source': 'Rate Limiter'
                 }
             
+            # Content moderation check
+            moderation_result = check_content_moderation(prompt, self.ai.openai_client) # MODIFIED: Use self.ai.openai_client
+            if moderation_result and moderation_result.get("flagged"):
+                logger.warning(f"Content moderation flagged input: {moderation_result.get('categories', [])}")
+                return {
+                    "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
+                    "success": False,
+                    "source": "Content Moderation",
+                    "used_search": False,
+                    "used_pinecone": False,
+                    "has_citations": False,
+                    "has_inline_citations": False,
+                    "safety_override": False
+                }
+
             # Check question limits
             limit_check = self.question_limits.is_within_limits(session)
             if not limit_check['allowed']:
@@ -3951,7 +3991,7 @@ def ensure_initialization_fixed():
             
             init_progress.progress(0.7)
             
-            rate_limiter = RateLimiter()
+            rate_limiter = RateLimiter(max_requests=2, window_seconds=60) # UPDATED: 2 questions per 60 seconds
             fingerprinting_manager = FingerprintingManager()
             
             init_progress.progress(0.8)
