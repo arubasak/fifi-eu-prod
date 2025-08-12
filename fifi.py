@@ -477,6 +477,7 @@ class DatabaseManager:
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         """Save session with SQLite Cloud compatibility and connection health check"""
+        logger.warning(f"💾 SAVING SESSION TO DB: {session.session_id[:8]} | user_type={session.user_type.value} | email={session.email} | messages={len(session.messages)} | daily_q={session.daily_question_count} | fp_id={session.fingerprint_id[:8]}")
         with self.lock:
             # Check and ensure connection health before any DB operation
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
@@ -490,7 +491,7 @@ class DatabaseManager:
             
             try:
                 # NEVER set row_factory for save operations
-                if hasattr(self.conn, 'row_factory'):
+                if hasattr(self.conn, 'row_factory'): 
                     self.conn.row_factory = None
                 
                 # Validate messages before saving
@@ -640,6 +641,7 @@ class DatabaseManager:
     @handle_api_errors("Database", "Find by Fingerprint")
     def find_sessions_by_fingerprint(self, fingerprint_id: str) -> List[UserSession]:
         """Find all sessions with the same fingerprint_id."""
+        logger.warning(f"🔍 SEARCHING FOR FINGERPRINT: {fingerprint_id[:8]}...")
         with self.lock:
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
             if current_config:
@@ -651,6 +653,7 @@ class DatabaseManager:
                 for session in sessions:
                     if not hasattr(session, 'display_message_offset'):
                         session.display_message_offset = 0
+                logger.warning(f"📊 FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
                 return sessions
             
             try:
@@ -706,83 +709,12 @@ class DatabaseManager:
                     except Exception as e:
                         logger.error(f"Error converting row to UserSession in find_sessions_by_fingerprint: {e}", exc_info=True)
                         continue
+                logger.warning(f"📊 FINGERPRINT SEARCH RESULTS (DB): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
+                for s in sessions:
+                    logger.warning(f"  - {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}")
                 return sessions
             except Exception as e:
                 logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
-                return []
-
-    @handle_api_errors("Database", "Find by Email")
-    def find_sessions_by_email(self, email: str) -> List[UserSession]:
-        """Find all sessions associated with a specific email address."""
-        with self.lock:
-            current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
-            if current_config:
-                self._ensure_connection_healthy(current_config)
-
-            if self.db_type == "memory":
-                sessions = [copy.deepcopy(s) for s in self.local_sessions.values() if s.email == email]
-                # Ensure backward compatibility for in-memory sessions
-                for session in sessions:
-                    if not hasattr(session, 'display_message_offset'):
-                        session.display_message_offset = 0
-                return sessions
-            
-            try:
-                if hasattr(self.conn, 'row_factory'):
-                    self.conn.row_factory = None
-
-                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset FROM sessions WHERE email = ? ORDER BY last_activity DESC", (email,))
-                sessions = []
-                for row in cursor.fetchall():
-                    if len(row) < 31: # Must have at least 31 columns for basic functionality
-                        logger.warning(f"Row has insufficient columns in find_sessions_by_email: {len(row)} (expected at least 31). Skipping row.")
-                        continue
-                    try:
-                        # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
-                        loaded_display_message_offset = row[31] if len(row) > 31 else 0
-                        loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
-
-                        s = UserSession(
-                            session_id=row[0], 
-                            user_type=UserType(row[1]) if row[1] else UserType.GUEST,
-                            email=row[2], 
-                            full_name=row[3],
-                            zoho_contact_id=row[4],
-                            created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
-                            last_activity=loaded_last_activity, # Use the safely loaded value
-                            messages=safe_json_loads(row[7], default_value=[]),
-                            active=bool(row[8]), 
-                            wp_token=row[9],
-                            timeout_saved_to_crm=bool(row[10]),
-                            fingerprint_id=row[11],
-                            fingerprint_method=row[12],
-                            visitor_type=row[13] or 'new_visitor',
-                            daily_question_count=row[14] or 0,
-                            total_question_count=row[15] or 0,
-                            last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
-                            question_limit_reached=bool(row[17]),
-                            ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
-                            ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
-                            ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
-                            ban_reason=row[21],
-                            evasion_count=row[22] or 0,
-                            current_penalty_hours=row[23] or 0,
-                            escalation_level=row[24] or 0,
-                            email_addresses_used=safe_json_loads(row[25], default_value=[]),
-                            email_switches_count=row[26] or 0,
-                            browser_privacy_level=row[27],
-                            registration_prompted=bool(row[28]),
-                            registration_link_clicked=bool(row[29]),
-                            recognition_response=row[30],
-                            display_message_offset=loaded_display_message_offset # Use the safely loaded value
-                        )
-                        sessions.append(s)
-                    except Exception as e:
-                        logger.error(f"Error converting row to UserSession in find_sessions_by_email: {e}", exc_info=True)
-                        continue
-                return sessions
-            except Exception as e:
-                logger.error(f"Failed to find sessions by email '{email}': {e}", exc_info=True)
                 return []
 
 # =============================================================================
@@ -2195,15 +2127,26 @@ class SessionManager:
 
     def _create_new_session(self) -> UserSession:
         """Creates a new user session with temporary fingerprint until JS fingerprinting completes."""
+        import traceback
+        import inspect
+        
+        # Get the calling function info
+        frame = inspect.currentframe()
+        caller = inspect.getframeinfo(frame.f_back)
+        
+        logger.error("🚨 NEW SESSION BEING CREATED!")
+        logger.error(f"📍 Called from: {caller.filename}:{caller.lineno} in function {caller.function}")
+        logger.error("📋 Full stack trace:")
+        for line in traceback.format_stack():
+            logger.error(line.strip())
+        
         session_id = str(uuid.uuid4())
         session = UserSession(session_id=session_id, last_activity=None)
         
-        # Apply temporary fingerprint until JS fingerprinting completes
         session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
         session.fingerprint_method = "temporary_fallback_python"
         
-     
-        logger.info(f"Created new session {session_id[:8]} with temporary fingerprint - waiting for JS fingerprinting")
+        logger.error(f"🆔 New session created: {session_id[:8]} (NOT saved to DB yet, will be saved in get_session)")
         return session
 
     def _check_15min_eligibility(self, session: UserSession) -> bool:
@@ -2268,8 +2211,88 @@ class SessionManager:
             logger.error(f"Error checking manual CRM eligibility for {session.session_id[:8]}: {e}")
             return False
 
+    def _attempt_fingerprint_inheritance(self, session: UserSession):
+        """Attempts to inherit session data from existing sessions with the same fingerprint."""
+        logger.info(f"🔄 Attempting fingerprint inheritance for session {session.session_id[:8]} with fingerprint {session.fingerprint_id[:8]}...")
+        
+        try:
+            existing_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+            
+            # Filter out the current session itself if it happens to be in the list
+            # And also filter out sessions that only have temporary fingerprints if we're trying to inherit from a 'real' one
+            relevant_existing_sessions = [
+                s for s in existing_sessions
+                if s.session_id != session.session_id and
+                   not s.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+            ]
+
+            if relevant_existing_sessions:
+                # Find the most recent non-guest session or the most recent overall if only guests
+                non_guest_sessions = [s for s in relevant_existing_sessions if s.user_type != UserType.GUEST]
+                
+                if non_guest_sessions:
+                    recent_session = max(non_guest_sessions, key=lambda s: s.last_activity if s.last_activity is not None else datetime.min)
+                    logger.warning(f"✅ INHERITING DATA from most recent non-guest session {recent_session.session_id[:8]} (type: {recent_session.user_type.value})")
+                else:
+                    # If only guest sessions found, pick the most recent one
+                    recent_session = max(relevant_existing_sessions, key=lambda s: s.last_activity if s.last_activity is not None else datetime.min)
+                    logger.warning(f"🆕 Only guest sessions found with fingerprint {session.fingerprint_id[:8]}, treating as new visitor based on no higher-privilege history. But will still check for bans/evasion.")
+                
+                # Inherit user identity and state
+                session.user_type = recent_session.user_type
+                session.email = recent_session.email
+                session.full_name = recent_session.full_name
+                session.zoho_contact_id = recent_session.zoho_contact_id
+                session.visitor_type = "returning_visitor"
+                
+                # Inherit usage counters and history
+                session.daily_question_count = recent_session.daily_question_count
+                session.total_question_count = recent_session.total_question_count
+                session.last_question_time = recent_session.last_question_time
+                
+                if session.last_activity is None and recent_session.last_activity is not None:
+                    session.last_activity = recent_session.last_activity
+
+                session.question_limit_reached = recent_session.question_limit_reached
+                session.ban_status = recent_session.ban_status
+                session.ban_start_time = recent_session.ban_start_time
+                session.ban_end_time = recent_session.ban_end_time
+                session.ban_reason = recent_session.ban_reason
+                
+                # Inherit tracking data
+                session.email_addresses_used = recent_session.email_addresses_used
+                session.email_switches_count = recent_session.email_switches_count
+                session.evasion_count = recent_session.evasion_count
+                session.current_penalty_hours = recent_session.current_penalty_hours
+                session.escalation_level = recent_session.escalation_level
+                
+                # IMPORTANT: If the current session was created with a temporary fingerprint,
+                # and we found a 'real' fingerprint from a previous session, we should update
+                # the current session's fingerprint to the 'real' one for consistency.
+                if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and \
+                   not recent_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                   
+                    logger.info(f"Updating temporary fingerprint {session.fingerprint_id[:8]} to recognized fingerprint {recent_session.fingerprint_id[:8]}")
+                    session.fingerprint_id = recent_session.fingerprint_id
+                    session.fingerprint_method = recent_session.fingerprint_method
+                    session.browser_privacy_level = recent_session.browser_privacy_level
+                    
+                logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, new_fp={session.fingerprint_id[:8]}")
+                
+            else:
+                logger.info(f"No relevant historical sessions found for fingerprint {session.fingerprint_id[:8]}.")
+                session.visitor_type = "new_visitor"
+                # If this session had a temp fingerprint, and no history, it remains a new visitor guest
+                # and its temp fingerprint remains until the JS one comes in.
+                
+        except Exception as e:
+            logger.error(f"Error during fingerprint inheritance for session {session.session_id[:8]}: {e}", exc_info=True)
+
+
     def get_session(self) -> Optional[UserSession]:
         """Gets or creates the current user session with enhanced validation."""
+        logger.info(f"🔍 get_session() called - current_session_id in state: {st.session_state.get('current_session_id', 'None')}")
+        
         # Perform periodic cleanup
         self._periodic_cleanup()
 
@@ -2287,6 +2310,19 @@ class SessionManager:
                 st.session_state[f'loading_{session_id}'] = False  # Clear the flag
                 
                 if session and session.active:
+                    # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
+                    # And this check hasn't been performed for this session yet in the current rerun cycle.
+                    fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
+                    if (session.fingerprint_id and 
+                        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
+                        not st.session_state.get(fingerprint_checked_key, False)):
+                        
+                        self._attempt_fingerprint_inheritance(session)
+                        # Save session after potential inheritance to persist updated user type/counts
+                        self.db.save_session(session) # Crucial to save here
+                        st.session_state[fingerprint_checked_key] = True # Mark as checked for this session
+                        logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
+
                     # Check limits and handle bans
                     limit_check = self.question_limits.is_within_limits(session)
                     if not limit_check.get('allowed', True):
@@ -2318,8 +2354,14 @@ class SessionManager:
             logger.info(f"Creating new session")
             new_session = self._create_new_session()
             st.session_state.current_session_id = new_session.session_id
-            self.db.save_session(new_session)
-            logger.info(f"Created and stored new session {new_session.session_id[:8]}")
+            
+            # Immediately attempt fingerprint inheritance for the *newly created* session
+            # This is critical if a user starts a new session but has an existing fingerprint
+            self._attempt_fingerprint_inheritance(new_session)
+            st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
+            
+            self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
+            logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check)")
             return new_session
             
         except Exception as e:
@@ -2334,6 +2376,8 @@ class SessionManager:
 
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]) -> bool:
         """Applies fingerprinting data from custom component to the session with better validation."""
+        logger.warning(f"🔍 APPLYING FINGERPRINT received from JS: {fingerprint_data.get('fingerprint_id', 'None')[:8]} to session {session.session_id[:8]}")
+        
         try:
             if not fingerprint_data or not isinstance(fingerprint_data, dict):
                 logger.warning("Invalid fingerprint data provided to apply_fingerprinting")
@@ -2342,67 +2386,35 @@ class SessionManager:
             old_fingerprint_id = session.fingerprint_id
             old_method = session.fingerprint_method
             
+            # Store the *new, real* fingerprint data
             session.fingerprint_id = fingerprint_data.get('fingerprint_id')
             session.fingerprint_method = fingerprint_data.get('fingerprint_method')
-            session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor')
+            # visitor_type should be set by inheritance logic, not here
+            # session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor')
             session.browser_privacy_level = fingerprint_data.get('browser_privacy_level', 'standard')
+            session.recognition_response = None # Clear any previous recognition response
             
             if not session.fingerprint_id or not session.fingerprint_method:
-                logger.error("Invalid fingerprint data: missing essential fields")
+                logger.error("Invalid fingerprint data: missing essential fields from JS. Reverting to old fingerprint.")
                 session.fingerprint_id = old_fingerprint_id
                 session.fingerprint_method = old_method
                 return False
             
-            # Check for existing sessions with same fingerprint
-            try:
-                existing_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
-                if existing_sessions:
-                    recent_session = max(existing_sessions, key=lambda s: s.last_activity if s.last_activity is not None else datetime.min)
-                    
-                    if recent_session.user_type != UserType.GUEST:
-                        # Inherit user identity and state
-                        session.user_type = recent_session.user_type
-                        session.email = recent_session.email
-                        session.full_name = recent_session.full_name
-                        session.zoho_contact_id = recent_session.zoho_contact_id
-                        session.visitor_type = "returning_visitor"
-                        
-                        # Inherit usage counters and history
-                        session.daily_question_count = recent_session.daily_question_count
-                        session.total_question_count = recent_session.total_question_count
-                        session.last_question_time = recent_session.last_question_time
-                        
-                        if session.last_activity is None and recent_session.last_activity is not None:
-                            session.last_activity = recent_session.last_activity
-
-                        session.question_limit_reached = recent_session.question_limit_reached
-                        session.ban_status = recent_session.ban_status
-                        session.ban_start_time = recent_session.ban_start_time
-                        session.ban_end_time = recent_session.ban_end_time
-                        session.ban_reason = recent_session.ban_reason
-                        
-                        # Inherit tracking data
-                        session.email_addresses_used = recent_session.email_addresses_used
-                        session.email_switches_count = recent_session.email_switches_count
-                        session.evasion_count = recent_session.evasion_count
-                        session.current_penalty_hours = recent_session.current_penalty_hours
-                        session.escalation_level = recent_session.escalation_level
-                        
-                        logger.info(f"✅ Inherited complete session data for {session.session_id[:8]} from recognized fingerprint: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}")
-                    else:
-                        session.visitor_type = "new_visitor"
-                        logger.info(f"🆕 Fingerprint {session.fingerprint_id[:8]} has only guest history, treating as new visitor")
-            except Exception as e:
-                logger.error(f"Failed to check fingerprint history or inherit data: {e}")
+            # Now that the current session has its *real* fingerprint from JS,
+            # run the inheritance logic to see if this fingerprint has a history.
+            # This will update user_type, question counts, etc., based on the definitive fingerprint.
+            self._attempt_fingerprint_inheritance(session)
             
-            # Save session with new fingerprint data
+            # Save session with new fingerprint data and inherited properties
             try:
                 self.db.save_session(session)
-                logger.info(f"✅ Fingerprinting applied to {session.session_id[:8]}: {session.fingerprint_method} (ID: {session.fingerprint_id[:8]}...)")
+                logger.info(f"✅ Fingerprinting applied and inheritance checked for {session.session_id[:8]}: {session.fingerprint_method} (ID: {session.fingerprint_id[:8]}...)")
             except Exception as e:
-                logger.error(f"Failed to save session after fingerprinting: {e}")
+                logger.error(f"Failed to save session after fingerprinting (JS data received): {e}")
+                # If save fails, revert to old fingerprint to avoid inconsistent state
                 session.fingerprint_id = old_fingerprint_id
                 session.fingerprint_method = old_method
+                return False
         except Exception as e:
             logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
             return False
@@ -2644,7 +2656,7 @@ class SessionManager:
                 else:
                     return {
                         'banned': True,
-                        'content': limit_check.get('message', 'Access restricted.'),
+                        'content': limit_check.get("content", 'Access restricted.'),
                         'time_remaining': limit_check.get('time_remaining')
                     }
             
@@ -3182,12 +3194,14 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         
         logger.info(f"✅ Processing fingerprint for session '{session_id[:8]}': ID={fingerprint_id[:8]}, Method={method}, Privacy={privacy}")
         
+        # The apply_fingerprinting method will now handle both setting the fingerprint
+        # and checking for inheritance based on this new 'real' fingerprint.
         processed_data = {
             'fingerprint_id': fingerprint_id,
             'fingerprint_method': method,
-            'visitor_type': 'new_visitor',
             'browser_privacy_level': privacy,
             'working_methods': working_methods
+            # visitor_type is determined by apply_fingerprinting after inheritance check
         }
         
         success = session_manager.apply_fingerprinting(session, processed_data)
@@ -4106,13 +4120,12 @@ def main_fixed():
         logger.error(f"Page routing error: {page_error}", exc_info=True)
         st.error("⚠️ Page error occurred. Please refresh the page.")
         
-        #for key in list(st.session_state.keys()):
-            #del st.session_state[key]
-        
-        #time.sleep(2)
-        #st.rerun()
+        # This block was previously identified as problematic for session clearing.
+        # It's now correctly set to just stop execution without clearing session state,
+        # allowing for better debugging and recovery on client-side refresh.
         st.stop()
 
 # Entry point
 if __name__ == "__main__":
     main_fixed()
+```
