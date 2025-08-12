@@ -2711,8 +2711,8 @@ class SessionManager:
         try:
             sanitized_email = sanitize_input(email, 100).lower().strip()
             
-            if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
-            , sanitized_email):
+            # Fix the unterminated string literal by adding the closing single quote
+            if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', sanitized_email):
                 return {'success': False, 'message': 'Please enter a valid email address.'}
             
             # ENHANCED: Check for evasion before proceeding
