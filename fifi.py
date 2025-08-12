@@ -3536,7 +3536,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
 
             if minutes_inactive >= (timeout_duration - 1) and minutes_inactive < timeout_duration:
                 minutes_remaining = timeout_duration - minutes_inactive
-                st.warning(f"⏰ Session expires in: {int(minutes_remaining)}m")
+                #st.warning(f"⏰ Session expires in: {int(minutes_remaining)}m")
             elif minutes_inactive >= timeout_duration:
                 st.error(f"🚫 Session is likely expired. Type a question to check.")
         else:
