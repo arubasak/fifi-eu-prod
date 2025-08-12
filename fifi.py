@@ -4074,55 +4074,60 @@ def main_fixed():
         st.error("❌ Session Manager not available. Please refresh the page.")
         return
 
-    # Get session
-    session = session_manager.get_session()
-    
-    if session is None or not session.active:
-        logger.warning(f"Session is None or Inactive after get_session. Forcing welcome page.")
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.session_state['page'] = None
-        st.rerun()
-        return
-
-    # Activity tracker and timeout logic
-    activity_data_from_js = None
-    if session and session.session_id:
-        activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
-        
-        if activity_tracker_key_state_flag not in st.session_state or \
-           st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
-            
-            logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
-            activity_data_from_js = render_simple_activity_tracker(session.session_id)
-            st.session_state[activity_tracker_key_state_flag] = True
-            st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
-            st.session_state.latest_activity_data_from_js = activity_data_from_js
-        else:
-            activity_data_from_js = st.session_state.latest_activity_data_from_js
-    
-    # Check timeout
-    timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
-    if timeout_triggered:
-        return
-
-    # Route to appropriate page
+    # Determine current page based on session state
     current_page = st.session_state.get('page')
-    
+
+    # Route to appropriate page based on user intent
     try:
         if current_page != "chat":
+            # If not on chat page, render welcome page. No session is needed or created yet.
             render_welcome_page(session_manager)
         else:
+            # If on chat page, it means user has clicked "Start as Guest" or "Sign In"
+            # So, now it's appropriate to get/create their session.
+            session = session_manager.get_session() 
+            
+            # If for any reason (e.g., session expired, DB error) we can't get an active session
+            # when we're supposed to be on the 'chat' page, force a reset to welcome page.
+            if session is None or not session.active:
+                logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                st.session_state['page'] = None
+                st.rerun()
+                return
+                
+            # Activity tracker and timeout logic (only for active sessions on chat page)
+            activity_data_from_js = None
+            if session and session.session_id: # Redundant check but harmless given the 'if session' above
+                activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
+                
+                # Check if the activity tracker component has been rendered for *this specific session*
+                # and ensure it's re-rendered if the session_id changes (e.g., after timeout/reset)
+                if activity_tracker_key_state_flag not in st.session_state or \
+                   st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
+                    
+                    logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
+                    activity_data_from_js = render_simple_activity_tracker(session.session_id)
+                    st.session_state[activity_tracker_key_state_flag] = True
+                    st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
+                    st.session_state.latest_activity_data_from_js = activity_data_from_js
+                else:
+                    activity_data_from_js = st.session_state.latest_activity_data_from_js
+            
+            # Check timeout (only for active sessions on chat page)
+            timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+            if timeout_triggered:
+                return
+
+            # Render chat interface components
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
             render_chat_interface_simplified(session_manager, session, activity_data_from_js)
                     
     except Exception as page_error:
         logger.error(f"Page routing error: {page_error}", exc_info=True)
         st.error("⚠️ Page error occurred. Please refresh the page.")
-        
-        # This block was previously identified as problematic for session clearing.
-        # It's now correctly set to just stop execution without clearing session state,
-        # allowing for better debugging and recovery on client-side refresh.
+        # Do not clear session state here, just stop this rerun to prevent infinite loops/new sessions
         st.stop()
 
 # Entry point
