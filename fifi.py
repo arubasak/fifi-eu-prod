@@ -2202,9 +2202,7 @@ class SessionManager:
         session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
         session.fingerprint_method = "temporary_fallback_python"
         
-        # Save to database
-        self.db.save_session(session)
-        
+     
         logger.info(f"Created new session {session_id[:8]} with temporary fingerprint - waiting for JS fingerprinting")
         return session
 
@@ -2313,6 +2311,7 @@ class SessionManager:
             logger.info(f"Creating new session")
             new_session = self._create_new_session()
             st.session_state.current_session_id = new_session.session_id
+            self.db.save_session(new_session)
             logger.info(f"Created and stored new session {new_session.session_id[:8]}")
             return new_session
             
