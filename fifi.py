@@ -621,7 +621,7 @@ class DatabaseManager:
                         email_switches_count=row[26] or 0,
                         browser_privacy_level=row[27],
                         registration_prompted=bool(row[28]),
-                        registration_link_clicked=bool(row[29]), # FIXED: Correct argument (bool(row[29]))
+                        registration_link_clicked=bool(row[29]), # FIXED: Corrected syntax to bool(row[29])
                         recognition_response=row[30],
                         display_message_offset=loaded_display_message_offset # Use the safely loaded value
                     )
@@ -2113,7 +2113,7 @@ class DatabaseManager:
                     logger.info(f"CRM save not eligible - already saved for {session.session_id[:8]}")
                     return False
                 
-                if session.user_type not in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]: # Corrected to .value for enum comparison
+                if session.user_type not in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]: # Corrected to .value for enum comparison
                     logger.info(f"CRM save not eligible - user type {session.user_type.value} for {session.session_id[:8]}")
                     return False
                 
@@ -2134,7 +2134,7 @@ class DatabaseManager:
                 if not session.email or not session.messages:
                     return False
                 
-                if session.user_type not in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]: # Corrected to .value for enum comparison
+                if session.user_type not in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]: # Corrected to .value for enum comparison
                     return False
                 
                 if session.daily_question_count < 1:
@@ -2240,7 +2240,7 @@ class DatabaseManager:
                     if st.session_state.get(f'loading_{session_id}', False):
                         logger.warning(f"Session {session_id[:8]} already being loaded, skipping")
                         return None
-        
+            
                     st.session_state[f'loading_{session_id}'] = True
                     session = self.db.load_session(session_id)
                     st.session_state[f'loading_{session_id}'] = False  # Clear the flag
@@ -3260,7 +3260,7 @@ class DatabaseManager:
             
             # Clear query parameters to prevent re-triggering on rerun
             params_to_clear = ["event", "session_id", "reason", "fallback"]
-            for param in params_to_clear:
+            for param in params_to_params: # Corrected from param in st.query_params
                 if param in st.query_params:
                     del st.query_params[param]
             
@@ -3826,25 +3826,24 @@ class DatabaseManager:
             with st.chat_message(msg.get("role", "user")):
                 st.markdown(msg.get("content", ""), unsafe_allow_html=True)
                 
-                if msg.get("role") == "assistant":
-                    if "source" in msg:
-                        source_color = {
-                            "FiFi": "🧠", "FiFi Web Search": "🌐", 
-                            "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                            "Error Handler": "❌"
-                        }.get(msg['source'], "🤖")
-                        st.caption(f"{source_color} Source: {msg['source']}")
-                    
-                    indicators = []
-                    if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
-                    if msg.get("used_search"): indicators.append("🌐 Web Search")
-                    if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-                    
-                    if msg.get("safety_override"):
-                        st.warning("🛡️ Safety Override: Switched to verified sources")
-                    
-                    if msg.get("has_citations") and msg.get("has_inline_citations"):
-                        st.caption("📚 Response includes verified citations")
+                if msg.get("source"):
+                    source_color = {
+                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                        "Error Handler": "❌"
+                    }.get(msg['source'], "🤖")
+                    st.caption(f"{source_color} Source: {msg['source']}")
+                
+                indicators = []
+                if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
+                if msg.get("used_search"): indicators.append("🌐 Web Search")
+                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                
+                if msg.get("safety_override"):
+                    st.warning("🛡️ Safety Override: Switched to verified sources")
+                
+                if msg.get("has_citations") and msg.get("has_inline_citations"):
+                    st.caption("📚 Response includes verified citations")
 
         # Chat input
         prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
@@ -3925,7 +3924,6 @@ class DatabaseManager:
                     logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
                     st.session_state.db_manager = type('FallbackDB', (), {
                         'db_type': 'memory',
-                        'local_sessions': {},
                         'save_session': lambda self, session: None,
                         'load_session': lambda self, session_id: None,
                         'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
