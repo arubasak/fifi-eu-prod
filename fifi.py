@@ -477,7 +477,7 @@ class DatabaseManager:
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         """Save session with SQLite Cloud compatibility and connection health check"""
-        logger.warning(f"💾 SAVING SESSION TO DB: {session.session_id[:8]} | user_type={session.user_type.value} | email={session.email} | messages={len(session.messages)} | daily_q={session.daily_question_count} | fp_id={session.fingerprint_id[:8]}")
+        logger.warning(f"💾 SAVING SESSION TO DB: {session.session_id[:8]} | user_type={session.user_type.value} | email={session.email} | messages={len(session.messages)} | daily_q={session.daily_question_count} | fp_id={session.fingerprint_id[:8]} | active={session.active}")
         with self.lock:
             # Check and ensure connection health before any DB operation
             current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
@@ -531,7 +531,7 @@ class DatabaseManager:
                      int(session.registration_link_clicked), session.recognition_response, session.display_message_offset))
                 self.conn.commit()
                 
-                logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}")
+                logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}")
                 
             except Exception as e:
                 logger.error(f"Failed to save session {session.session_id[:8]}: {e}", exc_info=True)
@@ -626,7 +626,7 @@ class DatabaseManager:
                         display_message_offset=loaded_display_message_offset # Use the safely loaded value
                     )
                     
-                    logger.info(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}")
+                    logger.info(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}")
                     return user_session
                     
                 except Exception as e:
@@ -711,7 +711,7 @@ class DatabaseManager:
                         continue
                 logger.warning(f"📊 FINGERPRINT SEARCH RESULTS (DB): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
                 for s in sessions:
-                    logger.warning(f"  - {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}")
+                    logger.warning(f"  - {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}, active={s.active}")
                 return sessions
             except Exception as e:
                 logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
@@ -916,8 +916,10 @@ class QuestionLimitManager:
                     fp_session.last_question_time):
                     
                     time_since_limit = now - fp_session.last_question_time
-                    if time_since_limit <= timedelta(hours=24):
-                        recent_limit_sessions.append(fp_session)
+                    if time_since_limit >= timedelta(hours=24): # Only check if the limit was hit and 24 hours have NOT passed
+                        continue # Skip if the limit already reset
+                    
+                    recent_limit_sessions.append(fp_session)
             
             if recent_limit_sessions:
                 logger.warning(f"🚨 EVASION DETECTED: Session {session.session_id[:8]} switching emails after hitting guest limit. Found {len(recent_limit_sessions)} recent limited sessions.")
@@ -1000,7 +1002,7 @@ class QuestionLimitManager:
                 }
         
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
-            if session.daily_question_count >= user_limit:
+            if session.daily_question_count >= user_limit: # user_limit is 10 for EMAIL_VERIFIED_GUEST
                 self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
                 return {
                     'allowed': False,
@@ -1013,6 +1015,7 @@ class QuestionLimitManager:
     def record_question(self, session: UserSession):
         """Records question and applies tier-specific logic for registered users."""
         session.daily_question_count += 1
+        session.total_question_count += 1  # ADDED: Increment total_question_count
         session.last_question_time = datetime.now()
         
         # ENHANCED: Tier-specific ban logic for registered users
@@ -1024,7 +1027,7 @@ class QuestionLimitManager:
                 self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Tier 2 limit reached (20 questions)")
                 logger.info(f"Tier 2 ban applied to registered user {session.session_id[:8]} after 20 questions")
         
-        logger.debug(f"Question recorded for {session.session_id[:8]}: daily={session.daily_question_count}")
+        logger.debug(f"Question recorded for {session.session_id[:8]}: daily={session.daily_question_count}, total={session.total_question_count}")
     
     def apply_evasion_penalty(self, session: UserSession) -> int:
         """Applies escalating penalty for evasion attempts."""
@@ -1269,52 +1272,6 @@ class ZohoCRMManager:
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
                 
-        return False
-
-    def _add_note(self, contact_id: str, note_title: str, note_content: str) -> bool:
-        """Adds a note to a Zoho contact."""
-        access_token = self._get_access_token()
-        if not access_token: 
-            return False
-
-        headers = {'Authorization': f'Zoho-oauthtoken {access_token}', 'Content-Type': 'application/json'}
-        
-        max_content_length = 32000
-        if len(note_content) > max_content_length:
-            note_content = note_content[:max_content_length - 100] + "\n\n[Content truncated due to size limits]"
-        
-        note_data = {
-            "data": [{
-                "Note_Title": note_title,
-                "Note_Content": note_content,
-                "Parent_Id": {"id": contact_id},
-                "se_module": "Contacts"
-            }]
-        }
-        
-        try:
-            response = requests.post(f"{self.base_url}/Notes", headers=headers, json=note_data, timeout=15)
-            
-            if response.status_code == 401:
-                logger.warning("Zoho token expired, attempting refresh for _add_note...")
-                access_token = self._get_access_token(force_refresh=True)
-                if not access_token: 
-                    return False
-                headers['Authorization'] = f'Zoho-oauthtoken {access_token}'
-                response = requests.post(f"{self.base_url}/Notes", headers=headers, json=note_data, timeout=15)
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            if 'data' in data and data['data'][0]['code'] == 'SUCCESS':
-                logger.info(f"Successfully added Zoho note: {note_title}")
-                return True
-            else:
-                logger.error(f"Zoho note creation failed with response: {data}")
-                
-        except Exception as e:
-            logger.error(f"Error adding Zoho note: {e}", exc_info=True)
-            
         return False
 
     def save_chat_transcript_sync(self, session: UserSession, trigger_reason: str) -> bool:
@@ -2170,7 +2127,7 @@ class SessionManager:
         """Enhanced eligibility check for CRM saves including new user types and conditions."""
         try:
             if not session.email or not session.messages:
-                logger.info(f"CRM save not eligible - missing email or messages for {session.session_id[:8]}")
+                logger.info(f"CRM save not eligible - missing email ({bool(session.email)}) or messages ({bool(session.messages)}) for {session.session_id[:8]}")
                 return False
             
             if session.timeout_saved_to_crm and "clear_chat" in trigger_reason.lower():
@@ -2181,8 +2138,8 @@ class SessionManager:
                 logger.info(f"CRM save not eligible - user type {session.user_type.value} for {session.session_id[:8]}")
                 return False
             
-            if session.daily_question_count < 1 and not ("timeout" in trigger_reason.lower() or "emergency" in trigger_reason.lower()):
-                logger.info(f"CRM save not eligible - no questions asked for {session.session_id[:8]}")
+            if session.daily_question_count < 1:
+                logger.info(f"CRM save not eligible - no questions asked ({session.daily_question_count}) for {session.session_id[:8]}")
                 return False
 
             logger.info(f"CRM save eligible for {session.session_id[:8]}: UserType={session.user_type.value}, Questions={session.daily_question_count}")
@@ -2277,7 +2234,7 @@ class SessionManager:
                     session.fingerprint_method = recent_session.fingerprint_method
                     session.browser_privacy_level = recent_session.browser_privacy_level
                     
-                logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, new_fp={session.fingerprint_id[:8]}")
+                logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, new_fp={session.fingerprint_id[:8]}, active={session.active}")
                 
             else:
                 logger.info(f"No relevant historical sessions found for fingerprint {session.fingerprint_id[:8]}.")
@@ -2361,7 +2318,7 @@ class SessionManager:
             st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
             
             self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
-            logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check)")
+            logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}")
             return new_session
             
         except Exception as e:
@@ -2408,7 +2365,7 @@ class SessionManager:
             # Save session with new fingerprint data and inherited properties
             try:
                 self.db.save_session(session)
-                logger.info(f"✅ Fingerprinting applied and inheritance checked for {session.session_id[:8]}: {session.fingerprint_method} (ID: {session.fingerprint_id[:8]}...)")
+                logger.info(f"✅ Fingerprinting applied and inheritance checked for {session.session_id[:8]}: {session.fingerprint_method} (ID: {session.fingerprint_id[:8]}...), active={session.active}")
             except Exception as e:
                 logger.error(f"Failed to save session after fingerprinting (JS data received): {e}")
                 # If save fails, revert to old fingerprint to avoid inconsistent state
@@ -2530,14 +2487,20 @@ class SessionManager:
             verification_success = self.email_verification.verify_code(session.email, sanitized_code)
             
             if verification_success:
-                # Upgrade user to email verified guest
+                logger.info(f"✅ BEFORE email verification upgrade for session {session.session_id[:8]}:")
+                logger.info(f"   - User Type: {session.user_type.value}")
+                logger.info(f"   - Daily Questions: {session.daily_question_count}")
+                logger.info(f"   - Total Questions: {session.total_question_count}")
+                logger.info(f"   - Has Messages: {len(session.messages)}")
+                
+                # Upgrade user to email verified guest - PRESERVE question count
                 session.user_type = UserType.EMAIL_VERIFIED_GUEST
                 session.question_limit_reached = False  # Reset limit flag
-                
-                # Reset daily question count if needed (give them a fresh start)
-                if session.daily_question_count >= 4:  # If they were at guest limit
-                    session.daily_question_count = 0
-                    session.last_question_time = None
+
+                # REMOVED: No longer reset daily_question_count here. It preserves the count.
+                # if session.daily_question_count >= 4:  # If they were at guest limit
+                #     session.daily_question_count = 0
+                #     session.last_question_time = None
                 
                 # Set last_activity if not already set (first time officially verified)
                 if session.last_activity is None:
@@ -2546,13 +2509,19 @@ class SessionManager:
                 # Save upgraded session
                 try:
                     self.db.save_session(session)
-                    logger.info(f"User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email}")
+                    logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email}")
+                    logger.info(f"✅ AFTER email verification upgrade for session {session.session_id[:8]}:")
+                    logger.info(f"   - User Type: {session.user_type.value}")
+                    logger.info(f"   - Daily Questions: {session.daily_question_count} (PRESERVED)")
+                    logger.info(f"   - Total Questions: {session.total_question_count}")
+                    logger.info(f"   - CRM Eligible: {self._is_crm_save_eligible(session, 'email_verification_success')}")
+
                 except Exception as e:
                     logger.error(f"Failed to save upgraded session: {e}")
                 
                 return {
                     'success': True,
-                    'message': f'✅ Email verified successfully! You now have 10 questions per day.'
+                    'message': f'✅ Email verified successfully! You now have {10 - session.daily_question_count if session.daily_question_count <= 10 else 0} questions remaining today (total 10 for the day).'
                 }
             else:
                 return {
@@ -2598,7 +2567,7 @@ class SessionManager:
                     current_session.wp_token = wp_token
                     current_session.question_limit_reached = False
                     
-                    # Reset question counts for fresh start as registered user
+                    # Reset question counts for fresh start as registered user (20 questions/day)
                     current_session.daily_question_count = 0
                     current_session.last_question_time = None
                     
@@ -3236,6 +3205,9 @@ def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
             success = session_manager.zoho.save_chat_transcript_sync(session, f"Emergency Save: {reason}")
             if success:
                 session.timeout_saved_to_crm = True
+                # NO: session.active = False here, as the FastAPI beacon handles it more robustly.
+                # If this is a fallback save, the FastAPI will explicitly mark active=False.
+                # If this is a normal save, Streamlit's end_session or timeout handler will mark active=False.
                 session.last_activity = datetime.now()
                 session_manager.db.save_session(session)
                 logger.info(f"✅ Emergency save completed successfully for session {session_id[:8]}")
@@ -3282,6 +3254,8 @@ def handle_emergency_save_requests_from_query():
         
         try:
             save_reason = f"{reason}_fallback" if fallback == "true" else reason
+            # Call process_emergency_save_from_query which handles the actual saving and active status.
+            # This is a Streamlit-level save, intended as a fallback if the beacon failed.
             success = process_emergency_save_from_query(session_id, save_reason)
             
             if success:
@@ -3435,10 +3409,11 @@ def render_welcome_page(session_manager: 'SessionManager'):
         col1, col2, col3 = st.columns(3)
         with col2:
             if st.button("👤 Start as Guest", use_container_width=True):
-                session = session_manager.get_session()
+                # When "Start as Guest" is clicked, we trigger the session creation/retrieval
+                session = session_manager.get_session() 
                 if session.last_activity is None:
                     session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
+                    session_manager.db.save_session(session) # Save immediately to persist last_activity
                 st.session_state.page = "chat"
                 st.rerun()
 
