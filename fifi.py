@@ -621,7 +621,7 @@ class DatabaseManager:
                         email_switches_count=row[26] or 0,
                         browser_privacy_level=row[27],
                         registration_prompted=bool(row[28]),
-                        int(session.registration_link_clicked), session.recognition_response, session.display_message_offset)) # Corrected: Needs to be bool(row[29])
+                        int(session.registration_link_clicked), session.recognition_response, session.display_message_offset))
                         
                         logger.info(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}")
                         return user_session
