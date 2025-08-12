@@ -580,7 +580,7 @@ class DatabaseManager:
                 # Handle as tuple (SQLite Cloud returns tuples)
                 expected_cols = 32 # Updated from 31 to 32 for new display_message_offset column
                 if len(row) < 31: # Must have at least 31 columns for basic functionality
-                    logger.error(f"Row has insufficient columns: {len(row)} (expected at least 31) for session {session_id[:8]}. Data corruption suspected.")
+                    logger.error(f"Row has insufficient columns: {len(row)} (expected at least 31). Data corruption suspected.")
                     return None
                     
                 try:
@@ -1284,7 +1284,8 @@ class ZohoCRMManager:
             "data": [{
                 "Parent_Id": contact_id,
                 "Note_Title": note_title,
-                "Note_Content": note_content
+                "Note_Content": note_content,
+                "se_module": "Contacts"  # ADDED: Explicitly set the parent module
             }]
         }
         
@@ -1332,62 +1333,56 @@ class ZohoCRMManager:
             logger.info(f"ZOHO SAVE SKIPPED: Not eligible. (UserType: {session.user_type.value}, Email: {bool(session.email)}, Messages: {bool(session.messages)}, Zoho Enabled: {self.config.ZOHO_ENABLED})")
             return False
         
-        max_retries = 3 if "timeout" in trigger_reason.lower() or "emergency" in trigger_reason.lower() else 1
-        
-        for attempt in range(max_retries):
-            logger.info(f"Zoho Save Attempt {attempt + 1}/{max_retries}")
+        # Step 1: Find or create contact (once)
+        contact_id = self._find_contact_by_email(session.email)
+        if not contact_id:
+            contact_id = self._create_contact(session.email, session.full_name)
+        if not contact_id:
+            logger.error("Failed to find or create Zoho contact. Cannot proceed with save.")
+            return False
+        session.zoho_contact_id = contact_id
+
+        # Step 2: Generate PDF and upload attachment (once)
+        pdf_buffer = self.pdf_exporter.generate_chat_pdf(session)
+        upload_success = False
+        if pdf_buffer:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+            pdf_filename = f"fifi_chat_transcript_{timestamp}.pdf"
+            upload_success = self._upload_attachment(contact_id, pdf_buffer, pdf_filename)
+            if not upload_success:
+                logger.warning("Failed to upload PDF attachment to Zoho. Continuing with note only.")
+
+        # Step 3: Add note with retry logic
+        max_retries_note = 3 if "timeout" in trigger_reason.lower() or "emergency" in trigger_reason.lower() else 1
+        for attempt_note in range(max_retries_note):
             try:
-                contact_id = self._find_contact_by_email(session.email)
-                if not contact_id:
-                    contact_id = self._create_contact(session.email, session.full_name)
-                if not contact_id:
-                    logger.error("Failed to find or create Zoho contact. Cannot proceed with save.")
-                    if attempt == max_retries - 1: 
-                        return False
-                    time.sleep(2 ** attempt)
-                    continue 
-                session.zoho_contact_id = contact_id
-
-                pdf_buffer = self.pdf_exporter.generate_chat_pdf(session)
-                if not pdf_buffer:
-                    logger.error("Failed to generate PDF transcript. Cannot proceed with attachment.")
-                
-                upload_success = False
-                if pdf_buffer:
-                    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-                    pdf_filename = f"fifi_chat_transcript_{timestamp}.pdf"
-                    upload_success = self._upload_attachment(contact_id, pdf_buffer, pdf_filename)
-                    if not upload_success:
-                        logger.warning("Failed to upload PDF attachment to Zoho. Continuing with note only.")
-
                 note_title = f"FiFi AI Chat Transcript from {datetime.now().strftime('%Y-%m-%d %H:%M')} ({trigger_reason})"
                 note_content = self._generate_note_content(session, upload_success, trigger_reason)
                 note_success = self._add_note(contact_id, note_title, note_content)
                 
                 if note_success:
                     logger.info("=" * 80)
-                    logger.info(f"ZOHO SAVE COMPLETED SUCCESSFULLY on attempt {attempt + 1}")
+                    logger.info(f"ZOHO SAVE COMPLETED SUCCESSFULLY on note attempt {attempt_note + 1}")
                     logger.info(f"Contact ID: {contact_id}")
                     logger.info("=" * 80)
                     return True
                 else:
                     logger.error("Failed to add note to Zoho contact.")
-                    if attempt == max_retries - 1:
-                        logger.error("Max retries reached. Aborting save.")
+                    if attempt_note < max_retries_note - 1:
+                        time.sleep(2 ** attempt_note)
+                    else:
+                        logger.error("Max retries for note addition reached. Aborting save.")
                         return False
-
             except Exception as e:
-                logger.error("=" * 80)
-                logger.error(f"ZOHO SAVE FAILED on attempt {attempt + 1} with an exception.")
+                logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                logger.error("=" * 80)
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                if attempt_note < max_retries_note - 1:
+                    time.sleep(2 ** attempt_note)
                 else:
-                    logger.error("Max retries reached. Aborting save.")
+                    logger.error("Max retries for note addition reached. Aborting save.")
                     return False
         
-        return False
+        return False # Should only be reached if all note retries fail.
 
     def _generate_note_content(self, session: UserSession, attachment_uploaded: bool, trigger_reason: str) -> str:
         """Generates the text content for the Zoho CRM note."""
@@ -2528,7 +2523,7 @@ class SessionManager:
                 #     session.daily_question_count = 0
                 #     session.last_question_time = None
                 
-                # Set last_activity if not already set (first time officially verified)
+                # Set last_activity to now (official start for logged-in users)
                 if session.last_activity is None:
                     session.last_activity = datetime.now()
 
@@ -2578,7 +2573,13 @@ class SessionManager:
             }, timeout=10)
             
             if response.status_code == 200:
-                data = response.json()
+                try:
+                    data = response.json()
+                except requests.exceptions.JSONDecodeError as e:
+                    logger.error(f"WordPress authentication received non-JSON response with 200 status. Response text: '{response.text[:200]}'. Error: {e}", exc_info=True)
+                    st.error("Authentication failed: Invalid response from WordPress. Please try again or contact support.")
+                    return None
+                
                 wp_token = data.get('token')
                 user_email = data.get('user_email')
                 user_display_name = data.get('user_display_name')
@@ -3611,7 +3612,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             if session.timeout_saved_to_crm:
                 st.caption("💾 Auto-saved to CRM (after inactivity)")
             else:
-                st.caption("💾 Auto-save enabled (on sign out or browser close)")
+                st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
         else: 
             st.caption("🚫 CRM Integration: Registered users & verified guests only")
         
