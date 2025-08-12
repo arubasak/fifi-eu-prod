@@ -3711,7 +3711,7 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
         verification_email = st.session_state.get('verification_email', session.email)
         
         st.success(f"📧 A verification code has been sent to **{verification_email}**.")
-        st.info("Please check your email, including spam/junk folders. The code is valid for 10 minutes.")
+        st.info("Please check your email, including spam/junk folders. The code is valid for 1 minute.")
         
         with st.form("code_verification_form", clear_on_submit=False):
             code = st.text_input("Enter Verification Code", placeholder="e.g., 123456", max_chars=6, key="verification_code_input")
