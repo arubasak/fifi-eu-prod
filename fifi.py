@@ -322,6 +322,8 @@ class DatabaseManager:
             logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED. FALLING BACK TO NON-PERSISTENT IN-MEMORY STORAGE.")
             self.db_type = "memory"
             self.local_sessions = {}
+            st.warning("⚠️ Database connection failed. Chat history and user sessions will NOT be saved between restarts or browser closes.")
+            st.warning("Please check your database configuration or contact support if this issue persists.")
         
         # Initialize database schema
         if self.conn:
@@ -334,6 +336,7 @@ class DatabaseManager:
                 self.conn = None
                 self.db_type = "memory" 
                 self.local_sessions = {}
+                st.warning("⚠️ Database schema initialization failed. Falling back to in-memory storage. Chat history will NOT be saved.")
         
     def _try_sqlite_cloud(self, cs: str):
         try:
@@ -473,6 +476,8 @@ class DatabaseManager:
             self.db_type = "memory"
             if not hasattr(self, 'local_sessions'):
                 self.local_sessions = {}
+            st.warning("⚠️ Database connection was lost and could not be re-established. Falling back to temporary storage.")
+
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
@@ -539,7 +544,7 @@ class DatabaseManager:
                     self.local_sessions = {}
                 self.local_sessions[session.session_id] = copy.deepcopy(session)
                 logger.info(f"Fallback: Saved session {session.session_id[:8]} to in-memory storage")
-                raise
+                # Do not re-raise, as handle_api_errors already wraps and reports the error.
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
@@ -1528,8 +1533,8 @@ class PineconeAssistantTool:
             logger.error(f"Failed to initialize Pinecone Assistant: {e}")
             return None
 
-    def query(self, chat_history: List[BaseMessage], stream: bool = True) -> Dict[str, Any]:
-        """ENHANCED: Added streaming capability to Pinecone Assistant"""
+    def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]: # Removed 'stream' param
+        """Queries Pinecone Assistant (non-streaming client-side)."""
         if not self.assistant: 
             return None
         try:
@@ -1540,33 +1545,19 @@ class PineconeAssistantTool:
                 ) for msg in chat_history
             ]
             
-            # Pinecone's client 'stream' parameter means it yields chunks.
-            # We will consume these chunks here to get the full response and citations,
-            # then our Streamlit frontend will "fake stream" it.
-            response_chunks = self.assistant.chat(messages=pinecone_messages, model="gpt-4o", stream=stream)
+            # EXPLICITLY SET stream=False here for Pinecone client
+            response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o", stream=False) 
             
-            content_parts = []
-            full_citations_data = [] # To store all citation info
-            
-            for chunk in response_chunks:
-                if hasattr(chunk, 'choices') and chunk.choices:
-                    delta = chunk.choices[0].delta
-                    if hasattr(delta, 'content') and delta.content:
-                        content_parts.append(delta.content)
-                # Collect citations as they come or at the end
-                if hasattr(chunk, 'citations') and chunk.citations:
-                    full_citations_data.extend(chunk.citations)
-
-            content = ''.join(content_parts)
-            
-            has_citations = bool(full_citations_data)
+            content = response.message.content
+            has_citations = False
             citations_list = []
             
-            if has_citations:
+            if hasattr(response, 'citations') and response.citations:
+                has_citations = True
                 citations_header = "\n\n---\n**Sources:**\n"
                 seen_items = set()
                 
-                for citation in full_citations_data:
+                for citation in response.citations: # Full citations available here as not streaming
                     for reference in citation.references:
                         if hasattr(reference, 'file') and reference.file:
                             link_url = None
@@ -2206,7 +2197,7 @@ class SessionManager:
                     time.sleep(0.5)
                 else:
                     logger.error(f"All session save attempts failed for {session.session_id[:8]}")
-                    raise
+                    # No re-raise, let outer error handling capture if this is part of a larger flow.
 
     def _create_new_session(self) -> UserSession:
         """Creates a new user session with temporary fingerprint until JS fingerprinting completes."""
@@ -2219,7 +2210,7 @@ class SessionManager:
         session.fingerprint_method = "temporary_fallback_python"
         
         # Save to database
-        self.db.save_session(session)
+        self.db.save_session(session) # Use direct db save, retry not needed for creation
         
         logger.info(f"Created new session {session_id[:8]} with temporary fingerprint - waiting for JS fingerprinting")
         return session
@@ -3879,6 +3870,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Display chat messages (respects soft clear offset)
     # This loop renders historical messages directly, without streaming
     for msg in session.messages[session.display_message_offset:]:
+        # Skip the very last assistant message if we are about to display a new one via streaming
+        # This prevents duplicate display when the prompt triggers a new response.
+        if msg == session.messages[-1] and st.session_state.get('awaiting_new_response', False) and msg.get('role') == 'assistant':
+            continue
+
         with st.chat_message(msg.get("role", "user")):
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
@@ -3910,18 +3906,26 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
+        # Add user message to display immediately
         with st.chat_message("user"):
             st.markdown(prompt)
         
+        # Set a flag to indicate we're awaiting a new response (to avoid duplicating old one)
+        st.session_state.awaiting_new_response = True
+
         with st.chat_message("assistant"):
             with st.spinner("🔍 Processing your question..."):
                 try:
-                    response = session_manager.get_ai_response(session, prompt) # This gets the full response immediately
+                    # This call gets the full, non-streaming AI response with all metadata
+                    response = session_manager.get_ai_response(session, prompt) 
                     
+                    # Reset the flag after getting the response
+                    st.session_state.awaiting_new_response = False
+
                     if response.get('requires_email'):
                         st.error("📧 Please verify your email to continue.")
                         st.session_state.verification_stage = 'email_entry'
-                        st.rerun()
+                        # No rerunning here, let the main loop handle the dialog rendering
                     elif response.get('banned'):
                         st.error(response.get("content", 'Access restricted.'))
                         if response.get('time_remaining'):
@@ -3929,7 +3933,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             hours = int(time_remaining.total_seconds() // 3600)
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
-                        st.rerun()
+                        # No rerunning here, let the main loop handle the dialog rendering
                     else:
                         # --- START OF STREAMING EFFECT FOR NEW ASSISTANT RESPONSE ---
                         full_content_to_stream = response.get("content", "No response generated.")
@@ -3970,6 +3974,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
         
+        # Trigger a rerun after handling the prompt to update the UI
         st.rerun()
 
 # =============================================================================
@@ -3998,20 +4003,9 @@ def ensure_initialization_fixed():
             
             status_text.text("Connecting to database...")
             init_progress.progress(0.3)
-            try:
-                db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
-                st.session_state.db_manager = db_manager
-            except Exception as db_e:
-                logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
-                st.session_state.db_manager = type('FallbackDB', (), {
-                    'db_type': 'memory',
-                    'local_sessions': {},
-                    'save_session': lambda self, session: None,
-                    'load_session': lambda self, session_id: None,
-                    'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
-                    'find_sessions_by_email': lambda self, email: []
-                })()
-                st.warning("⚠️ Database unavailable. Using temporary storage.")
+            # DatabaseManager handles its own fallbacks to memory and warnings
+            db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+            st.session_state.db_manager = db_manager
             
             status_text.text("Setting up managers...")
             init_progress.progress(0.5)
