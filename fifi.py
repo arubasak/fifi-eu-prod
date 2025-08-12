@@ -362,7 +362,6 @@ class DatabaseManager:
                 if hasattr(self.conn, 'row_factory'): 
                     self.conn.row_factory = None
 
-                # Create table with all columns upfront, including display_message_offset
                 self.conn.execute('''
                     CREATE TABLE IF NOT EXISTS sessions (
                         session_id TEXT PRIMARY KEY,
@@ -621,7 +620,7 @@ class DatabaseManager:
                         email_switches_count=row[26] or 0,
                         browser_privacy_level=row[27],
                         registration_prompted=bool(row[28]),
-                        registration_link_clicked=bool(row[29]), # FIXED: Corrected syntax to bool(row[29])
+                        registration_link_clicked=bool(row[29]),
                         recognition_response=row[30],
                         display_message_offset=loaded_display_message_offset # Use the safely loaded value
                     )
@@ -1182,10 +1181,10 @@ class ZohoCRMManager:
                 contact_id = data['data'][0]['id']
                 logger.info(f"Found existing Zoho contact: {contact_id}")
                 return contact_id
-                
+                    
         except Exception as e:
             logger.error(f"Error finding Zoho contact by email {email}: {e}", exc_info=True)
-            
+                
         return None
 
     def _create_contact(self, email: str, full_name: Optional[str]) -> Optional[str]:
@@ -1221,10 +1220,10 @@ class ZohoCRMManager:
                 contact_id = data['data'][0]['details']['id']
                 logger.info(f"Created new Zoho contact: {contact_id}")
                 return contact_id
-                
+                    
         except Exception as e:
             logger.error(f"Error creating Zoho contact for {email}: {e}", exc_info=True)
-            
+                
         return None
 
     def _upload_attachment(self, contact_id: str, pdf_buffer: io.BytesIO, filename: str) -> bool:
@@ -1263,15 +1262,62 @@ class ZohoCRMManager:
                     return True
                 else:
                     logger.error(f"Zoho attachment upload failed with response: {data}")
-                    
+                        
             except requests.exceptions.Timeout:
                 logger.error(f"Zoho upload timeout (attempt {attempt + 1}/{max_retries})")
             except Exception as e:
                 logger.error(f"Error uploading Zoho attachment (attempt {attempt + 1}/{max_retries}): {e}", exc_info=True)
-                
+                    
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
+                    
+        return False
+
+    def _add_note(self, contact_id: str, note_title: str, note_content: str) -> bool:
+        """Adds a note to a Zoho contact."""
+        access_token = self._get_access_token()
+        if not access_token:
+            return False
+
+        headers = {'Authorization': f'Zoho-oauthtoken {access_token}', 'Content-Type': 'application/json'}
+        note_data = {
+            "data": [{
+                "Parent_Id": contact_id,
+                "Note_Title": note_title,
+                "Note_Content": note_content
+            }]
+        }
+        
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(f"{self.base_url}/Notes", headers=headers, json=note_data, timeout=10)
                 
+                if response.status_code == 401:
+                    logger.warning("Zoho token expired during note add, attempting refresh...")
+                    access_token = self._get_access_token(force_refresh=True)
+                    if not access_token:
+                        return False
+                    headers['Authorization'] = f'Zoho-oauthtoken {access_token}'
+                    continue # Retry with new token
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                if 'data' in data and data['data'][0]['code'] == 'SUCCESS':
+                    logger.info(f"Successfully added note to Zoho contact {contact_id}")
+                    return True
+                else:
+                    logger.error(f"Zoho note add failed with response: {data}")
+                        
+            except requests.exceptions.Timeout:
+                logger.error(f"Zoho note add timeout (attempt {attempt + 1}/{max_retries})")
+            except Exception as e:
+                logger.error(f"Error adding Zoho note (attempt {attempt + 1}/{max_retries}): {e}", exc_info=True)
+            
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+
         return False
 
     def save_chat_transcript_sync(self, session: UserSession, trigger_reason: str) -> bool:
@@ -1378,9 +1424,9 @@ class ZohoCRMManager:
                 
         return note_content
 
-    # =============================================================================
-    # RATE LIMITER & AI SYSTEM
-    # =============================================================================
+# =============================================================================
+# RATE LIMITER & AI SYSTEM
+# =============================================================================
 
 class RateLimiter:
     """Simple in-memory rate limiter to prevent abuse."""
@@ -1891,11 +1937,11 @@ class EnhancedAI:
                             logger.info("✅ Using web search response (primary)")
                             error_handler.mark_component_healthy("Tavily")
                             return web_response
-                            
+                                
                     except Exception as e:
                         logger.error(f"Web search failed: {e}")
                         error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
-                
+                    
                 # Fallback to Pinecone (despite issues)
                 if self.pinecone_tool:
                     try:
@@ -2991,12 +3037,12 @@ def render_simplified_browser_close_detection(session_id: str):
     if not session_manager:
         logger.debug("No session manager available for browser close detection")
         return
-        
+            
     session = session_manager.db.load_session(session_id)
     if not session:
         logger.debug(f"No session found for browser close detection: {session_id[:8]}")
         return
-        
+            
     # Check if user is eligible for CRM save - if not, skip emergency save setup entirely
     if not session_manager._is_crm_save_eligible(session, "browser_close_check"):
         logger.info(f"🚫 Session {session_id[:8]} not eligible for CRM save - skipping browser close detection")
@@ -3261,7 +3307,7 @@ def handle_emergency_save_requests_from_query():
         
         # Clear query parameters to prevent re-triggering on rerun
         params_to_clear = ["event", "session_id", "reason", "fallback"]
-        for param in params_to_clear: # FIXED: Corrected iteration variable from param in params_to_params
+        for param in params_to_clear:
             if param in st.query_params:
                 del st.query_params[param]
         
