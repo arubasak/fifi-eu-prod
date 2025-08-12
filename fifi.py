@@ -3779,8 +3779,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
     )
     
-    if fingerprint_needed:
+    fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+    if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+        st.session_state[fingerprint_key] = True
 
     # Browser close detection for emergency saves
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
