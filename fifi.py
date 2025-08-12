@@ -1077,7 +1077,7 @@ class DatabaseManager:
     # PDF EXPORTER & ZOHO CRM MANAGER
     # =============================================================================
 
-    class PDFExporter:
+    class PDFExporter: # This class is NOT nested under DatabaseManager
         """Handles generation of PDF chat transcripts."""
         def __init__(self):
             self.styles = getSampleStyleSheet()
@@ -1107,7 +1107,7 @@ class DatabaseManager:
             buffer.seek(0)
             return buffer
 
-    class ZohoCRMManager:
+    class ZohoCRMManager: # This class is NOT nested under DatabaseManager
         """Manages integration with Zoho CRM for contact management and chat transcript saving."""
         
         def __init__(self, config: Config, pdf_exporter: PDFExporter):
@@ -1714,7 +1714,7 @@ class DatabaseManager:
             elif any(keyword in error_str for keyword in ['500', '503']): 
                 error_handler.component_status["Pinecone"] = "server_error"
                 return "server_error"
-            elif any(keyword in error_str for keyword in ['timeout', 'connection', 'network']):
+            elif any(keyword in error_str for keyword in ['timeout', 'connection', 'network']): # FIXED: Changed 'code' to 'keyword' to match other lines
                 error_handler.component_status["Pinecone"] = "connectivity_error"
                 return "connectivity_error"
             else:
@@ -1822,11 +1822,8 @@ class DatabaseManager:
             return False
 
         @handle_api_errors("AI System", "Get Response", show_to_user=True)
-        def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]: # Reverted arguments (session removed)
+        def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
             """Enhanced AI response with bidirectional fallback and intelligent routing."""
-            
-            # REMOVED: Content moderation check (moved to SessionManager.get_ai_response)
-            # REMOVED: Rate limiter check (moved to SessionManager.get_ai_response)
             
             # Convert chat history to LangChain format
             if chat_history:
@@ -2113,7 +2110,7 @@ class DatabaseManager:
                     logger.info(f"CRM save not eligible - already saved for {session.session_id[:8]}")
                     return False
                 
-                if session.user_type not in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]: # Corrected to .value for enum comparison
+                if session.user_type.value not in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]: # FIXED: Corrected to .value for enum comparison
                     logger.info(f"CRM save not eligible - user type {session.user_type.value} for {session.session_id[:8]}")
                     return False
                 
@@ -2134,7 +2131,7 @@ class DatabaseManager:
                 if not session.email or not session.messages:
                     return False
                 
-                if session.user_type not in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]: # Corrected to .value for enum comparison
+                if session.user_type.value not in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]: # FIXED: Corrected to .value for enum comparison
                     return False
                 
                 if session.daily_question_count < 1:
@@ -3260,7 +3257,7 @@ class DatabaseManager:
             
             # Clear query parameters to prevent re-triggering on rerun
             params_to_clear = ["event", "session_id", "reason", "fallback"]
-            for param in params_to_params: # Corrected from param in st.query_params
+            for param in params_to_clear: # FIXED: Corrected iteration variable from param in params_to_params
                 if param in st.query_params:
                     del st.query_params[param]
             
@@ -3606,7 +3603,7 @@ class DatabaseManager:
                     
             with col2:
                 signout_help = "Ends your current session and returns to the welcome page."
-                if (session.user_type in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and # Corrected to .value
+                if (session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and # FIXED: Corrected to .value
                     session.email and session.messages and session.daily_question_count >= 1):
                     signout_help += " Your conversation will be automatically saved to CRM before signing out."
                 
@@ -3924,6 +3921,7 @@ class DatabaseManager:
                     logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
                     st.session_state.db_manager = type('FallbackDB', (), {
                         'db_type': 'memory',
+                        'local_sessions': {},
                         'save_session': lambda self, session: None,
                         'load_session': lambda self, session_id: None,
                         'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
