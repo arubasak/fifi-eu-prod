@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import os
 import uuid
@@ -4465,4 +4466,67 @@ def main_fixed():
     
     # After get_session, if session is None or not session.active, it means get_session
     # would have triggered a rerun to the welcome page, so we just stop here.
-    if session is None
+    if session is None or not session.active: # FIX: Added colon here
+        # This means get_session already handled the redirection or creation of a new session
+        # and should have called st.rerun or st.stop. If we get here, something unexpected happened.
+        logger.warning(f"Session is None or Inactive after get_session. This should be handled by get_session's internal redirect. Forcing welcome page.")
+        # Clear state and rerun as a final safeguard
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.session_state['page'] = None
+        st.rerun()
+        return
+
+    # --- Start of new/modified logic for activity tracker and timeout ---
+    activity_data_from_js = None
+    if session and session.session_id: # Only render if we have a valid session object and ID
+        # Render the activity tracker only once per session/rerun from the top level
+        # This prevents the "multiple elements with same key" error
+        # Use a more robust key check for re-rendering
+        activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
+        
+        if activity_tracker_key_state_flag not in st.session_state or \
+           st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
+            
+            logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
+            activity_data_from_js = render_simple_activity_tracker(session.session_id)
+            st.session_state[activity_tracker_key_state_flag] = True
+            st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
+            st.session_state.latest_activity_data_from_js = activity_data_from_js
+        else:
+            activity_data_from_js = st.session_state.latest_activity_data_from_js
+    
+    # Now pass this data to the timeout checker
+    # The timeout checker will manage updating session.last_activity in DB
+    timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+    if timeout_triggered:
+        return # Stop execution if a reload was initiated
+    # --- End of new/modified logic for activity tracker and timeout ---
+
+    # Route to appropriate page based on st.session_state['page']
+    current_page = st.session_state.get('page')
+    
+    try:
+        if current_page != "chat":
+            render_welcome_page(session_manager)
+            
+        else:
+            # If we are on the chat page, render sidebar and chat interface with streaming
+            render_sidebar(session_manager, session, st.session_state.pdf_exporter)
+            render_chat_interface_with_streaming(session_manager, session, activity_data_from_js)
+                    
+    except Exception as page_error:
+        logger.error(f"Page routing error: {page_error}", exc_info=True)
+        st.error("⚠️ Page error occurred. Please refresh the page.")
+        
+        # Clear potentially corrupted session state as a last resort
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        
+        time.sleep(2)
+        st.rerun()
+
+# Entry point
+if __name__ == "__main__":
+    main_fixed()
+```
