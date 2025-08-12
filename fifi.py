@@ -2966,6 +2966,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         if JS_EVAL_AVAILABLE:
             try:
                 logger.info(f"🔄 Triggering browser reload for timeout")
+                time.sleep(5)
                 streamlit_js_eval(js_expressions="parent.window.location.reload()")
                 st.stop()
             except Exception as e:
