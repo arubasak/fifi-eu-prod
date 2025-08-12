@@ -22,7 +22,7 @@ from reportlab.lib.units import inch
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.colors import black, grey, lightgrey
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
-from typing import List, Dict, Optional, Any, Callable, Generator, Union
+from typing import List, Dict, Optional, Any, Callable
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -272,7 +272,7 @@ class UserSession:
     
     # Question Tracking (Activity-Based)
     daily_question_count: int = 0
-    total_question_count: int = 0 # Now lifetime for all users
+    total_question_count: int = 0
     last_question_time: Optional[datetime] = None
     question_limit_reached: bool = False
     
@@ -827,6 +827,7 @@ class FingerprintingManager:
             
             # Render with minimal visibility (height=0 for silent operation)
             logger.info(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
+            # REMOVE 'key' ARGUMENT HERE
             st.components.v1.html(html_content, height=0, width=0, scrolling=False)
             
             logger.info(f"✅ External fingerprint component rendered successfully for session {session_id[:8]}")
@@ -942,19 +943,20 @@ class EmailVerificationManager:
             st.error(f"Verification failed: {str(e)}")
             return False
 
+# ENHANCED: Question Limit Manager with Tier System and Evasion Detection
 class QuestionLimitManager:
-    """Manages activity-based question limiting and ban statuses for different user tiers."""
+    """Enhanced question limit manager with tier system for registered users and evasion detection."""
     
     def __init__(self):
         self.question_limits = {
             UserType.GUEST.value: 4,
             UserType.EMAIL_VERIFIED_GUEST.value: 10,
-            UserType.REGISTERED_USER.value: 20 # Confirmed: 20 questions total for Registered Users daily.
+            UserType.REGISTERED_USER.value: 20  # ENHANCED: Changed from 40 to 20
         }
         self.evasion_penalties = [24, 48, 96, 192, 336]
     
     def is_within_limits(self, session: UserSession) -> Dict[str, Any]:
-        """Checks if the current session is within its allowed question limits or if any bans are active."""
+        """ENHANCED: Limit checking with tier system for registered users."""
         user_limit = self.question_limits.get(session.user_type.value, 0)
         
         # Check if any existing ban is still active
@@ -970,14 +972,15 @@ class QuestionLimitManager:
                 }
             else:
                 logger.info(f"Ban for session {session.session_id[:8]} expired. Resetting status.")
-                # After ban expires, reset daily limits
+                # ENHANCED: Reset both daily and total counters after ban expires
                 session.ban_status = BanStatus.NONE
                 session.ban_start_time = None
                 session.ban_end_time = None
                 session.ban_reason = None
                 session.question_limit_reached = False
-                session.daily_question_count = 0 # Reset daily count after ban
-                # total_question_count is now a lifetime counter, not reset here
+                session.daily_question_count = 0  # Reset daily count
+                if session.user_type.value == UserType.REGISTERED_USER.value:
+                    session.total_question_count = 0  # Reset total count for registered users
         
         # Daily reset logic (24-hour rolling window)
         if session.last_question_time:
@@ -985,10 +988,11 @@ class QuestionLimitManager:
             if time_since_last >= timedelta(hours=24):
                 logger.info(f"Daily question count reset for session {session.session_id[:8]}.")
                 session.daily_question_count = 0
+                if session.user_type.value == UserType.REGISTERED_USER.value:
+                    session.total_question_count = 0  # Also reset total for registered users daily
                 session.question_limit_reached = False
-                # total_question_count is now a lifetime counter, not reset here
         
-        # GUEST USER logic
+        # GUEST USER logic (unchanged)
         if session.user_type.value == UserType.GUEST.value:
             if session.daily_question_count >= user_limit:
                 return {
@@ -997,32 +1001,32 @@ class QuestionLimitManager:
                     'message': 'Please provide your email address to continue.'
                 }
         
-        # EMAIL VERIFIED GUEST logic
+        # EMAIL VERIFIED GUEST logic (unchanged)
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             if session.daily_question_count >= user_limit:
-                self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified guest daily limit reached")
+                self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
                 return {
                     'allowed': False,
                     'reason': 'daily_limit',
                     'message': self._get_email_verified_limit_message()
                 }
         
-        # REGISTERED USER logic (Tiered limits)
+        # ENHANCED: REGISTERED USER logic - NEW TIER SYSTEM
         elif session.user_type.value == UserType.REGISTERED_USER.value:
-            # Tier 1: Questions 1-10 -> 1-hour ban
-            if session.daily_question_count >= 10 and session.daily_question_count < user_limit: # user_limit is 20
-                # Check if they are already serving the 1-hour ban. If so, don't re-apply.
-                if not (session.ban_status.value == BanStatus.ONE_HOUR.value and session.ban_end_time and datetime.now() < session.ban_end_time):
-                    self._apply_ban(session, BanStatus.ONE_HOUR, "Registered user Tier 1 limit reached (10 questions)")
+            # Tier 1: Questions 1-10 → 1-hour ban
+            if session.total_question_count >= 10 and session.total_question_count < user_limit:
+                # Check if already served Tier 1 ban
+                if not (session.ban_status.value == BanStatus.ONE_HOUR.value and session.ban_end_time):
+                    self._apply_ban(session, BanStatus.ONE_HOUR, "Tier 1 limit reached (10 questions)")
                     return {
                         'allowed': False,
                         'reason': 'tier1_limit',
                         'message': "You've used 10 questions today. Please wait 1 hour to access Tier 2 (11-20 questions)."
                     }
             
-            # Tier 2: Questions 11-20 -> 24-hour ban (total daily limit reached)
-            elif session.daily_question_count >= user_limit: # user_limit is 20
-                self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user Tier 2 limit reached (20 questions)")
+            # Tier 2: Questions 11-20 → 24-hour ban
+            elif session.total_question_count >= user_limit:
+                self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Tier 2 limit reached (20 questions)")
                 return {
                     'allowed': False,
                     'reason': 'tier2_limit',
@@ -1032,11 +1036,44 @@ class QuestionLimitManager:
         return {'allowed': True}
     
     def record_question(self, session: UserSession):
-        """Increments question counters for the session."""
+        """Records question for the session."""
         session.daily_question_count += 1
-        session.total_question_count += 1 # Always increment lifetime count
+        if session.user_type.value == UserType.REGISTERED_USER.value:
+            session.total_question_count += 1
         session.last_question_time = datetime.now()
         logger.debug(f"Question recorded for {session.session_id[:8]}: daily={session.daily_question_count}, total={session.total_question_count}.")
+    
+    # ENHANCED: Evasion Detection Implementation
+    def detect_guest_email_evasion(self, session: UserSession, new_email: str) -> bool:
+        """Detects if a guest user is switching emails to evade limits."""
+        if session.user_type.value != UserType.GUEST.value:
+            return False
+        
+        # Check if this is an email switch
+        if session.email and session.email != new_email:
+            session.email_switches_count += 1
+            logger.warning(f"Guest user {session.session_id[:8]} switching email: {session.email} → {new_email} (Switch #{session.email_switches_count})")
+            
+            # Apply evasion penalty for email switching after hitting guest limit
+            if session.daily_question_count >= 4:
+                penalty_hours = self.apply_evasion_penalty(session)
+                logger.warning(f"Evasion detected: Guest switched email after hitting 4-question limit. Applied {penalty_hours}h ban.")
+                return True
+        
+        return False
+    
+    def apply_evasion_penalty(self, session: UserSession) -> int:
+        """ENHANCED: Now actually called - applies escalating penalty for evasion attempts."""
+        session.evasion_count += 1
+        session.escalation_level = min(session.evasion_count, len(self.evasion_penalties))
+        
+        penalty_hours = self.evasion_penalties[session.escalation_level - 1]
+        session.current_penalty_hours = penalty_hours
+        
+        self._apply_ban(session, BanStatus.EVASION_BLOCK, f"Evasion attempt #{session.evasion_count}")
+        
+        logger.warning(f"Evasion penalty applied to {session.session_id[:8]}: {penalty_hours}h (Level {session.escalation_level}).")
+        return penalty_hours
     
     def _apply_ban(self, session: UserSession, ban_type: BanStatus, reason: str):
         """Applies a ban to the session for a specified duration."""
@@ -1054,29 +1091,14 @@ class QuestionLimitManager:
         
         logger.info(f"Ban applied to session {session.session_id[:8]}: Type={ban_type.value}, Duration={ban_hours}h, Reason='{reason}'.")
     
-    def apply_evasion_penalty(self, session: UserSession) -> int:
-        """Applies an escalating penalty for evasion attempts."""
-        session.evasion_count += 1
-        session.escalation_level = min(session.evasion_count, len(self.evasion_penalties))
-        
-        penalty_hours = self.evasion_penalties[session.escalation_level - 1]
-        session.current_penalty_hours = penalty_hours
-        
-        self._apply_ban(session, BanStatus.EVASION_BLOCK, f"Evasion attempt #{session.evasion_count}")
-        
-        logger.warning(f"Evasion penalty applied to {session.session_id[:8]}: {penalty_hours}h (Level {session.escalation_level}).")
-        return penalty_hours
-    
     def _get_ban_message(self, session: UserSession) -> str:
-        """Provides a user-friendly message for current bans."""
+        """ENHANCED: User-friendly message for current bans including new tier system."""
         if session.ban_status.value == BanStatus.EVASION_BLOCK.value:
             return "Usage limit reached due to detected unusual activity. Please try again later."
         elif session.ban_status.value == BanStatus.ONE_HOUR.value:
-            # Specific message for 1-hour ban
             return "Tier 1 completed (10 questions). Please wait 1 hour to access Tier 2 (11-20 questions)."
         elif session.user_type.value == UserType.REGISTERED_USER.value:
-            # Generic message for registered user limits (implies 24hr ban if not 1hr specific)
-            return "Daily limit reached (20 questions). Please retry in 24 hours as we are giving preference to others in the queue."
+            return "Usage limit reached. Please retry in 1 hour as we are giving preference to others in the queue."
         else:
             return self._get_email_verified_limit_message()
     
@@ -1463,65 +1485,7 @@ def sanitize_input(text: str, max_length: int = 4000) -> str:
     return html.escape(text)[:max_length].strip()
 
 # =============================================================================
-# STREAMING RESPONSE CLASSES
-# =============================================================================
-
-@dataclass
-class StreamingResponse:
-    """Container for streaming response data"""
-    content_generator: Generator[str, None, None]
-    final_metadata: Dict[str, Any]
-    stream_completed: bool = False
-
-class StreamingCitationProcessor:
-    """Processes citations from streaming Pinecone responses"""
-    
-    def __init__(self):
-        self.citations_collected = []
-        self.seen_items = set()
-    
-    def process_citations(self, response_obj) -> str:
-        """Process citations from Pinecone response and return formatted citations string"""
-        citations_text = ""
-        
-        if hasattr(response_obj, 'citations') and response_obj.citations:
-            citations_header = "\n\n---\n**Sources:**\n"
-            citations_list = []
-            
-            for citation in response_obj.citations:
-                for reference in citation.references:
-                    if hasattr(reference, 'file') and reference.file:
-                        link_url = None
-                        if hasattr(reference.file, 'metadata') and reference.file.metadata:
-                            link_url = reference.file.metadata.get('source_url')
-                        if not link_url and hasattr(reference.file, 'signed_url') and reference.file.signed_url:
-                            link_url = reference.file.signed_url
-                        
-                        if link_url:
-                            if '?' in link_url:
-                                link_url += '&utm_source=fifi-in'
-                            else:
-                                link_url += '?utm_source=fifi-in'
-                            
-                            display_text = link_url
-                            if display_text not in self.seen_items:
-                                link = f"[{len(self.seen_items) + 1}] [{display_text}]({link_url})"
-                                citations_list.append(link)
-                                self.seen_items.add(display_text)
-                        else:
-                            display_text = getattr(reference.file, 'name', 'Unknown Source')
-                            if display_text not in self.seen_items:
-                                link = f"[{len(self.seen_items) + 1}] {display_text}"
-                                citations_list.append(link)
-                                self.seen_items.add(display_text)
-            
-            if citations_list:
-                citations_text = citations_header + "\n".join(citations_list)
-        
-        return citations_text
-
-# =============================================================================
-# PINECONE ASSISTANT TOOL - ENHANCED WITH TRUE STREAMING
+# PINECONE ASSISTANT TOOL - ENHANCED WITH STREAMING
 # =============================================================================
 
 class PineconeAssistantTool:
@@ -1564,12 +1528,10 @@ class PineconeAssistantTool:
             logger.error(f"Failed to initialize Pinecone Assistant: {e}")
             return None
 
-    def stream_query(self, chat_history: List[BaseMessage]) -> Generator[Union[str, Dict[str, Any]], None, None]:
-        """ENHANCED: True streaming generator for Pinecone Assistant responses"""
-        if not self.assistant:
-            yield {"error": "Assistant not available"}
-            return
-        
+    def query(self, chat_history: List[BaseMessage], stream: bool = True) -> Dict[str, Any]:
+        """ENHANCED: Added streaming capability to Pinecone Assistant"""
+        if not self.assistant: 
+            return None
         try:
             pinecone_messages = [
                 PineconeMessage(
@@ -1578,59 +1540,73 @@ class PineconeAssistantTool:
                 ) for msg in chat_history
             ]
             
-            logger.info("🌊 Starting streaming query to Pinecone Assistant...")
+            # ENHANCED: Enable streaming for Pinecone
+            response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o", stream=stream)
             
-            response_stream = self.assistant.chat(
-                messages=pinecone_messages, 
-                model="gpt-4o", 
-                stream=True
-            )
-            
-            full_content = "" # Accumulates all content, including citations, for final metadata
-            citation_processor = StreamingCitationProcessor()
-            
-            # Stream the content as it arrives
-            for chunk in response_stream:
-                try:
+            # Handle streaming response
+            if stream:
+                content_parts = []
+                for chunk in response:
                     if hasattr(chunk, 'choices') and chunk.choices:
                         delta = chunk.choices[0].delta
                         if hasattr(delta, 'content') and delta.content:
-                            content_chunk = delta.content
-                            full_content += content_chunk
-                            yield content_chunk  # Yield each content chunk immediately for display
-                            
-                    # Check if this is the final chunk with citations
-                    if hasattr(chunk, 'citations') and chunk.citations:
-                        citations_text = citation_processor.process_citations(chunk)
-                        if citations_text:
-                            yield citations_text # Yield citations as part of the streamed output
-                            full_content += citations_text # Add citations to full_content for saving
-                            
-                except Exception as chunk_error:
-                    logger.error(f"Error processing stream chunk: {chunk_error}")
-                    continue
+                            content_parts.append(delta.content)
+                content = ''.join(content_parts)
+            else:
+                content = response.message.content
             
-            # Yield final metadata AFTER all content and citations have been streamed and accumulated
-            has_citations = len(citation_processor.seen_items) > 0
-            logger.info(f"PineconeAssistantTool: Final accumulated content length for metadata: {len(full_content)}") # Debug log
-            yield {
-                "type": "metadata",
-                "success": True,
+            has_citations = False
+            
+            if hasattr(response, 'citations') and response.citations:
+                has_citations = True
+                citations_header = "\n\n---\n**Sources:**\n"
+                citations_list = []
+                seen_items = set()
+                
+                for citation in response.citations:
+                    for reference in citation.references:
+                        if hasattr(reference, 'file') and reference.file:
+                            link_url = None
+                            if hasattr(reference.file, 'metadata') and reference.file.metadata:
+                                link_url = reference.file.metadata.get('source_url')
+                            if not link_url and hasattr(reference.file, 'signed_url') and reference.file.signed_url:
+                                link_url = reference.file.signed_url
+                            
+                            if link_url:
+                                if '?' in link_url:
+                                    link_url += '&utm_source=fifi-in'
+                                else:
+                                    link_url += '?utm_source=fifi-in'
+                                
+                                display_text = link_url
+                                if display_text not in seen_items:
+                                    link = f"[{len(seen_items) + 1}] [{display_text}]({link_url})"
+                                    citations_list.append(link)
+                                    seen_items.add(display_text)
+                            else:
+                                display_text = getattr(reference.file, 'name', 'Unknown Source')
+                                if display_text not in seen_items:
+                                    link = f"[{len(seen_items) + 1}] {display_text}"
+                                    citations_list.append(link)
+                                    seen_items.add(display_text)
+                
+                if citations_list:
+                    content += citations_header + "\n".join(citations_list)
+            
+            return {
+                "content": content, 
+                "success": True, 
                 "source": "FiFi",
                 "has_citations": has_citations,
-                "response_length": len(full_content),
+                "response_length": len(content),
                 "used_pinecone": True,
                 "used_search": False,
-                "has_inline_citations": has_citations,
-                "safety_override": False,
-                "full_content": full_content # This is the definitive full content that needs to be accurate
+                "has_inline_citations": bool(citations_list) if has_citations else False,
+                "safety_override": False
             }
-            
-            logger.info(f"✅ Streaming query completed successfully, total length: {len(full_content)}")
-            
         except Exception as e:
-            logger.error(f"Pinecone streaming error: {str(e)}")
-            yield {"error": f"Streaming failed: {str(e)}"}
+            logger.error(f"Pinecone Assistant error: {str(e)}")
+            return None
 
 class TavilyFallbackAgent:
     def __init__(self, tavily_api_key: str):
@@ -1756,8 +1732,6 @@ class TavilyFallbackAgent:
             synthesized_content = self.synthesize_search_results(search_results, message)
             final_content = self.add_utm_to_links(synthesized_content)
             
-            logger.info(f"TavilyFallbackAgent: Final synthesized content length: {len(final_content)}") # Debug log
-            
             return {
                 "content": final_content,
                 "success": True,
@@ -1766,8 +1740,7 @@ class TavilyFallbackAgent:
                 "used_search": True,
                 "has_citations": True,
                 "has_inline_citations": True,
-                "safety_override": False,
-                "full_content": final_content # Ensure full_content is set for saving
+                "safety_override": False
             }
         except Exception as e:
             return {
@@ -1781,9 +1754,9 @@ class TavilyFallbackAgent:
                 "safety_override": False
             }
     
-# ENHANCED: AI System with Streaming Support
+# ENHANCED: AI System with Improved Error Handling and Bidirectional Fallback
 class EnhancedAI:
-    """Enhanced AI system with streaming support for Pinecone responses"""
+    """Enhanced AI system with Pinecone knowledge base, web search fallback, improved error handling, and bidirectional fallback."""
     
     def __init__(self, config: Config):
         self.config = config
@@ -1823,105 +1796,6 @@ class EnhancedAI:
                 logger.error(f"Tavily agent initialization failed: {e}")
                 error_handler.log_error(error_handler.handle_api_error("Tavily", "Initialize", e))
                 self.tavily_agent = None
-
-    def stream_response(self, prompt: str, chat_history: List[Dict] = None) -> Generator[Union[str, Dict[str, Any]], None, None]:
-        """NEW: Streaming response generator for Pinecone Assistant"""
-        
-        # Content moderation check
-        moderation_result = check_content_moderation(prompt, self.openai_client)
-        if moderation_result and moderation_result.get("flagged"):
-            logger.warning(f"Content moderation flagged input: {moderation_result.get('categories', [])}")
-            yield {"error": "Content policy violation", "message": moderation_result.get("message", "Your message violates our content policy.")}
-            return
-        
-        # Convert chat history to LangChain format
-        if chat_history:
-            langchain_history = []
-            for msg in chat_history[-10:]:
-                if msg.get("role") == "user":
-                    langchain_history.append(HumanMessage(content=msg.get("content", "")))
-                elif msg.get("role") == "assistant":
-                    langchain_history.append(AIMessage(content=msg.get("content", "")))
-            langchain_history.append(HumanMessage(content=prompt))
-        else:
-            langchain_history = [HumanMessage(content=prompt)]
-        
-        # Component health-based routing
-        pinecone_healthy = error_handler.component_status.get("Pinecone") == "healthy"
-        
-        # Try Pinecone streaming first if healthy and available
-        if self.pinecone_tool and pinecone_healthy:
-            try:
-                logger.info("🌊 Starting Pinecone streaming response...")
-                
-                # These variables capture what Pinecone's stream_query will eventually provide as final metadata
-                # The full_content will be used for saving to DB and final display in cases where the stream is processed.
-                full_content_from_ai_tool = "" 
-                metadata_from_ai_tool = {} 
-                
-                # Iterate through the generator from Pinecone Assistant
-                for chunk in self.pinecone_tool.stream_query(langchain_history):
-                    if isinstance(chunk, str):
-                        yield chunk  # Yield content chunk for display immediately
-                            
-                    elif isinstance(chunk, dict):
-                        if chunk.get("type") == "metadata": # This is the final metadata from PineconeAssistantTool
-                            metadata_from_ai_tool = chunk
-                            full_content_from_ai_tool = chunk.get("full_content", "")
-                        elif chunk.get("error"):
-                            # Streaming failed, fall back to web search
-                            logger.warning(f"Pinecone streaming failed: {chunk['error']}")
-                            break # Break the loop to attempt fallback
-                
-                # After the loop, check if Pinecone provided a successful metadata chunk
-                # and decide if we should use it or fallback.
-                if metadata_from_ai_tool and not self.should_use_web_fallback(metadata_from_ai_tool):
-                    # Pinecone stream completed successfully and passed safety checks
-                    # Yield the final metadata, including the full content.
-                    yield {"type": "final_metadata", **metadata_from_ai_tool}
-                    error_handler.mark_component_healthy("Pinecone")
-                    return # Exit after successful Pinecone response
-                else:
-                    logger.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information or Pinecone failure. Switching to verified web sources.")
-                    # Continue to web search fallback below
-                    
-            except Exception as e:
-                logger.error(f"Pinecone streaming failed: {e}")
-                error_handler.log_error(error_handler.handle_api_error("Pinecone", "Stream Query", e))
-        
-        # Fallback to web search (non-streaming, then simulated streaming)
-        if self.tavily_agent:
-            try:
-                logger.info("🌐 Falling back to web search...")
-                web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
-                
-                if web_response and web_response.get("success"):
-                    # Web response comes as a single chunk of content. We simulate streaming it.
-                    content_from_tavily = web_response["content"]
-                    words = content_from_tavily.split()
-                    
-                    for i, word in enumerate(words):
-                        if i == 0:
-                            yield word
-                        else:
-                            yield " " + word
-                        time.sleep(0.05)  # Small delay for streaming effect
-                    
-                    # Yield final metadata for Tavily response
-                    yield {
-                        "type": "final_metadata",
-                        "full_content": content_from_tavily, # Ensure full content is explicitly in final metadata
-                        **web_response
-                    }
-                    error_handler.mark_component_healthy("Tavily")
-                    return
-                    
-            except Exception as e:
-                logger.error(f"Tavily search failed: {e}")
-                error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
-        
-        # Final fallback if all AI tools fail
-        yield {"error": "All AI tools unavailable", "message": "I apologize, but I'm unable to process your request at the moment due to technical issues."}
 
     # ENHANCED: Pinecone Error Detection
     def _is_pinecone_error_requiring_fallback(self, error: Exception) -> bool:
@@ -2074,9 +1948,9 @@ class EnhancedAI:
 
     @handle_api_errors("AI System", "Get Response", show_to_user=True)
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """Legacy non-streaming method for backward compatibility"""
+        """ENHANCED: AI response with improved error handling, bidirectional fallback, and component health routing."""
         
-        # Content moderation check
+        # Content moderation check (unchanged)
         moderation_result = check_content_moderation(prompt, self.openai_client)
         if moderation_result and moderation_result.get("flagged"):
             logger.warning(f"Content moderation flagged input: {moderation_result.get('categories', [])}")
@@ -2091,7 +1965,7 @@ class EnhancedAI:
                 "safety_override": False
             }
         
-        # Convert chat history to LangChain format
+        # Convert chat history to LangChain format (unchanged)
         if chat_history:
             langchain_history = []
             for msg in chat_history[-10:]:
@@ -2103,7 +1977,7 @@ class EnhancedAI:
         else:
             langchain_history = [HumanMessage(content=prompt)]
         
-        # Component health-based routing
+        # ENHANCED: Component health-based routing
         pinecone_healthy = error_handler.component_status.get("Pinecone") == "healthy"
         tavily_healthy = error_handler.component_status.get("Tavily") == "healthy"
         
@@ -2112,8 +1986,8 @@ class EnhancedAI:
         # Try Pinecone first if healthy and available
         if self.pinecone_tool and pinecone_healthy:
             try:
-                logger.info("🔍 Querying Pinecone knowledge base (non-streaming)...")
-                pinecone_response = self.pinecone_tool.query(langchain_history) 
+                logger.info("🔍 Querying Pinecone knowledge base...")
+                pinecone_response = self.pinecone_tool.query(langchain_history)
                 
                 if pinecone_response and pinecone_response.get("success"):
                     should_fallback = self.should_use_web_fallback(pinecone_response)
@@ -2130,7 +2004,7 @@ class EnhancedAI:
                 logger.error(f"Pinecone query failed: {e}")
                 error_handler.log_error(error_handler.handle_api_error("Pinecone", "Query", e))
                 
-                # Check if this error requires fallback to Tavily
+                # ENHANCED: Check if this error requires fallback to Tavily
                 if self._is_pinecone_error_requiring_fallback(e):
                     logger.info("🔄 Pinecone error requires fallback, switching to Tavily")
                     # Continue to Tavily fallback below
@@ -2150,7 +2024,7 @@ class EnhancedAI:
         # Try Tavily if available and healthy (either as fallback or primary)
         if self.tavily_agent and tavily_healthy:
             try:
-                logger.info("🌐 Using web search (non-streaming)...")
+                logger.info("🌐 Using web search...")
                 web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
                 
                 if web_response and web_response.get("success"):
@@ -2162,11 +2036,11 @@ class EnhancedAI:
                 logger.error(f"Tavily search failed: {e}")
                 error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
                 
-                # Check if this error requires fallback to Pinecone (bidirectional fallback)
+                # ENHANCED: Check if this error requires fallback to Pinecone (bidirectional fallback)
                 if self._is_tavily_error_requiring_fallback(e) and self.pinecone_tool:
                     try:
                         logger.info("🔄 Tavily failed, attempting Pinecone fallback")
-                        pinecone_response = self.pinecone_tool.query(langchain_history) # non-streaming fallback
+                        pinecone_response = self.pinecone_tool.query(langchain_history)
                         
                         if pinecone_response and pinecone_response.get("success"):
                             # Skip safety checks for fallback scenario
@@ -2268,7 +2142,7 @@ class SessionManager:
             if hasattr(self.rate_limiter, 'requests'):
                 old_limit_entries = []
                 for identifier, timestamps in self.rate_limiter.requests.items():
-                    cutoff = time.time() - self.rate_limiter.window_seconds 
+                    cutoff = time.time() - self.rate_limiter.window_seconds
                     self.rate_limiter.requests[identifier] = [t for t in timestamps if t > cutoff]
                     
                     if not self.rate_limiter.requests[identifier]:
@@ -2622,13 +2496,25 @@ class SessionManager:
         except Exception:
             return "****@****.***"
 
+    # ENHANCED: Email verification with evasion detection
     def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
-        """Handles the email verification process for guest users by sending a code."""
+        """Enhanced email verification with evasion detection."""
         try:
             sanitized_email = sanitize_input(email, 100).lower().strip()
             
-            if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', sanitized_email):
+            if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}, sanitized_email):
                 return {'success': False, 'message': 'Please enter a valid email address.'}
+            
+            # ENHANCED: Check for evasion before proceeding
+            evasion_detected = self.question_limits.detect_guest_email_evasion(session, sanitized_email)
+            
+            if evasion_detected:
+                # Save session with evasion penalty
+                self.db.save_session(session)
+                return {
+                    'success': False, 
+                    'message': f'Usage limit reached due to detected unusual activity. Please wait {session.current_penalty_hours} hours before trying again.'
+                }
             
             # Track email usage for this session
             if sanitized_email not in session.email_addresses_used:
@@ -2693,7 +2579,7 @@ class SessionManager:
                     session.daily_question_count = 0
                     session.last_question_time = None
                 
-                # Set last_activity to now (first time officially verified)
+                # Set last_activity if not already set (first time officially verified)
                 if session.last_activity is None:
                     session.last_activity = datetime.now()
 
@@ -2754,9 +2640,9 @@ class SessionManager:
                     current_session.wp_token = wp_token
                     current_session.question_limit_reached = False
                     
-                    # Reset daily question count for fresh start as registered user
+                    # Reset question counts for fresh start as registered user
                     current_session.daily_question_count = 0
-                    # total_question_count is now a lifetime counter, not reset here
+                    current_session.total_question_count = 0
                     current_session.last_question_time = None
                     
                     # Set last_activity to now (official start for logged-in users)
@@ -2796,9 +2682,8 @@ class SessionManager:
             st.error("An unexpected error occurred during authentication. Please try again later.")
             return None
 
-    # This method is not used in the new streaming chat_interface, but kept for completeness
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-        """Gets AI response and manages session state (non-streaming version)."""
+        """Gets AI response and manages session state."""
         try:
             # Check rate limiting
             if not self.rate_limiter.is_allowed(session.session_id):
@@ -2833,7 +2718,6 @@ class SessionManager:
             self.question_limits.record_question(session)
             
             # Get AI response
-            # This calls the non-streaming `EnhancedAI.get_response` method.
             ai_response = self.ai.get_response(sanitized_prompt, session.messages)
             
             # Add messages to session
@@ -2863,99 +2747,6 @@ class SessionManager:
                 'success': False,
                 'source': 'Error Handler'
             }
-
-    def get_streaming_ai_response(self, session: UserSession, prompt: str) -> Generator[Union[str, Dict[str, Any]], None, None]:
-        """NEW: Gets streaming AI response and manages session state"""
-        try:
-            # Check rate limiting
-            if not self.rate_limiter.is_allowed(session.session_id):
-                yield {"error": "Rate limit exceeded", "message": "Too many requests. Please wait a moment before asking another question."}
-                return
-            
-            # Check question limits
-            limit_check = self.question_limits.is_within_limits(session)
-            if not limit_check['allowed']:
-                if limit_check.get('reason') == 'guest_limit':
-                    yield {'requires_email': True, 'content': 'Email verification required.'}
-                    return
-                else:
-                    yield {
-                        'banned': True,
-                        'content': limit_check.get('message', 'Access restricted.'),
-                        'time_remaining': limit_check.get('time_remaining')
-                    }
-                    return
-            
-            # Sanitize input
-            sanitized_prompt = sanitize_input(prompt, 4000)
-            if not sanitized_prompt:
-                yield {"error": "Invalid input", "message": "Please enter a valid question."}
-                return
-            
-            # Record question
-            self.question_limits.record_question(session)
-            
-            # Stream AI response
-            # This variable will accumulate all string chunks yielded by the AI system
-            # It will serve as a fallback for `full_content` if the final_metadata doesn't provide it explicitly
-            accumulated_streamed_content = "" 
-            final_metadata_from_ai_system = {} # To store the final metadata dict yielded by EnhancedAI.stream_response
-            
-            # Iterate through the chunks yielded by EnhancedAI.stream_response
-            for chunk in self.ai.stream_response(sanitized_prompt, session.messages):
-                if isinstance(chunk, str):
-                    accumulated_streamed_content += chunk # Accumulate content for eventual saving
-                    yield chunk  # Yield string chunks directly to Streamlit for real-time display
-                elif isinstance(chunk, dict):
-                    if chunk.get("type") == "final_metadata":
-                        final_metadata_from_ai_system = chunk # Capture the complete final metadata dict
-                        # IMPORTANT: The 'full_content' for saving should ideally come from this metadata chunk,
-                        # as it's the definitive complete response (including all inline elements/citations from the AI tool).
-                        # We will use this to override accumulated_streamed_content for saving if available.
-                    elif chunk.get("error") or chunk.get("requires_email") or chunk.get("banned"):
-                        # These are control signals for immediate UI actions (errors, bans, email prompts).
-                        # Yield them to the calling UI function (`render_chat_interface_with_streaming`)
-                        # so it can handle the display of messages/dialogs and trigger reruns.
-                        yield chunk 
-                        return # Exit generator immediately after yielding a control chunk
-            
-            # After the loop finishes (meaning the entire stream from the AI system has completed,
-            # or a final_metadata chunk was received), we now have `accumulated_streamed_content`
-            # and `final_metadata_from_ai_system`.
-            
-            # Determine the definitive content to save in the database:
-            # Prioritize the 'full_content' from the final_metadata if available,
-            # otherwise, use the content accumulated from the streamed text chunks.
-            content_to_save_to_db = final_metadata_from_ai_system.get('full_content', accumulated_streamed_content)
-            
-            # Add messages to session after streaming completes and content is finalized
-            user_message = {'role': 'user', 'content': sanitized_prompt}
-            assistant_message = {
-                'role': 'assistant',
-                'content': content_to_save_to_db, # Use the definitive content for DB storage
-                'source': final_metadata_from_ai_system.get('source', 'Unknown'), # Use source from metadata
-                'used_pinecone': final_metadata_from_ai_system.get('used_pinecone', False),
-                'used_search': final_metadata_from_ai_system.get('used_search', False),
-                'has_citations': final_metadata_from_ai_system.get('has_citations', False),
-                'has_inline_citations': final_metadata_from_ai_system.get('has_inline_citations', False),
-                'safety_override': final_metadata_from_ai_system.get('safety_override', False)
-            }
-            
-            session.messages.extend([user_message, assistant_message])
-            
-            # Add debug log for final content length before saving
-            logger.info(f"Final content length to be saved for session {session.session_id[:8]}: {len(content_to_save_to_db)}")
-
-            # Update activity and save session
-            self._update_activity(session)
-            
-            # Yield final completion signal to the UI (includes the final metadata for display logic)
-            yield {"type": "stream_complete", "metadata": final_metadata_from_ai_system}
-            
-        except Exception as e:
-            logger.error(f"Streaming AI response generation failed: {e}", exc_info=True)
-            # If an error occurs in the generator itself, yield an error chunk
-            yield {"error": "Processing failed", "message": "I encountered an error processing your request. Please try again."}
 
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
@@ -3146,7 +2937,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         session.full_name = fresh_session_from_db.full_name # Update full name
         session.zoho_contact_id = fresh_session_from_db.zoho_contact_id # Update Zoho ID
         session.daily_question_count = fresh_session_from_db.daily_question_count # Keep counts synced
-        session.total_question_count = fresh_session_from_db.total_question_count # Keep counts synced
+        session.total_question_count = fresh_session_from_db.total_question_count
         session.last_question_time = fresh_session_from_db.last_question_time
         session.display_message_offset = fresh_session_from_db.display_message_offset # Ensure offset is synced
         # IMPORTANT: Do NOT copy messages here, as this function is for state management, not chat display history.
@@ -3596,7 +3387,7 @@ def handle_fingerprint_requests_from_query():
         params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
         for param in params_to_clear:
             if param in st.query_params:
-                del st.query_params[param] # Delete by key from query_params
+                del st.query_params[param]
         
         # Validate we have the required data
         if not fingerprint_id or not method:
@@ -3624,11 +3415,12 @@ def handle_fingerprint_requests_from_query():
         logger.info("ℹ️ No fingerprint requests found in current URL query parameters.")
 
 # =============================================================================
-# UI COMPONENTS
+# UI COMPONENTS - ENHANCED WITH NEW FEATURES
 # =============================================================================
 
+# ENHANCED: Welcome page with registration tracking
 def render_welcome_page(session_manager: 'SessionManager'):
-    """Renders the application's welcome page, including sign-in and guest options."""
+    """Enhanced welcome page with registration tracking."""
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
     
@@ -3650,9 +3442,9 @@ def render_welcome_page(session_manager: 'SessionManager'):
     
     with col3:
         st.warning("🔐 **Registered Users**")
-        # Updated tier message to reflect 20 questions/day and tiers
-        st.markdown("• **Tier 1: First 10 questions/day (1-hour break)**")
-        st.markdown("• **Tier 2: Next 10 questions/day (24-hour break)**")
+        # ENHANCED: Updated to show new tier system
+        st.markdown("• **Tier 1: 10 questions** (1-hour break)")
+        st.markdown("• **Tier 2: 20 questions total/day**")
         st.markdown("• Cross-device tracking & consistent experience")
         st.markdown("• Automatic chat saving to Zoho CRM")
         st.markdown("• Priority access during high usage")
@@ -3693,6 +3485,14 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             st.rerun()
             
             st.markdown("---")
+            
+            # ENHANCED: Registration tracking
+            current_session = session_manager.get_session()
+            if not current_session.registration_prompted:
+                current_session.registration_prompted = True
+                session_manager.db.save_session(current_session)
+                logger.info(f"Registration prompt shown for session {current_session.session_id[:8]}")
+            
             st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
     
     with tab2:
@@ -3719,8 +3519,9 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 st.session_state.page = "chat"
                 st.rerun()
 
+# ENHANCED: Sidebar with new tier system display
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
-    """Renders the application's sidebar with enhanced CRM save information."""
+    """Enhanced sidebar with new tier information for registered users."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
@@ -3731,26 +3532,13 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             if session.email: 
                 st.markdown(f"**Email:** {session.email}")
             
-            # Display daily questions and total lifetime questions
-            st.markdown(f"**Questions Today:** {session.daily_question_count}/{session_manager.question_limits.question_limits[UserType.REGISTERED_USER.value]} (Total lifetime: {session.total_question_count})")
-            
-            # Tier progress display
-            if session.daily_question_count <= 10:
-                st.progress(min(session.daily_question_count / 10, 1.0), text="Tier 1 (up to 10 questions)")
-            else: # For daily_question_count between 11 and 20
-                progress_value = min((session.daily_question_count - 10) / 10, 1.0)
+            # ENHANCED: Show new tier system for registered users
+            st.markdown(f"**Questions Today:** {session.total_question_count}/20")
+            if session.total_question_count <= 10:
+                st.progress(min(session.total_question_count / 10, 1.0), text="Tier 1 (up to 10 questions)")
+            else:
+                progress_value = min((session.total_question_count - 10) / 10, 1.0)
                 st.progress(progress_value, text="Tier 2 (11-20 questions)")
-            
-            # Add reset time for registered users
-            if session.last_question_time:
-                next_reset = session.last_question_time + timedelta(hours=24)
-                time_to_reset = next_reset - datetime.now()
-                if time_to_reset.total_seconds() > 0:
-                    hours = int(time_to_reset.total_seconds() // 3600)
-                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
-                    st.caption(f"Daily limit resets in: {hours}h {minutes}m")
-                else:
-                    st.caption("Daily questions have reset!")
             
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             st.info("📧 **Email Verified Guest**")
@@ -3919,8 +3707,9 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat automatically saves to CRM during Sign Out or browser/tab close.") # Updated text
 
+# ENHANCED: Email verification with evasion detection
 def render_email_verification_dialog(session_manager: 'SessionManager', session: UserSession):
-    """Renders the email verification dialog for guest users who have hit their initial question limit (4 questions)."""
+    """Enhanced email verification dialog with evasion detection and recognition."""
     st.error("📧 **Email Verification Required**")
     st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
     
@@ -4038,9 +3827,9 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                 else:
                     st.error("Please enter the verification code you received.")
 
-def render_chat_interface_with_streaming(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
+def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """
-    ENHANCED: Chat interface with streaming support for Pinecone responses.
+    Chat interface with robust timeout system.
     """
     
     st.title("🤖 FiFi AI Assistant")
@@ -4092,93 +3881,72 @@ def render_chat_interface_with_streaming(session_manager: 'SessionManager', sess
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
             if msg.get("role") == "assistant":
-                # Removed Source/Indicator display here as it will be handled by the post-stream display logic
-                pass 
+                if "source" in msg:
+                    source_color = {
+                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                        "Error Handler": "❌"
+                    }.get(msg['source'], "🤖")
+                    st.caption(f"{source_color} Source: {msg['source']}")
+                
+                indicators = []
+                if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
+                if msg.get("used_search"): indicators.append("🌐 Web Search")
+                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                
+                if msg.get("safety_override"):
+                    st.warning("🛡️ Safety Override: Switched to verified sources")
+                
+                if msg.get("has_citations") and msg.get("has_inline_citations"):
+                    st.caption("📚 Response includes verified citations")
 
-    # Chat input with streaming support
+    # Chat input (unchanged)
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=session.ban_status.value != BanStatus.NONE.value)
     
     if prompt:
-        logger.info(f"🌊 Processing streaming question from {session.session_id[:8]}")
+        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
+        
+        # session.last_activity is updated by _update_activity called in get_ai_response on success
         
         with st.chat_message("user"):
             st.markdown(prompt)
         
         with st.chat_message("assistant"):
-            # Get the generator from session_manager.get_streaming_ai_response
-            response_generator = session_manager.get_streaming_ai_response(session, prompt)
-
-            # Store final metadata outside the streaming loop for display *after* streaming completes
-            final_response_metadata_for_display = {}
-
-            # Helper generator to yield text chunks and capture metadata/control signals
-            def stream_and_capture_metadata():
-                nonlocal final_response_metadata_for_display
-                for chunk in response_generator:
-                    if isinstance(chunk, str):
-                        yield chunk # Yield string chunks directly to st.write_stream for text display
-                    elif isinstance(chunk, dict):
-                        if chunk.get("type") == "final_metadata":
-                            final_response_metadata_for_display = chunk.get("metadata", {})
-                            # This metadata is captured and used after st.write_stream finishes.
-                        elif chunk.get("error") or chunk.get("requires_email") or chunk.get("banned"):
-                            # These are control signals for immediate UI actions.
-                            # Store it and stop the stream. The main function will handle the rerun.
-                            st.session_state._stream_control_chunk = chunk 
-                            return # Stop yielding immediately, this causes st.write_stream to complete
-                # Generator finishes naturally if no control chunk caused an early return.
-
-            # Use st.write_stream to display the content incrementally
-            st.write_stream(stream_and_capture_metadata())
-            
-            # After st.write_stream completes (or is stopped by a control chunk),
-            # check for and process any control chunks that were stored.
-            if "_stream_control_chunk" in st.session_state:
-                control_chunk = st.session_state.pop("_stream_control_chunk") # Remove from session_state after processing
-                if control_chunk.get("requires_email"):
-                    st.error("📧 Please verify your email to continue.")
-                    st.session_state.verification_stage = 'email_entry'
-                elif control_chunk.get("banned"):
-                    st.error(control_chunk.get("content", 'Access restricted.'))
-                    if control_chunk.get('time_remaining'):
-                        time_remaining = control_chunk['time_remaining']
-                        hours = int(time_remaining.total_seconds() // 3600)
-                        minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                        st.error(f"Time remaining: {hours}h {minutes}m")
-                elif control_chunk.get("error"):
-                    error_msg = control_chunk.get("message", "An error occurred processing your request.")
-                    st.error(f"⚠️ {error_msg}")
-               
-                st.rerun() # Crucial rerun to display error messages/dialogs from control chunks
-                return # Stop execution for this run
-
-            # If no control chunk was encountered, the stream completed normally.
-            # Now, display the source and indicator information below the response.
-            if final_response_metadata_for_display.get('source'):
-                source_info = final_response_metadata_for_display['source']
-                source_color = {
-                    "FiFi": "🧠", "FiFi Web Search": "🌐",
-                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                    "Error Handler": "❌"
-                }.get(source_info, "🤖")
-                st.caption(f"{source_color} Source: {source_info}")
-            
-            indicators = []
-            if final_response_metadata_for_display.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
-            if final_response_metadata_for_display.get("used_search"): indicators.append("🌐 Web Search")
-            if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-            
-            if final_response_metadata_for_display.get("safety_override"):
-                st.warning("🛡️ Safety Override: Switched to verified sources")
-            
-            if final_response_metadata_for_display.get("has_citations") and final_response_metadata_for_display.get("has_inline_citations"):
-                st.caption("📚 Response includes verified citations")
-            
-            logger.info(f"✅ Streaming question processed successfully for display and saving.")
+            with st.spinner("🔍 Processing your question..."):
+                try:
+                    response = session_manager.get_ai_response(session, prompt)
+                    
+                    if response.get('requires_email'):
+                        st.error("📧 Please verify your email to continue.")
+                        st.session_state.verification_stage = 'email_entry'
+                        st.rerun()
+                    elif response.get('banned'):
+                        st.error(response.get("content", 'Access restricted.'))
+                        if response.get('time_remaining'):
+                            time_remaining = response['time_remaining']
+                            hours = int(time_remaining.total_seconds() // 3600)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.rerun()
+                    else:
+                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                        
+                        if response.get("source"):
+                            source_color = {
+                                "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                "Error Handler": "❌"
+                            }.get(response['source'], "🤖")
+                            st.caption(f"{source_color} Source: {response['source']}")
+                        
+                        logger.info(f"✅ Question processed successfully")
+                        
+                except Exception as e:
+                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
+                    st.error("⚠️ I encountered an error. Please try again.")
         
-        st.rerun() # This rerun is crucial to refresh the UI and persist the chat history to the main session state.
-
+        st.rerun()
 
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
@@ -4241,9 +4009,10 @@ def ensure_initialization_fixed():
                 logger.error(f"AI system failed: {e}")
                 ai_system = type('FallbackAI', (), {
                     "openai_client": None, # Ensure fallback object has this attribute
-                    'stream_response': lambda self, prompt, history=None: iter([
-                        {"error": "AI system unavailable", "message": "AI system temporarily unavailable."}
-                    ])
+                    'get_response': lambda self, prompt, history=None: {
+                        "content": "AI system temporarily unavailable.",
+                        "success": False
+                    }
                 })()
             
             init_progress.progress(0.7)
@@ -4400,7 +4169,7 @@ def main_fixed():
         else:
             # If we are on the chat page, render sidebar and chat interface
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_with_streaming(session_manager, session, activity_data_from_js)
+            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
                     
     except Exception as page_error:
         logger.error(f"Page routing error: {page_error}", exc_info=True)
