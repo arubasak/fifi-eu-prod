@@ -544,7 +544,7 @@ class DatabaseManager:
                     self.local_sessions = {}
                 self.local_sessions[session.session_id] = copy.deepcopy(session)
                 logger.info(f"Fallback: Saved session {session.session_id[:8]} to in-memory storage")
-                # Do not re-raise, as handle_api_errors already wraps and reports the error.
+                raise
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
@@ -832,7 +832,6 @@ class FingerprintingManager:
             
             # Render with minimal visibility (height=0 for silent operation)
             logger.info(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-            # REMOVE 'key' ARGUMENT HERE
             st.components.v1.html(html_content, height=0, width=0, scrolling=False)
             
             logger.info(f"✅ External fingerprint component rendered successfully for session {session_id[:8]}")
@@ -948,23 +947,21 @@ class EmailVerificationManager:
             st.error(f"Verification failed: {str(e)}")
             return False
 
-# ENHANCED: Question Limit Manager with Tier System and Evasion Detection
 class QuestionLimitManager:
-    """Enhanced question limit manager with tier system for registered users and evasion detection."""
+    """Manages activity-based question limiting and ban statuses for different user tiers."""
     
     def __init__(self):
         self.question_limits = {
             UserType.GUEST.value: 4,
             UserType.EMAIL_VERIFIED_GUEST.value: 10,
-            UserType.REGISTERED_USER.value: 20  # ENHANCED: Changed from 40 to 20
+            UserType.REGISTERED_USER.value: 20 # Changed from 40 to 20 for tier logic.
         }
         self.evasion_penalties = [24, 48, 96, 192, 336]
     
     def is_within_limits(self, session: UserSession) -> Dict[str, Any]:
-        """ENHANCED: Limit checking with tier system for registered users."""
+        """Checks if the current session is within its allowed question limits or if any bans are active."""
         user_limit = self.question_limits.get(session.user_type.value, 0)
         
-        # Check if any existing ban is still active
         if session.ban_status.value != BanStatus.NONE.value:
             if session.ban_end_time and datetime.now() < session.ban_end_time:
                 time_remaining = session.ban_end_time - datetime.now()
@@ -977,15 +974,11 @@ class QuestionLimitManager:
                 }
             else:
                 logger.info(f"Ban for session {session.session_id[:8]} expired. Resetting status.")
-                # ENHANCED: Reset both daily and total counters after ban expires
                 session.ban_status = BanStatus.NONE
                 session.ban_start_time = None
                 session.ban_end_time = None
                 session.ban_reason = None
                 session.question_limit_reached = False
-                session.daily_question_count = 0  # Reset daily count
-                if session.user_type.value == UserType.REGISTERED_USER.value:
-                    session.total_question_count = 0  # Also reset total for registered users daily
         
         # Daily reset logic (24-hour rolling window)
         if session.last_question_time:
@@ -997,7 +990,6 @@ class QuestionLimitManager:
                     session.total_question_count = 0  # Also reset total for registered users daily
                 session.question_limit_reached = False
         
-        # GUEST USER logic (unchanged)
         if session.user_type.value == UserType.GUEST.value:
             if session.daily_question_count >= user_limit:
                 return {
@@ -1006,7 +998,6 @@ class QuestionLimitManager:
                     'message': 'Please provide your email address to continue.'
                 }
         
-        # EMAIL VERIFIED GUEST logic (unchanged)
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             if session.daily_question_count >= user_limit:
                 self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
@@ -1041,44 +1032,12 @@ class QuestionLimitManager:
         return {'allowed': True}
     
     def record_question(self, session: UserSession):
-        """Records question for the session."""
+        """Increments question counters for the session."""
         session.daily_question_count += 1
         if session.user_type.value == UserType.REGISTERED_USER.value:
             session.total_question_count += 1
         session.last_question_time = datetime.now()
         logger.debug(f"Question recorded for {session.session_id[:8]}: daily={session.daily_question_count}, total={session.total_question_count}.")
-    
-    # ENHANCED: Evasion Detection Implementation
-    def detect_guest_email_evasion(self, session: UserSession, new_email: str) -> bool:
-        """Detects if a guest user is switching emails to evade limits."""
-        if session.user_type.value != UserType.GUEST.value:
-            return False
-        
-        # Check if this is an email switch
-        if session.email and session.email != new_email:
-            session.email_switches_count += 1
-            logger.warning(f"Guest user {session.session_id[:8]} switching email: {session.email} → {new_email} (Switch #{session.email_switches_count})")
-            
-            # Apply evasion penalty for email switching after hitting guest limit
-            if session.daily_question_count >= 4:
-                penalty_hours = self.apply_evasion_penalty(session)
-                logger.warning(f"Evasion detected: Guest switched email after hitting 4-question limit. Applied {penalty_hours}h ban.")
-                return True
-        
-        return False
-    
-    def apply_evasion_penalty(self, session: UserSession) -> int:
-        """ENHANCED: Now actually called - applies escalating penalty for evasion attempts."""
-        session.evasion_count += 1
-        session.escalation_level = min(session.evasion_count, len(self.evasion_penalties))
-        
-        penalty_hours = self.evasion_penalties[session.escalation_level - 1]
-        session.current_penalty_hours = penalty_hours
-        
-        self._apply_ban(session, BanStatus.EVASION_BLOCK, f"Evasion attempt #{session.evasion_count}")
-        
-        logger.warning(f"Evasion penalty applied to {session.session_id[:8]}: {penalty_hours}h (Level {session.escalation_level}).")
-        return penalty_hours
     
     def _apply_ban(self, session: UserSession, ban_type: BanStatus, reason: str):
         """Applies a ban to the session for a specified duration."""
@@ -1096,8 +1055,21 @@ class QuestionLimitManager:
         
         logger.info(f"Ban applied to session {session.session_id[:8]}: Type={ban_type.value}, Duration={ban_hours}h, Reason='{reason}'.")
     
+    def apply_evasion_penalty(self, session: UserSession) -> int:
+        """Applies an escalating penalty for evasion attempts."""
+        session.evasion_count += 1
+        session.escalation_level = min(session.evasion_count, len(self.evasion_penalties))
+        
+        penalty_hours = self.evasion_penalties[session.escalation_level - 1]
+        session.current_penalty_hours = penalty_hours
+        
+        self._apply_ban(session, BanStatus.EVASION_BLOCK, f"Evasion attempt #{session.evasion_count}")
+        
+        logger.warning(f"Evasion penalty applied to {session.session_id[:8]}: {penalty_hours}h (Level {session.escalation_level}).")
+        return penalty_hours
+    
     def _get_ban_message(self, session: UserSession) -> str:
-        """ENHANCED: User-friendly message for current bans including new tier system."""
+        """Provides a user-friendly message for current bans."""
         if session.ban_status.value == BanStatus.EVASION_BLOCK.value:
             return "Usage limit reached due to detected unusual activity. Please try again later."
         elif session.ban_status.value == BanStatus.ONE_HOUR.value:
@@ -1490,7 +1462,7 @@ def sanitize_input(text: str, max_length: int = 4000) -> str:
     return html.escape(text)[:max_length].strip()
 
 # =============================================================================
-# PINECONE ASSISTANT TOOL - ENHANCED WITH STREAMING
+# PINECONE ASSISTANT TOOL
 # =============================================================================
 
 class PineconeAssistantTool:
@@ -1533,7 +1505,7 @@ class PineconeAssistantTool:
             logger.error(f"Failed to initialize Pinecone Assistant: {e}")
             return None
 
-    def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]: # Removed 'stream' param
+    def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]:
         """Queries Pinecone Assistant (non-streaming client-side)."""
         if not self.assistant: 
             return None
@@ -1548,16 +1520,15 @@ class PineconeAssistantTool:
             # EXPLICITLY SET stream=False here for Pinecone client
             response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o", stream=False) 
             
-            content = response.message.content
-            has_citations = False
-            citations_list = []
+            core_content = response.message.content # This is the main AI answer
+            citations_markdown = ""
+            has_inline_citations = False
             
             if hasattr(response, 'citations') and response.citations:
-                has_citations = True
-                citations_header = "\n\n---\n**Sources:**\n"
+                citations_list_items = []
                 seen_items = set()
                 
-                for citation in response.citations: # Full citations available here as not streaming
+                for citation in response.citations:
                     for reference in citation.references:
                         if hasattr(reference, 'file') and reference.file:
                             link_url = None
@@ -1574,29 +1545,28 @@ class PineconeAssistantTool:
                                 
                                 display_text = link_url
                                 if display_text not in seen_items:
-                                    link = f"[{len(seen_items) + 1}] [{display_text}]({link_url})"
-                                    citations_list.append(link)
+                                    citations_list_items.append(f"[{len(seen_items) + 1}] [{display_text}]({link_url})")
                                     seen_items.add(display_text)
                             else:
                                 display_text = getattr(reference.file, 'name', 'Unknown Source')
                                 if display_text not in seen_items:
-                                    link = f"[{len(seen_items) + 1}] {display_text}"
-                                    citations_list.append(link)
+                                    citations_list_items.append(f"[{len(seen_items) + 1}] {display_text}")
                                     seen_items.add(display_text)
                 
-                if citations_list:
-                    # Append citations to content after gathering all
-                    content += citations_header + "\n".join(citations_list)
-            
+                if citations_list_items:
+                    citations_markdown = "---\n**Sources:**\n" + "\n".join(citations_list_items)
+                    has_inline_citations = True # Indicates citations were generated
+
             return {
-                "content": content, 
+                "content": core_content, # Main content
+                "citations_display_content": citations_markdown, # Separated citations
                 "success": True, 
                 "source": "FiFi",
-                "has_citations": has_citations,
-                "response_length": len(content),
+                "has_citations": bool(response.citations), # True if any raw citations came from Pinecone
+                "response_length": len(core_content),
                 "used_pinecone": True,
                 "used_search": False,
-                "has_inline_citations": bool(citations_list) if has_citations else False, # True if citations were actually formatted and added
+                "has_inline_citations": has_inline_citations, # True if formatted citations were generated
                 "safety_override": False
             }
         except Exception as e:
@@ -1607,139 +1577,93 @@ class TavilyFallbackAgent:
     def __init__(self, tavily_api_key: str):
         self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
 
-    def add_utm_to_links(self, content: str) -> str:
-        """Finds all Markdown links in a string and appends the UTM parameters."""
-        def replacer(match):
-            url = match.group(1)
-            utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
-            if '?' in url:
-                new_url = f"{url}&{utm_params}"
-            else:
-                new_url = f"{url}?{utm_params}"
-            return f"({new_url})"
-        return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
-
-    def synthesize_search_results(self, results, query: str) -> str:
-        """Synthesize search results into a coherent response similar to LLM output."""
-        
-        # Handle string response from Tavily
-        if isinstance(results, str):
-            return f"Based on my search: {results}"
-        
-        # Handle dictionary response from Tavily (most common format)
-        if isinstance(results, dict):
-            # Check if there's a pre-made answer
-            if results.get('answer'):
-                return f"Based on my search: {results['answer']}"
-            
-            # Extract the results array
-            search_results = results.get('results', [])
-            if not search_results:
-                return "I couldn't find any relevant information for your query."
-            
-            # Process the results
-            relevant_info = []
-            sources = []
-            
-            for i, result in enumerate(search_results[:3], 1):  # Use top 3 results
-                if isinstance(result, dict):
-                    title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
-                             result.get('description') or 
-                             result.get('summary', ''))
-                    url = result.get('url', '')
-                    
-                    if content:
-                        # Clean up content
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                        relevant_info.append(content)
-                        
-                        if url and title:
-                            sources.append(f"[{title}]({url})")
-            
-            if not relevant_info:
-                return "I found search results but couldn't extract readable content. Please try rephrasing your query."
-            
-            # Build synthesized response
-            response_parts = []
-            
-            if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info[0]}")
-            else:
-                response_parts.append("Based on my search, here's what I found:")
-                for i, info in enumerate(relevant_info, 1):
-                    response_parts.append(f"\n\n**{i}.** {info}")
-            
-            # Add sources
-            if sources:
-                response_parts.append(f"\n\n**Sources:**")
-                for i, source in enumerate(sources, 1):
-                    response_parts.append(f"\n{i}. {source}")
-            
-            return "".join(response_parts)
-        
-        # Handle direct list (fallback)
-        if isinstance(results, list):
-            relevant_info = []
-            sources = []
-            
-            for i, result in enumerate(results[:3], 1):
-                if isinstance(result, dict):
-                    title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
-                             result.get('description', ''))
-                    url = result.get('url', '')
-                    
-                    if content:
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                        relevant_info.append(content)
-                        if url:
-                            sources.append(f"[{title}]({url})")
-            
-            if not relevant_info:
-                return "I couldn't find relevant information for your query."
-            
-            response_parts = []
-            if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info[0]}")
-            else:
-                response_parts.append("Based on my search:")
-                for info in relevant_info:
-                    response_parts.append(f"\n{info}")
-            
-            if sources:
-                response_parts.append(f"\n\n**Sources:**")
-                for i, source in enumerate(sources, 1):
-                    response_parts.append(f"{i}. {source}")
-            
-            return "".join(response_parts)
-        
-        # Fallback for unknown formats
-        return "I couldn't find any relevant information for your query."
+    def add_utm_to_links(self, url: str) -> str:
+        """Adds UTM parameters to a given URL."""
+        utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
+        if '?' in url:
+            new_url = f"{url}&{utm_params}"
+        else:
+            new_url = f"{url}?{utm_params}"
+        return new_url
 
     def query(self, message: str, chat_history: List[BaseMessage]) -> Dict[str, Any]:
         try:
             search_results = self.tavily_tool.invoke({"query": message})
-            synthesized_content = self.synthesize_search_results(search_results, message)
-            final_content = self.add_utm_to_links(synthesized_content)
             
+            core_content = ""
+            citations_markdown = ""
+            sources_list_items = []
+            
+            # TavilySearch can return a dict with 'answer' and 'results', or sometimes just a list of results.
+            if isinstance(search_results, dict):
+                # Prioritize a direct answer if provided by Tavily
+                if search_results.get('answer'):
+                    core_content = f"Based on my search: {search_results['answer']}"
+                
+                # Process individual search results for content and sources
+                relevant_info_snippets = []
+                for i, result in enumerate(search_results.get('results', [])[:3], 1):  # Use top 3 results
+                    content_snippet = (result.get('content') or 
+                                     result.get('snippet') or 
+                                     result.get('description') or 
+                                     result.get('summary', ''))
+                    if content_snippet:
+                        if len(content_snippet) > 400: # Truncate long snippets
+                            content_snippet = content_snippet[:400] + "..."
+                        relevant_info_snippets.append(content_snippet)
+                        
+                        if result.get('url') and result.get('title'):
+                            # Add formatted source link
+                            sources_list_items.append(f"[{result['title']}]({self.add_utm_to_links(result['url'])})")
+                
+                # If no direct answer but snippets are found, synthesize from snippets
+                if not core_content and relevant_info_snippets:
+                    if len(relevant_info_snippets) == 1:
+                        core_content = f"Based on my search: {relevant_info_snippets[0]}"
+                    else:
+                        core_content = "Based on my search, here's what I found:\n\n" + "\n\n".join([f"**{i}.** {info}" for i, info in enumerate(relevant_info_snippets, 1)])
+            
+            elif isinstance(search_results, list): # Fallback for cases where Tavily returns a direct list of results
+                relevant_info_snippets = []
+                for i, result in enumerate(search_results[:3], 1):
+                    content_snippet = (result.get('content') or 
+                                     result.get('snippet') or 
+                                     result.get('description', ''))
+                    if content_snippet:
+                        if len(content_snippet) > 400:
+                            content_snippet = content_snippet[:400] + "..."
+                        relevant_info_snippets.append(content_snippet)
+                        if result.get('url') and result.get('title'):
+                            sources_list_items.append(f"[{result['title']}]({self.add_utm_to_links(result['url'])})")
+
+                if relevant_info_snippets:
+                    if len(relevant_info_snippets) == 1:
+                        core_content = f"Based on my search: {relevant_info_snippets[0]}"
+                    else:
+                        core_content = "Based on my search:\n" + "\n".join(relevant_info_snippets)
+            
+            if not core_content: # If no content extracted from any format
+                core_content = "I couldn't find any relevant information for your query."
+
+            # Format citations if any sources were collected
+            if sources_list_items:
+                citations_markdown = "**Sources:**\n" + "\n".join(sources_list_items)
+
             return {
-                "content": final_content,
+                "content": core_content,
+                "citations_display_content": citations_markdown,
                 "success": True,
                 "source": "FiFi Web Search",
                 "used_pinecone": False,
                 "used_search": True,
-                "has_citations": True,
-                "has_inline_citations": True,
+                "has_citations": bool(sources_list_items), # True if sources were found
+                "has_inline_citations": bool(sources_list_items), # Always true if Tavily provides sources
                 "safety_override": False
             }
         except Exception as e:
             return {
                 "content": f"I apologize, but an error occurred while searching: {str(e)}",
+                "citations_display_content": "",
                 "success": False,
                 "source": "error",
                 "used_pinecone": False,
@@ -1749,9 +1673,8 @@ class TavilyFallbackAgent:
                 "safety_override": False
             }
     
-# ENHANCED: AI System with Improved Error Handling and Bidirectional Fallback
 class EnhancedAI:
-    """Enhanced AI system with Pinecone knowledge base, web search fallback, improved error handling, and bidirectional fallback."""
+    """Enhanced AI system with Pinecone knowledge base, web search fallback, content moderation, and anti-hallucination safety."""
     
     def __init__(self, config: Config):
         self.config = config
@@ -1775,10 +1698,8 @@ class EnhancedAI:
                     self.config.PINECONE_ASSISTANT_NAME
                 )
                 logger.info("✅ Pinecone Assistant initialized successfully")
-                error_handler.mark_component_healthy("Pinecone")
             except Exception as e:
                 logger.error(f"Pinecone tool initialization failed: {e}")
-                error_handler.log_error(error_handler.handle_api_error("Pinecone", "Initialize", e))
                 self.pinecone_tool = None
         
         # Initialize Tavily agent
@@ -1786,76 +1707,9 @@ class EnhancedAI:
             try:
                 self.tavily_agent = TavilyFallbackAgent(self.config.TAVILY_API_KEY)
                 logger.info("✅ Tavily Web Search initialized successfully")
-                error_handler.mark_component_healthy("Tavily")
             except Exception as e:
                 logger.error(f"Tavily agent initialization failed: {e}")
-                error_handler.log_error(error_handler.handle_api_error("Tavily", "Initialize", e))
                 self.tavily_agent = None
-
-    # ENHANCED: Pinecone Error Detection
-    def _is_pinecone_error_requiring_fallback(self, error: Exception) -> bool:
-        """Determines if Pinecone error requires fallback to Tavily."""
-        error_str = str(error).lower()
-        error_type = type(error).__name__
-        
-        # Check for HTTP status codes that require fallback
-        pinecone_fallback_codes = [
-            "401", "402", "403",  # Auth/payment issues
-            "429",                # Rate limiting
-            "500", "503",         # Server errors
-            "400", "404", "409", "412", "422"  # Client errors
-        ]
-        
-        # Check for status codes in error message
-        for code in pinecone_fallback_codes:
-            if code in error_str:
-                logger.warning(f"Pinecone error code {code} detected, triggering fallback")
-                return True
-        
-        # Check for specific error types
-        fallback_conditions = [
-            "timeout" in error_str,
-            "connection" in error_str,
-            "network" in error_str,
-            "unavailable" in error_str,
-            "rate limit" in error_str,
-            "quota" in error_str,
-            error_type in ["ConnectionError", "TimeoutError", "HTTPError"]
-        ]
-        
-        if any(fallback_conditions):
-            logger.warning(f"Pinecone fallback condition met: {error_type} - {error_str}")
-            return True
-        
-        return False
-
-    # ENHANCED: Tavily Error Detection for Bidirectional Fallback
-    def _is_tavily_error_requiring_fallback(self, error: Exception) -> bool:
-        """Determines if Tavily error requires fallback to Pinecone."""
-        error_str = str(error).lower()
-        error_type = type(error).__name__
-        
-        # Check for conditions that should trigger Pinecone fallback
-        fallback_conditions = [
-            "timeout" in error_str,
-            "connection" in error_str,
-            "network" in error_str,
-            "unavailable" in error_str,
-            "rate limit" in error_str,
-            "quota" in error_str,
-            "401" in error_str,
-            "403" in error_str,
-            "429" in error_str,
-            "500" in error_str,
-            "503" in error_str,
-            error_type in ["ConnectionError", "TimeoutError", "HTTPError"]
-        ]
-        
-        if any(fallback_conditions):
-            logger.warning(f"Tavily fallback condition met: {error_type} - {error_str}")
-            return True
-        
-        return False
 
     def should_use_web_fallback(self, pinecone_response: Dict[str, Any]) -> bool:
         """EXTREMELY aggressive fallback detection to prevent any hallucination."""
@@ -1871,16 +1725,7 @@ class EnhancedAI:
         if any(indicator in content for indicator in current_info_indicators):
             return True
         
-        # PRIORITY 2: Explicit "don't know" statements (allow these to pass)
-        explicit_unknown = [
-            "i don't have specific information", "i don't know", "i'm not sure",
-            "i cannot help", "i cannot provide", "cannot find specific information",
-            "no specific information", "no information about", "don't have information",
-            "not available in my knowledge", "unable to find", "no data available",
-            "insufficient information", "outside my knowledge", "cannot answer"
-        ]
-        if any(keyword in content for keyword in explicit_unknown):
-            return False # Don't fallback for explicit "don't know" responses
+        # PRIORITY 2: Explicit "don't know" statements (handled separately now, see get_response)
         
         # PRIORITY 3: Detect fake files/images/paths (CRITICAL SAFETY)
         fake_file_patterns = [
@@ -1907,9 +1752,11 @@ class EnhancedAI:
                 return True
         
         # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short or explicit "don't know")
+        # Note: explicit "don't know" is handled at a higher level now.
         if not has_real_citations:
             if "[1]" not in content_raw and "**Sources:**" not in content_raw:
-                if len(content_raw.strip()) > 30:
+                # If content is longer than a typical short answer and has no citations, fallback
+                if len(content_raw.strip()) > 50: # Increased threshold slightly
                     logger.warning("🚨 SAFETY: Long response without citations")
                     return True
         
@@ -1920,8 +1767,10 @@ class EnhancedAI:
             "experts say", "based on", "in general", "as a rule"
         ]
         if any(flag in content for flag in general_knowledge_red_flags):
-            logger.warning("🚨 SAFETY: Detected general knowledge indicators")
-            return True
+            # Only trigger if no real citations and response is not just a short fact
+            if not has_real_citations and len(content_raw.strip()) > 50:
+                logger.warning("🚨 SAFETY: Detected general knowledge indicators without citations")
+                return True
         
         # PRIORITY 7: Question-answering patterns that suggest general knowledge
         qa_patterns = [
@@ -1943,14 +1792,14 @@ class EnhancedAI:
 
     @handle_api_errors("AI System", "Get Response", show_to_user=True)
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """ENHANCED: AI response with improved error handling, bidirectional fallback, and component health routing."""
+        """Enhanced AI response with content moderation, Pinecone, web search, and safety features."""
         
-        # Content moderation check (unchanged)
         moderation_result = check_content_moderation(prompt, self.openai_client)
         if moderation_result and moderation_result.get("flagged"):
             logger.warning(f"Content moderation flagged input: {moderation_result.get('categories', [])}")
             return {
                 "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
+                "citations_display_content": "", # Added for consistency
                 "success": False,
                 "source": "Content Moderation",
                 "used_search": False,
@@ -1960,105 +1809,95 @@ class EnhancedAI:
                 "safety_override": False
             }
         
-        # Convert chat history to LangChain format (unchanged)
+        langchain_history = []
         if chat_history:
-            langchain_history = []
-            for msg in chat_history[-10:]:
+            for msg in chat_history[-10:]: # Limit to last 10 messages for context
                 if msg.get("role") == "user":
                     langchain_history.append(HumanMessage(content=msg.get("content", "")))
                 elif msg.get("role") == "assistant":
                     langchain_history.append(AIMessage(content=msg.get("content", "")))
-            langchain_history.append(HumanMessage(content=prompt))
-        else:
-            langchain_history = [HumanMessage(content=prompt)]
+        langchain_history.append(HumanMessage(content=prompt))
         
-        # ENHANCED: Component health-based routing
-        pinecone_healthy = error_handler.component_status.get("Pinecone") == "healthy"
-        tavily_healthy = error_handler.component_status.get("Tavily") == "healthy"
+        pinecone_response = None
         
-        logger.info(f"Component Status - Pinecone: {error_handler.component_status.get('Pinecone', 'unknown')}, Tavily: {error_handler.component_status.get('Tavily', 'unknown')}")
-        
-        # Try Pinecone first if healthy and available
-        if self.pinecone_tool and pinecone_healthy:
+        # 1. Attempt Pinecone first
+        if self.pinecone_tool:
             try:
                 logger.info("🔍 Querying Pinecone knowledge base...")
                 pinecone_response = self.pinecone_tool.query(langchain_history)
-                
-                if pinecone_response and pinecone_response.get("success"):
-                    should_fallback = self.should_use_web_fallback(pinecone_response)
-                    
-                    if not should_fallback:
-                        logger.info("✅ Using Pinecone response (passed safety checks)")
-                        error_handler.mark_component_healthy("Pinecone")
-                        return pinecone_response
-                    else:
-                        logger.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switching to verified web sources.")
-                        # Continue to web search fallback
-                        
             except Exception as e:
                 logger.error(f"Pinecone query failed: {e}")
                 error_handler.log_error(error_handler.handle_api_error("Pinecone", "Query", e))
-                
-                # ENHANCED: Check if this error requires fallback to Tavily
-                if self._is_pinecone_error_requiring_fallback(e):
-                    logger.info("🔄 Pinecone error requires fallback, switching to Tavily")
-                    # Continue to Tavily fallback below
-                else:
-                    # Don't fallback for this error, return error response
-                    return {
-                        "content": "I apologize, but I'm experiencing technical difficulties with my knowledge base. Please try again later.",
-                        "success": False,
-                        "source": "Pinecone Error",
-                        "used_search": False,
-                        "used_pinecone": False,
-                        "has_citations": False,
-                        "has_inline_citations": False,
-                        "safety_override": False
-                    }
+                # Don't return error yet, proceed to fallback.
         
-        # Try Tavily if available and healthy (either as fallback or primary)
-        if self.tavily_agent and tavily_healthy:
+        # 2. Evaluate Pinecone response and determine fallback strategy
+        should_fallback_to_web = False
+        if pinecone_response and pinecone_response.get("success"):
+            pinecone_content_lower = pinecone_response.get("content", "").lower()
+            explicit_pinecone_unknown_phrases = [
+                "i don't have specific information", "i don't know", "i'm not sure",
+                "i cannot help", "i cannot provide", "cannot find specific information",
+                "no specific information", "no information about", "don't have information",
+                "not available in my knowledge", "unable to find", "no data available",
+                "insufficient information", "outside my knowledge", "cannot answer"
+            ]
+            
+            if any(phrase in pinecone_content_lower for phrase in explicit_pinecone_unknown_phrases):
+                logger.info("🔄 Pinecone explicitly said 'I don't know'. Forcing web search.")
+                should_fallback_to_web = True
+            elif self.should_use_web_fallback(pinecone_response):
+                logger.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated/unreliable Pinecone information. Forcing web search.")
+                should_fallback_to_web = True
+        elif pinecone_response is None: # Pinecone tool failed or returned None
+            logger.info("🔄 Pinecone tool failed or returned no response. Trying web search.")
+            should_fallback_to_web = True
+        else: # Pinecone returned a non-successful response (e.g., due to an internal error from Pinecone side)
+            logger.warning("⚠️ Pinecone returned a non-successful response. Trying web search.")
+            should_fallback_to_web = True
+
+        # 3. If fallback is needed, attempt Tavily
+        if should_fallback_to_web and self.tavily_agent:
             try:
-                logger.info("🌐 Using web search...")
-                web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
+                logger.info("🌐 Attempting web search (Tavily)...")
+                # Pass the *original* prompt, not the full history, for better search results.
+                # TavilySearch (LangChain tool) does not typically take chat history for direct query,
+                # but an agent built on it might. Here we assume direct query is best for fresh search.
+                web_response = self.tavily_agent.query(prompt, []) # Pass empty history to Tavily for simplicity
                 
                 if web_response and web_response.get("success"):
                     logger.info("✅ Using web search response")
-                    error_handler.mark_component_healthy("Tavily")
+                    # Set safety_override flag if the fallback was due to Pinecone's answer being suspicious
+                    if pinecone_response and not explicit_pinecone_unknown: # Only if Pinecone gave an answer but it was suspect
+                         web_response["safety_override"] = True
                     return web_response
                     
             except Exception as e:
-                logger.error(f"Tavily search failed: {e}")
+                logger.error(f"Web search failed: {e}")
                 error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
-                
-                # ENHANCED: Check if this error requires fallback to Pinecone (bidirectional fallback)
-                if self._is_tavily_error_requiring_fallback(e) and self.pinecone_tool:
-                    try:
-                        logger.info("🔄 Tavily failed, attempting Pinecone fallback")
-                        pinecone_response = self.pinecone_tool.query(langchain_history)
-                        
-                        if pinecone_response and pinecone_response.get("success"):
-                            # Skip safety checks for fallback scenario
-                            logger.info("✅ Using Pinecone fallback response")
-                            error_handler.mark_component_healthy("Pinecone")
-                            return pinecone_response
-                            
-                    except Exception as pinecone_e:
-                        logger.error(f"Pinecone fallback also failed: {pinecone_e}")
-                        error_handler.log_error(error_handler.handle_api_error("Pinecone", "Fallback Query", pinecone_e))
         
-        # Final fallback - basic response
-        logger.warning("⚠️ All AI tools unavailable, using basic fallback")
-        return {
-            "content": "I apologize, but I'm unable to process your request at the moment due to technical issues. Please try again later.",
-            "success": False,
-            "source": "System Fallback",
-            "used_search": False,
-            "used_pinecone": False,
-            "has_citations": False,
-            "has_inline_citations": False,
-            "safety_override": False
-        }
+        # 4. Final fallback - return original Pinecone response or generic message
+        if pinecone_response and pinecone_response.get("success") and not should_fallback_to_web:
+            logger.info("✅ Final response is from Pinecone (no web fallback triggered)")
+            return pinecone_response
+        elif pinecone_response and pinecone_response.get("success") and should_fallback_to_web:
+            # This case means Pinecone gave an answer, but we decided to fallback, and web search failed.
+            # So, we reluctantly return Pinecone's original answer, marking it as safety_override attempted but failed.
+            logger.warning("⚠️ Web search fallback failed after Pinecone returned an answer. Reverting to Pinecone's answer with safety flag.")
+            pinecone_response["safety_override"] = True # Mark it as a potentially risky answer
+            return pinecone_response
+        else:
+            logger.warning("⚠️ All AI tools unavailable or failed to provide a reliable answer, using basic fallback")
+            return {
+                "content": "I apologize, but I'm currently experiencing technical difficulties or cannot find relevant information for your request. Please try again later or rephrase your question.",
+                "citations_display_content": "", # Added for consistency
+                "success": False,
+                "source": "System Fallback",
+                "used_search": False,
+                "used_pinecone": False,
+                "has_citations": False,
+                "has_inline_citations": False,
+                "safety_override": False
+            }
 
 @handle_api_errors("Content Moderation", "Check Prompt", show_to_user=False)
 def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
@@ -2491,26 +2330,14 @@ class SessionManager:
         except Exception:
             return "****@****.***"
 
-    # ENHANCED: Email verification with evasion detection
     def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
-        """Enhanced email verification with evasion detection."""
+        """Handles the email verification process for guest users by sending a code."""
         try:
             sanitized_email = sanitize_input(email, 100).lower().strip()
             
             # FIX: Corrected the unterminated string literal and added '$' for end of string match.
             if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', sanitized_email):
                 return {'success': False, 'message': 'Please enter a valid email address.'}
-            
-            # ENHANCED: Check for evasion before proceeding
-            evasion_detected = self.question_limits.detect_guest_email_evasion(session, sanitized_email)
-            
-            if evasion_detected:
-                # Save session with evasion penalty
-                self.db.save_session(session)
-                return {
-                    'success': False, 
-                    'message': f'Usage limit reached due to detected unusual activity. Please wait {session.current_penalty_hours} hours before trying again.'
-                }
             
             # Track email usage for this session
             if sanitized_email not in session.email_addresses_used:
@@ -2685,6 +2512,7 @@ class SessionManager:
             if not self.rate_limiter.is_allowed(session.session_id):
                 return {
                     'content': 'Too many requests. Please wait a moment before asking another question.',
+                    'citations_display_content': '', # Added for consistency
                     'success': False,
                     'source': 'Rate Limiter'
                 }
@@ -2697,7 +2525,8 @@ class SessionManager:
                 else:
                     return {
                         'banned': True,
-                        'content': limit_check.get('message', 'Access restricted.'),
+                        'content': limit_check.get("content", 'Access restricted.'),
+                        'citations_display_content': '', # Added for consistency
                         'time_remaining': limit_check.get('time_remaining')
                     }
             
@@ -2706,6 +2535,7 @@ class SessionManager:
             if not sanitized_prompt:
                 return {
                     'content': 'Please enter a valid question.',
+                    'citations_display_content': '', # Added for consistency
                     'success': False,
                     'source': 'Input Validation'
                 }
@@ -2720,7 +2550,8 @@ class SessionManager:
             user_message = {'role': 'user', 'content': sanitized_prompt}
             assistant_message = {
                 'role': 'assistant',
-                'content': ai_response.get('content', 'No response generated.'),
+                'content': ai_response.get('content', 'No response generated.'), # Core AI content
+                'citations_display_content': ai_response.get('citations_display_content', ''), # New: separate citations
                 'source': ai_response.get('source'),
                 'used_pinecone': ai_response.get('used_pinecone', False),
                 'used_search': ai_response.get('used_search', False),
@@ -2740,6 +2571,7 @@ class SessionManager:
             logger.error(f"AI response generation failed: {e}", exc_info=True)
             return {
                 'content': 'I encountered an error processing your request. Please try again.',
+                'citations_display_content': '', # Added for consistency
                 'success': False,
                 'source': 'Error Handler'
             }
@@ -3411,12 +3243,11 @@ def handle_fingerprint_requests_from_query():
         logger.info("ℹ️ No fingerprint requests found in current URL query parameters.")
 
 # =============================================================================
-# UI COMPONENTS - ENHANCED WITH NEW FEATURES
+# UI COMPONENTS
 # =============================================================================
 
-# ENHANCED: Welcome page with registration tracking
 def render_welcome_page(session_manager: 'SessionManager'):
-    """Enhanced welcome page with registration tracking."""
+    """Renders the application's welcome page, including sign-in and guest options."""
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
     
@@ -3438,9 +3269,8 @@ def render_welcome_page(session_manager: 'SessionManager'):
     
     with col3:
         st.warning("🔐 **Registered Users**")
-        # ENHANCED: Updated to show new tier system
-        st.markdown("• **Tier 1: 10 questions** (1-hour break)")
-        st.markdown("• **Tier 2: 20 questions total/day**")
+        st.markdown("• **Tier 1: 10 questions** (1-hour break)") # Updated for tier
+        st.markdown("• **Tier 2: 20 questions total/day**") # Updated for tier
         st.markdown("• Cross-device tracking & consistent experience")
         st.markdown("• Automatic chat saving to Zoho CRM")
         st.markdown("• Priority access during high usage")
@@ -3515,9 +3345,8 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 st.session_state.page = "chat"
                 st.rerun()
 
-# ENHANCED: Sidebar with new tier system display
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
-    """Enhanced sidebar with new tier information for registered users."""
+    """Renders the application's sidebar with enhanced CRM save information."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
@@ -3703,9 +3532,8 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat automatically saves to CRM during Sign Out or browser/tab close.") # Updated text
 
-# ENHANCED: Email verification with evasion detection
 def render_email_verification_dialog(session_manager: 'SessionManager', session: UserSession):
-    """Enhanced email verification dialog with evasion detection and recognition."""
+    """Renders the email verification dialog for guest users who have hit their initial question limit (4 questions)."""
     st.error("📧 **Email Verification Required**")
     st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
     
@@ -3878,8 +3706,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         with st.chat_message(msg.get("role", "user")):
             st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
-            # Display metadata for historical assistant messages
+            # Display metadata for historical assistant messages AFTER their content
             if msg.get("role") == "assistant":
+                if msg.get("citations_display_content"): # Display formatted citations if present
+                    st.markdown(msg["citations_display_content"], unsafe_allow_html=True)
+
                 if "source" in msg:
                     source_color = {
                         "FiFi": "🧠", "FiFi Web Search": "🌐", 
@@ -3947,7 +3778,12 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         # Display the content with a streaming effect
                         st.write_stream(stream_content_char_by_char(full_content_to_stream))
 
-                        # Display metadata AFTER the streaming content is complete
+                        # Display citations separately, AFTER the main content has streamed
+                        citations_to_display = response.get("citations_display_content", "")
+                        if citations_to_display:
+                            st.markdown(citations_to_display, unsafe_allow_html=True) # Display as markdown
+
+                        # Display other metadata AFTER citations (if any)
                         if response.get("source"):
                             source_color = {
                                 "FiFi": "🧠", "FiFi Web Search": "🌐",
@@ -4029,6 +3865,7 @@ def ensure_initialization_fixed():
                     "openai_client": None, # Ensure fallback object has this attribute
                     'get_response': lambda self, prompt, history=None: {
                         "content": "AI system temporarily unavailable.",
+                        "citations_display_content": "", # Added for consistency
                         "success": False
                     }
                 })()
@@ -4120,7 +3957,23 @@ def main_fixed():
         logger.error(f"Main initialization error: {init_error}", exc_info=True)
         return
 
+    # Pre-process query parameters to establish session_id early if redirected
+    query_params = st.query_params
+    query_session_id = query_params.get("session_id")
+    query_event = query_params.get("event")
+
+    # If a session_id is coming from a query parameter (e.g., from JS redirect)
+    # and it's not already the current_session_id, set it. This prioritizes query params.
+    if query_session_id and st.session_state.get('current_session_id') != query_session_id:
+        # Only do this if it's a specific event meant to carry session ID for continuity
+        if query_event in ["fingerprint_complete", "emergency_close"]:
+            st.session_state.current_session_id = query_session_id
+            logger.info(f"Main: Overriding st.session_state.current_session_id with {query_session_id[:8]} from query params due to {query_event}.")
+
+
     # Handle emergency saves AND fingerprint data first (these are immediate redirects/stops)
+    # These handlers will now *use* the current_session_id set above or the one loaded by get_session.
+    # They should *also* ensure query params are cleared AFTER processing.
     try:
         handle_emergency_save_requests_from_query()
         handle_fingerprint_requests_from_query()
@@ -4133,9 +3986,8 @@ def main_fixed():
         st.error("❌ Session Manager not available. Please refresh the page.")
         return
 
-    # CRITICAL: Always try to get/validate the session. This will handle
-    # creating new sessions, reloading existing ones, and even redirecting if inactive.
-    # This call is paramount.
+    # CRITICAL: Always try to get/validate the session.
+    # This call now relies on st.session_state.current_session_id being correctly set.
     session = session_manager.get_session()
     
     # After get_session, if session is None or not session.active, it means get_session
@@ -4203,3 +4055,4 @@ def main_fixed():
 # Entry point
 if __name__ == "__main__":
     main_fixed()
+```
