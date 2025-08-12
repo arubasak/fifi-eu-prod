@@ -4106,11 +4106,12 @@ def main_fixed():
         logger.error(f"Page routing error: {page_error}", exc_info=True)
         st.error("⚠️ Page error occurred. Please refresh the page.")
         
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+        #for key in list(st.session_state.keys()):
+            #del st.session_state[key]
         
-        time.sleep(2)
-        st.rerun()
+        #time.sleep(2)
+        #st.rerun()
+        st.stop()
 
 # Entry point
 if __name__ == "__main__":
