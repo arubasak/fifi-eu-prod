@@ -3377,20 +3377,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
             
             st.markdown("---")
             
-            # NEW: Registration tracking section
-            session = session_manager.get_session()
-            if not session.registration_prompted:
-                st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
-                
-                # Mark that registration was prompted
-                session.registration_prompted = True
-                try:
-                    session_manager.db.save_session(session)
-                    logger.info(f"✅ Registration prompt shown and tracked for session {session.session_id[:8]}")
-                except Exception as e:
-                    logger.error(f"Failed to save registration prompt tracking: {e}")
-            else:
-                st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
+            st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
     
     with tab2:
         st.markdown("""
