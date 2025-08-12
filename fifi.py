@@ -1944,36 +1944,39 @@ class EnhancedAI:
             try:
                 logger.info("🌊 Starting Pinecone streaming response...")
                 
-                full_content = ""
-                metadata = {}
+                full_content_from_pinecone_metadata = "" # To capture full_content from Pinecone's final metadata chunk
+                metadata_from_pinecone = {} # To capture all metadata from Pinecone's final metadata chunk
                 
                 for chunk in self.pinecone_tool.stream_query(langchain_history):
                     if isinstance(chunk, str):
-                        full_content += chunk
-                        yield chunk  # Stream content to UI
+                        yield chunk  # Yield content chunk for display
+                            
                     elif isinstance(chunk, dict):
-                        if chunk.get("type") == "metadata":
-                            metadata = chunk
+                        if chunk.get("type") == "metadata": # This is the final metadata from PineconeAssistantTool
+                            metadata_from_pinecone = chunk
+                            full_content_from_pinecone_metadata = chunk.get("full_content", "")
                         elif chunk.get("error"):
                             # Streaming failed, fall back to web search
                             logger.warning(f"Pinecone streaming failed: {chunk['error']}")
-                            break
+                            break # Break the loop to attempt fallback
                 
-                # Check if we should fallback based on content
-                if metadata and not self.should_use_web_fallback(metadata):
-                    # Stream completed successfully, yield final metadata
-                    yield {"type": "final_metadata", **metadata}
+                # After the loop, check if Pinecone provided a successful metadata chunk
+                # and decide if we should use it or fallback.
+                if metadata_from_pinecone and not self.should_use_web_fallback(metadata_from_pinecone):
+                    # Pinecone stream completed successfully and passed safety checks
+                    # Yield the final metadata, including the full content.
+                    yield {"type": "final_metadata", **metadata_from_pinecone}
                     error_handler.mark_component_healthy("Pinecone")
-                    return
+                    return # Exit after successful Pinecone response
                 else:
-                    logger.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switching to verified web sources.")
+                    logger.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information or Pinecone failure. Switching to verified web sources.")
                     # Continue to web search fallback below
                     
             except Exception as e:
                 logger.error(f"Pinecone streaming failed: {e}")
                 error_handler.log_error(error_handler.handle_api_error("Pinecone", "Stream Query", e))
         
-        # Fallback to web search (non-streaming)
+        # Fallback to web search (non-streaming, then simulated streaming)
         if self.tavily_agent:
             try:
                 logger.info("🌐 Falling back to web search...")
@@ -1981,8 +1984,8 @@ class EnhancedAI:
                 
                 if web_response and web_response.get("success"):
                     # Stream the web response content word by word for better UX
-                    content = web_response["content"]
-                    words = content.split()
+                    content_from_tavily = web_response["content"]
+                    words = content_from_tavily.split()
                     
                     for i, word in enumerate(words):
                         if i == 0:
@@ -1991,9 +1994,10 @@ class EnhancedAI:
                             yield " " + word
                         time.sleep(0.05)  # Small delay for streaming effect
                     
-                    # Yield final metadata
+                    # Yield final metadata for Tavily response
                     yield {
                         "type": "final_metadata",
+                        "full_content": content_from_tavily, # Ensure full content is explicitly in final metadata
                         **web_response
                     }
                     error_handler.mark_component_healthy("Tavily")
@@ -2003,7 +2007,7 @@ class EnhancedAI:
                 logger.error(f"Tavily search failed: {e}")
                 error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
         
-        # Final fallback
+        # Final fallback if all AI tools fail
         yield {"error": "All AI tools unavailable", "message": "I apologize, but I'm unable to process your request at the moment due to technical issues."}
 
     # ENHANCED: Pinecone Error Detection
@@ -2711,7 +2715,7 @@ class SessionManager:
         try:
             sanitized_email = sanitize_input(email, 100).lower().strip()
             
-            # Fix the unterminated string literal by adding the closing single quote
+            # FIX: Added '$' to terminate the regex pattern string literal
             if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', sanitized_email):
                 return {'success': False, 'message': 'Please enter a valid email address.'}
             
@@ -2789,7 +2793,7 @@ class SessionManager:
                     session.daily_question_count = 0
                     session.last_question_time = None
                 
-                # Set last_activity if not already set (first time officially verified)
+                # Set last_activity to now (first time officially verified)
                 if session.last_activity is None:
                     session.last_activity = datetime.now()
 
@@ -2990,29 +2994,40 @@ class SessionManager:
             self.question_limits.record_question(session)
             
             # Stream AI response
-            full_content = ""
-            final_metadata = {}
+            # Accumulator for content that actually gets displayed AND saved to DB
+            content_to_save_and_display = "" 
+            final_metadata = {} # To store the final metadata from the AI system
             
             for chunk in self.ai.stream_response(sanitized_prompt, session.messages):
                 if isinstance(chunk, str):
-                    full_content += chunk
-                    yield chunk  # Stream content to UI
+                    content_to_save_and_display += chunk # Accumulate content
+                    yield chunk  # Yield content for real-time UI update
                 elif isinstance(chunk, dict):
                     if chunk.get("type") == "final_metadata":
-                        final_metadata = chunk
+                        final_metadata = chunk # Capture the full metadata when streaming completes
+                        # We specifically extract 'full_content' from here for the DB save,
+                        # as it contains the definitive complete response (including citations)
+                        # directly from the AI tool.
+                        content_to_save_and_display = final_metadata.get('full_content', content_to_save_and_display)
+                        
                     elif chunk.get("error"):
-                        yield chunk
+                        yield chunk # Pass error directly to UI
                         return
+                        
                     elif chunk.get("requires_email") or chunk.get("banned"):
-                        yield chunk
+                        yield chunk # Pass special messages directly to UI
                         return
+            
+            # After the loop finishes, all streaming has completed or an error occurred.
+            # `content_to_save_and_display` now holds the full accumulated content for DB.
+            # `final_metadata` holds the complete metadata (including source) if a `final_metadata` chunk was sent.
             
             # Add messages to session after streaming completes
             user_message = {'role': 'user', 'content': sanitized_prompt}
             assistant_message = {
                 'role': 'assistant',
-                'content': full_content,
-                'source': final_metadata.get('source', 'Unknown'),
+                'content': content_to_save_and_display, # Use the correctly accumulated/extracted content
+                'source': final_metadata.get('source', 'Unknown'), # Use source from final_metadata
                 'used_pinecone': final_metadata.get('used_pinecone', False),
                 'used_search': final_metadata.get('used_search', False),
                 'has_citations': final_metadata.get('has_citations', False),
@@ -3025,7 +3040,8 @@ class SessionManager:
             # Update activity and save session
             self._update_activity(session)
             
-            # Yield final completion signal
+            # Yield final completion signal (which the UI part already expects)
+            # Ensure final_metadata is consistent here, even if it's empty from a catastrophic failure
             yield {"type": "stream_complete", "metadata": final_metadata}
             
         except Exception as e:
@@ -4199,23 +4215,26 @@ def render_chat_interface_with_streaming(session_manager: 'SessionManager', sess
             message_placeholder = st.empty()
             
             try:
-                # Stream the response
-                full_content = ""
-                source_info = None
-                indicators = []
+                # This `full_content` is only for accumulating text for the display placeholder
+                # It is *not* the one saved to the DB; that one comes from final_metadata.
+                full_content_for_display = "" 
+                source_info_for_display = None
+                indicators_for_display = []
                 
+                # Iterate through chunks yielded by the session manager's streaming AI response
                 for chunk in session_manager.get_streaming_ai_response(session, prompt):
                     if isinstance(chunk, str):
-                        # Accumulate content and update display
-                        full_content += chunk
-                        message_placeholder.markdown(full_content + "▊", unsafe_allow_html=True)  # Add cursor
+                        full_content_for_display += chunk
+                        # Update display with cursor
+                        message_placeholder.markdown(full_content_for_display + "▊", unsafe_allow_html=True)  
                         
                     elif isinstance(chunk, dict):
+                        # Handle immediate control/error messages
                         if chunk.get("requires_email"):
                             message_placeholder.error("📧 Please verify your email to continue.")
                             st.session_state.verification_stage = 'email_entry'
-                            st.rerun()
-                            return
+                            st.rerun() # Rerun to show verification dialog
+                            return # Exit function
                             
                         elif chunk.get("banned"):
                             message_placeholder.error(chunk.get("content", 'Access restricted.'))
@@ -4224,45 +4243,49 @@ def render_chat_interface_with_streaming(session_manager: 'SessionManager', sess
                                 hours = int(time_remaining.total_seconds() // 3600)
                                 minutes = int((time_remaining.total_seconds() % 3600) // 60)
                                 st.error(f"Time remaining: {hours}h {minutes}m")
-                            st.rerun()
-                            return
+                            st.rerun() # Rerun to update ban message in sidebar/dialog
+                            return # Exit function
                             
                         elif chunk.get("error"):
                             error_msg = chunk.get("message", "An error occurred processing your request.")
                             message_placeholder.error(f"⚠️ {error_msg}")
-                            return
+                            return # Exit function, error already displayed
                             
                         elif chunk.get("type") == "stream_complete":
-                            # Final metadata received
+                            # Final metadata received after all content chunks have been streamed
                             metadata = chunk.get("metadata", {})
-                            source_info = metadata.get('source')
+                            source_info_for_display = metadata.get('source')
                             
                             if metadata.get("used_pinecone"): 
-                                indicators.append("🧠 Knowledge Base")
+                                indicators_for_display.append("🧠 Knowledge Base")
                             if metadata.get("used_search"): 
-                                indicators.append("🌐 Web Search")
+                                indicators_for_display.append("🌐 Web Search")
                 
-                # Remove cursor and finalize content
-                message_placeholder.markdown(full_content, unsafe_allow_html=True)
+                # After the loop, the full response content for display (`full_content_for_display`)
+                # and all metadata (`source_info_for_display`, `indicators_for_display`) should be set.
                 
-                # Add source and indicator information
-                if source_info:
+                # Remove cursor and finalize content display
+                message_placeholder.markdown(full_content_for_display, unsafe_allow_html=True)
+                
+                # Add source and indicator information below the response
+                if source_info_for_display:
                     source_color = {
                         "FiFi": "🧠", "FiFi Web Search": "🌐",
                         "Content Moderation": "🛡️", "System Fallback": "⚠️",
                         "Error Handler": "❌"
-                    }.get(source_info, "🤖")
-                    st.caption(f"{source_color} Source: {source_info}")
+                    }.get(source_info_for_display, "🤖")
+                    st.caption(f"{source_color} Source: {source_info_for_display}")
                 
-                if indicators:
-                    st.caption(f"Enhanced with: {', '.join(indicators)}")
+                if indicators_for_display:
+                    st.caption(f"Enhanced with: {', '.join(indicators_for_display)}")
                 
-                logger.info(f"✅ Streaming question processed successfully")
+                logger.info(f"✅ Streaming question processed successfully for display")
                 
             except Exception as e:
-                logger.error(f"❌ Streaming AI response failed: {e}", exc_info=True)
+                logger.error(f"❌ Streaming AI response failed during display update: {e}", exc_info=True)
                 message_placeholder.error("⚠️ I encountered an error. Please try again.")
         
+        # This rerun is crucial to refresh the UI and persist the chat history to the main session state.
         st.rerun()
 
 # =============================================================================
@@ -4442,66 +4465,4 @@ def main_fixed():
     
     # After get_session, if session is None or not session.active, it means get_session
     # would have triggered a rerun to the welcome page, so we just stop here.
-    if session is None or not session.active:
-        # This means get_session already handled the redirection or creation of a new session
-        # and should have called st.rerun or st.stop. If we get here, something unexpected happened.
-        logger.warning(f"Session is None or Inactive after get_session. This should be handled by get_session's internal redirect. Forcing welcome page.")
-        # Clear state and rerun as a final safeguard
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.session_state['page'] = None
-        st.rerun()
-        return
-
-    # --- Start of new/modified logic for activity tracker and timeout ---
-    activity_data_from_js = None
-    if session and session.session_id: # Only render if we have a valid session object and ID
-        # Render the activity tracker only once per session/rerun from the top level
-        # This prevents the "multiple elements with same key" error
-        # Use a more robust key check for re-rendering
-        activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
-        
-        if activity_tracker_key_state_flag not in st.session_state or \
-           st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
-            
-            logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
-            activity_data_from_js = render_simple_activity_tracker(session.session_id)
-            st.session_state[activity_tracker_key_state_flag] = True
-            st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
-            st.session_state.latest_activity_data_from_js = activity_data_from_js
-        else:
-            activity_data_from_js = st.session_state.latest_activity_data_from_js
-    
-    # Now pass this data to the timeout checker
-    # The timeout checker will manage updating session.last_activity in DB
-    timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
-    if timeout_triggered:
-        return # Stop execution if a reload was initiated
-    # --- End of new/modified logic for activity tracker and timeout ---
-
-    # Route to appropriate page based on st.session_state['page']
-    current_page = st.session_state.get('page')
-    
-    try:
-        if current_page != "chat":
-            render_welcome_page(session_manager)
-            
-        else:
-            # If we are on the chat page, render sidebar and chat interface with streaming
-            render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_with_streaming(session_manager, session, activity_data_from_js)
-                    
-    except Exception as page_error:
-        logger.error(f"Page routing error: {page_error}", exc_info=True)
-        st.error("⚠️ Page error occurred. Please refresh the page.")
-        
-        # Clear potentially corrupted session state as a last resort
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        
-        time.sleep(2)
-        st.rerun()
-
-# Entry point
-if __name__ == "__main__":
-    main_fixed()
+    if session is None
