@@ -949,7 +949,7 @@ class QuestionLimitManager:
         self.question_limits = {
             UserType.GUEST.value: 4,
             UserType.EMAIL_VERIFIED_GUEST.value: 10,
-            UserType.REGISTERED_USER.value: 20 # Reverted back to 20 as per your request
+            UserType.REGISTERED_USER.value: 20 # Confirmed: 20 questions total for Registered Users daily.
         }
         self.evasion_penalties = [24, 48, 96, 192, 336]
     
@@ -2113,11 +2113,6 @@ class EnhancedAI:
         if self.pinecone_tool and pinecone_healthy:
             try:
                 logger.info("🔍 Querying Pinecone knowledge base (non-streaming)...")
-                # Note: This calls the non-streaming query from PineconeAssistantTool.
-                # If you need this path to also be streaming for some reason,
-                # you'd need to adapt `PineconeAssistantTool.query` to support streaming,
-                # or remove this non-streaming `get_response` method entirely if all calls
-                # will go through `get_streaming_ai_response`.
                 pinecone_response = self.pinecone_tool.query(langchain_history) 
                 
                 if pinecone_response and pinecone_response.get("success"):
@@ -2273,7 +2268,7 @@ class SessionManager:
             if hasattr(self.rate_limiter, 'requests'):
                 old_limit_entries = []
                 for identifier, timestamps in self.rate_limiter.requests.items():
-                    cutoff = time.time() - self.rate_limiter.window_seconds # Fixed typo
+                    cutoff = time.time() - self.rate_limiter.window_seconds 
                     self.rate_limiter.requests[identifier] = [t for t in timestamps if t > cutoff]
                     
                     if not self.rate_limiter.requests[identifier]:
@@ -2901,58 +2896,65 @@ class SessionManager:
             self.question_limits.record_question(session)
             
             # Stream AI response
-            # `content_to_save_and_display` accumulates the text portions of the stream
-            # It will be definitively set by `final_metadata.get('full_content')` later
-            content_to_save_and_display = "" 
-            final_metadata = {} # To store the final metadata from the AI system
+            # This variable will accumulate all string chunks yielded by the AI system
+            # It will serve as a fallback for `full_content` if the final_metadata doesn't provide it explicitly
+            accumulated_streamed_content = "" 
+            final_metadata_from_ai_system = {} # To store the final metadata dict yielded by EnhancedAI.stream_response
             
             # Iterate through the chunks yielded by EnhancedAI.stream_response
             for chunk in self.ai.stream_response(sanitized_prompt, session.messages):
                 if isinstance(chunk, str):
-                    content_to_save_and_display += chunk # Accumulate content for saving
-                    yield chunk  # Yield string chunks to Streamlit for display
+                    accumulated_streamed_content += chunk # Accumulate content for eventual saving
+                    yield chunk  # Yield string chunks directly to Streamlit for real-time display
                 elif isinstance(chunk, dict):
                     if chunk.get("type") == "final_metadata":
-                        final_metadata = chunk # Capture the full metadata
-                        # The definitive full content for saving is in final_metadata['full_content']
-                        # This ensures citations etc. are part of the saved message.
-                        content_to_save_and_display = final_metadata.get('full_content', content_to_save_and_display)
+                        final_metadata_from_ai_system = chunk # Capture the complete final metadata dict
+                        # IMPORTANT: The 'full_content' for saving should ideally come from this metadata chunk,
+                        # as it's the definitive complete response (including all inline elements/citations from the AI tool).
+                        # We will use this to override accumulated_streamed_content for saving if available.
                     elif chunk.get("error") or chunk.get("requires_email") or chunk.get("banned"):
-                        # These are control signals for immediate UI action, not text to display.
-                        # Yield them to the calling function (render_chat_interface_with_streaming)
-                        # so it can handle the reruns.
+                        # These are control signals for immediate UI actions (errors, bans, email prompts).
+                        # Yield them to the calling UI function (`render_chat_interface_with_streaming`)
+                        # so it can handle the display of messages/dialogs and trigger reruns.
                         yield chunk 
-                        return # Exit generator immediately after yielding control chunk
+                        return # Exit generator immediately after yielding a control chunk
             
-            # After the loop finishes (i.e., stream_complete was handled by `final_metadata`),
-            # `content_to_save_and_display` holds the complete, final content.
+            # After the loop finishes (meaning the entire stream from the AI system has completed,
+            # or a final_metadata chunk was received), we now have `accumulated_streamed_content`
+            # and `final_metadata_from_ai_system`.
             
-            # Add messages to session after streaming completes
+            # Determine the definitive content to save in the database:
+            # Prioritize the 'full_content' from the final_metadata if available,
+            # otherwise, use the content accumulated from the streamed text chunks.
+            content_to_save_to_db = final_metadata_from_ai_system.get('full_content', accumulated_streamed_content)
+            
+            # Add messages to session after streaming completes and content is finalized
             user_message = {'role': 'user', 'content': sanitized_prompt}
             assistant_message = {
                 'role': 'assistant',
-                'content': content_to_save_and_display, # Use the correctly accumulated/extracted content for DB
-                'source': final_metadata.get('source', 'Unknown'), # Use source from final_metadata
-                'used_pinecone': final_metadata.get('used_pinecone', False),
-                'used_search': final_metadata.get('used_search', False),
-                'has_citations': final_metadata.get('has_citations', False),
-                'has_inline_citations': final_metadata.get('has_inline_citations', False),
-                'safety_override': final_metadata.get('safety_override', False)
+                'content': content_to_save_to_db, # Use the definitive content for DB storage
+                'source': final_metadata_from_ai_system.get('source', 'Unknown'), # Use source from metadata
+                'used_pinecone': final_metadata_from_ai_system.get('used_pinecone', False),
+                'used_search': final_metadata_from_ai_system.get('used_search', False),
+                'has_citations': final_metadata_from_ai_system.get('has_citations', False),
+                'has_inline_citations': final_metadata_from_ai_system.get('has_inline_citations', False),
+                'safety_override': final_metadata_from_ai_system.get('safety_override', False)
             }
             
             session.messages.extend([user_message, assistant_message])
             
             # Add debug log for final content length before saving
-            logger.info(f"Final content length to be saved for session {session.session_id[:8]}: {len(content_to_save_and_display)}")
+            logger.info(f"Final content length to be saved for session {session.session_id[:8]}: {len(content_to_save_to_db)}")
 
             # Update activity and save session
             self._update_activity(session)
             
-            # Yield final completion signal (which the UI part already expects)
-            yield {"type": "stream_complete", "metadata": final_metadata}
+            # Yield final completion signal to the UI (includes the final metadata for display logic)
+            yield {"type": "stream_complete", "metadata": final_metadata_from_ai_system}
             
         except Exception as e:
             logger.error(f"Streaming AI response generation failed: {e}", exc_info=True)
+            # If an error occurs in the generator itself, yield an error chunk
             yield {"error": "Processing failed", "message": "I encountered an error processing your request. Please try again."}
 
     def clear_chat_history(self, session: UserSession):
@@ -4115,16 +4117,16 @@ def render_chat_interface_with_streaming(session_manager: 'SessionManager', sess
                 nonlocal final_response_metadata_for_display
                 for chunk in response_generator:
                     if isinstance(chunk, str):
-                        yield chunk # Yield string chunks directly to st.write_stream
+                        yield chunk # Yield string chunks directly to st.write_stream for text display
                     elif isinstance(chunk, dict):
                         if chunk.get("type") == "final_metadata":
                             final_response_metadata_for_display = chunk.get("metadata", {})
-                            # No yield for metadata here, as st.write_stream only handles text.
-                            # The metadata will be processed AFTER st.write_stream finishes.
-                        # Handle other control chunks that need immediate action and stop the stream
-                        elif chunk.get("requires_email") or chunk.get("banned") or chunk.get("error"):
+                            # This metadata is captured and used after st.write_stream finishes.
+                        elif chunk.get("error") or chunk.get("requires_email") or chunk.get("banned"):
+                            # These are control signals for immediate UI actions.
+                            # Store it and stop the stream. The main function will handle the rerun.
                             st.session_state._stream_control_chunk = chunk 
-                            return # Stop yielding immediately, will cause st.write_stream to complete
+                            return # Stop yielding immediately, this causes st.write_stream to complete
                 # Generator finishes naturally if no control chunk caused an early return.
 
             # Use st.write_stream to display the content incrementally
@@ -4133,7 +4135,7 @@ def render_chat_interface_with_streaming(session_manager: 'SessionManager', sess
             # After st.write_stream completes (or is stopped by a control chunk),
             # check for and process any control chunks that were stored.
             if "_stream_control_chunk" in st.session_state:
-                control_chunk = st.session_state.pop("_stream_control_chunk") # Remove after processing
+                control_chunk = st.session_state.pop("_stream_control_chunk") # Remove from session_state after processing
                 if control_chunk.get("requires_email"):
                     st.error("📧 Please verify your email to continue.")
                     st.session_state.verification_stage = 'email_entry'
@@ -4148,11 +4150,11 @@ def render_chat_interface_with_streaming(session_manager: 'SessionManager', sess
                     error_msg = control_chunk.get("message", "An error occurred processing your request.")
                     st.error(f"⚠️ {error_msg}")
                
-                st.rerun() # Crucial rerun to display messages/dialogs from control chunks
+                st.rerun() # Crucial rerun to display error messages/dialogs from control chunks
                 return # Stop execution for this run
 
             # If no control chunk was encountered, the stream completed normally.
-            # Now, display the source and indicator information based on the final_response_metadata_for_display.
+            # Now, display the source and indicator information below the response.
             if final_response_metadata_for_display.get('source'):
                 source_info = final_response_metadata_for_display['source']
                 source_color = {
