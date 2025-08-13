@@ -1920,8 +1920,7 @@ class EnhancedAI:
             
             else: # This 'else' block seems out of place, it should be part of the initial routing
                   # I suspect this was intended to be 'if not use_pinecone_first:'
-                  # Given the previous context, it implies if pinecone_tool failed *and* tavily_agent is available
-                  # The current logic will only hit this 'else' if use_pinecone_first is True but then tavily_agent is None or failed.
+                  # Given the previous context, it implies if pinecone_tool failed *and* tavily_agent is None or failed.
                 # Try Tavily first (when Pinecone has major issues)
                 if self.tavily_agent:
                     try:
@@ -2021,6 +2020,15 @@ class SessionManager:
         """Returns the configured session timeout duration in minutes."""
         return 5
     
+    # Helper to get privilege level for user types
+    def _get_privilege_level(self, user_type: UserType) -> int:
+        if user_type == UserType.REGISTERED_USER:
+            return 2
+        elif user_type == UserType.EMAIL_VERIFIED_GUEST:
+            return 1
+        else:
+            return 0
+
     def _periodic_cleanup(self):
         """Perform periodic cleanup of memory and resources"""
         now = datetime.now()
@@ -2190,79 +2198,141 @@ class SessionManager:
             return False
 
     def _attempt_fingerprint_inheritance(self, session: UserSession):
-        """Attempts to inherit session data from existing sessions with the same fingerprint."""
+        """Attempts to inherit session data from existing sessions with the same fingerprint.
+        Prioritizes the highest user type and merges usage statistics.
+        """
         logger.info(f"🔄 Attempting fingerprint inheritance for session {session.session_id[:8]} with fingerprint {session.fingerprint_id[:8]}...")
         
         try:
-            existing_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+            # 1. Get all sessions associated with this fingerprint, including the current one
             
-            # Filter out the current session itself if it happens to be in the list
-            # And also filter out sessions that only have temporary fingerprints if we're trying to inherit from a 'real' one
-            relevant_existing_sessions = [
-                s for s in existing_sessions
-                if s.session_id != session.session_id and
-                   not s.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-            ]
+            # First, fetch all historical sessions by fingerprint
+            historical_fp_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+            
+            # Filter out the current session from historical list, if it was already saved
+            historical_fp_sessions = [s for s in historical_fp_sessions if s.session_id != session.session_id]
 
-            if relevant_existing_sessions:
-                # Find the most recent non-guest session or the most recent overall if only guests
-                non_guest_sessions = [s for s in relevant_existing_sessions if s.user_type != UserType.GUEST]
-                
-                if non_guest_sessions:
-                    recent_session = max(non_guest_sessions, key=lambda s: s.last_activity if s.last_activity is not None else datetime.min)
-                    logger.warning(f"✅ INHERITING DATA from most recent non-guest session {recent_session.session_id[:8]} (type: {recent_session.user_type.value})")
-                else:
-                    # If only guest sessions found, pick the most recent one
-                    recent_session = max(relevant_existing_sessions, key=lambda s: s.last_activity if s.last_activity is not None else datetime.min)
-                    logger.warning(f"🆕 Only guest sessions found with fingerprint {session.fingerprint_id[:8]}, treating as new visitor based on no higher-privilege history. But will still check for bans/evasion.")
-                
-                # Inherit user identity and state
-                session.user_type = recent_session.user_type
-                session.email = recent_session.email
-                session.full_name = recent_session.full_name
-                session.zoho_contact_id = recent_session.zoho_contact_id
-                session.visitor_type = "returning_visitor"
-                
-                # Inherit usage counters and history
-                session.daily_question_count = recent_session.daily_question_count
-                session.total_question_count = recent_session.total_question_count
-                session.last_question_time = recent_session.last_question_time
-                
-                if session.last_activity is None and recent_session.last_activity is not None:
-                    session.last_activity = recent_session.last_activity
+            # Combine current session with historical ones to determine the merged state
+            all_sessions_for_merge = [session] + historical_fp_sessions
 
-                session.question_limit_reached = recent_session.question_limit_reached
-                session.ban_status = recent_session.ban_status
-                session.ban_start_time = recent_session.ban_start_time
-                session.ban_end_time = recent_session.ban_end_time
-                session.ban_reason = recent_session.ban_reason
+            # Initialize merged values with current session's values as a baseline
+            merged_user_type = session.user_type
+            merged_email = session.email
+            merged_full_name = session.full_name
+            merged_zoho_contact_id = session.zoho_contact_id
+            merged_wp_token = session.wp_token
+            merged_daily_question_count = session.daily_question_count
+            merged_total_question_count = session.total_question_count
+            merged_last_question_time = session.last_question_time
+            merged_question_limit_reached = session.question_limit_reached
+            merged_ban_status = session.ban_status
+            merged_ban_start_time = session.ban_start_time
+            merged_ban_end_time = session.ban_end_time
+            merged_ban_reason = session.ban_reason
+            merged_evasion_count = session.evasion_count
+            merged_current_penalty_hours = session.current_penalty_hours
+            merged_escalation_level = session.escalation_level
+            merged_email_addresses_used = set(session.email_addresses_used) # Use a set for deduplication
+            merged_browser_privacy_level = session.browser_privacy_level
+            merged_visitor_type = session.visitor_type
+            
+            # Determine the effective 'source' session for identity and core data, favoring higher privilege and recency
+            source_for_identity_and_base_data = session # Start with current session
+            
+            # Iterate through all sessions to find the most authoritative source for each piece of data
+            for s in all_sessions_for_merge:
+                # Prioritize user type: highest privilege wins
+                if self._get_privilege_level(s.user_type) > self._get_privilege_level(merged_user_type):
+                    merged_user_type = s.user_type
+                    source_for_identity_and_base_data = s # If user type upgraded, new source
+                elif self._get_privilege_level(s.user_type) == self._get_privilege_level(merged_user_type):
+                    # If same privilege, prefer more recent
+                    if s.last_activity and (not source_for_identity_and_base_data.last_activity or s.last_activity > source_for_identity_and_base_data.last_activity):
+                        source_for_identity_and_base_data = s
                 
-                # Inherit tracking data
-                session.email_addresses_used = recent_session.email_addresses_used
-                session.email_switches_count = recent_session.email_switches_count
-                session.evasion_count = recent_session.evasion_count
-                session.current_penalty_hours = recent_session.current_penalty_hours
-                session.escalation_level = recent_session.escalation_level
+                # Merge identity and token info (prefer non-empty, and from higher privilege if found)
+                if s.email and not merged_email: merged_email = s.email
+                if s.full_name and not merged_full_name: merged_full_name = s.full_name
+                if s.zoho_contact_id and not merged_zoho_contact_id: merged_zoho_contact_id = s.zoho_contact_id
+                if s.wp_token and not merged_wp_token: merged_wp_token = s.wp_token
+
+                # Merge usage counts (take max for daily and total)
+                if s.daily_question_count is not None:
+                    merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
+                if s.total_question_count is not None:
+                    merged_total_question_count = max(merged_total_question_count, s.total_question_count)
                 
-                # IMPORTANT: If the current session was created with a temporary fingerprint,
-                # and we found a 'real' fingerprint from a previous session, we should update
-                # the current session's fingerprint to the 'real' one for consistency.
-                if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and \
-                   not recent_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                   
-                    logger.info(f"Updating temporary fingerprint {session.fingerprint_id[:8]} to recognized fingerprint {recent_session.fingerprint_id[:8]}")
-                    session.fingerprint_id = recent_session.fingerprint_id
-                    session.fingerprint_method = recent_session.fingerprint_method
-                    session.browser_privacy_level = recent_session.browser_privacy_level
-                    
-                logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, new_fp={session.fingerprint_id[:8]}, active={session.active}")
+                # Merge last_question_time (most recent)
+                if s.last_question_time and (not merged_last_question_time or s.last_question_time > merged_last_question_time):
+                    merged_last_question_time = s.last_question_time
+
+                # Merge ban status (most restrictive)
+                # For simplicity, if any session is banned, current session becomes banned.
+                # A more complex logic might check ban expiration. Here, assume current active ban overrides.
+                if s.ban_status != BanStatus.NONE:
+                    # If the current merged status is NONE, or the new status is more severe, update
+                    if merged_ban_status == BanStatus.NONE or \
+                       (s.ban_status == BanStatus.EVASION_BLOCK and merged_ban_status != BanStatus.EVASION_BLOCK) or \
+                       (s.ban_status == BanStatus.TWENTY_FOUR_HOUR and merged_ban_status == BanStatus.ONE_HOUR):
+                        merged_ban_status = s.ban_status
+                        merged_ban_start_time = s.ban_start_time
+                        merged_ban_end_time = s.ban_end_time
+                        merged_ban_reason = s.ban_reason
+                        merged_question_limit_reached = s.question_limit_reached # If banned, limit is reached
+
+                # Merge evasion stats (take max)
+                if s.evasion_count is not None: merged_evasion_count = max(merged_evasion_count, s.evasion_count)
+                if s.current_penalty_hours is not None: merged_current_penalty_hours = max(merged_current_penalty_hours, s.current_penalty_hours)
+                if s.escalation_level is not None: merged_escalation_level = max(merged_escalation_level, s.escalation_level)
+
+                # Merge email addresses used
+                if s.email_addresses_used:
+                    merged_email_addresses_used.update(s.email_addresses_used)
+                if s.email_switches_count is not None: merged_email_switches_count = max(merged_email_switches_count, s.email_switches_count)
                 
-            else:
-                logger.info(f"No relevant historical sessions found for fingerprint {session.fingerprint_id[:8]}.")
-                session.visitor_type = "new_visitor"
-                # If this session had a temp fingerprint, and no history, it remains a new visitor guest
-                # and its temp fingerprint remains until the JS one comes in.
-                
+                # Merge browser privacy level (take from the most authoritative source)
+                if s.browser_privacy_level and s == source_for_identity_and_base_data: # If this is the most privileged/recent source
+                    merged_browser_privacy_level = s.browser_privacy_level
+
+            # Apply the merged values back to the current session object
+            original_session_user_type_for_log = session.user_type
+            session.user_type = merged_user_type
+            session.email = merged_email
+            session.full_name = merged_full_name
+            session.zoho_contact_id = merged_zoho_contact_id
+            session.wp_token = merged_wp_token
+            session.daily_question_count = merged_daily_question_count
+            session.total_question_count = merged_total_question_count
+            session.last_question_time = merged_last_question_time
+            session.question_limit_reached = merged_question_limit_reached
+            session.ban_status = merged_ban_status
+            session.ban_start_time = merged_ban_start_time
+            session.ban_end_time = merged_ban_end_time
+            session.ban_reason = merged_ban_reason
+            session.evasion_count = merged_evasion_count
+            session.current_penalty_hours = merged_current_penalty_hours
+            session.escalation_level = merged_escalation_level
+            session.email_addresses_used = list(merged_email_addresses_used)
+            session.email_switches_count = merged_email_switches_count
+            session.browser_privacy_level = merged_browser_privacy_level
+            session.visitor_type = "returning_visitor" if len(historical_fp_sessions) > 0 else "new_visitor" # If any historical session, it's returning
+
+            # Update fingerprint to the 'real' one if current is temporary and a real one was found
+            # The 'real' fingerprint should come from the most authoritative source.
+            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and \
+               not source_for_identity_and_base_data.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+               
+                logger.info(f"Updating temporary fingerprint {session.fingerprint_id[:8]} to recognized fingerprint {source_for_identity_and_base_data.fingerprint_id[:8]}")
+                session.fingerprint_id = source_for_identity_and_base_data.fingerprint_id
+                session.fingerprint_method = source_for_identity_and_base_data.fingerprint_method
+                session.browser_privacy_level = source_for_identity_and_base_data.browser_privacy_level
+            
+            # Ensure last_activity is updated if it was None or older than source
+            if session.last_activity is None and source_for_identity_and_base_data.last_activity is not None:
+                session.last_activity = source_for_identity_and_base_data.last_activity
+
+            logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value} (from {original_session_user_type_for_log.value}), daily_q={session.daily_question_count}, total_q={session.total_question_count}, fp={session.fingerprint_id[:8]}, active={session.active}")
+            
         except Exception as e:
             logger.error(f"Error during fingerprint inheritance for session {session.session_id[:8]}: {e}", exc_info=True)
 
@@ -2578,7 +2648,7 @@ class SessionManager:
                     logger.error(f"WordPress authentication received unexpected Content-Type '{content_type}' with 200 status. Expected application/json. Response text: '{response.text[:200]}'", exc_info=True)
                     st.error("Authentication failed: WordPress returned a webpage instead of an API response. This often means the JWT authentication plugin is not active or configured correctly on the WordPress site. Please contact support.")
                     return None
-                
+
                 try:
                     data = response.json()
                 except requests.exceptions.JSONDecodeError as e:
@@ -2593,16 +2663,23 @@ class SessionManager:
                 if wp_token and user_email:
                     current_session = self.get_session()
                     
+                    # Preserve current daily/total question count and last question time
+                    # This is crucial for carrying over previous usage into the new, higher limit tier.
+                    previous_daily_question_count = current_session.daily_question_count
+                    previous_total_question_count = current_session.total_question_count
+                    previous_last_question_time = current_session.last_question_time
+
                     # Upgrade to registered user
                     current_session.user_type = UserType.REGISTERED_USER
                     current_session.email = user_email
                     current_session.full_name = user_display_name
                     current_session.wp_token = wp_token
-                    current_session.question_limit_reached = False
+                    current_session.question_limit_reached = False # Reset any limit flags
                     
-                    # Reset question counts for fresh start as registered user (20 questions/day)
-                    current_session.daily_question_count = 0
-                    current_session.last_question_time = None
+                    # Apply preserved counts to the upgraded session
+                    current_session.daily_question_count = previous_daily_question_count
+                    current_session.total_question_count = previous_total_question_count
+                    current_session.last_question_time = previous_last_question_time
                     
                     # Set last_activity to now (official start for logged-in users)
                     current_session.last_activity = datetime.now()
@@ -2610,7 +2687,7 @@ class SessionManager:
                     # Save authenticated session
                     try:
                         self.db.save_session(current_session)
-                        logger.info(f"User authenticated and upgraded to REGISTERED_USER: {user_email}")
+                        logger.info(f"User authenticated and upgraded to REGISTERED_USER: {user_email}, daily_q={current_session.daily_question_count}")
                     except Exception as e:
                         logger.error(f"Failed to save authenticated session: {e}")
                         st.error("Authentication succeeded but session could not be saved. Please try again or contact support.")
@@ -4020,7 +4097,7 @@ def ensure_initialization_fixed():
             # These are correctly nested classes *within* DatabaseManager, so instantiate using db_manager
             fingerprinting_manager = db_manager.FingerprintingManager()
             
-            init_progress.progress(0.8)
+            init_progress.progress(0.9)
             
             try:
                 email_verification_manager = db_manager.EmailVerificationManager(config)
@@ -4135,35 +4212,3 @@ def main_fixed():
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
                 st.session_state['page'] = None
-                st.rerun()
-                return
-                
-            activity_data_from_js = None
-            if session and session.session_id: 
-                activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
-                if activity_tracker_key_state_flag not in st.session_state or \
-                   st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
-                    
-                    logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
-                    activity_data_from_js = render_simple_activity_tracker(session.session_id)
-                    st.session_state[activity_tracker_key_state_flag] = True
-                    st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
-                    st.session_state.latest_activity_data_from_js = activity_data_from_js
-                else:
-                    activity_data_from_js = st.session_state.latest_activity_data_from_js
-            
-            timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
-            if timeout_triggered:
-                return
-
-            render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
-                    
-    except Exception as page_error:
-        logger.error(f"Page routing error: {page_error}", exc_info=True)
-        st.error("⚠️ Page error occurred. Please refresh the page.")
-        st.stop()
-
-# Entry point
-if __name__ == "__main__":
-    main_fixed()
