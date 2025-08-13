@@ -1036,13 +1036,10 @@ class DatabaseManager:
                     session.last_question_time = None
             
             # Reset daily counters if 24 hours passed
-            # This logic will only reset if last_question_time is older than 24 hours AND 
-            # the user is NOT pending re-verification for a higher user type.
-            # This allows the pending state to potentially carry over a count for REGISTERED_USER login
-            # before it's reset by this daily logic.
+            # IMPORTANT: This logic now applies universally and always resets if 24h passed.
             if session.last_question_time:
                 time_since_last = datetime.now() - session.last_question_time
-                if time_since_last >= timedelta(hours=24): # IMPORTANT: No longer checking reverification_pending here. Always reset if 24h passed.
+                if time_since_last >= timedelta(hours=24):
                     logger.info(f"Daily question count reset for session {session.session_id[:8]} due to 24-hour window expiration.")
                     session.daily_question_count = 0
                     session.question_limit_reached = False
@@ -2297,10 +2294,10 @@ class SessionManager:
             all_sessions_for_merge = [session] + historical_fp_sessions
 
             # Initialize merged values with current session's values as a baseline
-            merged_user_type = session.user_type # Will be updated to highest privilege or remain GUEST if pending re-verification
+            merged_user_type = session.user_type 
             merged_daily_question_count = session.daily_question_count
             merged_total_question_count = session.total_question_count
-            merged_last_question_time = session.last_question_time
+            merged_last_question_time = session.last_question_time # Use current session's LQT as baseline
             merged_question_limit_reached = session.question_limit_reached
             merged_ban_status = session.ban_status
             merged_ban_start_time = session.ban_start_time
@@ -2309,10 +2306,10 @@ class SessionManager:
             merged_evasion_count = session.evasion_count
             merged_current_penalty_hours = session.current_penalty_hours
             merged_escalation_level = session.escalation_level
-            merged_email_addresses_used = set(session.email_addresses_used) # Use a set for deduplication
+            merged_email_addresses_used = set(session.email_addresses_used) 
             
             # Determine the effective 'source' session for identity and core data, favoring highest privilege and recency
-            source_for_identity_and_base_data = session # Start with current session, will be replaced if better source found
+            source_for_identity_and_base_data = session 
             
             # Iterate through all sessions to find the most authoritative source for each piece of data
             for s in all_sessions_for_merge:
@@ -2325,14 +2322,26 @@ class SessionManager:
                         source_for_identity_and_base_data = s
                 
                 # Merge usage counts (take max for daily and total)
+                # IMPORTANT: Only consider daily_question_count if it's potentially valid (i.e., within 24h or if last_question_time is None)
+                # Or if the session itself is active. This prevents inheriting stale/reset counts.
+                now = datetime.now()
                 if s.daily_question_count is not None:
-                    merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
+                    # If the session is active OR its last question time is within 24 hours (i.e. not reset yet)
+                    if s.active or (s.last_question_time and (now - s.last_question_time < timedelta(hours=24))):
+                        merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
+                    else:
+                        # If the session is inactive and its 24-hour window has passed, its daily_question_count is effectively 0 for inheritance.
+                        pass 
+                
                 if s.total_question_count is not None:
                     merged_total_question_count = max(merged_total_question_count, s.total_question_count)
                 
-                # Merge last_question_time (most recent)
+                # Merge last_question_time (most recent from all sessions for the fingerprint)
                 if s.last_question_time and (not merged_last_question_time or s.last_question_time > merged_last_question_time):
                     merged_last_question_time = s.last_question_time
+                elif merged_last_question_time is None and s.last_question_time is not None:
+                    merged_last_question_time = s.last_question_time
+
 
                 # Merge ban status (most restrictive)
                 if s.ban_status != BanStatus.NONE:
@@ -2360,7 +2369,7 @@ class SessionManager:
             # Apply merged usage values (always inherited)
             session.daily_question_count = merged_daily_question_count
             session.total_question_count = merged_total_question_count
-            session.last_question_time = merged_last_question_time
+            session.last_question_time = merged_last_question_time # Set from the most recent activity found
             session.question_limit_reached = merged_question_limit_reached
             session.ban_status = merged_ban_status
             session.ban_start_time = merged_ban_start_time
@@ -2413,8 +2422,12 @@ class SessionManager:
                 session.fingerprint_method = source_for_identity_and_base_data.fingerprint_method
             
             # Ensure last_activity is updated if it was None or older than source
+            # This is critical for the main timeout functionality
             if session.last_activity is None and source_for_identity_and_base_data.last_activity is not None:
                 session.last_activity = source_for_identity_and_base_data.last_activity
+            elif source_for_identity_and_base_data.last_activity and (not session.last_activity or source_for_identity_and_base_data.last_activity > session.last_activity):
+                session.last_activity = source_for_identity_and_base_data.last_activity
+
 
             logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value} (from {original_session_user_type_for_log.value}), daily_q={session.daily_question_count}, total_q={session.total_question_count}, fp={session.fingerprint_id[:8]}, active={session.active}, rev_pending={session.reverification_pending}")
             
@@ -2798,9 +2811,6 @@ class SessionManager:
                     # current_session.daily_question_count and current_session.last_question_time
                     # will already reflect the correct state due to get_session()'s inheritance
                     # and 24-hour reset logic.
-                    
-                    # Simply preserve the current state of daily_question_count and last_question_time
-                    # as they are after get_session() and initial limit checks.
                     
                     # Clear any pending re-verification flags, as direct login supersedes it
                     if current_session.reverification_pending:
