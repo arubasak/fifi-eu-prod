@@ -2573,11 +2573,17 @@ class SessionManager:
             }, timeout=10)
             
             if response.status_code == 200:
+                content_type = response.headers.get('Content-Type', '').lower()
+                if 'application/json' not in content_type:
+                    logger.error(f"WordPress authentication received unexpected Content-Type '{content_type}' with 200 status. Expected application/json. Response text: '{response.text[:200]}'", exc_info=True)
+                    st.error("Authentication failed: WordPress returned a webpage instead of an API response. This often means the JWT authentication plugin is not active or configured correctly on the WordPress site. Please contact support.")
+                    return None
+                
                 try:
                     data = response.json()
                 except requests.exceptions.JSONDecodeError as e:
-                    logger.error(f"WordPress authentication received non-JSON response with 200 status. Response text: '{response.text[:200]}'. Error: {e}", exc_info=True)
-                    st.error("Authentication failed: Invalid response from WordPress. Please try again or contact support.")
+                    logger.error(f"WordPress authentication received non-JSON response with 200 status, despite Content-Type possibly being JSON. Response text: '{response.text[:200]}'. Error: {e}", exc_info=True)
+                    st.error("Authentication failed: Invalid JSON response from WordPress. Please try again or contact support.")
                     return None
                 
                 wp_token = data.get('token')
