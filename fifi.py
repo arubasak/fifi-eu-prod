@@ -4212,3 +4212,35 @@ def main_fixed():
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
                 st.session_state['page'] = None
+                st.rerun()
+                return
+                
+            activity_data_from_js = None
+            if session and session.session_id: 
+                activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
+                if activity_tracker_key_state_flag not in st.session_state or \
+                   st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
+                    
+                    logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
+                    activity_data_from_js = render_simple_activity_tracker(session.session_id)
+                    st.session_state[activity_tracker_key_state_flag] = True
+                    st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
+                    st.session_state.latest_activity_data_from_js = activity_data_from_js
+                else:
+                    activity_data_from_js = st.session_state.latest_activity_data_from_js
+            
+            timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+            if timeout_triggered:
+                return
+
+            render_sidebar(session_manager, session, st.session_state.pdf_exporter)
+            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
+                    
+    except Exception as page_error:
+        logger.error(f"Page routing error: {page_error}", exc_info=True)
+        st.error("⚠️ Page error occurred. Please refresh the page.")
+        st.stop()
+
+# Entry point
+if __name__ == "__main__":
+    main_fixed()
