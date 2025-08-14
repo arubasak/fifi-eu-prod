@@ -1154,19 +1154,16 @@ class PDFExporter:
     def __init__(self):
         self.styles = getSampleStyleSheet()
         
-        # Define base paragraph style with increased leading and spaceAfter
-        self.styles.add(ParagraphStyle(
-            name='Normal',
-            fontName='Helvetica',
-            fontSize=10,
-            leading=14,  # Increased line spacing (1.4 * font size)
-            spaceAfter=6 # Space after each paragraph
-        ))
+        # Modify the existing 'Normal' style from the sample stylesheet
+        self.styles['Normal'].fontName = 'Helvetica'
+        self.styles['Normal'].fontSize = 10
+        self.styles['Normal'].leading = 14  # Increased line spacing (1.4 * font size)
+        self.styles['Normal'].spaceAfter = 6 # Space after each paragraph
         
-        # Header style
+        # Header style (can still be added, as it's a new name)
         self.styles.add(ParagraphStyle(
             name='ChatHeader',
-            parent=self.styles['Normal'],
+            parent=self.styles['Normal'], # Inherit from the modified 'Normal'
             alignment=TA_CENTER,
             fontSize=18,
             leading=22,
@@ -1176,7 +1173,7 @@ class PDFExporter:
         # User message style with light grey background
         self.styles.add(ParagraphStyle(
             name='UserMessage',
-            parent=self.styles['Normal'],
+            parent=self.styles['Normal'], # Inherit from the modified 'Normal'
             backColor=lightgrey,
             leftIndent=5,
             rightIndent=5,
@@ -1189,7 +1186,7 @@ class PDFExporter:
         # Small caption style for sources
         self.styles.add(ParagraphStyle(
             name='Caption',
-            parent=self.styles['Normal'],
+            parent=self.styles['Normal'], # Inherit from the modified 'Normal'
             fontSize=8,
             leading=10,
             textColor=grey,
@@ -3227,7 +3224,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         # Also update re-verification flags
         session.reverification_pending = fresh_session_from_db.reverification_pending
         session.pending_user_type = fresh_session_from_db.pending_user_type
-        session.pending_email = fresh_session_from_rb.pending_email
+        session.pending_email = fresh_session_from_db.pending_email # Corrected variable name from fresh_session_from_rb
         session.pending_full_name = fresh_session_from_db.pending_full_name
         session.pending_zoho_contact_id = fresh_session_from_db.pending_zoho_contact_id
         session.pending_wp_token = fresh_session_from_db.pending_wp_token
