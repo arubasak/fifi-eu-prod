@@ -91,6 +91,7 @@ except ImportError:
 try:
     from supabase import create_client, Client
     SUPABASE_AVAILABLE = True
+    logger.info("✅ Supabase SDK available.")
 except ImportError:
     logger.warning("Supabase SDK not available. Email verification will be disabled.")
 
@@ -1748,7 +1749,7 @@ class TavilyFallbackAgent:
             if sources:
                 response_parts.append(f"\n\n**Sources:**")
                 for i, source in enumerate(sources, 1):
-                    response_parts.append(f"{i}. {source}")
+                    response.append(f"{i}. {source}")
             
             return "".join(response_parts)
         
@@ -1997,28 +1998,12 @@ class EnhancedAI:
                     logger.error(f"Web search failed: {e}")
                     error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
             
-            else: # This 'else' block seems out of place, it should be part of the initial routing
-                  # I suspect this was intended to be 'if not use_pinecone_first:'
-                  # Given the previous context, it implies if pinecone_tool failed *and* tavily_agent is None or failed.
-                # Try Tavily first (when Pinecone has major issues)
-                if self.tavily_agent:
-                    try:
-                        logger.info("🌐 Querying web search (primary due to Pinecone issues)...")
-                        web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
-                        
-                        if web_response and web_response.get("success"):
-                            logger.info("✅ Using web search response (primary)")
-                            error_handler.mark_component_healthy("Tavily")
-                            return web_response
-                                
-                    except Exception as e:
-                        logger.error(f"Web search failed: {e}")
-                        error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
-                    
-                # Fallback to Pinecone (despite issues)
+            # If Pinecone was supposed to be primary but failed/forced fallback, and Tavily also failed/was not configured,
+            # now we try Pinecone again as a last resort if it's available, even with its known issues.
+            if not self.tavily_agent: # This condition is critical after the above attempt to use Tavily.
                 if self.pinecone_tool:
                     try:
-                        logger.info("🔍 Falling back to Pinecone knowledge base...")
+                        logger.info("🔍 Falling back to Pinecone knowledge base (re-attempt after web search failure/absence)...")
                         pinecone_response = self.pinecone_tool.query(langchain_history)
                         
                         if pinecone_response and pinecone_response.get("success"):
@@ -2031,6 +2016,39 @@ class EnhancedAI:
                     except Exception as e:
                         error_type = self._detect_pinecone_error_type(e)
                         logger.error(f"Pinecone fallback also failed ({error_type}): {e}")
+        else: # This path is taken if _should_use_pinecone_first() returned False initially
+              # (e.g., Pinecone had critical errors, but Tavily was healthy)
+            # Try Tavily first
+            if self.tavily_agent:
+                try:
+                    logger.info("🌐 Querying web search (primary due to Pinecone issues)...")
+                    web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
+                    
+                    if web_response and web_response.get("success"):
+                        logger.info("✅ Using web search response (primary)")
+                        error_handler.mark_component_healthy("Tavily")
+                        return web_response
+                                
+                except Exception as e:
+                    logger.error(f"Web search failed: {e}")
+                    error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
+                
+            # Fallback to Pinecone (despite issues)
+            if self.pinecone_tool:
+                try:
+                    logger.info("🔍 Falling back to Pinecone knowledge base (despite initial issues)...")
+                    pinecone_response = self.pinecone_tool.query(langchain_history)
+                    
+                    if pinecone_response and pinecone_response.get("success"):
+                        should_fallback = self.should_use_web_fallback(pinecone_response)
+                        
+                        if not should_fallback:
+                            logger.info("✅ Using Pinecone response (fallback)")
+                            return pinecone_response
+                            
+                except Exception as e:
+                    error_type = self._detect_pinecone_error_type(e)
+                    logger.error(f"Pinecone fallback also failed ({error_type}): {e}")
         
         # Final fallback - basic response
         logger.warning("⚠️ All AI tools unavailable, using basic fallback")
@@ -2307,6 +2325,7 @@ class SessionManager:
             merged_current_penalty_hours = session.current_penalty_hours
             merged_escalation_level = session.escalation_level
             merged_email_addresses_used = set(session.email_addresses_used) 
+            merged_email_switches_count = session.email_switches_count # FIX: Initialize this variable
             
             # Determine the effective 'source' session for identity and core data, favoring highest privilege and recency
             source_for_identity_and_base_data = session 
@@ -3356,10 +3375,7 @@ def render_simplified_browser_close_detection(session_id: str):
                     console.error('❌ Fetch failed:', error);
                     redirectToStreamlitFallback(reason);
                 }});
-            }} catch (e) {{
-                console.error('❌ Fetch setup failed:', e);
-                redirectToStreamlitFallback(reason);
-            }}
+            }} {{ /* no catch here, handled by .catch in the promise chain */ }}
             
             // FALLBACK 2: Always redirect to Streamlit as final backup
             setTimeout(() => {{
