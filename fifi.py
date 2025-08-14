@@ -1054,6 +1054,8 @@ class DatabaseManager:
                         'reason': 'daily_limit',
                         'message': "Daily limit of 20 questions reached. Please retry in 24 hours."
                     }
+                # Tier 1 (Questions 1-10) is handled separately now for the ban delay
+                # This only checks if they are _about_ to hit tier 1 ban on the *next* question
                 elif session.daily_question_count >= 10:  # Tier 2: Questions 11-20
                     # Still allowed, but close to limit
                     remaining = user_limit - session.daily_question_count
@@ -1092,19 +1094,10 @@ class DatabaseManager:
             return {'allowed': True}
         
         def record_question(self, session: UserSession):
-            """Records question and applies tier-specific logic for registered users."""
+            """Records question. Tier-specific ban application is now handled elsewhere."""
             session.daily_question_count += 1
             session.total_question_count += 1  # ADDED: Increment total_question_count
             session.last_question_time = datetime.now()
-            
-            # ENHANCED: Tier-specific ban logic for registered users
-            if session.user_type.value == UserType.REGISTERED_USER.value:
-                if session.daily_question_count == 10:  # End of Tier 1
-                    self._apply_ban(session, BanStatus.ONE_HOUR, "Tier 1 limit reached (10 questions)")
-                    logger.info(f"Tier 1 ban applied to registered user {session.session_id[:8]} after 10 questions")
-                elif session.daily_question_count == 20:  # End of Tier 2
-                    self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Tier 2 limit reached (20 questions)")
-                    logger.info(f"Tier 2 ban applied to registered user {session.session_id[:8]} after 20 questions")
             
             logger.debug(f"Question recorded for {session.session_id[:8]}: daily={session.daily_question_count}, total={session.total_question_count}")
         
@@ -1160,27 +1153,82 @@ class PDFExporter:
     """Handles generation of PDF chat transcripts."""
     def __init__(self):
         self.styles = getSampleStyleSheet()
-        self.styles.add(ParagraphStyle(name='ChatHeader', alignment=TA_CENTER, fontSize=18))
-        self.styles.add(ParagraphStyle(name='UserMessage', backColor=lightgrey))
+        
+        # Define base paragraph style with increased leading and spaceAfter
+        self.styles.add(ParagraphStyle(
+            name='Normal',
+            fontName='Helvetica',
+            fontSize=10,
+            leading=14,  # Increased line spacing (1.4 * font size)
+            spaceAfter=6 # Space after each paragraph
+        ))
+        
+        # Header style
+        self.styles.add(ParagraphStyle(
+            name='ChatHeader',
+            parent=self.styles['Normal'],
+            alignment=TA_CENTER,
+            fontSize=18,
+            leading=22,
+            spaceAfter=12
+        ))
+        
+        # User message style with light grey background
+        self.styles.add(ParagraphStyle(
+            name='UserMessage',
+            parent=self.styles['Normal'],
+            backColor=lightgrey,
+            leftIndent=5,
+            rightIndent=5,
+            borderPadding=3,
+            borderRadius=3,
+            spaceBefore=8, # Add space before user message block
+            spaceAfter=8
+        ))
+        
+        # Small caption style for sources
+        self.styles.add(ParagraphStyle(
+            name='Caption',
+            parent=self.styles['Normal'],
+            fontSize=8,
+            leading=10,
+            textColor=grey,
+            spaceBefore=2,
+            spaceAfter=2
+        ))
 
     @handle_api_errors("PDF Exporter", "Generate Chat PDF")
     def generate_chat_pdf(self, session: UserSession) -> Optional[io.BytesIO]:
         """Generates a PDF of the chat transcript."""
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=letter)
-        story = [Paragraph("FiFi AI Chat Transcript", self.styles['Heading1'])]
         
+        story = []
+        story.append(Paragraph("FiFi AI Chat Transcript", self.styles['ChatHeader']))
+        story.append(Spacer(1, 12)) # Additional space after header
+
         for msg in session.messages:
             role = str(msg.get('role', 'unknown')).capitalize()
-            content = html.escape(str(msg.get('content', '')))
-            content = re.sub(r'<[^>]+>', '', content)
+            # Clean content from HTML/Markdown before putting into PDF Paragraph
+            content = str(msg.get('content', ''))
+            # Remove any HTML tags that might be in the content
+            content = re.sub(r'<[^>]+>', '', content) 
+            # Replace Markdown bold/italics with ReportLab's equivalents or just remove
+            content = content.replace('**', '<b>').replace('__', '<b>') # Simple bold conversion
+            content = content.replace('*', '<i>').replace('_', '<i>') # Simple italic conversion
+            content = html.escape(content) # HTML escape what's left
+
             
             style = self.styles['UserMessage'] if role == 'User' else self.styles['Normal']
-            story.append(Spacer(1, 8))
+            
             story.append(Paragraph(f"<b>{role}:</b> {content}", style))
             
             if msg.get("source"):
-                story.append(Paragraph(f"<i>Source: {msg['source']}</i>", self.styles['Normal']))
+                story.append(Paragraph(f"<i>Source: {msg['source']}</i>", self.styles['Caption']))
+            
+            # Add a bit more space between messages if not handled by spaceAfter
+            if style.spaceAfter is None: # Only add if the style doesn't already define spaceAfter
+                story.append(Spacer(1, 10)) 
                 
         doc.build(story)
         buffer.seek(0)
@@ -1749,7 +1797,7 @@ class TavilyFallbackAgent:
             if sources:
                 response_parts.append(f"\n\n**Sources:**")
                 for i, source in enumerate(sources, 1):
-                    response.append(f"{i}. {source}")
+                    response_parts.append(f"{i}. {source}")
             
             return "".join(response_parts)
         
@@ -2969,8 +3017,22 @@ class SessionManager:
             
             session.messages.extend([user_message, assistant_message])
             
+            # Check for Tier 1 limit AFTER adding the 10th message and applying the ban
+            tier1_ban_applied_post_response = False
+            if (session.user_type == UserType.REGISTERED_USER and 
+                session.daily_question_count == 10 and 
+                session.ban_status == BanStatus.NONE): # Ensure ban isn't already active
+                
+                self.question_limits._apply_ban(session, BanStatus.ONE_HOUR, "Tier 1 limit reached (10 questions)")
+                tier1_ban_applied_post_response = True
+                logger.info(f"Tier 1 ban applied to registered user {session.session_id[:8]} after 10th question's response was added.")
+
+
             # Update activity and save session
             self._update_activity(session)
+            
+            # Return original AI response, but add tier1_ban_applied_post_response flag
+            ai_response['tier1_ban_applied_post_response'] = tier1_ban_applied_post_response
             
             return ai_response
             
@@ -3165,7 +3227,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         # Also update re-verification flags
         session.reverification_pending = fresh_session_from_db.reverification_pending
         session.pending_user_type = fresh_session_from_db.pending_user_type
-        session.pending_email = fresh_session_from_db.pending_email
+        session.pending_email = fresh_session_from_rb.pending_email
         session.pending_full_name = fresh_session_from_db.pending_full_name
         session.pending_zoho_contact_id = fresh_session_from_db.pending_zoho_contact_id
         session.pending_wp_token = fresh_session_from_db.pending_wp_token
@@ -4155,6 +4217,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             
             if msg.get("has_citations") and msg.get("has_inline_citations"):
                 st.caption("📚 Response includes verified citations")
+            
+            # Check for post-response Tier 1 ban notification (for Registered Users only)
+            if msg.get('role') == 'assistant' and msg.get('tier1_ban_applied_post_response', False):
+                st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
+                st.markdown("---") # Visual separator
 
     # Chat input
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
@@ -4195,6 +4262,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             st.caption(f"{source_color} Source: {response['source']}")
                         
                         logger.info(f"✅ Question processed successfully")
+                        
+                        # Only re-run if a ban was just applied post-response to update UI (disable input, show message)
+                        if response.get('tier1_ban_applied_post_response', False):
+                            logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
+                            st.rerun()
                         
                 except Exception as e:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
@@ -4424,3 +4496,4 @@ def main_fixed():
 # Entry point
 if __name__ == "__main__":
     main_fixed()
+```
