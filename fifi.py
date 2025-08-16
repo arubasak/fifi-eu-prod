@@ -9,7 +9,7 @@ import functools
 import io
 import html
 import jwt
-import threading # RESTORED THIS LINE
+import threading 
 import copy
 import sqlite3
 import hashlib
@@ -310,6 +310,9 @@ class UserSession:
     pending_zoho_contact_id: Optional[str] = None
     pending_wp_token: Optional[str] = None
 
+    # NEW: Flag to allow guest questions after declining a recognized email
+    declined_recognized_email_at: Optional[datetime] = None
+
 
 class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
@@ -412,7 +415,9 @@ class DatabaseManager:
                     pending_email TEXT,
                     pending_full_name TEXT,
                     pending_zoho_contact_id TEXT,
-                    pending_wp_token TEXT
+                    pending_wp_token TEXT,
+                    -- NEW: Declined recognized email
+                    declined_recognized_email_at TEXT
                 )
             ''')
             
@@ -424,7 +429,8 @@ class DatabaseManager:
                 ("pending_email", "TEXT"),
                 ("pending_full_name", "TEXT"),
                 ("pending_zoho_contact_id", "TEXT"),
-                ("pending_wp_token", "TEXT")
+                ("pending_wp_token", "TEXT"),
+                ("declined_recognized_email_at", "TEXT") # NEW column
             ]
             for col_name, col_type in new_columns:
                 try:
@@ -537,9 +543,12 @@ class DatabaseManager:
             
             # Handle None for last_activity before saving
             last_activity_iso = session.last_activity.isoformat() if session.last_activity else None
+            # Handle None for declined_recognized_email_at before saving
+            declined_recognized_email_at_iso = session.declined_recognized_email_at.isoformat() if session.declined_recognized_email_at else None
+
 
             self.conn.execute(
-                '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (session.session_id, session.user_type.value, session.email, session.full_name,
                  session.zoho_contact_id, session.created_at.isoformat(),
                  last_activity_iso, json_messages, int(session.active),
@@ -558,7 +567,8 @@ class DatabaseManager:
                  int(session.reverification_pending), 
                  session.pending_user_type.value if session.pending_user_type else None,
                  session.pending_email, session.pending_full_name,
-                 session.pending_zoho_contact_id, session.pending_wp_token))
+                 session.pending_zoho_contact_id, session.pending_wp_token,
+                 declined_recognized_email_at_iso)) # NEW field
             self.conn.commit()
             
             logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}")
@@ -600,6 +610,8 @@ class DatabaseManager:
                 session.pending_zoho_contact_id = None
                 session.pending_wp_token = None
                 logger.debug(f"Added missing re-verification fields to in-memory session {session_id[:8]}")
+            if session and not hasattr(session, 'declined_recognized_email_at'): # NEW field
+                session.declined_recognized_email_at = None
             
             return copy.deepcopy(session)
         
@@ -609,7 +621,7 @@ class DatabaseManager:
                 self.conn.row_factory = None
             
             # Update SELECT statement to include new fields
-            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
             row = cursor.fetchone()
             
             if not row: 
@@ -617,8 +629,8 @@ class DatabaseManager:
                 return None
             
             # Handle as tuple (SQLite Cloud returns tuples)
-            # Expected 32 columns before adding re-verification fields. Now 38.
-            expected_min_cols = 38
+            # Expected 32 columns before adding re-verification fields. Now 38. Now 39.
+            expected_min_cols = 39 # Updated expected columns
             if len(row) < expected_min_cols: # Must have at least this many columns for full functionality
                 logger.error(f"Row has insufficient columns: {len(row)} (expected at least {expected_min_cols}). Data corruption suspected or old schema.")
                 # Attempt to load with missing columns, defaulting new ones
@@ -635,6 +647,9 @@ class DatabaseManager:
                 loaded_pending_full_name = row[35] if len(row) > 35 else None
                 loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
                 loaded_pending_wp_token = row[37] if len(row) > 37 else None
+                # NEW: Safely get declined_recognized_email_at
+                loaded_declined_recognized_email_at = datetime.fromisoformat(row[38]) if len(row) > 38 and row[38] else None
+
 
                 # Convert last_activity from ISO format string or None
                 loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
@@ -677,7 +692,8 @@ class DatabaseManager:
                     pending_email=loaded_pending_email, # NEW
                     pending_full_name=loaded_pending_full_name, # NEW
                     pending_zoho_contact_id=loaded_pending_zoho_contact_id, # NEW
-                    pending_wp_token=loaded_pending_wp_token # NEW
+                    pending_wp_token=loaded_pending_wp_token, # NEW
+                    declined_recognized_email_at=loaded_declined_recognized_email_at # NEW
                 )
                 
                 logger.debug(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
@@ -714,6 +730,8 @@ class DatabaseManager:
                     session.pending_full_name = None
                     session.pending_zoho_contact_id = None
                     session.pending_wp_token = None
+                if not hasattr(session, 'declined_recognized_email_at'): # NEW field
+                    session.declined_recognized_email_at = None
             logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
             return sessions
         
@@ -723,10 +741,10 @@ class DatabaseManager:
 
             # Query ALL sessions with the fingerprint_id, regardless of active status
             # IMPORTANT: This query correctly does NOT include 'AND active = 1'
-            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
+            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
             sessions = []
             for row in cursor.fetchall():
-                expected_min_cols = 38
+                expected_min_cols = 39 # Updated expected columns
                 if len(row) < expected_min_cols: # Must have at least this many columns for full functionality
                     logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected at least {expected_min_cols}). Skipping row.")
                     continue
@@ -741,6 +759,9 @@ class DatabaseManager:
                     loaded_pending_full_name = row[35] if len(row) > 35 else None
                     loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
                     loaded_pending_wp_token = row[37] if len(row) > 37 else None
+                    # NEW: Safely get declined_recognized_email_at
+                    loaded_declined_recognized_email_at = datetime.fromisoformat(row[38]) if len(row) > 38 and row[38] else None
+
 
                     loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
 
@@ -782,7 +803,8 @@ class DatabaseManager:
                         pending_email=loaded_pending_email, # NEW
                         pending_full_name=loaded_pending_full_name, # NEW
                         pending_zoho_contact_id=loaded_pending_zoho_contact_id, # NEW
-                        pending_wp_token=loaded_pending_wp_token # NEW
+                        pending_wp_token=loaded_pending_wp_token, # NEW
+                        declined_recognized_email_at=loaded_declined_recognized_email_at # NEW
                     )
                     sessions.append(s)
                 except Exception as e:
@@ -972,6 +994,21 @@ class DatabaseManager:
             Returns True if evasion is detected.
             """
             try:
+                # If the user just declined a recognized email and is still within guest limits,
+                # temporarily bypass evasion check as a grace period.
+                if (session.declined_recognized_email_at and 
+                    session.daily_question_count < self.question_limits[UserType.GUEST.value]):
+                    logger.info(f"Evasion check bypassed for {session.session_id[:8]}: Just declined recognized email and within guest limit.")
+                    return False
+                
+                # Clear the grace period flag once guest limit is hit, so future attempts trigger evasion
+                if session.declined_recognized_email_at and \
+                   session.daily_question_count >= self.question_limits[UserType.GUEST.value]:
+                    logger.info(f"Evasion grace period ended for {session.session_id[:8]}: Guest limit reached.")
+                    session.declined_recognized_email_at = None # Clear the flag
+                    db_manager.save_session(session) # Persist this flag clearing
+                
+
                 # Only check for guest users who have hit their limit
                 if (session.user_type != UserType.GUEST or 
                     session.daily_question_count < self.question_limits[UserType.GUEST.value] or
@@ -2465,6 +2502,9 @@ class SessionManager:
                 session.pending_wp_token = source_for_identity_and_base_data.wp_token
                 session.browser_privacy_level = source_for_identity_and_base_data.browser_privacy_level
                 
+                # Also ensure declined_recognized_email_at is cleared if a higher privilege is now pending
+                session.declined_recognized_email_at = None
+                
                 logger.info(f"Re-verification pending for {session.session_id[:8]}. Higher privilege ({source_for_identity_and_base_data.user_type.value}) found for fingerprint, but requires email verification.")
             else:
                 # Current session is already at the highest or equal privilege level found for this fingerprint.
@@ -2481,6 +2521,8 @@ class SessionManager:
                 session.pending_full_name = None
                 session.pending_zoho_contact_id = None
                 session.pending_wp_token = None
+                # Importantly, do NOT clear declined_recognized_email_at here if it was just set.
+                # It will be managed by QuestionLimitManager.detect_guest_email_evasion
                 logger.info(f"No re-verification needed for {session.session_id[:8]}. User type set to {session.user_type.value}.")
 
 
@@ -2729,7 +2771,9 @@ class SessionManager:
                 session.pending_wp_token = None
                 logger.warning(f"Session {session.session_id[:8]} switched email during pending re-verification. Resetting pending state.")
 
-
+            # Clear `declined_recognized_email_at` if they are now proceeding with *any* email verification
+            session.declined_recognized_email_at = None
+            
             # Set last_activity if not already set (first time starting chat)
             if session.last_activity is None:
                 session.last_activity = datetime.now()
@@ -2805,6 +2849,8 @@ class SessionManager:
                     logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST (first time): {session.email}")
 
                 session.question_limit_reached = False  # Reset limit flag
+                # Clear declined_recognized_email_at on successful verification
+                session.declined_recognized_email_at = None 
                 
                 # Set last_activity to now (official start for logged-in users)
                 if session.last_activity is None:
@@ -2893,6 +2939,8 @@ class SessionManager:
                         current_session.pending_full_name = None
                         current_session.pending_zoho_contact_id = None
                         current_session.pending_wp_token = None
+                    # Clear declined_recognized_email_at on successful login
+                    current_session.declined_recognized_email_at = None
 
                     # Upgrade to registered user
                     current_session.user_type = UserType.REGISTERED_USER
@@ -2973,16 +3021,19 @@ class SessionManager:
 
             # Check question limits
             limit_check = self.question_limits.is_within_limits(session)
+            # This check for 'allowed' is crucial and must be placed here before recording question
             if not limit_check['allowed']:
-                if limit_check.get('reason') == 'guest_limit' or session.reverification_pending: # Added session.reverification_pending here
-                    return {'requires_email': True, 'content': 'Email verification required.'}
-                else:
+                # If it's a hard ban, just return, the message has been rendered by is_within_limits
+                if limit_check.get('reason') != 'guest_limit': 
                     return {
                         'banned': True,
                         'content': limit_check.get("content", 'Access restricted.'),
                         'time_remaining': limit_check.get('time_remaining')
                     }
-            
+                # If it's 'guest_limit', it means they've hit 4 questions and need to verify
+                else: # limit_check.get('reason') == 'guest_limit'
+                    return {'requires_email': True, 'content': 'Email verification required.'}
+
             # Sanitize input
             sanitized_prompt = sanitize_input(prompt, 4000)
             if not sanitized_prompt:
@@ -2992,7 +3043,7 @@ class SessionManager:
                     'source': 'Input Validation'
                 }
             
-            # Record question
+            # Record question (only if allowed to ask)
             self.question_limits.record_question(session)
             
             # Get AI response (now simple call to EnhancedAI's core function)
@@ -3236,6 +3287,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         session.pending_full_name = fresh_session_from_db.pending_full_name
         session.pending_zoho_contact_id = fresh_session_from_db.pending_zoho_contact_id
         session.pending_wp_token = fresh_session_from_db.pending_wp_token
+        session.declined_recognized_email_at = fresh_session_from_db.declined_recognized_email_at # NEW
     else:
         logger.warning(f"Session {session.session_id[:8]} from st.session_state not found in database. Forcing reset.")
         session.active = False
@@ -3854,7 +3906,9 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             st.caption("Email verification unlocks 10 questions/day.")
             if session.reverification_pending:
                 st.info("💡 An account is available for this device. Re-verify email to reclaim it!")
-
+            elif session.recognition_response == "no_declined_reco" and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]: # Check for this state
+                st.info("💡 You are currently using guest questions. Verify your email to get more.") # Alternative message
+                
         # Show fingerprint status
         if session.fingerprint_id:
             if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
@@ -4032,13 +4086,26 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                 with col1:
                     if st.button("✅ Yes, that's my email", use_container_width=True, key="recognize_yes_btn"):
                         session.recognition_response = "yes"
+                        session.declined_recognized_email_at = None # Clear this flag if they accept
                         st.session_state.verification_email = fingerprint_history['email']
                         st.session_state.verification_stage = "send_code_recognized"
                         st.rerun()
                 with col2:
                     if st.button("❌ No, use a different email", use_container_width=True, key="recognize_no_btn"):
-                        session.recognition_response = "no"
-                        st.session_state.verification_stage = "email_entry"
+                        session.recognition_response = "no_declined_reco" # Track this specific path
+                        session.declined_recognized_email_at = datetime.now() # Mark time of decline
+                        session.user_type = UserType.GUEST # Ensure user type is guest for allowance
+                        session.reverification_pending = False # Clear pending state
+                        # Clear pending identity fields
+                        session.pending_user_type = None
+                        session.pending_email = None
+                        session.pending_full_name = None
+                        session.pending_zoho_contact_id = None
+                        session.pending_wp_token = None
+                        session_manager.db.save_session(session) # Persist this decision
+                        
+                        # Allow continuation as guest for 4 questions
+                        del st.session_state.verification_stage # Clears the verification dialog
                         st.rerun()
             else:
                 # No historical email found for this device, proceed to manual entry for guest limit
@@ -4176,15 +4243,32 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
 
     # User limits check with enhanced messaging
     limit_check = session_manager.question_limits.is_within_limits(session)
-    if not limit_check['allowed']:
-        # If guest limit hit OR re-verification is pending, force dialog
-        if limit_check.get('reason') == 'guest_limit' or session.reverification_pending:
-            render_email_verification_dialog(session_manager, session)
-            return
-        else:
-            return
     
-    # ENHANCED: Show tier warnings for registered users
+    # NEW LOGIC FOR EMAIL VERIFICATION DIALOG DISPLAY
+    # The dialog should appear if:
+    # 1. User is banned (and not guest_limit - hard bans are just blocking)
+    # 2. User is a guest AND has hit their question limit
+    # 3. User is reverification_pending
+    # 4. User has declined a recognized email AND is still within guest questions, but will eventually need to verify an email
+
+    # First, handle hard bans (non-email-verification related bans)
+    if not limit_check['allowed'] and limit_check.get('reason') != 'guest_limit':
+        # If it's a hard ban, just return, the message has been rendered by is_within_limits
+        return
+    
+    # Next, handle email verification dialog display conditions
+    # Show dialog if:
+    #   - Guest limit hit (`limit_check.get('reason') == 'guest_limit'`)
+    #   - Reverification is pending (`session.reverification_pending`)
+    #   - User explicitly declined a recognized email AND hasn't hit guest limit yet (this is the new scenario)
+    if limit_check.get('reason') == 'guest_limit' or \
+       session.reverification_pending or \
+       (session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]):
+        render_email_verification_dialog(session_manager, session)
+        return # Block chat input, show dialog
+
+
+    # ENHANCED: Show tier warnings for registered users (only if not blocked by dialog/ban)
     if (session.user_type.value == UserType.REGISTERED_USER.value and 
         limit_check.get('allowed') and 
         limit_check.get('tier')):
