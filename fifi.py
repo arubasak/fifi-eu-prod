@@ -3438,16 +3438,14 @@ def render_simplified_browser_close_detection(session_id: str):
         window.fifi_close_enhanced_initialized = true;
         
         let saveTriggered = false;
-        let isTabSwitching = false;
         
         console.log('🛡️ Enhanced browser close detection initialized for eligible user');
         
-        // ... rest of the existing JavaScript code remains unchanged ...
-        function performActualEmergencySave(reason) {{
+        function performEmergencySave(reason) {{
             if (saveTriggered) return;
             saveTriggered = true;
             
-            console.log('🚨 Confirmed browser/tab close, sending emergency save:', reason);
+            console.log('🚨 Browser/tab close detected, sending emergency save beacon:', reason);
             
             const emergencyData = JSON.stringify({{
                 session_id: sessionId,
@@ -3455,123 +3453,27 @@ def render_simplified_browser_close_detection(session_id: str):
                 timestamp: Date.now()
             }});
             
-            // PRIMARY: Try navigator.sendBeacon to FastAPI
             if (navigator.sendBeacon) {{
-                try {{
-                    const sent = navigator.sendBeacon(
-                        FASTAPI_URL,
-                        new Blob([emergencyData], {{type: 'application/json'}})
-                    );
-                    if (sent) {{
-                        console.log('✅ Emergency save beacon sent successfully to FastAPI');
-                        return;
-                    }} else {{
-                        console.warn('⚠️ Beacon send returned false, trying fallback...');
-                    }}
-                }} catch (e) {{
-                    console.error('❌ Beacon failed:', e);
+                // *** THIS IS THE CRITICAL CHANGE ***
+                // We send as 'text/plain' to make it a "simple request" and AVOID the CORS preflight.
+                const sent = navigator.sendBeacon(
+                    FASTAPI_URL,
+                    new Blob([emergencyData], {{type: 'text/plain;charset=UTF-8'}})
+                );
+                
+                if (sent) {{
+                    console.log('✅ Emergency save beacon sent successfully to FastAPI');
+                }} else {{
+                    console.warn('⚠️ Beacon send returned false, trying fallback...');
+                    // Fallback logic can be added here if needed, but the primary beacon should now be more reliable.
                 }}
             }}
-            
-            // FALLBACK 1: Try fetch with very short timeout
-            try {{
-                fetch(FASTAPI_URL, {{
-                    method: 'POST',
-                    headers: {{
-                        'Content-Type': 'application/json',
-                    }},
-                    body: emergencyData,
-                    keepalive: true,
-                    signal: AbortSignal.timeout(3000)
-                }}).then(response => {{
-                    if (response.ok) {{
-                        console.log('✅ Emergency save via fetch successful');
-                    }} else {{
-                        console.warn('⚠️ Fetch response not OK, status:', response.status);
-                        redirectToStreamlitFallback(reason);
-                    }}
-                }}).catch(error => {{
-                    console.error('❌ Fetch failed:', error);
-                    redirectToStreamlitFallback(reason);
-                }});
-            }} {{ /* no catch here, handled by .catch in the promise chain */ }}
-            
-            // FALLBACK 2: Always redirect to Streamlit as final backup
-            setTimeout(() => {{
-                redirectToStreamlitFallback(reason);
-            }}, 1000);
         }}
         
-        function redirectToStreamlitFallback(reason) {{
-            try {{
-                console.log('🔄 Using Streamlit fallback for emergency save');
-                const saveUrl = `${{window.location.origin}}${{window.location.pathname}}?event=emergency_close&session_id=${{sessionId}}&reason=${{reason}}&fallback=true`;
-                window.location.href = saveUrl;
-            }} catch (e) {{
-                console.error('❌ Streamlit fallback redirect failed:', e);
-            }}
-        }}
-        
-        function triggerEmergencySave(reason) {{
-            if (isTabSwitching) {{
-                console.log('🔍 Potential tab switch detected, delaying emergency save by 150ms...');
-                setTimeout(() => {{
-                    if (document.visibilityState === 'visible') {{
-                        console.log('✅ Tab switch confirmed - CANCELING emergency save');
-                        isTabSwitching = false;
-                        return;
-                    }}
-                    console.log('🚨 Real exit confirmed after delay - proceeding with emergency save');
-                    performActualEmergencySave(reason);
-                }}, 150);
-                return;
-            }}
-            
-            performActualEmergencySave(reason);
-        }}
-        
-        // Listen for visibility changes to track tab switching
-        document.addEventListener('visibilitychange', function() {{
-            if (document.visibilityState === 'hidden') {{
-                console.log('📱 Tab became hidden - potential tab switch');
-                isTabSwitching = true;
-            }} else if (document.visibilityState === 'visible') {{
-                console.log('👁️ Tab became visible - confirmed tab switch');
-                isTabSwitching = false;
-            }}
-        }});
-        
-        // Listen for actual browser close events
         window.addEventListener('beforeunload', () => {{
-            triggerEmergencySave('browser_close');
+            performEmergencySave('browser_close_or_refresh');
         }}, {{ capture: true, passive: true }});
         
-        window.addEventListener('unload', () => {{
-            triggerEmergencySave('browser_close');
-        }}, {{ capture: true, passive: true }});
-        
-        // Try to monitor parent window as well
-        try {{
-            if (window.parent && window.parent !== window) {{
-                window.parent.document.addEventListener('visibilitychange', function() {{
-                    if (window.parent.document.visibilityState === 'hidden') {{
-                        console.log('📱 Parent tab became hidden - potential tab switch');
-                        isTabSwitching = true;
-                    }} else if (window.parent.document.visibilityState === 'visible') {{
-                        console.log('👁️ Parent tab became visible - confirmed tab switch');
-                        isTabSwitching = false;
-                    }}
-                }});
-                
-                window.parent.addEventListener('beforeunload', () => {{
-                    triggerEmergencySave('browser_close');
-                }}, {{ capture: true, passive: true }});
-            }}
-        }} catch (e) {{
-            console.debug('Cannot monitor parent events (cross-origin):', e);
-        }}
-        
-        console.log('✅ Enhanced browser close detection ready');
     }})();
     </script>
     """
@@ -3580,6 +3482,7 @@ def render_simplified_browser_close_detection(session_id: str):
         st.components.v1.html(enhanced_close_js, height=0, width=0)
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close detection: {e}")
+
 
 def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
     """Processes fingerprint data received via URL query parameters."""
