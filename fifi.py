@@ -4084,7 +4084,8 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                     st.session_state.verification_stage = "send_code_recognized"
                     st.rerun()
             with col2:
-                if st.button("❌ No, use a different email", use_container_width=True, key="reverify_no_btn"):
+                # Changed button text
+                if st.button("❌ No, I don't recognize the email", use_container_width=True, key="reverify_no_btn"):
                     session.recognition_response = "no_declined_reco" # Track this specific path
                     session.declined_recognized_email_at = datetime.now() # Mark time of decline
                     # Clear pending states and ensure current user type is GUEST for continued allowance
@@ -4097,21 +4098,44 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                     session.pending_wp_token = None
                     session_manager.db.save_session(session) # Persist this decision
                     
-                    del st.session_state.verification_stage # Allow to proceed to chat interface (to ask guest questions)
+                    # NEW: Set a specific state to indicate they declined, but can continue as guest
+                    # This prevents immediately jumping to email_entry form if they have questions left.
+                    st.session_state.verification_stage = "declined_recognized_email_prompt_only"
                     st.rerun()
-        # Scenario B: Guest limit hit OR user previously declined recognized email (now prompting for ANY email)
-        else: 
-            # This handles cases where user hit guest limit, OR user previously clicked "No" to recognized email.
-            # In both cases, we push to email_entry directly to get a new email.
-            if session.declined_recognized_email_at:
-                st.info(f"You chose to use a different email. You have {session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count} more guest questions. To continue beyond this, please verify your email.")
-            else: # This is the case for a new guest hitting 4 questions for the first time
-                st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
-            
+
+        # Scenario B: Guest limit hit (forcing email entry)
+        elif session_manager.question_limits.is_within_limits(session).get('reason') == 'guest_limit':
+            st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
             st.session_state.verification_stage = "email_entry"
             st.rerun() # Rerun to render the email_entry form immediately
-    
+        
+        # Scenario C: User previously declined recognized email and still has guest questions left
+        elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
+            st.session_state.verification_stage = "declined_recognized_email_prompt_only"
+            st.rerun() # Rerun to render the new dialog for this specific case
+        
     # Render subsequent stages if state is advanced
+    # NEW State: User declined recognized email and has guest questions remaining
+    if st.session_state.verification_stage == 'declined_recognized_email_prompt_only':
+        remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
+        st.info(f"You chose not to verify the recognized email. You can still use your remaining **{remaining_questions} guest questions**.")
+        st.info("To ask more questions after this, or to save chat history, please verify your email.")
+
+        col_opts1, col_opts2 = st.columns(2)
+        with col_opts1:
+            if st.button("📧 Enter a New Email for Verification", use_container_width=True, key="new_email_opt_btn"):
+                st.session_state.verification_email = "" # Clear pre-filled email
+                st.session_state.verification_stage = "email_entry"
+                st.rerun()
+        with col_opts2:
+            if st.button("Continue as Guest for Now", use_container_width=True, key="continue_guest_btn"):
+                # Simply dismiss the dialog for now. Chat will be enabled below.
+                # The prompt will reappear when guest limit is actually hit, or on next session.
+                del st.session_state.verification_stage
+                st.success("You can now continue as a Guest. The email prompt will reappear later.")
+                time.sleep(1) # Give user a moment to read success message
+                st.rerun()
+
     if st.session_state.verification_stage == 'send_code_recognized':
         email_to_verify = st.session_state.get('verification_email')
         if email_to_verify:
