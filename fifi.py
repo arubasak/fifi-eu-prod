@@ -4245,27 +4245,27 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     limit_check = session_manager.question_limits.is_within_limits(session)
     
     # NEW LOGIC FOR EMAIL VERIFICATION DIALOG DISPLAY
-    # The dialog should appear if:
-    # 1. User is banned (and not guest_limit - hard bans are just blocking)
-    # 2. User is a guest AND has hit their question limit
-    # 3. User is reverification_pending
-    # 4. User has declined a recognized email AND is still within guest questions, but will eventually need to verify an email
-
     # First, handle hard bans (non-email-verification related bans)
-    if not limit_check['allowed'] and limit_check.get('reason') != 'guest_limit':
-        # If it's a hard ban, just return, the message has been rendered by is_within_limits
-        return
+    if not limit_check['allowed']:
+        # If it's a hard ban (not 'guest_limit'), just return, message rendered by is_within_limits
+        if limit_check.get('reason') != 'guest_limit':
+            return # Hard ban, just exit
+        # If it's 'guest_limit', it means they've hit 4 questions and need to verify, so proceed to dialog
     
-    # Next, handle email verification dialog display conditions
-    # Show dialog if:
-    #   - Guest limit hit (`limit_check.get('reason') == 'guest_limit'`)
-    #   - Reverification is pending (`session.reverification_pending`)
-    #   - User explicitly declined a recognized email AND hasn't hit guest limit yet (this is the new scenario)
-    if limit_check.get('reason') == 'guest_limit' or \
-       session.reverification_pending or \
-       (session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]):
+    # Conditions to show the email verification dialog and block chat input
+    # This should be checked BEFORE allowing any chat input processing.
+    should_show_email_dialog = False
+    if limit_check.get('reason') == 'guest_limit': # Guest limit hit
+        should_show_email_dialog = True
+    elif session.reverification_pending: # Reverification is pending
+        should_show_email_dialog = True
+    elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
+        # User explicitly declined a recognized email AND is still within guest questions
+        should_show_email_dialog = True
+
+    if should_show_email_dialog:
         render_email_verification_dialog(session_manager, session)
-        return # Block chat input, show dialog
+        return # BLOCK FURTHER CHAT INTERFACE RENDERING AND PROMPT PROCESSING
 
 
     # ENHANCED: Show tier warnings for registered users (only if not blocked by dialog/ban)
@@ -4313,6 +4313,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.markdown("---") # Visual separator
 
     # Chat input
+    # This input is only enabled if should_show_email_dialog was False
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=session.ban_status.value != BanStatus.NONE.value)
     
