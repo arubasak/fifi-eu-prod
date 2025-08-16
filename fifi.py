@@ -9,7 +9,7 @@ import functools
 import io
 import html
 import jwt
-# import threading # REMOVED THIS LINE
+import threading # RESTORED THIS LINE
 import copy
 import sqlite3
 import hashlib
@@ -91,7 +91,7 @@ except ImportError:
 try:
     from supabase import create_client, Client
     SUPABASE_AVAILABLE = True
-    logger.info("✅ Supabase SDK available.")
+    logger.info("✅ Supabase client initialized for email verification.")
 except ImportError:
     logger.warning("Supabase SDK not available. Email verification will be disabled.")
 
@@ -653,7 +653,7 @@ class DatabaseManager:
                     timeout_saved_to_crm=bool(row[10]),
                     fingerprint_id=row[11],
                     fingerprint_method=row[12],
-                    visitor_type=row[13] or 'new_visitor',
+                    visitor_type=row[13] or 'new_visitor', # This line loads the *old* value from DB
                     daily_question_count=row[14] or 0,
                     total_question_count=row[15] or 0,
                     last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
@@ -2580,7 +2580,7 @@ class SessionManager:
             
             # Immediately attempt fingerprint inheritance for the *newly created* session
             # This is critical if a user starts a new session but has an existing fingerprint
-            self._attempt_fingerprint_inheritance(new_session) # <--- This will now correctly set visitor_type
+            self._attempt_fingerprint_inheritance(new_session) # <--- This call will now also correctly set visitor_type
             st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
             
             self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
