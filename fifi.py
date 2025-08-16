@@ -2247,7 +2247,7 @@ class SessionManager:
             
             # Clean up error history
             if hasattr(st.session_state, 'error_handler') and hasattr(st.session_state.error_handler, 'error_history') and len(st.session_state.error_handler.error_history) > 100:
-                st.session_state.error_handler.error_history = st.session_state.error_handler.error_history[-50:]
+                st.session_state.error_handler.error_history = st.session_state.error_history[-50:]
                 logger.info("Cleaned up error history")
             
             self._last_cleanup = now
@@ -4062,57 +4062,56 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
     """Enhanced email verification dialog with evasion detection and re-verification flow."""
     st.error("📧 **Action Required**")
     
+    # Initialize verification_stage if not set
     if 'verification_stage' not in st.session_state:
         st.session_state.verification_stage = 'initial_check'
 
+    # Determine which UI stage to show
     if st.session_state.verification_stage == 'initial_check':
-        # Check if re-verification is pending due to fingerprint inheritance
+        # Scenario A: Re-verification is pending (higher privilege account found for this device)
         if session.reverification_pending:
             email_to_reverify = session.pending_email
             masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
             st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
             st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
-            st.session_state.verification_email = email_to_reverify
-            st.session_state.verification_stage = "send_code_recognized"
-            st.rerun()
-        else: # Standard guest limit hit
-            fingerprint_history = session_manager.check_fingerprint_history(session.fingerprint_id)
-            if fingerprint_history.get('has_history') and fingerprint_history.get('email'):
-                masked_email = session_manager._mask_email(fingerprint_history['email'])
-                st.info(f"🤝 **We seem to recognize this device!**")
-                st.markdown(f"Are you **{masked_email}**?")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("✅ Yes, that's my email", use_container_width=True, key="recognize_yes_btn"):
-                        session.recognition_response = "yes"
-                        session.declined_recognized_email_at = None # Clear this flag if they accept
-                        st.session_state.verification_email = fingerprint_history['email']
-                        st.session_state.verification_stage = "send_code_recognized"
-                        st.rerun()
-                with col2:
-                    if st.button("❌ No, use a different email", use_container_width=True, key="recognize_no_btn"):
-                        session.recognition_response = "no_declined_reco" # Track this specific path
-                        session.declined_recognized_email_at = datetime.now() # Mark time of decline
-                        session.user_type = UserType.GUEST # Ensure user type is guest for allowance
-                        session.reverification_pending = False # Clear pending state
-                        # Clear pending identity fields
-                        session.pending_user_type = None
-                        session.pending_email = None
-                        session.pending_full_name = None
-                        session.pending_zoho_contact_id = None
-                        session.pending_wp_token = None
-                        session_manager.db.save_session(session) # Persist this decision
-                        
-                        # Allow continuation as guest for 4 questions
-                        del st.session_state.verification_stage # Clears the verification dialog
-                        st.rerun()
-            else:
-                # No historical email found for this device, proceed to manual entry for guest limit
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Verify this email", use_container_width=True, key="reverify_yes_btn"):
+                    session.recognition_response = "yes_reverify"
+                    session.declined_recognized_email_at = None # Clear this flag if they accept
+                    st.session_state.verification_email = email_to_reverify
+                    st.session_state.verification_stage = "send_code_recognized"
+                    st.rerun()
+            with col2:
+                if st.button("❌ No, use a different email", use_container_width=True, key="reverify_no_btn"):
+                    session.recognition_response = "no_declined_reco" # Track this specific path
+                    session.declined_recognized_email_at = datetime.now() # Mark time of decline
+                    # Clear pending states and ensure current user type is GUEST for continued allowance
+                    session.user_type = UserType.GUEST 
+                    session.reverification_pending = False
+                    session.pending_user_type = None
+                    session.pending_email = None
+                    session.pending_full_name = None
+                    session.pending_zoho_contact_id = None
+                    session.pending_wp_token = None
+                    session_manager.db.save_session(session) # Persist this decision
+                    
+                    del st.session_state.verification_stage # Allow to proceed to chat interface (to ask guest questions)
+                    st.rerun()
+        # Scenario B: Guest limit hit OR user previously declined recognized email (now prompting for ANY email)
+        else: 
+            # Check if user previously declined a recognized email and landed here.
+            # OR if no history and simply hit guest limit.
+            if session.declined_recognized_email_at:
+                st.info(f"You chose to use a different email. You can ask {session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count} more guest questions. To continue beyond this, please verify your email.")
+            else: # This is the case for a new guest hitting 4 questions for the first time
                 st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
-                st.session_state.verification_stage = "email_entry"
-                st.rerun()
-
+            
+            st.session_state.verification_stage = "email_entry"
+            st.rerun() # Rerun to render the email_entry form immediately
+    
+    # Render subsequent stages if state is advanced
     if st.session_state.verification_stage == 'send_code_recognized':
         email_to_verify = st.session_state.get('verification_email')
         if email_to_verify:
@@ -4123,10 +4122,9 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                     st.session_state.verification_stage = "code_entry"
                 else:
                     st.error(result['message'])
-                    # NEW: Check if this was an evasion detection
+                    # Check if this was an evasion detection (which blocks flow)
                     if "unusual activity" in result['message'].lower():
-                        # Don't proceed to email entry, just show the restriction
-                        st.stop()
+                        st.stop() # Stop further reruns, user is hard-blocked
                     st.session_state.verification_stage = "email_entry" # Fallback to manual entry if send fails
             st.rerun()
         else:
@@ -4142,7 +4140,6 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
             
             if submit_email:
                 if current_email_input:
-                    # handle_guest_email_verification now handles email_switches_count and setting session.email
                     result = session_manager.handle_guest_email_verification(session, current_email_input)
                     if result['success']:
                         st.success(result['message'])
@@ -4151,10 +4148,8 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                         st.rerun()
                     else:
                         st.error(result['message'])
-                        # NEW: Check if this was an evasion detection
                         if "unusual activity" in result['message'].lower():
-                            # Don't allow further attempts, stop here
-                            st.stop()
+                            st.stop() # Hard block due to evasion
                 else:
                     st.error("Please enter an email address to receive the code.")
     
@@ -4244,28 +4239,40 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # User limits check with enhanced messaging
     limit_check = session_manager.question_limits.is_within_limits(session)
     
-    # NEW LOGIC FOR EMAIL VERIFICATION DIALOG DISPLAY
     # First, handle hard bans (non-email-verification related bans)
     if not limit_check['allowed']:
         # If it's a hard ban (not 'guest_limit'), just return, message rendered by is_within_limits
         if limit_check.get('reason') != 'guest_limit':
             return # Hard ban, just exit
-        # If it's 'guest_limit', it means they've hit 4 questions and need to verify, so proceed to dialog
     
-    # Conditions to show the email verification dialog and block chat input
-    # This should be checked BEFORE allowing any chat input processing.
-    should_show_email_dialog = False
-    if limit_check.get('reason') == 'guest_limit': # Guest limit hit
-        should_show_email_dialog = True
-    elif session.reverification_pending: # Reverification is pending
-        should_show_email_dialog = True
+    # Determine if the email verification dialog should be displayed AND block chat
+    show_email_dialog_and_block_chat = False
+    
+    if session.reverification_pending: # Recognized higher privilege account needs re-verification
+        show_email_dialog_and_block_chat = True
+    elif limit_check.get('reason') == 'guest_limit': # Guest limit hit
+        show_email_dialog_and_block_chat = True
     elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
-        # User explicitly declined a recognized email AND is still within guest questions
-        should_show_email_dialog = True
+        # User explicitly declined a recognized email, AND is still within guest questions,
+        # but they must verify to continue after guest questions are exhausted.
+        # This means we should show the dialog to prompt them for a new email,
+        # but they are NOT blocked from asking questions *yet*.
+        # The prompt is to acknowledge that they need to verify to continue beyond the guest limit.
+        show_email_dialog_and_block_chat = True
 
-    if should_show_email_dialog:
-        render_email_verification_dialog(session_manager, session)
-        return # BLOCK FURTHER CHAT INTERFACE RENDERING AND PROMPT PROCESSING
+    if show_email_dialog_and_block_chat:
+        # If the user is in the 'declined_recognized_email_at' state and *hasn't* hit guest limit yet,
+        # we don't want to block the chat input, but still want to show the prompt.
+        if session.declined_recognized_email_at and \
+           session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
+            
+            # Show the dialog but allow the chat input to remain active below it
+            render_email_verification_dialog(session_manager, session)
+            # DO NOT RETURN HERE, let the rest of the chat interface render
+        else:
+            # For reverification_pending or guest_limit hit, block chat input
+            render_email_verification_dialog(session_manager, session)
+            return # BLOCK FURTHER CHAT INTERFACE RENDERING AND PROMPT PROCESSING
 
 
     # ENHANCED: Show tier warnings for registered users (only if not blocked by dialog/ban)
@@ -4313,7 +4320,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.markdown("---") # Visual separator
 
     # Chat input
-    # This input is only enabled if should_show_email_dialog was False
+    # This input is only enabled if the return statement above was NOT hit (i.e., not hard-blocked)
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=session.ban_status.value != BanStatus.NONE.value)
     
