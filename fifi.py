@@ -3310,7 +3310,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
                 logger.error(f"Browser reload failed during inactive session handling: {e}")
         
         st.info("🏠 Redirecting to home page...")
-        time.sleep(5)
+        # Removed time.sleep(5)
         st.rerun()
         st.stop()
         return True
@@ -3390,14 +3390,14 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         if JS_EVAL_AVAILABLE:
             try:
                 logger.info(f"🔄 Triggering browser reload for timeout")
-                time.sleep(5)
+                # Removed time.sleep(5)
                 streamlit_js_eval(js_expressions="parent.window.location.reload()")
                 st.stop()
             except Exception as e:
                 logger.error(f"Browser reload failed during inactive session handling: {e}")
         
         st.info("🏠 Redirecting to home page...")
-        time.sleep(5)
+        # Removed time.sleep(5)
         st.rerun()
         st.stop()
         return True
@@ -3702,7 +3702,7 @@ def handle_emergency_save_requests_from_query():
             st.error(f"❌ An unexpected error occurred during emergency save: {str(e)}")
             logger.critical(f"Emergency save processing crashed from query parameter: {e}", exc_info=True)
         
-        time.sleep(2)
+        # Removed time.sleep(2)
         st.stop()
     else:
         logger.debug("ℹ️ No emergency save requests found in current URL query parameters.")
@@ -3738,7 +3738,7 @@ def handle_fingerprint_requests_from_query():
         if not fingerprint_id or not method:
             st.error("❌ **Fingerprint Error** - Missing required data in redirect")
             logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
-            time.sleep(2)
+            # Removed time.sleep(2)
             st.rerun()
             return
         
@@ -3820,7 +3820,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             st.session_state.current_session_id = authenticated_session.session_id
                             st.session_state.page = "chat"
                             
-                            time.sleep(1.5)
+                            # Removed time.sleep(1.5)
                             st.rerun()
             
             st.markdown("---")
@@ -4058,18 +4058,36 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat automatically saves to CRM during Sign Out or browser/tab close.")
 
-def render_email_verification_dialog(session_manager: 'SessionManager', session: UserSession):
-    """Enhanced email verification dialog with evasion detection and re-verification flow."""
-    st.error("📧 **Action Required**")
-    
-    # Initialize verification_stage if not set
-    if 'verification_stage' not in st.session_state:
-        st.session_state.verification_stage = 'initial_check'
+# NEW FUNCTION FOR EMAIL PROMPT MANAGEMENT
+def display_email_prompt_if_needed(session_manager: 'SessionManager', session: UserSession) -> bool:
+    """
+    Renders email verification dialog if needed.
+    Returns True if chat input should be disabled, False otherwise.
+    """
+    # If the user has explicitly chosen to continue as guest and still has questions,
+    # and we are not in the middle of sending/verifying a code, then don't show the dialog.
+    if st.session_state.get('guest_continue_active') and \
+       session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value] and \
+       st.session_state.get('verification_stage') not in ["send_code_recognized", "email_entry", "code_entry"]:
+        return False # Do not show dialog, allow chat
 
-    # Determine which UI stage to show
-    if st.session_state.verification_stage == 'initial_check':
-        # Scenario A: Re-verification is pending (higher privilege account found for this device)
-        if session.reverification_pending:
+    # Check if a hard block is in place first (re-verification needed or guest limit hit)
+    limit_check = session_manager.question_limits.is_within_limits(session)
+    is_guest_limit_hit = limit_check.get('reason') == 'guest_limit'
+
+    # If re-verification is pending OR guest limit is hit, force the dialog and block chat
+    if session.reverification_pending or is_guest_limit_hit:
+        st.error("📧 **Action Required**")
+        if 'verification_stage' not in st.session_state or st.session_state.verification_stage == 'declined_recognized_email_prompt_only':
+            # Reset stage to initial_check or email_entry if coming from a "guest continue" path
+            if session.reverification_pending:
+                st.session_state.verification_stage = 'initial_check'
+            else: # Must be guest limit hit
+                st.session_state.verification_stage = 'email_entry'
+        
+        current_stage = st.session_state.verification_stage
+        
+        if current_stage == 'initial_check':
             email_to_reverify = session.pending_email
             masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
             st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
@@ -4079,16 +4097,15 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
             with col1:
                 if st.button("✅ Verify this email", use_container_width=True, key="reverify_yes_btn"):
                     session.recognition_response = "yes_reverify"
-                    session.declined_recognized_email_at = None # Clear this flag if they accept
+                    session.declined_recognized_email_at = None
                     st.session_state.verification_email = email_to_reverify
                     st.session_state.verification_stage = "send_code_recognized"
+                    session_manager.db.save_session(session) # Save response
                     st.rerun()
             with col2:
-                # Changed button text
                 if st.button("❌ No, I don't recognize the email", use_container_width=True, key="reverify_no_btn"):
-                    session.recognition_response = "no_declined_reco" # Track this specific path
-                    session.declined_recognized_email_at = datetime.now() # Mark time of decline
-                    # Clear pending states and ensure current user type is GUEST for continued allowance
+                    session.recognition_response = "no_declined_reco"
+                    session.declined_recognized_email_at = datetime.now()
                     session.user_type = UserType.GUEST 
                     session.reverification_pending = False
                     session.pending_user_type = None
@@ -4097,26 +4114,103 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                     session.pending_zoho_contact_id = None
                     session.pending_wp_token = None
                     session_manager.db.save_session(session) # Persist this decision
-                    
-                    # NEW: Set a specific state to indicate they declined, but can continue as guest
-                    # This prevents immediately jumping to email_entry form if they have questions left.
-                    st.session_state.verification_stage = "declined_recognized_email_prompt_only"
+                    st.session_state.guest_continue_active = True # Allow continuing as guest now
+                    del st.session_state.verification_stage # Clear stage to dismiss dialog
+                    st.success("You can now continue as a Guest.")
+                    st.rerun()
+            return True # BLOCK CHAT INPUT
+        
+        elif current_stage == 'send_code_recognized':
+            email_to_verify = st.session_state.get('verification_email')
+            if email_to_verify:
+                with st.spinner(f"Sending verification code to {session_manager._mask_email(email_to_verify)}..."):
+                    result = session_manager.handle_guest_email_verification(session, email_to_verify)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.session_state.verification_stage = "code_entry"
+                    else:
+                        st.error(result['message'])
+                        if "unusual activity" in result['message'].lower(): st.stop()
+                        st.session_state.verification_stage = "email_entry"
+                st.rerun()
+            else:
+                st.error("Error: No recognized email found to send the code. Please enter your email manually.")
+                st.session_state.verification_stage = "email_entry"
+                st.rerun()
+            return True # BLOCK CHAT INPUT
+
+        elif current_stage == 'email_entry':
+            st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
+            with st.form("email_verification_form", clear_on_submit=False):
+                st.markdown("**Please enter your email address to receive a verification code:**")
+                current_email_input = st.text_input("Email Address", placeholder="your@email.com", value=st.session_state.get('verification_email', session.email or ""), key="manual_email_input")
+                submit_email = st.form_submit_button("Send Verification Code", use_container_width=True)
+                
+                if submit_email:
+                    if current_email_input:
+                        result = session_manager.handle_guest_email_verification(session, current_email_input)
+                        if result['success']:
+                            st.success(result['message'])
+                            st.session_state.verification_email = current_email_input
+                            st.session_state.verification_stage = "code_entry"
+                            st.rerun()
+                        else:
+                            st.error(result['message'])
+                            if "unusual activity" in result['message'].lower(): st.stop()
+                    else:
+                        st.error("Please enter an email address to receive the code.")
+            return True # BLOCK CHAT INPUT
+        
+        elif current_stage == 'code_entry':
+            verification_email = st.session_state.get('verification_email', session.email)
+            st.success(f"📧 A verification code has been sent to **{session_manager._mask_email(verification_email)}**.")
+            st.info("Please check your email, including spam/junk folders. The code is valid for 1 minute.")
+            
+            with st.form("code_verification_form", clear_on_submit=False):
+                code = st.text_input("Enter Verification Code", placeholder="e.g., 123456", max_chars=6, key="verification_code_input")
+                col_code1, col_code2 = st.columns(2)
+                with col_code1:
+                    submit_code = st.form_submit_button("Verify Code", use_container_width=True)
+                with col_code2:
+                    resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
+                
+                if resend_code:
+                    if verification_email:
+                        with st.spinner("Resending code..."):
+                            verification_sent = session_manager.email_verification.send_verification_code(verification_email)
+                            if verification_sent:
+                                st.success("Verification code resent successfully!")
+                                st.session_state.verification_stage = "code_entry"
+                            else:
+                                st.error("Failed to resend code. Please try again later.")
+                    else:
+                        st.error("Error: No email address found to resend the code. Please go back and enter your email.")
+                        st.session_state.verification_stage = "email_entry"
                     st.rerun()
 
-        # Scenario B: Guest limit hit (forcing email entry)
-        elif session_manager.question_limits.is_within_limits(session).get('reason') == 'guest_limit':
-            st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
-            st.session_state.verification_stage = "email_entry"
-            st.rerun() # Rerun to render the email_entry form immediately
+                if submit_code:
+                    if code:
+                        with st.spinner("Verifying code..."):
+                            result = session_manager.verify_email_code(session, code)
+                        if result['success']:
+                            st.success(result['message'])
+                            st.balloons()
+                            for key in ['verification_email', 'verification_stage', 'guest_continue_active']: # Clear new flag
+                                if key in st.session_state: del st.session_state[key]
+                            st.rerun()
+                        else:
+                            st.error(result['message'])
+                    else:
+                        st.error("Please enter the verification code you received.")
+            return True # BLOCK CHAT INPUT
         
-        # Scenario C: User previously declined recognized email and still has guest questions left
-        elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
-            st.session_state.verification_stage = "declined_recognized_email_prompt_only"
-            st.rerun() # Rerun to render the new dialog for this specific case
+    # --- Non-blocking prompt for guests who declined recognized email and still have questions ---
+    elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value] and \
+         not st.session_state.get('guest_continue_active'): # Only show if guest_continue_active is not True
         
-    # Render subsequent stages if state is advanced
-    # NEW State: User declined recognized email and has guest questions remaining
-    if st.session_state.verification_stage == 'declined_recognized_email_prompt_only':
+        st.error("📧 **Action Suggested**") # Changed to Action Suggested
+        st.session_state.verification_stage = "declined_recognized_email_prompt_only"
+        
         remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
         st.info(f"You chose not to verify the recognized email. You can still use your remaining **{remaining_questions} guest questions**.")
         st.info("To ask more questions after this, or to save chat history, please verify your email.")
@@ -4129,99 +4223,13 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                 st.rerun()
         with col_opts2:
             if st.button("Continue as Guest for Now", use_container_width=True, key="continue_guest_btn"):
-                # Simply dismiss the dialog for now. Chat will be enabled below.
-                # The prompt will reappear when guest limit is actually hit, or on next session.
                 del st.session_state.verification_stage
-                st.success("You can now continue as a Guest. The email prompt will reappear later.")
-                time.sleep(1) # Give user a moment to read success message
+                st.session_state.guest_continue_active = True
+                st.success("You can now continue as a Guest. The email prompt will reappear when your guest questions run out.")
                 st.rerun()
+        return False # DO NOT BLOCK CHAT INPUT
 
-    if st.session_state.verification_stage == 'send_code_recognized':
-        email_to_verify = st.session_state.get('verification_email')
-        if email_to_verify:
-            with st.spinner(f"Sending verification code to {session_manager._mask_email(email_to_verify)}..."):
-                result = session_manager.handle_guest_email_verification(session, email_to_verify)
-                if result['success']:
-                    st.success(result['message'])
-                    st.session_state.verification_stage = "code_entry"
-                else:
-                    st.error(result['message'])
-                    # Check if this was an evasion detection (which blocks flow)
-                    if "unusual activity" in result['message'].lower():
-                        st.stop() # Stop further reruns, user is hard-blocked
-                    st.session_state.verification_stage = "email_entry" # Fallback to manual entry if send fails
-            st.rerun()
-        else:
-            st.error("Error: No recognized email found to send the code. Please enter your email manually.")
-            st.session_state.verification_stage = "email_entry"
-            st.rerun()
-
-    if st.session_state.verification_stage == 'email_entry':
-        with st.form("email_verification_form", clear_on_submit=False):
-            st.markdown("**Please enter your email address to receive a verification code:**")
-            current_email_input = st.text_input("Email Address", placeholder="your@email.com", value=st.session_state.get('verification_email', session.email or ""), key="manual_email_input")
-            submit_email = st.form_submit_button("Send Verification Code", use_container_width=True)
-            
-            if submit_email:
-                if current_email_input:
-                    result = session_manager.handle_guest_email_verification(session, current_email_input)
-                    if result['success']:
-                        st.success(result['message'])
-                        st.session_state.verification_email = current_email_input
-                        st.session_state.verification_stage = "code_entry"
-                        st.rerun()
-                    else:
-                        st.error(result['message'])
-                        if "unusual activity" in result['message'].lower():
-                            st.stop() # Hard block due to evasion
-                else:
-                    st.error("Please enter an email address to receive the code.")
-    
-    if st.session_state.verification_stage == 'code_entry':
-        verification_email = st.session_state.get('verification_email', session.email)
-        
-        st.success(f"📧 A verification code has been sent to **{session_manager._mask_email(verification_email)}**.")
-        st.info("Please check your email, including spam/junk folders. The code is valid for 1 minute.")
-        
-        with st.form("code_verification_form", clear_on_submit=False):
-            code = st.text_input("Enter Verification Code", placeholder="e.g., 123456", max_chars=6, key="verification_code_input")
-            
-            col_code1, col_code2 = st.columns(2)
-            with col_code1:
-                submit_code = st.form_submit_button("Verify Code", use_container_width=True)
-            with col_code2:
-                resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
-            
-            if resend_code:
-                if verification_email:
-                    with st.spinner("Resending code..."):
-                        verification_sent = session_manager.email_verification.send_verification_code(verification_email)
-                        if verification_sent:
-                            st.success("Verification code resent successfully!")
-                            st.session_state.verification_stage = "code_entry"
-                        else:
-                            st.error("Failed to resend code. Please try again later.")
-                else:
-                    st.error("Error: No email address found to resend the code. Please go back and enter your email.")
-                    st.session_state.verification_stage = "email_entry"
-                st.rerun()
-
-            if submit_code:
-                if code:
-                    with st.spinner("Verifying code..."):
-                        result = session_manager.verify_email_code(session, code)
-                    if result['success']:
-                        st.success(result['message'])
-                        st.balloons()
-                        for key in ['verification_email', 'verification_stage']:
-                            if key in st.session_state:
-                                del st.session_state[key]
-                        time.sleep(2)
-                        st.rerun()
-                    else:
-                        st.error(result['message'])
-                else:
-                    st.error("Please enter the verification code you received.")
+    return False # Default: no dialog displayed, allow chat input
 
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications."""
@@ -4260,50 +4268,18 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         except Exception as e:
             logger.error(f"Browser close detection failed: {e}")
 
-    # User limits check with enhanced messaging
-    limit_check = session_manager.question_limits.is_within_limits(session)
-    
-    # First, handle hard bans (non-email-verification related bans)
-    if not limit_check['allowed']:
-        # If it's a hard ban (not 'guest_limit'), just return, message rendered by is_within_limits
-        if limit_check.get('reason') != 'guest_limit':
-            return # Hard ban, just exit
-    
-    # Determine if the email verification dialog should be displayed AND block chat
-    show_email_dialog_and_block_chat = False
-    
-    if session.reverification_pending: # Recognized higher privilege account needs re-verification
-        show_email_dialog_and_block_chat = True
-    elif limit_check.get('reason') == 'guest_limit': # Guest limit hit
-        show_email_dialog_and_block_chat = True
-    # The following condition means user explicitly declined a recognized email AND has NOT yet hit their guest limit (e.g., 0/4 to 3/4 questions)
-    # We show the dialog, but don't block the chat input.
-    # The dialog in render_email_verification_dialog will handle not pushing to email_entry immediately for this case.
-    elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
-        show_email_dialog_and_block_chat = True
-
-    if show_email_dialog_and_block_chat:
-        # If the user is in the 'declined_recognized_email_at' state and *hasn't* hit guest limit yet,
-        # we don't want to block the chat input, but still want to show the prompt.
-        if session.declined_recognized_email_at and \
-           session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
-            
-            render_email_verification_dialog(session_manager, session)
-            # DO NOT RETURN HERE, allow the chat input to render below the dialog
-        else:
-            # For reverification_pending or guest_limit hit, BLOCK chat input
-            render_email_verification_dialog(session_manager, session)
-            return # BLOCK FURTHER CHAT INTERFACE RENDERING AND PROMPT PROCESSING
-
+    # Determine if chat input should be blocked based on email prompt state
+    block_chat_input = display_email_prompt_if_needed(session_manager, session)
 
     # ENHANCED: Show tier warnings for registered users (only if not blocked by dialog/ban)
+    # This notification can appear below the email prompt if the prompt is non-blocking.
     if (session.user_type.value == UserType.REGISTERED_USER.value and 
-        limit_check.get('allowed') and 
-        limit_check.get('tier')):
+        session_manager.question_limits.is_within_limits(session).get('allowed') and 
+        session_manager.question_limits.is_within_limits(session).get('tier')):
         
+        limit_check = session_manager.question_limits.is_within_limits(session)
         tier = limit_check.get('tier')
         remaining = limit_check.get('remaining', 0)
-        warning = limit_check.get('warning')
         
         if tier == 2 and remaining <= 3:
             st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until 24-hour reset!")
@@ -4341,9 +4317,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.markdown("---") # Visual separator
 
     # Chat input
-    # This input is only enabled if the return statement above was NOT hit (i.e., not hard-blocked)
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=session.ban_status.value != BanStatus.NONE.value)
+                            disabled=block_chat_input or session.ban_status.value != BanStatus.NONE.value)
     
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
@@ -4358,7 +4333,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     
                     if response.get('requires_email'):
                         st.error("📧 Please verify your email to continue.")
-                        st.session_state.verification_stage = 'email_entry' # Ensure email entry dialog appears
+                        # This should be handled by display_email_prompt_if_needed on next rerun
+                        # setting st.session_state.verification_stage correctly.
+                        st.session_state.verification_stage = 'email_entry' 
                         st.rerun()
                     elif response.get('banned'):
                         st.error(response.get("content", 'Access restricted.'))
@@ -4505,7 +4482,7 @@ def ensure_initialization_fixed():
             init_progress.progress(1.0)
             status_text.text("✅ Initialization complete!")
             
-            time.sleep(0.5)
+            # Removed time.sleep(0.5)
             progress_placeholder.empty()
             
             st.session_state.initialized = True
