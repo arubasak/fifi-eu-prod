@@ -2247,7 +2247,7 @@ class SessionManager:
             
             # Clean up error history
             if hasattr(st.session_state, 'error_handler') and hasattr(st.session_state.error_handler, 'error_history') and len(st.session_state.error_handler.error_history) > 100:
-                st.session_state.error_handler.error_history = st.session_state.error_history[-50:]
+                st.session_state.error_handler.error_history = st.session_state.error_handler.error_history[-50:]
                 logger.info("Cleaned up error history")
             
             self._last_cleanup = now
@@ -4101,10 +4101,10 @@ def render_email_verification_dialog(session_manager: 'SessionManager', session:
                     st.rerun()
         # Scenario B: Guest limit hit OR user previously declined recognized email (now prompting for ANY email)
         else: 
-            # Check if user previously declined a recognized email and landed here.
-            # OR if no history and simply hit guest limit.
+            # This handles cases where user hit guest limit, OR user previously clicked "No" to recognized email.
+            # In both cases, we push to email_entry directly to get a new email.
             if session.declined_recognized_email_at:
-                st.info(f"You chose to use a different email. You can ask {session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count} more guest questions. To continue beyond this, please verify your email.")
+                st.info(f"You chose to use a different email. You have {session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count} more guest questions. To continue beyond this, please verify your email.")
             else: # This is the case for a new guest hitting 4 questions for the first time
                 st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
             
@@ -4252,12 +4252,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         show_email_dialog_and_block_chat = True
     elif limit_check.get('reason') == 'guest_limit': # Guest limit hit
         show_email_dialog_and_block_chat = True
+    # The following condition means user explicitly declined a recognized email AND has NOT yet hit their guest limit (e.g., 0/4 to 3/4 questions)
+    # We show the dialog, but don't block the chat input.
+    # The dialog in render_email_verification_dialog will handle not pushing to email_entry immediately for this case.
     elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
-        # User explicitly declined a recognized email, AND is still within guest questions,
-        # but they must verify to continue after guest questions are exhausted.
-        # This means we should show the dialog to prompt them for a new email,
-        # but they are NOT blocked from asking questions *yet*.
-        # The prompt is to acknowledge that they need to verify to continue beyond the guest limit.
         show_email_dialog_and_block_chat = True
 
     if show_email_dialog_and_block_chat:
@@ -4266,11 +4264,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         if session.declined_recognized_email_at and \
            session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
             
-            # Show the dialog but allow the chat input to remain active below it
             render_email_verification_dialog(session_manager, session)
-            # DO NOT RETURN HERE, let the rest of the chat interface render
+            # DO NOT RETURN HERE, allow the chat input to render below the dialog
         else:
-            # For reverification_pending or guest_limit hit, block chat input
+            # For reverification_pending or guest_limit hit, BLOCK chat input
             render_email_verification_dialog(session_manager, session)
             return # BLOCK FURTHER CHAT INTERFACE RENDERING AND PROMPT PROCESSING
 
