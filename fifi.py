@@ -3528,7 +3528,7 @@ def render_simplified_browser_close_detection(session_id: str):
             }}
             
             performActualEmergencySave(reason);
-        }} # THIS LINE WAS CHANGED: Previously it was '}' (single brace)
+            }} # THIS LINE WAS CHANGED: Previously it was '}' (single brace)
         
         // Listen for visibility changes to track tab switching
         document.addEventListener('visibilitychange', function() {{
