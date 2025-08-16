@@ -9,7 +9,7 @@ import functools
 import io
 import html
 import jwt
-import threading
+# import threading # REMOVED THIS LINE
 import copy
 import sqlite3
 import hashlib
@@ -268,7 +268,7 @@ class UserSession:
     # Universal Fingerprinting (ALL sessions)
     fingerprint_id: Optional[str] = None
     fingerprint_method: Optional[str] = None
-    visitor_type: str = "new_visitor"
+    visitor_type: str = "new_visitor" # Default value
     recognition_response: Optional[str] = None
     
     # Question Tracking (Activity-Based)
@@ -313,7 +313,7 @@ class UserSession:
 
 class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
-        self.lock = threading.Lock()
+        # self.lock = threading.Lock() # REMOVED THIS LINE
         self.conn = None
         self._last_health_check = None
         self._health_check_interval = timedelta(minutes=5)
@@ -367,83 +367,83 @@ class DatabaseManager:
 
     def _init_complete_database(self):
         """Initialize database schema with all columns upfront"""
-        with self.lock:
-            try:
-                if hasattr(self.conn, 'row_factory'): 
-                    self.conn.row_factory = None
+        # with self.lock: # REMOVED THIS LINE
+        try:
+            if hasattr(self.conn, 'row_factory'): 
+                self.conn.row_factory = None
 
-                self.conn.execute('''
-                    CREATE TABLE IF NOT EXISTS sessions (
-                        session_id TEXT PRIMARY KEY,
-                        user_type TEXT DEFAULT 'guest',
-                        email TEXT,
-                        full_name TEXT,
-                        zoho_contact_id TEXT,
-                        created_at TEXT DEFAULT '',
-                        last_activity TEXT, -- Changed to allow NULL initially
-                        messages TEXT DEFAULT '[]',
-                        active INTEGER DEFAULT 1,
-                        fingerprint_id TEXT,
-                        fingerprint_method TEXT,
-                        visitor_type TEXT DEFAULT 'new_visitor',
-                        daily_question_count INTEGER DEFAULT 0,
-                        total_question_count INTEGER DEFAULT 0,
-                        last_question_time TEXT,
-                        question_limit_reached INTEGER DEFAULT 0,
-                        ban_status TEXT DEFAULT 'none',
-                        ban_start_time TEXT,
-                        ban_end_time TEXT,
-                        ban_reason TEXT,
-                        evasion_count INTEGER DEFAULT 0,
-                        current_penalty_hours INTEGER DEFAULT 0,
-                        escalation_level INTEGER DEFAULT 0,
-                        email_addresses_used TEXT DEFAULT '[]',
-                        email_switches_count INTEGER DEFAULT 0,
-                        browser_privacy_level TEXT,
-                        registration_prompted INTEGER DEFAULT 0,
-                        registration_link_clicked INTEGER DEFAULT 0,
-                        wp_token TEXT,
-                        timeout_saved_to_crm INTEGER DEFAULT 0,
-                        recognition_response TEXT,
-                        display_message_offset INTEGER DEFAULT 0,
-                        -- NEW: Re-verification fields
-                        reverification_pending INTEGER DEFAULT 0,
-                        pending_user_type TEXT,
-                        pending_email TEXT,
-                        pending_full_name TEXT,
-                        pending_zoho_contact_id TEXT,
-                        pending_wp_token TEXT
-                    )
-                ''')
-                
-                # Add new columns if they don't exist (for existing databases)
-                new_columns = [
-                    ("display_message_offset", "INTEGER DEFAULT 0"),
-                    ("reverification_pending", "INTEGER DEFAULT 0"),
-                    ("pending_user_type", "TEXT"),
-                    ("pending_email", "TEXT"),
-                    ("pending_full_name", "TEXT"),
-                    ("pending_zoho_contact_id", "TEXT"),
-                    ("pending_wp_token", "TEXT")
-                ]
-                for col_name, col_type in new_columns:
-                    try:
-                        self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_type}")
-                        logger.debug(f"✅ Added {col_name} column to existing database")
-                    except Exception as alter_error:
-                        logger.debug(f"ALTER TABLE for {col_name} failed (likely already exists): {alter_error}")
-                
-                # Create essential indexes
-                self.conn.execute("CREATE INDEX IF NOT EXISTS idx_session_lookup ON sessions(session_id, active)")
-                self.conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint_id ON sessions(fingerprint_id)")
-                self.conn.execute("CREATE INDEX IF NOT EXISTS idx_email ON sessions(email)")
-                
-                self.conn.commit()
-                logger.info("✅ Database schema ready and indexes created.")
-                
-            except Exception as e:
-                logger.error(f"Database initialization failed: {e}", exc_info=True)
-                raise
+            self.conn.execute('''
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    user_type TEXT DEFAULT 'guest',
+                    email TEXT,
+                    full_name TEXT,
+                    zoho_contact_id TEXT,
+                    created_at TEXT DEFAULT '',
+                    last_activity TEXT, -- Changed to allow NULL initially
+                    messages TEXT DEFAULT '[]',
+                    active INTEGER DEFAULT 1,
+                    fingerprint_id TEXT,
+                    fingerprint_method TEXT,
+                    visitor_type TEXT DEFAULT 'new_visitor',
+                    daily_question_count INTEGER DEFAULT 0,
+                    total_question_count INTEGER DEFAULT 0,
+                    last_question_time TEXT,
+                    question_limit_reached INTEGER DEFAULT 0,
+                    ban_status TEXT DEFAULT 'none',
+                    ban_start_time TEXT,
+                    ban_end_time TEXT,
+                    ban_reason TEXT,
+                    evasion_count INTEGER DEFAULT 0,
+                    current_penalty_hours INTEGER DEFAULT 0,
+                    escalation_level INTEGER DEFAULT 0,
+                    email_addresses_used TEXT DEFAULT '[]',
+                    email_switches_count INTEGER DEFAULT 0,
+                    browser_privacy_level TEXT,
+                    registration_prompted INTEGER DEFAULT 0,
+                    registration_link_clicked INTEGER DEFAULT 0,
+                    wp_token TEXT,
+                    timeout_saved_to_crm INTEGER DEFAULT 0,
+                    recognition_response TEXT,
+                    display_message_offset INTEGER DEFAULT 0,
+                    -- NEW: Re-verification fields
+                    reverification_pending INTEGER DEFAULT 0,
+                    pending_user_type TEXT,
+                    pending_email TEXT,
+                    pending_full_name TEXT,
+                    pending_zoho_contact_id TEXT,
+                    pending_wp_token TEXT
+                )
+            ''')
+            
+            # Add new columns if they don't exist (for existing databases)
+            new_columns = [
+                ("display_message_offset", "INTEGER DEFAULT 0"),
+                ("reverification_pending", "INTEGER DEFAULT 0"),
+                ("pending_user_type", "TEXT"),
+                ("pending_email", "TEXT"),
+                ("pending_full_name", "TEXT"),
+                ("pending_zoho_contact_id", "TEXT"),
+                ("pending_wp_token", "TEXT")
+            ]
+            for col_name, col_type in new_columns:
+                try:
+                    self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_type}")
+                    logger.debug(f"✅ Added {col_name} column to existing database")
+                except Exception as alter_error:
+                    logger.debug(f"ALTER TABLE for {col_name} failed (likely already exists): {alter_error}")
+            
+            # Create essential indexes
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_session_lookup ON sessions(session_id, active)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_fingerprint_id ON sessions(fingerprint_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_email ON sessions(email)")
+            
+            self.conn.commit()
+            logger.info("✅ Database schema ready and indexes created.")
+            
+        except Exception as e:
+            logger.error(f"Database initialization failed: {e}", exc_info=True)
+            raise
 
     def _check_connection_health(self) -> bool:
         """Check if database connection is healthy"""
@@ -503,126 +503,233 @@ class DatabaseManager:
     def save_session(self, session: UserSession):
         """Save session with SQLite Cloud compatibility and connection health check"""
         logger.debug(f"💾 SAVING SESSION TO DB: {session.session_id[:8]} | user_type={session.user_type.value} | email={session.email} | messages={len(session.messages)} | daily_q={session.daily_question_count} | fp_id={session.fingerprint_id[:8]} | active={session.active}")
-        with self.lock:
-            # Check and ensure connection health before any DB operation
-            current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
-            if current_config:
-                self._ensure_connection_healthy(current_config)
+        # with self.lock: # REMOVED THIS LINE
+        # Check and ensure connection health before any DB operation
+        current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
+        if current_config:
+            self._ensure_connection_healthy(current_config)
 
-            if self.db_type == "memory":
-                self.local_sessions[session.session_id] = copy.deepcopy(session)
-                logger.debug(f"Saved session {session.session_id[:8]} to in-memory.")
-                return
+        if self.db_type == "memory":
+            self.local_sessions[session.session_id] = copy.deepcopy(session)
+            logger.debug(f"Saved session {session.session_id[:8]} to in-memory.")
+            return
+        
+        try:
+            # NEVER set row_factory for save operations
+            if hasattr(self.conn, 'row_factory'): 
+                self.conn.row_factory = None
             
+            # Validate messages before saving
+            if not isinstance(session.messages, list):
+                logger.warning(f"Invalid messages field for session {session.session_id[:8]}, resetting to empty list")
+                session.messages = []
+            
+            # Ensure JSON serializable data
             try:
-                # NEVER set row_factory for save operations
-                if hasattr(self.conn, 'row_factory'): 
-                    self.conn.row_factory = None
-                
-                # Validate messages before saving
-                if not isinstance(session.messages, list):
-                    logger.warning(f"Invalid messages field for session {session.session_id[:8]}, resetting to empty list")
-                    session.messages = []
-                
-                # Ensure JSON serializable data
-                try:
-                    json_messages = json.dumps(session.messages)
-                    json_emails_used = json.dumps(session.email_addresses_used)
-                except (TypeError, ValueError) as e:
-                    logger.error(f"Session data not JSON serializable for {session.session_id[:8]}: {e}. Resetting data to empty lists.")
-                    json_messages = "[]"
-                    json_emails_used = "[]"
-                    session.messages = []
-                    session.email_addresses_used = []
-                
-                # Handle None for last_activity before saving
-                last_activity_iso = session.last_activity.isoformat() if session.last_activity else None
+                json_messages = json.dumps(session.messages)
+                json_emails_used = json.dumps(session.email_addresses_used)
+            except (TypeError, ValueError) as e:
+                logger.error(f"Session data not JSON serializable for {session.session_id[:8]}: {e}. Resetting data to empty lists.")
+                json_messages = "[]"
+                json_emails_used = "[]"
+                session.messages = []
+                session.email_addresses_used = []
+            
+            # Handle None for last_activity before saving
+            last_activity_iso = session.last_activity.isoformat() if session.last_activity else None
 
-                self.conn.execute(
-                    '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                    (session.session_id, session.user_type.value, session.email, session.full_name,
-                     session.zoho_contact_id, session.created_at.isoformat(),
-                     last_activity_iso, json_messages, int(session.active),
-                     session.wp_token, int(session.timeout_saved_to_crm), session.fingerprint_id,
-                     session.fingerprint_method, session.visitor_type, session.daily_question_count,
-                     session.total_question_count, 
-                     session.last_question_time.isoformat() if session.last_question_time else None,
-                     int(session.question_limit_reached), session.ban_status.value,
-                     session.ban_start_time.isoformat() if session.ban_start_time else None,
-                     session.ban_end_time.isoformat() if session.ban_end_time else None,
-                     session.ban_reason, session.evasion_count, session.current_penalty_hours,
-                     session.escalation_level, json_emails_used,
-                     session.email_switches_count, session.browser_privacy_level, int(session.registration_prompted),
-                     int(session.registration_link_clicked), session.recognition_response, session.display_message_offset,
-                     int(session.reverification_pending), 
-                     session.pending_user_type.value if session.pending_user_type else None,
-                     session.pending_email, session.pending_full_name,
-                     session.pending_zoho_contact_id, session.pending_wp_token))
-                self.conn.commit()
-                
-                logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}")
-                
-            except Exception as e:
-                logger.error(f"Failed to save session {session.session_id[:8]}: {e}", exc_info=True)
-                # Try to fallback to in-memory on save failure
-                if not hasattr(self, 'local_sessions'):
-                    self.local_sessions = {}
-                self.local_sessions[session.session_id] = copy.deepcopy(session)
-                logger.info(f"Fallback: Saved session {session.session_id[:8]} to in-memory storage")
-                raise
+            self.conn.execute(
+                '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (session.session_id, session.user_type.value, session.email, session.full_name,
+                 session.zoho_contact_id, session.created_at.isoformat(),
+                 last_activity_iso, json_messages, int(session.active),
+                 session.wp_token, int(session.timeout_saved_to_crm), session.fingerprint_id,
+                 session.fingerprint_method, session.visitor_type, # This is the corrected line for fingerprint_method
+                 session.daily_question_count,
+                 session.total_question_count, 
+                 session.last_question_time.isoformat() if session.last_question_time else None,
+                 int(session.question_limit_reached), session.ban_status.value,
+                 session.ban_start_time.isoformat() if session.ban_start_time else None,
+                 session.ban_end_time.isoformat() if session.ban_end_time else None,
+                 session.ban_reason, session.evasion_count, session.current_penalty_hours,
+                 session.escalation_level, json_emails_used,
+                 session.email_switches_count, session.browser_privacy_level, int(session.registration_prompted),
+                 int(session.registration_link_clicked), session.recognition_response, session.display_message_offset,
+                 int(session.reverification_pending), 
+                 session.pending_user_type.value if session.pending_user_type else None,
+                 session.pending_email, session.pending_full_name,
+                 session.pending_zoho_contact_id, session.pending_wp_token))
+            self.conn.commit()
+            
+            logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save session {session.session_id[:8]}: {e}", exc_info=True)
+            # Try to fallback to in-memory on save failure
+            if not hasattr(self, 'local_sessions'):
+                self.local_sessions = {}
+            self.local_sessions[session.session_id] = copy.deepcopy(session)
+            logger.info(f"Fallback: Saved session {session.session_id[:8]} to in-memory storage")
+            raise
 
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
         """Load session with complete SQLite Cloud compatibility and connection health check"""
-        with self.lock:
-            # Check and ensure connection health before any DB operation
-            current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
-            if current_config:
-                self._ensure_connection_healthy(current_config)
+        # with self.lock: # REMOVED THIS LINE
+        # Check and ensure connection health before any DB operation
+        current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
+        if current_config:
+            self._ensure_connection_healthy(current_config)
 
-            if self.db_type == "memory":
-                session = self.local_sessions.get(session_id)
-                if session and isinstance(session.user_type, str):
-                    try:
-                        session.user_type = UserType(session.user_type)
-                    except ValueError:
-                        session.user_type = UserType.GUEST
+        if self.db_type == "memory":
+            session = self.local_sessions.get(session_id)
+            if session and isinstance(session.user_type, str):
+                try:
+                    session.user_type = UserType(session.user_type)
+                except ValueError:
+                    session.user_type = UserType.GUEST
+            
+            # Ensure backward compatibility for in-memory sessions too
+            if session and not hasattr(session, 'display_message_offset'):
+                session.display_message_offset = 0
+            if session and not hasattr(session, 'reverification_pending'):
+                session.reverification_pending = False
+                session.pending_user_type = None
+                session.pending_email = None
+                session.pending_full_name = None
+                session.pending_zoho_contact_id = None
+                session.pending_wp_token = None
+                logger.debug(f"Added missing re-verification fields to in-memory session {session_id[:8]}")
+            
+            return copy.deepcopy(session)
+        
+        try:
+            # NEVER set row_factory for cloud connections - always use raw tuples
+            if hasattr(self.conn, 'row_factory'):
+                self.conn.row_factory = None
+            
+            # Update SELECT statement to include new fields
+            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+            row = cursor.fetchone()
+            
+            if not row: 
+                logger.debug(f"No active session found for ID {session_id[:8]}.")
+                return None
+            
+            # Handle as tuple (SQLite Cloud returns tuples)
+            # Expected 32 columns before adding re-verification fields. Now 38.
+            expected_min_cols = 38
+            if len(row) < expected_min_cols: # Must have at least this many columns for full functionality
+                logger.error(f"Row has insufficient columns: {len(row)} (expected at least {expected_min_cols}). Data corruption suspected or old schema.")
+                # Attempt to load with missing columns, defaulting new ones
+                pass 
                 
-                # Ensure backward compatibility for in-memory sessions too
-                if session and not hasattr(session, 'display_message_offset'):
+            try:
+                # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
+                loaded_display_message_offset = row[31] if len(row) > 31 else 0
+                
+                # NEW: Safely get re-verification fields, defaulting if columns are missing
+                loaded_reverification_pending = bool(row[32]) if len(row) > 32 else False
+                loaded_pending_user_type = UserType(row[33]) if len(row) > 33 and row[33] else None
+                loaded_pending_email = row[34] if len(row) > 34 else None
+                loaded_pending_full_name = row[35] if len(row) > 35 else None
+                loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
+                loaded_pending_wp_token = row[37] if len(row) > 37 else None
+
+                # Convert last_activity from ISO format string or None
+                loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
+
+                user_session = UserSession(
+                    session_id=row[0], 
+                    user_type=UserType(row[1]) if row[1] else UserType.GUEST,
+                    email=row[2], 
+                    full_name=row[3],
+                    zoho_contact_id=row[4],
+                    created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
+                    last_activity=loaded_last_activity, # Use the safely loaded value
+                    messages=safe_json_loads(row[7], default_value=[]),
+                    active=bool(row[8]), 
+                    wp_token=row[9],
+                    timeout_saved_to_crm=bool(row[10]),
+                    fingerprint_id=row[11],
+                    fingerprint_method=row[12],
+                    visitor_type=row[13] or 'new_visitor',
+                    daily_question_count=row[14] or 0,
+                    total_question_count=row[15] or 0,
+                    last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
+                    question_limit_reached=bool(row[17]),
+                    ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
+                    ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
+                    ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
+                    ban_reason=row[21],
+                    evasion_count=row[22] or 0,
+                    current_penalty_hours=row[23] or 0,
+                    escalation_level=row[24] or 0,
+                    email_addresses_used=safe_json_loads(row[25], default_value=[]),
+                    email_switches_count=row[26] or 0,
+                    browser_privacy_level=row[27],
+                    registration_prompted=bool(row[28]),
+                    registration_link_clicked=bool(row[29]),
+                    recognition_response=row[30],
+                    display_message_offset=loaded_display_message_offset, # Use the safely loaded value
+                    reverification_pending=loaded_reverification_pending, # NEW
+                    pending_user_type=loaded_pending_user_type, # NEW
+                    pending_email=loaded_pending_email, # NEW
+                    pending_full_name=loaded_pending_full_name, # NEW
+                    pending_zoho_contact_id=loaded_pending_zoho_contact_id, # NEW
+                    pending_wp_token=loaded_pending_wp_token # NEW
+                )
+                
+                logger.debug(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
+                return user_session
+                
+            except Exception as e:
+                logger.error(f"Failed to create UserSession object from row for session {session_id[:8]}: {e}", exc_info=True)
+                logger.error(f"Problematic row data (truncated): {str(row)[:200]}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
+            return None
+
+    @handle_api_errors("Database", "Find by Fingerprint")
+    def find_sessions_by_fingerprint(self, fingerprint_id: str) -> List[UserSession]:
+        """Find all sessions with the same fingerprint_id. Includes inactive sessions."""
+        logger.debug(f"🔍 SEARCHING FOR FINGERPRINT: {fingerprint_id[:8]}...")
+        # with self.lock: # REMOVED THIS LINE
+        current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
+        if current_config:
+            self._ensure_connection_healthy(current_config)
+
+        if self.db_type == "memory":
+            sessions = [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fingerprint_id]
+            # Ensure backward compatibility for in-memory sessions
+            for session in sessions:
+                if not hasattr(session, 'display_message_offset'):
                     session.display_message_offset = 0
-                if session and not hasattr(session, 'reverification_pending'):
+                if not hasattr(session, 'reverification_pending'):
                     session.reverification_pending = False
                     session.pending_user_type = None
                     session.pending_email = None
                     session.pending_full_name = None
                     session.pending_zoho_contact_id = None
                     session.pending_wp_token = None
-                    logger.debug(f"Added missing re-verification fields to in-memory session {session_id[:8]}")
-                
-                return copy.deepcopy(session)
-            
-            try:
-                # NEVER set row_factory for cloud connections - always use raw tuples
-                if hasattr(self.conn, 'row_factory'):
-                    self.conn.row_factory = None
-                
-                # Update SELECT statement to include new fields
-                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
-                row = cursor.fetchone()
-                
-                if not row: 
-                    logger.debug(f"No active session found for ID {session_id[:8]}.")
-                    return None
-                
-                # Handle as tuple (SQLite Cloud returns tuples)
-                # Expected 32 columns before adding re-verification fields. Now 38.
+            logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
+            return sessions
+        
+        try:
+            if hasattr(self.conn, 'row_factory'):
+                self.conn.row_factory = None
+
+            # Query ALL sessions with the fingerprint_id, regardless of active status
+            # IMPORTANT: This query correctly does NOT include 'AND active = 1'
+            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
+            sessions = []
+            for row in cursor.fetchall():
                 expected_min_cols = 38
                 if len(row) < expected_min_cols: # Must have at least this many columns for full functionality
-                    logger.error(f"Row has insufficient columns: {len(row)} (expected at least {expected_min_cols}). Data corruption suspected or old schema.")
-                    # Attempt to load with missing columns, defaulting new ones
-                    pass 
-                    
+                    logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected at least {expected_min_cols}). Skipping row.")
+                    continue
                 try:
                     # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
                     loaded_display_message_offset = row[31] if len(row) > 31 else 0
@@ -635,10 +742,9 @@ class DatabaseManager:
                     loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
                     loaded_pending_wp_token = row[37] if len(row) > 37 else None
 
-                    # Convert last_activity from ISO format string or None
                     loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
 
-                    user_session = UserSession(
+                    s = UserSession(
                         session_id=row[0], 
                         user_type=UserType(row[1]) if row[1] else UserType.GUEST,
                         email=row[2], 
@@ -652,7 +758,7 @@ class DatabaseManager:
                         timeout_saved_to_crm=bool(row[10]),
                         fingerprint_id=row[11],
                         fingerprint_method=row[12],
-                        visitor_type=row[13] or 'new_visitor',
+                        visitor_type=row[13] or 'new_visitor', # This line loads the *old* value from DB
                         daily_question_count=row[14] or 0,
                         total_question_count=row[15] or 0,
                         last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
@@ -678,122 +784,17 @@ class DatabaseManager:
                         pending_zoho_contact_id=loaded_pending_zoho_contact_id, # NEW
                         pending_wp_token=loaded_pending_wp_token # NEW
                     )
-                    
-                    logger.debug(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
-                    return user_session
-                    
+                    sessions.append(s)
                 except Exception as e:
-                    logger.error(f"Failed to create UserSession object from row for session {session_id[:8]}: {e}", exc_info=True)
-                    logger.error(f"Problematic row data (truncated): {str(row)[:200]}")
-                    return None
-                    
-            except Exception as e:
-                logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
-                return None
-
-    @handle_api_errors("Database", "Find by Fingerprint")
-    def find_sessions_by_fingerprint(self, fingerprint_id: str) -> List[UserSession]:
-        """Find all sessions with the same fingerprint_id. Includes inactive sessions."""
-        logger.debug(f"🔍 SEARCHING FOR FINGERPRINT: {fingerprint_id[:8]}...")
-        with self.lock:
-            current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
-            if current_config:
-                self._ensure_connection_healthy(current_config)
-
-            if self.db_type == "memory":
-                sessions = [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fingerprint_id]
-                # Ensure backward compatibility for in-memory sessions
-                for session in sessions:
-                    if not hasattr(session, 'display_message_offset'):
-                        session.display_message_offset = 0
-                    if not hasattr(session, 'reverification_pending'):
-                        session.reverification_pending = False
-                        session.pending_user_type = None
-                        session.pending_email = None
-                        session.pending_full_name = None
-                        session.pending_zoho_contact_id = None
-                        session.pending_wp_token = None
-                logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
-                return sessions
-            
-            try:
-                if hasattr(self.conn, 'row_factory'):
-                    self.conn.row_factory = None
-
-                # Query ALL sessions with the fingerprint_id, regardless of active status
-                # IMPORTANT: This query correctly does NOT include 'AND active = 1'
-                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
-                sessions = []
-                for row in cursor.fetchall():
-                    expected_min_cols = 38
-                    if len(row) < expected_min_cols: # Must have at least this many columns for full functionality
-                        logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected at least {expected_min_cols}). Skipping row.")
-                        continue
-                    try:
-                        # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
-                        loaded_display_message_offset = row[31] if len(row) > 31 else 0
-                        
-                        # NEW: Safely get re-verification fields, defaulting if columns are missing
-                        loaded_reverification_pending = bool(row[32]) if len(row) > 32 else False
-                        loaded_pending_user_type = UserType(row[33]) if len(row) > 33 and row[33] else None
-                        loaded_pending_email = row[34] if len(row) > 34 else None
-                        loaded_pending_full_name = row[35] if len(row) > 35 else None
-                        loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
-                        loaded_pending_wp_token = row[37] if len(row) > 37 else None
-
-                        loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
-
-                        s = UserSession(
-                            session_id=row[0], 
-                            user_type=UserType(row[1]) if row[1] else UserType.GUEST,
-                            email=row[2], 
-                            full_name=row[3],
-                            zoho_contact_id=row[4],
-                            created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
-                            last_activity=loaded_last_activity, # Use the safely loaded value
-                            messages=safe_json_loads(row[7], default_value=[]),
-                            active=bool(row[8]), 
-                            wp_token=row[9],
-                            timeout_saved_to_crm=bool(row[10]),
-                            fingerprint_id=row[11],
-                            fingerprint_method=row[12],
-                            visitor_type=row[13] or 'new_visitor',
-                            daily_question_count=row[14] or 0,
-                            total_question_count=row[15] or 0,
-                            last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
-                            question_limit_reached=bool(row[17]),
-                            ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
-                            ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
-                            ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
-                            ban_reason=row[21],
-                            evasion_count=row[22] or 0,
-                            current_penalty_hours=row[23] or 0,
-                            escalation_level=row[24] or 0,
-                            email_addresses_used=safe_json_loads(row[25], default_value=[]),
-                            email_switches_count=row[26] or 0,
-                            browser_privacy_level=row[27],
-                            registration_prompted=bool(row[28]),
-                            registration_link_clicked=bool(row[29]),
-                            recognition_response=row[30],
-                            display_message_offset=loaded_display_message_offset, # Use the safely loaded value
-                            reverification_pending=loaded_reverification_pending, # NEW
-                            pending_user_type=loaded_pending_user_type, # NEW
-                            pending_email=loaded_pending_email, # NEW
-                            pending_full_name=loaded_pending_full_name, # NEW
-                            pending_zoho_contact_id=loaded_pending_zoho_contact_id, # NEW
-                            pending_wp_token=loaded_pending_wp_token # NEW
-                        )
-                        sessions.append(s)
-                    except Exception as e:
-                        logger.error(f"Error converting row to UserSession in find_sessions_by_fingerprint: {e}", exc_info=True)
-                        continue
-                logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (DB): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
-                for s in sessions:
-                    logger.debug(f"  - {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}, active={s.active}, rev_pending={s.reverification_pending}")
-                return sessions
-            except Exception as e:
-                logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
-                return []
+                    logger.error(f"Error converting row to UserSession in find_sessions_by_fingerprint: {e}", exc_info=True)
+                    continue
+            logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (DB): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
+            for s in sessions:
+                logger.debug(f"  - {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}, active={s.active}, rev_pending={s.reverification_pending}")
+            return sessions
+        except Exception as e:
+            logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
+            return []
 
     # =============================================================================
     # FEATURE MANAGERS (nested within DatabaseManager as they access self.db)
@@ -867,7 +868,7 @@ class DatabaseManager:
             return {
                 'fingerprint_id': fingerprint_id,
                 'fingerprint_method': fingerprint_method,
-                'visitor_type': visitor_type,
+                'visitor_type': visitor_type, # <-- This is where process_fingerprint_data sets visitor_type
                 'browser_privacy_level': privacy_level,
                 'working_methods': fingerprint_data.get('working_methods', [])
             }
@@ -1552,7 +1553,7 @@ class RateLimiter:
     """Simple in-memory rate limiter to prevent abuse."""
     def __init__(self, max_requests: int = 2, window_seconds: int = 60): # UPDATED: 2 questions per 60 seconds
         self.requests = defaultdict(list)
-        self._lock = threading.Lock()
+        self._lock = threading.Lock() # This is a separate RateLimiter specific lock, not the DB one
         self.max_requests = max_requests
         self.window_seconds = window_seconds
 
@@ -2353,6 +2354,13 @@ class SessionManager:
             # Filter out the current session from historical list, if it was already saved
             historical_fp_sessions = [s for s in historical_fp_sessions if s.session_id != session.session_id]
 
+            # Determine visitor_type based on persistent history # <--- ADDED THIS BLOCK
+            if historical_fp_sessions:
+                session.visitor_type = "returning_visitor"
+            else:
+                session.visitor_type = "new_visitor" # Explicitly set for clarity, though it's the default
+            # END ADDED BLOCK
+            
             # Combine current session with historical ones to determine the merged state
             all_sessions_for_merge = [session] + historical_fp_sessions
 
@@ -2572,7 +2580,7 @@ class SessionManager:
             
             # Immediately attempt fingerprint inheritance for the *newly created* session
             # This is critical if a user starts a new session but has an existing fingerprint
-            self._attempt_fingerprint_inheritance(new_session)
+            self._attempt_fingerprint_inheritance(new_session) # <--- This will now correctly set visitor_type
             st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
             
             self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
@@ -2604,8 +2612,7 @@ class SessionManager:
             # Store the *new, real* fingerprint data
             session.fingerprint_id = fingerprint_data.get('fingerprint_id')
             session.fingerprint_method = fingerprint_data.get('fingerprint_method')
-            # visitor_type should be set by inheritance logic, not here
-            # session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor')
+            # session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor') # <-- This line should remain commented out as visitor_type is set by inheritance
             session.browser_privacy_level = fingerprint_data.get('browser_privacy_level', 'standard')
             session.recognition_response = None # Clear any previous recognition response
             
@@ -2618,7 +2625,7 @@ class SessionManager:
             # Now that the current session has its *real* fingerprint from JS,
             # run the inheritance logic to see if this fingerprint has a history.
             # This will update user_type, question counts, etc., based on the definitive fingerprint.
-            self._attempt_fingerprint_inheritance(session)
+            self._attempt_fingerprint_inheritance(session) # <--- This call will now also update visitor_type
             
             # Save session with new fingerprint data and inherited properties
             try:
@@ -2810,6 +2817,7 @@ class SessionManager:
                     logger.info(f"   - User Type: {session.user_type.value}")
                     logger.info(f"   - Daily Questions: {session.daily_question_count} (PRESERVED from device history)")
                     logger.info(f"   - Total Questions: {session.total_question_count}")
+                    logger.info(f"   - Has Messages: {len(session.messages)}")
                     logger.info(f"   - CRM Eligible: {self._is_crm_save_eligible(session, 'email_verification_success')}")
 
                 except Exception as e:
