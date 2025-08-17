@@ -1010,8 +1010,10 @@ class DatabaseManager:
                 
 
                 # Only check for guest users who have hit their limit
+                # IMPORTANT: This now checks if current question count *plus one* exceeds the guest limit
+                # Because evasion is typically triggered on the *next* attempt after hitting the limit.
                 if (session.user_type != UserType.GUEST or 
-                    session.daily_question_count < self.question_limits[UserType.GUEST.value] or
+                    session.daily_question_count < self.question_limits[UserType.GUEST.value] or # This condition is critical
                     not session.fingerprint_id):
                     return False
                 
@@ -1086,7 +1088,7 @@ class DatabaseManager:
             # ENHANCED: Tier-based logic for registered users
             if session.user_type.value == UserType.REGISTERED_USER.value:
                 if session.daily_question_count >= user_limit:  # 20 questions
-                    self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user daily limit reached")
+                    # Ban is applied *after* 20th question's response, so this check will catch the 21st attempt
                     return {
                         'allowed': False,
                         'reason': 'daily_limit',
@@ -1113,21 +1115,23 @@ class DatabaseManager:
             
             # Original logic for other user types
             if session.user_type.value == UserType.GUEST.value:
-                if session.daily_question_count >= user_limit:
+                # The 'guest_limit_hit' reason will be used to trigger the email prompt.
+                # This needs to return false when current_question_count >= 4
+                if session.daily_question_count >= user_limit: # user_limit is 4 for GUEST
                     return {
                         'allowed': False,
                         'reason': 'guest_limit',
-                        # IMPORTANT: Removed original message here. display_email_prompt_if_needed will handle it.
                         'message': 'GUEST_LIMIT_HIT' 
                     }
             
             elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
+                # The ban for EMAIL_VERIFIED_GUEST is applied AFTER the 10th question.
+                # So this `is_within_limits` will return `allowed: False` for the 11th question attempt.
                 if session.daily_question_count >= user_limit: # user_limit is 10 for EMAIL_VERIFIED_GUEST
-                    self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
                     return {
                         'allowed': False,
                         'reason': 'daily_limit',
-                        'message': self._get_email_verified_limit_message()
+                        'message': self._get_email_verified_limit_message() # This is the specific message
                     }
             
             return {'allowed': True}
@@ -1165,7 +1169,7 @@ class DatabaseManager:
             session.ban_start_time = datetime.now()
             session.ban_end_time = session.ban_start_time + timedelta(hours=ban_hours)
             session.ban_reason = reason
-            session.question_limit_reached = True
+            session.question_limit_reached = True # This flag means the limit has been hit, effectively banning them
             
             logger.info(f"Ban applied to session {session.session_id[:8]}: Type={ban_type.value}, Duration={ban_hours}h, Reason='{reason}'.")
         
@@ -1177,8 +1181,10 @@ class DatabaseManager:
                 return "You've reached the Tier 1 limit (10 questions). Please wait 1 hour before continuing."
             elif session.user_type.value == UserType.REGISTERED_USER.value:
                 return "Daily limit reached. Please retry in 24 hours."
-            else:
+            elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
                 return self._get_email_verified_limit_message()
+            else: # Fallback for guest_limit_hit (this message won't be displayed directly now)
+                return "You've reached your question limit. Please verify your email to continue."
         
         def _get_email_verified_limit_message(self) -> str:
             """Specific message for email-verified guests hitting their daily limit."""
@@ -2491,9 +2497,11 @@ class SessionManager:
             session.email_switches_count = merged_email_switches_count
             
             # Determine privilege inheritance based on re-verification need
+            # IMPORTANT: Current session's user_type is NOT immediately updated here unless it's already the highest or no higher exists.
+            # It will be set to pending, and the actual upgrade happens after successful verification.
             if self._get_privilege_level(source_for_identity_and_base_data.user_type) > self._get_privilege_level(session.user_type):
                 # We found a higher privilege session for this fingerprint.
-                # Do NOT automatically upgrade. Instead, set pending re-verification.
+                # Set pending re-verification. The current session's user_type remains as is for now.
                 session.reverification_pending = True
                 session.pending_user_type = source_for_identity_and_base_data.user_type
                 session.pending_email = source_for_identity_and_base_data.email
@@ -2502,10 +2510,11 @@ class SessionManager:
                 session.pending_wp_token = source_for_identity_and_base_data.wp_token
                 session.browser_privacy_level = source_for_identity_and_base_data.browser_privacy_level
                 
-                # Also ensure declined_recognized_email_at is cleared if a higher privilege is now pending
-                session.declined_recognized_email_at = None
+                # Do NOT clear declined_recognized_email_at here if it was set
+                # It should only be cleared when verification is ACCEPTED or completed.
+                # If they decline recognition, they should be able to continue as guest.
                 
-                logger.info(f"Re-verification pending for {session.session_id[:8]}. Higher privilege ({source_for_identity_and_base_data.user_type.value}) found for fingerprint, but requires email verification.")
+                logger.info(f"Re-verification pending for {session.session_id[:8]}. Higher privilege ({source_for_identity_and_base_data.user_type.value}) found for fingerprint, but requires email verification. Current type: {session.user_type.value}")
             else:
                 # Current session is already at the highest or equal privilege level found for this fingerprint.
                 # Or no higher privilege found. Apply identity fields directly.
@@ -2522,7 +2531,7 @@ class SessionManager:
                 session.pending_zoho_contact_id = None
                 session.pending_wp_token = None
                 # Importantly, do NOT clear declined_recognized_email_at here if it was just set.
-                # It will be managed by QuestionLimitManager.detect_guest_email_evasion
+                # It will be managed by QuestionLimitManager.detect_guest_email_evasion or verify_email_code
                 logger.info(f"No re-verification needed for {session.session_id[:8]}. User type set to {session.user_type.value}.")
 
 
@@ -2585,10 +2594,10 @@ class SessionManager:
 
                     # Check limits and handle bans. This is where the 24-hour reset happens.
                     limit_check = self.question_limits.is_within_limits(session)
-                    if not limit_check.get('allowed', True):
+                    if not limit_check.get('allowed', True) and limit_check.get('reason') != 'guest_limit':
                         # If the user is being prompted for re-verification due to higher historical privilege,
                         # do not show a ban message, but let the dialog handle it.
-                        if session.reverification_pending and limit_check.get('reason') == 'guest_limit':
+                        if session.reverification_pending and limit_check.get('reason') == 'guest_limit': # This condition seems redundant based on the `if not allowed and reason != guest_limit` above
                             logger.info(f"Session {session.session_id[:8]} is pending re-verification, suppressing ban message and allowing dialog.")
                         else:
                             ban_type = limit_check.get('ban_type', 'unknown')
@@ -2871,7 +2880,7 @@ class SessionManager:
                 
                 return {
                     'success': True,
-                    'message': f'✅ Email verified successfully! You now have {10 - session.daily_question_count if session.daily_question_count <= 10 else 0} questions remaining today (total 10 for the day).'
+                    'message': f'✅ Email verified successfully! You now have {self.question_limits.question_limits[session.user_type.value] - session.daily_question_count if session.daily_question_count <= self.question_limits.question_limits[session.user_type.value] else 0} questions remaining today (total {self.question_limits.question_limits[session.user_type.value]} for the day).'
                 }
             else:
                 return {
@@ -3019,20 +3028,17 @@ class SessionManager:
                     "safety_override": False
                 }
 
-            # Check question limits
-            limit_check = self.question_limits.is_within_limits(session)
-            # This check for 'allowed' is crucial and must be placed here before recording question
-            if not limit_check['allowed']:
+            # Check for existing bans (not for guest limit, that is handled later)
+            limit_check_before_question = self.question_limits.is_within_limits(session)
+            if not limit_check_before_question['allowed'] and limit_check_before_question.get('reason') != 'guest_limit':
                 # If it's a hard ban, just return, the message has been rendered by is_within_limits
-                if limit_check.get('reason') != 'guest_limit': 
-                    return {
-                        'banned': True,
-                        'content': limit_check.get("content", 'Access restricted.'),
-                        'time_remaining': limit_check.get('time_remaining')
-                    }
-                # If it's 'guest_limit', it means they've hit 4 questions and need to verify
-                else: # limit_check.get('reason') == 'guest_limit'
-                    return {'requires_email': True, 'content': 'Email verification required.'}
+                return {
+                    'banned': True,
+                    'content': limit_check_before_question.get("message", 'Access restricted.'),
+                    'time_remaining': limit_check_before_question.get('time_remaining')
+                }
+            # IMPORTANT: The 'requires_email' for guests is NOT returned here.
+            # It will be triggered *after* the 4th question's response is given.
 
             # Sanitize input
             sanitized_prompt = sanitize_input(prompt, 4000)
@@ -3043,11 +3049,11 @@ class SessionManager:
                     'source': 'Input Validation'
                 }
             
-            # Record question (only if allowed to ask)
+            # Record question (this increments daily_question_count)
             self.question_limits.record_question(session)
             
-            # Get AI response (now simple call to EnhancedAI's core function)
-            ai_response = self.ai.get_response(sanitized_prompt, session.messages) # No extra args needed now
+            # Get AI response 
+            ai_response = self.ai.get_response(sanitized_prompt, session.messages)
             
             # Handle if ai.get_response() returned None due to its internal errors
             if ai_response is None:
@@ -3058,7 +3064,7 @@ class SessionManager:
                     'source': 'AI System Internal Error'
                 }
 
-            # Add messages to session
+            # Add messages to session AFTER AI has responded
             user_message = {'role': 'user', 'content': sanitized_prompt}
             assistant_message = {
                 'role': 'assistant',
@@ -3073,22 +3079,34 @@ class SessionManager:
             
             session.messages.extend([user_message, assistant_message])
             
-            # Check for Tier 1 limit AFTER adding the 10th message and applying the ban
-            tier1_ban_applied_post_response = False
-            if (session.user_type == UserType.REGISTERED_USER and 
-                session.daily_question_count == 10 and 
-                session.ban_status == BanStatus.NONE): # Ensure ban isn't already active
+            # --- Post-response limit checks to trigger UI actions for the *next* question ---
+            # This is where we determine if a prompt/ban should be displayed *after* this question's answer.
+            
+            # Check for guest limit hit (4th question for guest)
+            if (session.user_type == UserType.GUEST and 
+                session.daily_question_count >= self.question_limits.question_limits[UserType.GUEST.value]): # Already 4 questions asked
+                ai_response['trigger_guest_email_prompt'] = True
+                logger.info(f"Guest session {session.session_id[:8]} hit limit of {session.daily_question_count} questions. Setting trigger for email prompt.")
+            
+            # Check for email-verified guest daily limit hit (10th question)
+            elif (session.user_type == UserType.EMAIL_VERIFIED_GUEST and 
+                  session.daily_question_count >= self.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]): # Already 10 questions asked
+                self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
+                ai_response['trigger_email_verified_guest_ban'] = True
+                logger.info(f"Email-verified guest session {session.session_id[:8]} hit daily limit of {session.daily_question_count} questions. Applying 24h ban.")
+
+            # Check for Registered User Tier 1 limit hit (10th question)
+            elif (session.user_type == UserType.REGISTERED_USER and 
+                  session.daily_question_count == 10 and 
+                  session.ban_status == BanStatus.NONE): # Ensure ban isn't already active
                 
                 self.question_limits._apply_ban(session, BanStatus.ONE_HOUR, "Tier 1 limit reached (10 questions)")
-                tier1_ban_applied_post_response = True
+                ai_response['tier1_ban_applied_post_response'] = True
                 logger.info(f"Tier 1 ban applied to registered user {session.session_id[:8]} after 10th question's response was added.")
 
 
-            # Update activity and save session
+            # Update activity and save session (will save new message, new daily_question_count, and any new ban status)
             self._update_activity(session)
-            
-            # Return original AI response, but add tier1_ban_applied_post_response flag
-            ai_response['tier1_ban_applied_post_response'] = tier1_ban_applied_post_response
             
             return ai_response
             
@@ -3804,13 +3822,17 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             
         else: # Guest User
             st.warning("👤 **Guest User**")
-            st.markdown(f"**Questions:** {session.daily_question_count}/4")
-            st.progress(min(session.daily_question_count / 4, 1.0))
-            st.caption("Email verification unlocks 10 questions/day.")
+            # Display current daily question count (which might be > 4 due to inheritance) vs. Guest limit (4)
+            guest_limit = session_manager.question_limits.question_limits[UserType.GUEST.value]
+            st.markdown(f"**Questions:** {session.daily_question_count}/{guest_limit}")
+            st.progress(min(session.daily_question_count / guest_limit, 1.0))
+            st.caption(f"Email verification unlocks {session_manager.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]} questions/day.")
+            
             if session.reverification_pending:
                 st.info("💡 An account is available for this device. Re-verify email to reclaim it!")
-            elif session.recognition_response == "no_declined_reco" and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]: # Check for this state
-                st.info("💡 You are currently using guest questions. Verify your email to get more.") # Alternative message
+            # This specific message is now handled by display_email_prompt_if_needed when it's not blocking.
+            # elif session.recognition_response == "no_declined_reco" and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]: 
+            #     st.info("💡 You are currently using guest questions. Verify your email to get more.") 
                 
         # Show fingerprint status
         if session.fingerprint_id:
@@ -3991,25 +4013,24 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     is_guest_limit_hit = (session.user_type == UserType.GUEST and 
                           session.daily_question_count >= session_manager.question_limits.question_limits[UserType.GUEST.value])
     
-    # If currently in a verification stage (email_entry, code_entry, send_code)
-    # OR if a new blocking trigger occurs
-    if st.session_state.verification_stage in ['initial_check', 'email_entry', 'send_code_recognized', 'code_entry'] or \
-       session.reverification_pending or \
-       is_guest_limit_hit:
+    # --- Logic for BLOCKING prompts ---
+    if session.reverification_pending and st.session_state.verification_stage is None:
+        # User has a higher privilege account on this device, and hasn't explicitly declined to re-verify yet.
+        # This will set the stage to 'initial_check' and trigger the blocking dialog.
+        st.session_state.verification_stage = 'initial_check'
+        st.session_state.guest_continue_active = False # New blocking event, clear any previous guest-continue
         
-        # Override guest_continue_active if a blocking event truly needs attention
-        if session.reverification_pending and st.session_state.verification_stage is None:
-            st.session_state.verification_stage = 'initial_check'
-            st.session_state.guest_continue_active = False # New blocking event, clear any previous guest-continue
-        elif is_guest_limit_hit and st.session_state.verification_stage not in ['email_entry', 'send_code_recognized', 'code_entry']:
-            # If guest limit hit, and we are not already processing a code for a different reason
-            st.session_state.verification_stage = 'email_entry' # Force email entry
-            st.session_state.guest_continue_active = False # New blocking event, clear any previous guest-continue
-            
-        # Ensure chat is blocked and input disabled for all true blocking stages
-        if st.session_state.verification_stage in ['initial_check', 'email_entry', 'send_code_recognized', 'code_entry']:
-            st.session_state.chat_blocked_by_dialog = True
-            should_disable_chat_input = True
+    elif is_guest_limit_hit and st.session_state.verification_stage not in ['email_entry', 'send_code_recognized', 'code_entry'] and \
+         not (session.declined_recognized_email_at and st.session_state.guest_continue_active):
+        # Guest limit hit AND not already in another blocking verification stage AND not in a 'declined and continuing as guest' state
+        st.session_state.verification_stage = 'email_entry' # Force email entry for new guests hitting limit
+        st.session_state.guest_continue_active = False # New blocking event, clear any previous guest-continue
+
+
+    # If currently in a blocking verification stage
+    if st.session_state.verification_stage in ['initial_check', 'email_entry', 'send_code_recognized', 'code_entry']:
+        st.session_state.chat_blocked_by_dialog = True
+        should_disable_chat_input = True
 
         st.error("📧 **Action Required**") # Header for blocking prompts
 
@@ -4024,7 +4045,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             with col1:
                 if st.button("✅ Verify this email", use_container_width=True, key="reverify_yes_btn"):
                     session.recognition_response = "yes_reverify"
-                    session.declined_recognized_email_at = None
+                    session.declined_recognized_email_at = None # Accepting re-verification, clear decline flag
                     st.session_state.verification_email = email_to_reverify
                     st.session_state.verification_stage = "send_code_recognized"
                     session_manager.db.save_session(session) 
@@ -4032,19 +4053,21 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             with col2:
                 if st.button("❌ No, I don't recognize the email", use_container_width=True, key="reverify_no_btn"):
                     session.recognition_response = "no_declined_reco"
-                    session.declined_recognized_email_at = datetime.now()
-                    session.user_type = UserType.GUEST 
-                    session.reverification_pending = False
+                    session.declined_recognized_email_at = datetime.now() # Mark that they declined and want to proceed as guest
+                    session.user_type = UserType.GUEST # Revert to guest status for this session
+                    session.reverification_pending = False # Clear pending re-verification
                     session.pending_user_type = None
                     session.pending_email = None
                     session.pending_full_name = None
                     session.pending_zoho_contact_id = None
                     session.pending_wp_token = None
                     session_manager.db.save_session(session) 
-                    st.session_state.guest_continue_active = True # Allow continuing as guest now
+                    st.session_state.guest_continue_active = True # Allow continuing as guest now for remaining questions
                     st.session_state.chat_blocked_by_dialog = False # UNBLOCK CHAT
                     st.session_state.verification_stage = None # Clear stage to dismiss dialog
-                    st.success(f"You can now continue as a Guest. You have {session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count} guest questions remaining.")
+                    
+                    remaining_guest_q = max(0, session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count)
+                    st.success(f"You can now continue as a Guest. You have {remaining_guest_q} guest questions remaining.")
                     st.rerun()
 
         elif st.session_state.verification_stage == 'send_code_recognized':
@@ -4057,7 +4080,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                         st.session_state.verification_stage = "code_entry"
                     else:
                         st.error(result['message'])
-                        if "unusual activity" in result['message'].lower(): st.stop()
+                        if "unusual activity" in result['message'].lower(): st.stop() # Immediately stop on evasion
                         st.session_state.verification_stage = "email_entry" # Fallback to manual entry if send fails
                 st.rerun()
 
@@ -4078,7 +4101,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                             st.rerun()
                         else:
                             st.error(result['message'])
-                            if "unusual activity" in result['message'].lower(): st.stop()
+                            if "unusual activity" in result['message'].lower(): st.stop() # Immediately stop on evasion
                     else:
                         st.error("Please enter an email address to receive the code.")
             
@@ -4131,16 +4154,16 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     # This is a passive suggestion, not a forced action.
     elif session.declined_recognized_email_at and \
          session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value] and \
-         not st.session_state.guest_continue_active:
+         not st.session_state.guest_continue_active: # Only show if they haven't explicitly said "continue as guest" for this session
         
         # This is a non-blocking prompt, so chat_blocked_by_dialog remains False, and input remains enabled
         st.session_state.chat_blocked_by_dialog = False # Ensure UNBLOCKING for this case
         should_disable_chat_input = False # Ensure chat input is NOT disabled
         st.session_state.verification_stage = "declined_recognized_email_prompt_only" # Set this to indicate we are here
         
-        st.error("📧 **Action Suggested**") # Changed to Action Suggested
+        st.info("📧 **Email Verification Suggested**") # Changed to Action Suggested
         
-        remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
+        remaining_questions = max(0, session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count)
         st.info(f"You chose not to verify the recognized email. You can still use your remaining **{remaining_questions} guest questions**.")
         st.info("To ask more questions after this, or to save chat history, please verify your email.")
 
@@ -4203,106 +4226,109 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         except Exception as e:
             logger.error(f"Browser close detection failed: {e}")
 
+    # Display chat messages (respects soft clear offset)
+    visible_messages = session.messages[session.display_message_offset:]
+    for msg in visible_messages:
+        with st.chat_message(msg.get("role", "user")):
+            st.markdown(msg.get("content", ""), unsafe_allow_html=True)
+            
+            if msg.get("source"):
+                source_color = {
+                    "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                    "Error Handler": "❌"
+                }.get(msg['source'], "🤖")
+                st.caption(f"{source_color} Source: {msg['source']}")
+            
+            indicators = []
+            if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
+            if msg.get("used_search"): indicators.append("🌐 Web Search")
+            if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+            
+            if msg.get("safety_override"):
+                st.warning("🛡️ Safety Override: Switched to verified sources")
+            
+            if msg.get("has_citations") and msg.get("has_inline_citations"):
+                st.caption("📚 Response includes verified citations")
+            
+            # Check for post-response Tier 1 ban notification (for Registered Users only)
+            if msg.get('role') == 'assistant' and msg.get('tier1_ban_applied_post_response', False):
+                st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
+                st.markdown("---") # Visual separator
+            
+            # NEW: Check for post-response Guest Email Prompt trigger (for Guest Users only)
+            if msg.get('role') == 'assistant' and msg.get('trigger_guest_email_prompt', False):
+                st.warning("⚠️ **Guest Limit Reached:** You've used your 4 free questions. Email verification is required to continue.")
+                st.markdown("---")
+            
+            # NEW: Check for post-response Email Verified Guest Ban trigger
+            if msg.get('role') == 'assistant' and msg.get('trigger_email_verified_guest_ban', False):
+                st.error("🚫 **Daily Limit Reached**")
+                st.info(session_manager.question_limits._get_email_verified_limit_message()) # Use the specific message
+                st.markdown("---")
+
+
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input = display_email_prompt_if_needed(session_manager, session)
 
-    # Render chat content ONLY if not blocked by a dialog
-    if not st.session_state.get('chat_blocked_by_dialog', False):
-        # ENHANCED: Show tier warnings for registered users
-        if (session.user_type.value == UserType.REGISTERED_USER.value and 
-            session_manager.question_limits.is_within_limits(session).get('allowed') and 
-            session_manager.question_limits.is_within_limits(session).get('tier')):
-            
-            limit_check = session_manager.question_limits.is_within_limits(session)
-            tier = limit_check.get('tier')
-            remaining = limit_check.get('remaining', 0)
-            
-            if tier == 2 and remaining <= 3:
-                st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until 24-hour reset!")
-            elif tier == 1 and remaining <= 2:
-                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until 1-hour break.")
 
-        # Display chat messages (respects soft clear offset)
-        visible_messages = session.messages[session.display_message_offset:]
-        for msg in visible_messages:
-            with st.chat_message(msg.get("role", "user")):
-                st.markdown(msg.get("content", ""), unsafe_allow_html=True)
-                
-                if msg.get("source"):
-                    source_color = {
-                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
-                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                        "Error Handler": "❌"
-                    }.get(msg['source'], "🤖")
-                    st.caption(f"{source_color} Source: {msg['source']}")
-                
-                indicators = []
-                if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
-                if msg.get("used_search"): indicators.append("🌐 Web Search")
-                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-                
-                if msg.get("safety_override"):
-                    st.warning("🛡️ Safety Override: Switched to verified sources")
-                
-                if msg.get("has_citations") and msg.get("has_inline_citations"):
-                    st.caption("📚 Response includes verified citations")
-                
-                # Check for post-response Tier 1 ban notification (for Registered Users only)
-                if msg.get('role') == 'assistant' and msg.get('tier1_ban_applied_post_response', False):
-                    st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
-                    st.markdown("---") # Visual separator
-
-        # Chat input
-        prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                                disabled=should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value)
+    # Chat input
+    # Chat input should be disabled if blocked by dialog OR if a ban is active
+    is_banned_by_status = session.ban_status.value != BanStatus.NONE.value
+    st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                   disabled=should_disable_chat_input or is_banned_by_status,
+                   key="chat_input_main") # Added a key for stability
+    
+    # Process prompt from session state (needed because chat_input is cleared on interaction)
+    prompt = st.session_state.get("chat_input_main")
+    if prompt:
+        st.session_state["chat_input_main"] = "" # Clear the input field
+        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
-        if prompt:
-            logger.info(f"🎯 Processing question from {session.session_id[:8]}")
-            
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            
-            with st.chat_message("assistant"):
-                with st.spinner("🔍 Processing your question..."):
-                    try:
-                        response = session_manager.get_ai_response(session, prompt)
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Processing your question..."):
+                try:
+                    response = session_manager.get_ai_response(session, prompt)
+                    
+                    if response.get('banned'):
+                        st.error(response.get("content", 'Access restricted.'))
+                        if response.get('time_remaining'):
+                            time_remaining = response['time_remaining']
+                            hours = int(time_remaining.total_seconds() // 3600)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                        # The ban message is already handled at the top of display_email_prompt_if_needed.
+                        # This return will just make sure it reruns to display the disabled chat input.
+                        st.rerun() 
+                    else:
+                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         
-                        if response.get('requires_email'):
-                            # Chat input is disabled, and chat_blocked_by_dialog will be true on next rerun
-                            st.session_state.verification_stage = 'email_entry' 
-                            st.session_state.chat_blocked_by_dialog = True # Force block chat
-                            st.rerun()
-                        elif response.get('banned'):
-                            st.error(response.get("content", 'Access restricted.'))
-                            if response.get('time_remaining'):
-                                time_remaining = response['time_remaining']
-                                hours = int(time_remaining.total_seconds() // 3600)
-                                minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                                st.error(f"Time remaining: {hours}h {minutes}m")
-                            st.rerun()
-                        else:
-                            st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
-                            
-                            if response.get("source"):
-                                source_color = {
-                                    "FiFi": "🧠", "FiFi Web Search": "🌐",
-                                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                                    "Error Handler": "❌"
-                                }.get(response['source'], "🤖")
-                                st.caption(f"{source_color} Source: {response['source']}")
-                            
-                            logger.info(f"✅ Question processed successfully")
-                            
-                            # Only re-run if a ban was just applied post-response to update UI (disable input, show message)
-                            if response.get('tier1_ban_applied_post_response', False):
-                                logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
-                                st.rerun()
-                            
-                    except Exception as e:
-                        logger.error(f"❌ AI response failed: {e}", exc_info=True)
-                        st.error("⚠️ I encountered an error. Please try again.")
-            
-            st.rerun()
+                        if response.get("source"):
+                            source_color = {
+                                "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                "Error Handler": "❌"
+                            }.get(response['source'], "🤖")
+                            st.caption(f"{source_color} Source: {response['source']}")
+                        
+                        logger.info(f"✅ Question processed successfully")
+                        
+                        # Re-run if a new blocking state or ban was just applied post-response
+                        if response.get('trigger_guest_email_prompt', False) or \
+                           response.get('trigger_email_verified_guest_ban', False) or \
+                           response.get('tier1_ban_applied_post_response', False):
+                            logger.info(f"Rerunning to show post-response prompt/ban for session {session.session_id[:8]}")
+                            st.rerun() # This will trigger display_email_prompt_if_needed on the next run
+                        
+                except Exception as e:
+                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
+                    st.error("⚠️ I encountered an error. Please try again.")
+        
+        # If no specific trigger, just rerun to clear input and update UI
+        st.rerun()
 
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
