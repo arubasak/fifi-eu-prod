@@ -310,6 +310,11 @@ class UserSession:
     pending_zoho_contact_id: Optional[str] = None
     pending_wp_token: Optional[str] = None
 
+    # NEW: Pending count fields for reverification
+    pending_daily_question_count: Optional[int] = None
+    pending_total_question_count: Optional[int] = None
+    pending_last_question_time: Optional[datetime] = None
+
     # NEW: Flag to allow guest questions after declining a recognized email
     declined_recognized_email_at: Optional[datetime] = None
 
@@ -417,7 +422,11 @@ class DatabaseManager:
                     pending_zoho_contact_id TEXT,
                     pending_wp_token TEXT,
                     -- NEW: Declined recognized email
-                    declined_recognized_email_at TEXT
+                    declined_recognized_email_at TEXT,
+                    -- NEW: Pending count fields
+                    pending_daily_question_count INTEGER,
+                    pending_total_question_count INTEGER,
+                    pending_last_question_time TEXT
                 )
             ''')
             
@@ -430,7 +439,11 @@ class DatabaseManager:
                 ("pending_full_name", "TEXT"),
                 ("pending_zoho_contact_id", "TEXT"),
                 ("pending_wp_token", "TEXT"),
-                ("declined_recognized_email_at", "TEXT") # NEW column
+                ("declined_recognized_email_at", "TEXT"),
+                # NEW: Add pending count fields
+                ("pending_daily_question_count", "INTEGER"),
+                ("pending_total_question_count", "INTEGER"),
+                ("pending_last_question_time", "TEXT")
             ]
             for col_name, col_type in new_columns:
                 try:
@@ -548,7 +561,7 @@ class DatabaseManager:
 
 
             self.conn.execute(
-                '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, pending_daily_question_count, pending_total_question_count, pending_last_question_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (session.session_id, session.user_type.value, session.email, session.full_name,
                  session.zoho_contact_id, session.created_at.isoformat(),
                  last_activity_iso, json_messages, int(session.active),
@@ -568,7 +581,11 @@ class DatabaseManager:
                  session.pending_user_type.value if session.pending_user_type else None,
                  session.pending_email, session.pending_full_name,
                  session.pending_zoho_contact_id, session.pending_wp_token,
-                 declined_recognized_email_at_iso)) # NEW field
+                 declined_recognized_email_at_iso,
+                 session.pending_daily_question_count,
+                 session.pending_total_question_count,
+                 session.pending_last_question_time.isoformat() if session.pending_last_question_time else None
+                 ))
             self.conn.commit()
             
             logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}")
@@ -612,7 +629,11 @@ class DatabaseManager:
                 logger.debug(f"Added missing re-verification fields to in-memory session {session_id[:8]}")
             if session and not hasattr(session, 'declined_recognized_email_at'): # NEW field
                 session.declined_recognized_email_at = None
-            
+            if session and not hasattr(session, 'pending_daily_question_count'): # NEW field
+                session.pending_daily_question_count = None
+                session.pending_total_question_count = None
+                session.pending_last_question_time = None
+
             return copy.deepcopy(session)
         
         try:
@@ -621,7 +642,7 @@ class DatabaseManager:
                 self.conn.row_factory = None
             
             # Update SELECT statement to include new fields
-            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, pending_daily_question_count, pending_total_question_count, pending_last_question_time FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
             row = cursor.fetchone()
             
             if not row: 
@@ -629,8 +650,7 @@ class DatabaseManager:
                 return None
             
             # Handle as tuple (SQLite Cloud returns tuples)
-            # Expected 32 columns before adding re-verification fields. Now 38. Now 39.
-            expected_min_cols = 39 # Updated expected columns
+            expected_min_cols = 42 # Updated expected columns
             if len(row) < expected_min_cols: # Must have at least this many columns for full functionality
                 logger.error(f"Row has insufficient columns: {len(row)} (expected at least {expected_min_cols}). Data corruption suspected or old schema.")
                 # Attempt to load with missing columns, defaulting new ones
@@ -649,6 +669,11 @@ class DatabaseManager:
                 loaded_pending_wp_token = row[37] if len(row) > 37 else None
                 # NEW: Safely get declined_recognized_email_at
                 loaded_declined_recognized_email_at = datetime.fromisoformat(row[38]) if len(row) > 38 and row[38] else None
+
+                # NEW: Safely get pending count fields
+                loaded_pending_daily_question_count = row[39] if len(row) > 39 else None
+                loaded_pending_total_question_count = row[40] if len(row) > 40 else None
+                loaded_pending_last_question_time = datetime.fromisoformat(row[41]) if len(row) > 41 and row[41] else None
 
 
                 # Convert last_activity from ISO format string or None
@@ -693,7 +718,10 @@ class DatabaseManager:
                     pending_full_name=loaded_pending_full_name, # NEW
                     pending_zoho_contact_id=loaded_pending_zoho_contact_id, # NEW
                     pending_wp_token=loaded_pending_wp_token, # NEW
-                    declined_recognized_email_at=loaded_declined_recognized_email_at # NEW
+                    declined_recognized_email_at=loaded_declined_recognized_email_at, # NEW
+                    pending_daily_question_count=loaded_pending_daily_question_count, # NEW
+                    pending_total_question_count=loaded_pending_total_question_count, # NEW
+                    pending_last_question_time=loaded_pending_last_question_time # NEW
                 )
                 
                 logger.debug(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
@@ -732,6 +760,10 @@ class DatabaseManager:
                     session.pending_wp_token = None
                 if not hasattr(session, 'declined_recognized_email_at'): # NEW field
                     session.declined_recognized_email_at = None
+                if not hasattr(session, 'pending_daily_question_count'): # NEW field
+                    session.pending_daily_question_count = None
+                    session.pending_total_question_count = None
+                    session.pending_last_question_time = None
             logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
             return sessions
         
@@ -741,10 +773,10 @@ class DatabaseManager:
 
             # Query ALL sessions with the fingerprint_id, regardless of active status
             # IMPORTANT: This query correctly does NOT include 'AND active = 1'
-            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
+            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, pending_daily_question_count, pending_total_question_count, pending_last_question_time FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
             sessions = []
             for row in cursor.fetchall():
-                expected_min_cols = 39 # Updated expected columns
+                expected_min_cols = 42 # Updated expected columns
                 if len(row) < expected_min_cols: # Must have at least this many columns for full functionality
                     logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected at least {expected_min_cols}). Skipping row.")
                     continue
@@ -762,6 +794,10 @@ class DatabaseManager:
                     # NEW: Safely get declined_recognized_email_at
                     loaded_declined_recognized_email_at = datetime.fromisoformat(row[38]) if len(row) > 38 and row[38] else None
 
+                    # NEW: Safely get pending count fields
+                    loaded_pending_daily_question_count = row[39] if len(row) > 39 else None
+                    loaded_pending_total_question_count = row[40] if len(row) > 40 else None
+                    loaded_pending_last_question_time = datetime.fromisoformat(row[41]) if len(row) > 41 and row[41] else None
 
                     loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
 
@@ -804,7 +840,10 @@ class DatabaseManager:
                         pending_full_name=loaded_pending_full_name, # NEW
                         pending_zoho_contact_id=loaded_pending_zoho_contact_id, # NEW
                         pending_wp_token=loaded_pending_wp_token, # NEW
-                        declined_recognized_email_at=loaded_declined_recognized_email_at # NEW
+                        declined_recognized_email_at=loaded_declined_recognized_email_at, # NEW
+                        pending_daily_question_count=loaded_pending_daily_question_count, # NEW
+                        pending_total_question_count=loaded_pending_total_question_count, # NEW
+                        pending_last_question_time=loaded_pending_last_question_time # NEW
                     )
                     sessions.append(s)
                 except Exception as e:
@@ -2481,27 +2520,9 @@ class SessionManager:
             
             original_session_user_type_for_log = session.user_type
             
-            # Apply merged usage values (always inherited)
-            session.daily_question_count = merged_daily_question_count
-            session.total_question_count = merged_total_question_count
-            session.last_question_time = merged_last_question_time # Set from the most recent activity found
-            session.question_limit_reached = merged_question_limit_reached
-            session.ban_status = merged_ban_status
-            session.ban_start_time = merged_ban_start_time
-            session.ban_end_time = merged_ban_end_time
-            session.ban_reason = merged_ban_reason
-            session.evasion_count = merged_evasion_count
-            session.current_penalty_hours = merged_current_penalty_hours
-            session.escalation_level = merged_escalation_level
-            session.email_addresses_used = list(merged_email_addresses_used)
-            session.email_switches_count = merged_email_switches_count
-            
             # Determine privilege inheritance based on re-verification need
-            # IMPORTANT: Current session's user_type is NOT immediately updated here unless it's already the highest or no higher exists.
-            # It will be set to pending, and the actual upgrade happens after successful verification.
             if self._get_privilege_level(source_for_identity_and_base_data.user_type) > self._get_privilege_level(session.user_type):
-                # We found a higher privilege session for this fingerprint.
-                # Set pending re-verification. The current session's user_type remains as is for now.
+                # Higher privilege found - set pending re-verification
                 session.reverification_pending = True
                 session.pending_user_type = source_for_identity_and_base_data.user_type
                 session.pending_email = source_for_identity_and_base_data.email
@@ -2510,33 +2531,64 @@ class SessionManager:
                 session.pending_wp_token = source_for_identity_and_base_data.wp_token
                 session.browser_privacy_level = source_for_identity_and_base_data.browser_privacy_level
                 
-                # Do NOT clear declined_recognized_email_at here if it was set
-                # It should only be cleared when verification is ACCEPTED or completed.
-                # If they decline recognition, they should be able to continue as guest.
+                # NEW: Store inherited counts in pending fields, DON'T apply them yet.
+                session.pending_daily_question_count = merged_daily_question_count
+                session.pending_total_question_count = merged_total_question_count
+                session.pending_last_question_time = merged_last_question_time
                 
-                logger.info(f"Re-verification pending for {session.session_id[:8]}. Higher privilege ({source_for_identity_and_base_data.user_type.value}) found for fingerprint, but requires email verification. Current type: {session.user_type.value}")
+                # IMPORTANT: The current session's actual counts (session.daily_question_count, etc.) remain unchanged.
+                # Apply security-related merged values immediately (e.g., bans, evasion stats).
+                session.question_limit_reached = merged_question_limit_reached
+                session.ban_status = merged_ban_status
+                session.ban_start_time = merged_ban_start_time
+                session.ban_end_time = merged_ban_end_time
+                session.ban_reason = merged_ban_reason
+                session.evasion_count = merged_evasion_count
+                session.current_penalty_hours = merged_current_penalty_hours
+                session.escalation_level = merged_escalation_level
+                session.email_addresses_used = list(merged_email_addresses_used)
+                session.email_switches_count = merged_email_switches_count
+                
+                logger.info(f"Re-verification pending for {session.session_id[:8]}. Inherited counts stored in pending fields. Current type: {session.user_type.value}, current daily_q: {session.daily_question_count}")
             else:
-                # Current session is already at the highest or equal privilege level found for this fingerprint.
-                # Or no higher privilege found. Apply identity fields directly.
-                session.user_type = source_for_identity_and_base_data.user_type # This ensures GUEST remains GUEST if no higher is found
+                # No re-verification needed. Apply all merged values directly.
+                session.user_type = source_for_identity_and_base_data.user_type
                 session.email = source_for_identity_and_base_data.email
                 session.full_name = source_for_identity_and_base_data.full_name
                 session.zoho_contact_id = source_for_identity_and_base_data.zoho_contact_id
                 session.wp_token = source_for_identity_and_base_data.wp_token
                 session.browser_privacy_level = source_for_identity_and_base_data.browser_privacy_level
-                session.reverification_pending = False # No pending if already at max privilege or no higher exists
+                
+                # Apply all merged usage values directly
+                session.daily_question_count = merged_daily_question_count
+                session.total_question_count = merged_total_question_count
+                session.last_question_time = merged_last_question_time
+                session.question_limit_reached = merged_question_limit_reached
+                session.ban_status = merged_ban_status
+                session.ban_start_time = merged_ban_start_time
+                session.ban_end_time = merged_ban_end_time
+                session.ban_reason = merged_ban_reason
+                session.evasion_count = merged_evasion_count
+                session.current_penalty_hours = merged_current_penalty_hours
+                session.escalation_level = merged_escalation_level
+                session.email_addresses_used = list(merged_email_addresses_used)
+                session.email_switches_count = merged_email_switches_count
+                
+                # Clear all pending fields
+                session.reverification_pending = False
                 session.pending_user_type = None
                 session.pending_email = None
                 session.pending_full_name = None
                 session.pending_zoho_contact_id = None
                 session.pending_wp_token = None
-                # Importantly, do NOT clear declined_recognized_email_at here if it was just set.
-                # It will be managed by QuestionLimitManager.detect_guest_email_evasion or verify_email_code
-                logger.info(f"No re-verification needed for {session.session_id[:8]}. User type set to {session.user_type.value}.")
+                session.pending_daily_question_count = None
+                session.pending_total_question_count = None
+                session.pending_last_question_time = None
+                
+                logger.info(f"No re-verification needed for {session.session_id[:8]}. User type set to {session.user_type.value}, counts merged directly.")
 
 
             # Update fingerprint to the 'real' one if current is temporary and a real one was found
-            # The 'real' fingerprint should come from the most authoritative source.
             if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and \
                not source_for_identity_and_base_data.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                
@@ -2545,7 +2597,6 @@ class SessionManager:
                 session.fingerprint_method = source_for_identity_and_base_data.fingerprint_method
             
             # Ensure last_activity is updated if it was None or older than source
-            # This is critical for the main timeout functionality
             if session.last_activity is None and source_for_identity_and_base_data.last_activity is not None:
                 session.last_activity = source_for_identity_and_base_data.last_activity
             elif source_for_identity_and_base_data.last_activity and (not session.last_activity or source_for_identity_and_base_data.last_activity > session.last_activity):
@@ -2844,12 +2895,29 @@ class SessionManager:
                     session.full_name = session.pending_full_name
                     session.zoho_contact_id = session.pending_zoho_contact_id
                     session.wp_token = session.pending_wp_token
+                    
+                    # NEW: Merge the pending counts with current session counts.
+                    base_daily_count = session.pending_daily_question_count or 0
+                    guest_questions_asked = session.daily_question_count or 0
+                    session.daily_question_count = base_daily_count + guest_questions_asked
+
+                    base_total_count = session.pending_total_question_count or 0
+                    session.total_question_count = base_total_count + guest_questions_asked
+                    
+                    # session.last_question_time is already the most recent from the current session's activity.
+                    # No need to merge it as it reflects the true last activity time.
+
+                    # Clear pending state
                     session.reverification_pending = False
                     session.pending_user_type = None
                     session.pending_email = None
                     session.pending_full_name = None
                     session.pending_zoho_contact_id = None
                     session.pending_wp_token = None
+                    session.pending_daily_question_count = None
+                    session.pending_total_question_count = None
+                    session.pending_last_question_time = None
+                    
                     logger.info(f"✅ User {session.session_id[:8]} reclaimed higher privilege: {session.user_type.value} via re-verification for {session.email}")
                 else:
                     # Upgrade user to email verified guest (normal first-time verification)
@@ -2870,7 +2938,7 @@ class SessionManager:
                     self.db.save_session(session)
                     logger.info(f"✅ AFTER email verification upgrade for session {session.session_id[:8]}:")
                     logger.info(f"   - User Type: {session.user_type.value}")
-                    logger.info(f"   - Daily Questions: {session.daily_question_count} (PRESERVED from device history)")
+                    logger.info(f"   - Daily Questions: {session.daily_question_count} (MERGED from device history)")
                     logger.info(f"   - Total Questions: {session.total_question_count}")
                     logger.info(f"   - Has Messages: {len(session.messages)}")
                     logger.info(f"   - CRM Eligible: {self._is_crm_save_eligible(session, 'email_verification_success')}")
@@ -2948,6 +3016,9 @@ class SessionManager:
                         current_session.pending_full_name = None
                         current_session.pending_zoho_contact_id = None
                         current_session.pending_wp_token = None
+                        current_session.pending_daily_question_count = None
+                        current_session.pending_total_question_count = None
+                        current_session.pending_last_question_time = None
                     # Clear declined_recognized_email_at on successful login
                     current_session.declined_recognized_email_at = None
 
@@ -3822,18 +3893,19 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             
         else: # Guest User
             st.warning("👤 **Guest User**")
-            # Display current daily question count (which might be > 4 due to inheritance) vs. Guest limit (4)
             guest_limit = session_manager.question_limits.question_limits[UserType.GUEST.value]
-            st.markdown(f"**Questions:** {session.daily_question_count}/{guest_limit}")
-            st.progress(min(session.daily_question_count / guest_limit, 1.0))
-            st.caption(f"Email verification unlocks {session_manager.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]} questions/day.")
+            # Use the session's actual current count for display
+            display_count = session.daily_question_count
             
+            st.markdown(f"**Questions:** {display_count}/{guest_limit}")
+            st.progress(min(display_count / guest_limit, 1.0))
+
             if session.reverification_pending:
                 st.info("💡 An account is available for this device. Re-verify email to reclaim it!")
-            # This specific message is now handled by display_email_prompt_if_needed when it's not blocking.
-            # elif session.recognition_response == "no_declined_reco" and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]: 
-            #     st.info("💡 You are currently using guest questions. Verify your email to get more.") 
-                
+                st.caption("Your progress will be merged upon verification.")
+            else:
+                st.caption(f"Email verification unlocks {session_manager.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]} questions/day.")
+            
         # Show fingerprint status
         if session.fingerprint_id:
             if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
@@ -4055,12 +4127,17 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     session.recognition_response = "no_declined_reco"
                     session.declined_recognized_email_at = datetime.now() # Mark that they declined and want to proceed as guest
                     session.user_type = UserType.GUEST # Revert to guest status for this session
-                    session.reverification_pending = False # Clear pending re-verification
+                    # Clear all pending fields
+                    session.reverification_pending = False
                     session.pending_user_type = None
                     session.pending_email = None
                     session.pending_full_name = None
                     session.pending_zoho_contact_id = None
                     session.pending_wp_token = None
+                    session.pending_daily_question_count = None
+                    session.pending_total_question_count = None
+                    session.pending_last_question_time = None
+                    
                     session_manager.db.save_session(session) 
                     st.session_state.guest_continue_active = True # Allow continuing as guest now for remaining questions
                     st.session_state.chat_blocked_by_dialog = False # UNBLOCK CHAT
