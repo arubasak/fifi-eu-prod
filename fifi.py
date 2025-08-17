@@ -4282,7 +4282,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Process prompt from session state (needed because chat_input is cleared on interaction)
     prompt = st.session_state.get("chat_input_main")
     if prompt:
-        st.session_state["chat_input_main"] = "" # Clear the input field
+        #st.session_state["chat_input_main"] = "" # Clear the input field
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
         with st.chat_message("user"):
