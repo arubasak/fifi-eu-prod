@@ -3099,17 +3099,17 @@ class SessionManager:
                     "safety_override": False
                 }
 
-            # Check for existing bans (not for guest limit, that is handled later)
+            # *** THE FIX IS HERE ***
+            # Check for existing bans (including guest limits)
             limit_check_before_question = self.question_limits.is_within_limits(session)
-            if not limit_check_before_question['allowed'] and limit_check_before_question.get('reason') != 'guest_limit':
-                # If it's a hard ban, just return, the message has been rendered by is_within_limits
+            if not limit_check_before_question['allowed']:
+                # The UI should handle showing the prompt or ban message. 
+                # This return just ensures the AI doesn't process the question.
                 return {
                     'banned': True,
-                    'content': limit_check_before_question.get("message", 'Access restricted.'),
+                    'content': limit_check_before_question.get("message", 'Access restricted due to usage policy.'),
                     'time_remaining': limit_check_before_question.get('time_remaining')
                 }
-            # IMPORTANT: The 'requires_email' for guests is NOT returned here.
-            # It will be triggered *after* the 4th question's response is given.
 
             # Sanitize input
             sanitized_prompt = sanitize_input(prompt, 4000)
