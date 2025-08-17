@@ -3455,17 +3455,17 @@ def render_simplified_browser_close_detection(session_id: str):
             
             if (navigator.sendBeacon) {{
                 // *** THIS IS THE CRITICAL CHANGE ***
-                // We send as 'text/plain' to make it a "simple request" and AVOID the CORS preflight.
+                // Reverted to application/json to match the FastAPI endpoint's expectation.
+                // The fix is now entirely on the FastAPI side with correct CORS middleware.
                 const sent = navigator.sendBeacon(
                     FASTAPI_URL,
-                    new Blob([emergencyData], {{type: 'text/plain;charset=UTF-8'}})
+                    new Blob([emergencyData], {{type: 'application/json'}})
                 );
                 
                 if (sent) {{
                     console.log('✅ Emergency save beacon sent successfully to FastAPI');
                 }} else {{
-                    console.warn('⚠️ Beacon send returned false, trying fallback...');
-                    // Fallback logic can be added here if needed, but the primary beacon should now be more reliable.
+                    console.warn('⚠️ Beacon send returned false. This may indicate a network issue or browser limitation.');
                 }}
             }}
         }}
@@ -3980,7 +3980,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     # Default states for this run
     should_disable_chat_input = False
-    # REMOVED: st.session_state.chat_blocked_by_dialog = False # Assume not blocked until a condition applies
 
     # Check for hard bans (non-email-verification related)
     limit_check = session_manager.question_limits.is_within_limits(session)
