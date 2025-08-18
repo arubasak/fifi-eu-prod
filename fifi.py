@@ -763,7 +763,9 @@ class DatabaseManager:
                     session.declined_recognized_email_at = None
                 if not hasattr(session, 'pending_daily_question_count'): # NEW field
                     session.pending_daily_question_count = None
+                if not hasattr(session, 'pending_total_question_count'): # NEW field
                     session.pending_total_question_count = None
+                if not hasattr(session, 'pending_last_question_time'): # NEW field
                     session.pending_last_question_time = None
             logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
             return sessions
@@ -2710,7 +2712,7 @@ class SessionManager:
             # Store the *new, real* fingerprint data
             session.fingerprint_id = fingerprint_data.get('fingerprint_id')
             session.fingerprint_method = fingerprint_data.get('fingerprint_method')
-            # session.visitor_type = fingerprint_data.get('visitor_type', 'new_visitor') # <-- This line should remain commented out as visitor_type is set by inheritance
+            # session.visitor_type is determined by apply_fingerprinting after inheritance check
             session.browser_privacy_level = fingerprint_data.get('browser_privacy_level', 'standard')
             session.recognition_response = None # Clear any previous recognition response
             
@@ -4078,12 +4080,18 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         return True # Disable chat input
 
     # Determine if a *blocking* email prompt is needed
-    is_guest_limit_hit = (session.user_type == UserType.GUEST and 
-                          session.daily_question_count >= session_manager.question_limits.question_limits[UserType.GUEST.value])
-    
+    # --- ADDED DETAILED DEBUGGING LOGS HERE ---
+    user_is_guest = (session.user_type == UserType.GUEST)
+    guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
+    daily_q_value = session.daily_question_count
+    daily_q_ge_limit = (daily_q_value >= guest_limit_value)
+
+    logger.debug(f"DEBUG_PROMPT_EVAL_COMPONENTS: SessionID={session.session_id[:8]} | IsGuest={user_is_guest} | DailyQ={daily_q_value} | GuestLimit={guest_limit_value} | DailyQ>=Limit={daily_q_ge_limit}")
+    # --- END ADDED DETAILED DEBUGGING LOGS ---
+
+    is_guest_limit_hit = (user_is_guest and daily_q_ge_limit) # Use the explicitly evaluated component
+
     logger.debug(f"DEBUG: display_email_prompt_if_needed: session_id={session.session_id[:8]} | user_type={session.user_type.value} | daily_q={session.daily_question_count} | is_guest_limit_hit={is_guest_limit_hit}")
-    logger.debug(f"DEBUG: Current st.session_state: verification_stage={st.session_state.verification_stage} | guest_continue_active={st.session_state.guest_continue_active} | chat_blocked_by_dialog={st.session_state.chat_blocked_by_dialog}")
-    logger.debug(f"DEBUG: Session flags: reverification_pending={session.reverification_pending} | declined_recognized_email_at={session.declined_recognized_email_at}")
 
     # --- Core Logic for Blocking Prompts ---
 
