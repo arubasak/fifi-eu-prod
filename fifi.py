@@ -4629,4 +4629,5 @@ def main_fixed():
                 else:
                     activity_data_from_js = st.session_state.latest_activity_data_from_js
             
-            timeout_triggered = check_timeout_and
+            timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+
