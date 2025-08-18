@@ -658,59 +658,59 @@ class DatabaseManager:
                 
             try:
                 # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
-                loaded_display_message_offset = row if len(row) > 31 else 0
+                loaded_display_message_offset = row[31] if len(row) > 31 else 0
                 
                 # NEW: Safely get re-verification fields, defaulting if columns are missing
-                loaded_reverification_pending = bool(row) if len(row) > 32 else False
-                loaded_pending_user_type = UserType(row) if len(row) > 33 and row else None
-                loaded_pending_email = row if len(row) > 34 else None
-                loaded_pending_full_name = row if len(row) > 35 else None
-                loaded_pending_zoho_contact_id = row if len(row) > 36 else None
-                loaded_pending_wp_token = row if len(row) > 37 else None
+                loaded_reverification_pending = bool(row[32]) if len(row) > 32 else False
+                loaded_pending_user_type = UserType(row[33]) if len(row) > 33 and row[33] else None
+                loaded_pending_email = row[34] if len(row) > 34 else None
+                loaded_pending_full_name = row[35] if len(row) > 35 else None
+                loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
+                loaded_pending_wp_token = row[37] if len(row) > 37 else None
                 # NEW: Safely get declined_recognized_email_at
-                loaded_declined_recognized_email_at = datetime.fromisoformat(row) if len(row) > 38 and row else None
+                loaded_declined_recognized_email_at = datetime.fromisoformat(row[38]) if len(row) > 38 and row[38] else None
 
                 # NEW: Safely get pending count fields
-                loaded_pending_daily_question_count = row if len(row) > 39 else None
-                loaded_pending_total_question_count = row if len(row) > 40 else None
-                loaded_pending_last_question_time = datetime.fromisoformat(row) if len(row) > 41 and row else None
+                loaded_pending_daily_question_count = row[39] if len(row) > 39 else None
+                loaded_pending_total_question_count = row[40] if len(row) > 40 else None
+                loaded_pending_last_question_time = datetime.fromisoformat(row[41]) if len(row) > 41 and row[41] else None
 
 
                 # Convert last_activity from ISO format string or None
-                loaded_last_activity = datetime.fromisoformat(row) if row else None
+                loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
 
                 user_session = UserSession(
-                    session_id=row, 
-                    user_type=UserType(row) if row else UserType.GUEST,
-                    email=row, 
-                    full_name=row,
-                    zoho_contact_id=row,
-                    created_at=datetime.fromisoformat(row) if row else datetime.now(),
+                    session_id=row[0], 
+                    user_type=UserType(row[1]) if row[1] else UserType.GUEST,
+                    email=row[2], 
+                    full_name=row[3],
+                    zoho_contact_id=row[4],
+                    created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
                     last_activity=loaded_last_activity, # Use the safely loaded value
-                    messages=safe_json_loads(row, default_value=[]),
-                    active=bool(row), 
-                    wp_token=row,
-                    timeout_saved_to_crm=bool(row),
-                    fingerprint_id=row,
-                    fingerprint_method=row,
-                    visitor_type=row or 'new_visitor', # This line loads the *old* value from DB
-                    daily_question_count=row or 0,
-                    total_question_count=row or 0,
-                    last_question_time=datetime.fromisoformat(row) if row else None,
-                    question_limit_reached=bool(row),
-                    ban_status=BanStatus(row) if row else BanStatus.NONE,
-                    ban_start_time=datetime.fromisoformat(row) if row else None,
-                    ban_end_time=datetime.fromisoformat(row) if row else None,
-                    ban_reason=row,
-                    evasion_count=row or 0,
-                    current_penalty_hours=row or 0,
-                    escalation_level=row or 0,
-                    email_addresses_used=safe_json_loads(row, default_value=[]),
-                    email_switches_count=row or 0,
-                    browser_privacy_level=row,
-                    registration_prompted=bool(row),
-                    registration_link_clicked=bool(row),
-                    recognition_response=row,
+                    messages=safe_json_loads(row[7], default_value=[]),
+                    active=bool(row[8]), 
+                    wp_token=row[9],
+                    timeout_saved_to_crm=bool(row[10]),
+                    fingerprint_id=row[11],
+                    fingerprint_method=row[12],
+                    visitor_type=row[13] or 'new_visitor', # This line loads the *old* value from DB
+                    daily_question_count=row[14] or 0,
+                    total_question_count=row[15] or 0,
+                    last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
+                    question_limit_reached=bool(row[17]),
+                    ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
+                    ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
+                    ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
+                    ban_reason=row[21],
+                    evasion_count=row[22] or 0,
+                    current_penalty_hours=row[23] or 0,
+                    escalation_level=row[24] or 0,
+                    email_addresses_used=safe_json_loads(row[25], default_value=[]),
+                    email_switches_count=row[26] or 0,
+                    browser_privacy_level=row[27],
+                    registration_prompted=bool(row[28]),
+                    registration_link_clicked=bool(row[29]),
+                    recognition_response=row[30],
                     display_message_offset=loaded_display_message_offset, # Use the safely loaded value
                     reverification_pending=loaded_reverification_pending, # NEW
                     pending_user_type=loaded_pending_user_type, # NEW
@@ -782,57 +782,57 @@ class DatabaseManager:
                     continue
                 try:
                     # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
-                    loaded_display_message_offset = row if len(row) > 31 else 0
+                    loaded_display_message_offset = row[31] if len(row) > 31 else 0
                     
                     # NEW: Safely get re-verification fields, defaulting if columns are missing
-                    loaded_reverification_pending = bool(row) if len(row) > 32 else False
-                    loaded_pending_user_type = UserType(row) if len(row) > 33 and row else None
-                    loaded_pending_email = row if len(row) > 34 else None
-                    loaded_pending_full_name = row if len(row) > 35 else None
-                    loaded_pending_zoho_contact_id = row if len(row) > 36 else None
-                    loaded_pending_wp_token = row if len(row) > 37 else None
+                    loaded_reverification_pending = bool(row[32]) if len(row) > 32 else False
+                    loaded_pending_user_type = UserType(row[33]) if len(row) > 33 and row[33] else None
+                    loaded_pending_email = row[34] if len(row) > 34 else None
+                    loaded_pending_full_name = row[35] if len(row) > 35 else None
+                    loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
+                    loaded_pending_wp_token = row[37] if len(row) > 37 else None
                     # NEW: Safely get declined_recognized_email_at
-                    loaded_declined_recognized_email_at = datetime.fromisoformat(row) if len(row) > 38 and row else None
+                    loaded_declined_recognized_email_at = datetime.fromisoformat(row[38]) if len(row) > 38 and row[38] else None
 
                     # NEW: Safely get pending count fields
-                    loaded_pending_daily_question_count = row if len(row) > 39 else None
-                    loaded_pending_total_question_count = row if len(row) > 40 else None
-                    loaded_pending_last_question_time = datetime.fromisoformat(row) if len(row) > 41 and row else None
+                    loaded_pending_daily_question_count = row[39] if len(row) > 39 else None
+                    loaded_pending_total_question_count = row[40] if len(row) > 40 else None
+                    loaded_pending_last_question_time = datetime.fromisoformat(row[41]) if len(row) > 41 and row[41] else None
 
-                    loaded_last_activity = datetime.fromisoformat(row) if row else None
+                    loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
 
                     s = UserSession(
-                        session_id=row, 
-                        user_type=UserType(row) if row else UserType.GUEST,
-                        email=row, 
-                        full_name=row,
-                        zoho_contact_id=row,
-                        created_at=datetime.fromisoformat(row) if row else datetime.now(),
+                        session_id=row[0], 
+                        user_type=UserType(row[1]) if row[1] else UserType.GUEST,
+                        email=row[2], 
+                        full_name=row[3],
+                        zoho_contact_id=row[4],
+                        created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
                         last_activity=loaded_last_activity, # Use the safely loaded value
-                        messages=safe_json_loads(row, default_value=[]),
-                        active=bool(row), 
-                        wp_token=row,
-                        timeout_saved_to_crm=bool(row),
-                        fingerprint_id=row,
-                        fingerprint_method=row,
-                        visitor_type=row or 'new_visitor', # This line loads the *old* value from DB
-                        daily_question_count=row or 0,
-                        total_question_count=row or 0,
-                        last_question_time=datetime.fromisoformat(row) if row else None,
-                        question_limit_reached=bool(row),
-                        ban_status=BanStatus(row) if row else BanStatus.NONE,
-                        ban_start_time=datetime.fromisoformat(row) if row else None,
-                        ban_end_time=datetime.fromisoformat(row) if row else None,
-                        ban_reason=row,
-                        evasion_count=row or 0,
-                        current_penalty_hours=row or 0,
-                        escalation_level=row or 0,
-                        email_addresses_used=safe_json_loads(row, default_value=[]),
-                        email_switches_count=row or 0,
-                        browser_privacy_level=row,
-                        registration_prompted=bool(row),
-                        registration_link_clicked=bool(row),
-                        recognition_response=row,
+                        messages=safe_json_loads(row[7], default_value=[]),
+                        active=bool(row[8]), 
+                        wp_token=row[9],
+                        timeout_saved_to_crm=bool(row[10]),
+                        fingerprint_id=row[11],
+                        fingerprint_method=row[12],
+                        visitor_type=row[13] or 'new_visitor', # This line loads the *old* value from DB
+                        daily_question_count=row[14] or 0,
+                        total_question_count=row[15] or 0,
+                        last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
+                        question_limit_reached=bool(row[17]),
+                        ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
+                        ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
+                        ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
+                        ban_reason=row[21],
+                        evasion_count=row[22] or 0,
+                        current_penalty_hours=row[23] or 0,
+                        escalation_level=row[24] or 0,
+                        email_addresses_used=safe_json_loads(row[25], default_value=[]),
+                        email_switches_count=row[26] or 0,
+                        browser_privacy_level=row[27],
+                        registration_prompted=bool(row[28]),
+                        registration_link_clicked=bool(row[29]),
+                        recognition_response=row[30],
                         display_message_offset=loaded_display_message_offset, # Use the safely loaded value
                         reverification_pending=loaded_reverification_pending, # NEW
                         pending_user_type=loaded_pending_user_type, # NEW
@@ -1025,7 +1025,7 @@ class DatabaseManager:
                 UserType.EMAIL_VERIFIED_GUEST.value: 10,
                 UserType.REGISTERED_USER.value: 20  # CHANGED: Reduced from 40 to 20
             }
-            self.evasion_penalties = [24, 48, 96, 192, 336]  # Escalating penalties in hours
+            self.evasion_penalties = [24, 48, 96, 192, 336] # Escalating penalties in hours
         
         def detect_guest_email_evasion(self, session: UserSession, db_manager) -> bool:
             """
@@ -1387,7 +1387,7 @@ class ZohoCRMManager:
             data = response.json()
             
             if 'data' in data and data['data']:
-                contact_id = data['data']['id']
+                contact_id = data['data'][0]['id'] # Access the first item in the 'data' list
                 logger.info(f"Found existing Zoho contact: {contact_id}")
                 return contact_id
                     
@@ -1425,8 +1425,8 @@ class ZohoCRMManager:
             response.raise_for_status()
             data = response.json()
             
-            if 'data' in data and data['data']['code'] == 'SUCCESS':
-                contact_id = data['data']['details']['id']
+            if 'data' in data and data['data'][0]['code'] == 'SUCCESS': # Access the first item in the 'data' list
+                contact_id = data['data'][0]['details']['id'] # Access the first item in the 'data' list
                 logger.info(f"Created new Zoho contact: {contact_id}")
                 return contact_id
                     
@@ -1466,7 +1466,7 @@ class ZohoCRMManager:
                 response.raise_for_status()
                 data = response.json()
                 
-                if 'data' in data and data['data']['code'] == 'SUCCESS':
+                if 'data' in data and data['data'][0]['code'] == 'SUCCESS': # Access the first item in the 'data' list
                     logger.info(f"Successfully uploaded attachment: {filename}")
                     return True
                 else:
@@ -1514,7 +1514,7 @@ class ZohoCRMManager:
                 response.raise_for_status()
                 data = response.json()
                 
-                if 'data' in data and data['data']['code'] == 'SUCCESS':
+                if 'data' in data and data['data'][0]['code'] == 'SUCCESS': # Access the first item in the 'data' list
                     logger.info(f"Successfully added note to Zoho contact {contact_id}")
                     return True
                 else:
@@ -1528,7 +1528,7 @@ class ZohoCRMManager:
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
 
-        return False
+        return False # Should only be reached if all note retries fail.
 
     def save_chat_transcript_sync(self, session: UserSession, trigger_reason: str) -> bool:
         """Synchronously saves the chat transcript to Zoho CRM."""
@@ -1677,7 +1677,7 @@ class PineconeAssistantTool:
                 "6. NEVER guess or speculate about anything\n"
                 "7. NEVER make up website links, file paths, or citations\n"
                 "8. If asked about current events, news, recent information, or anything not in your documents, respond with: 'I don't have specific information about this topic in my knowledge base.'\n"
-                "9. Only include citations,, etc. if they come from your actual uploaded documents\n"
+                "9. Only include citations [1], [2], etc. if they come from your actual uploaded documents\n" # Corrected typo
                 "10. NEVER reference images, files, or documents that were not actually uploaded to your knowledge base\n\n"
                 "REMEMBER: It is better to say 'I don't know' than to provide incorrect information, fake sources, or non-existent file references."
             )
@@ -1825,7 +1825,7 @@ class TavilyFallbackAgent:
             response_parts = []
             
             if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info}")
+                response_parts.append(f"Based on my search: {relevant_info[0]}") # Corrected from relevant_info (which is a list)
             else:
                 response_parts.append("Based on my search, here's what I found:")
                 for i, info in enumerate(relevant_info, 1):
@@ -1864,7 +1864,7 @@ class TavilyFallbackAgent:
             
             response_parts = []
             if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info}")
+                response_parts.append(f"Based on my search: {relevant_info[0]}") # Corrected from relevant_info (which is a list)
             else:
                 response_parts.append("Based on my search:")
                 for info in relevant_info:
@@ -1901,7 +1901,7 @@ class TavilyFallbackAgent:
             return None
     
 class EnhancedAI:
-    """Gets AI response and manages session state."""
+    """Enhanced AI system with improved error handling and bidirectional fallback.""" # Corrected comment
     
     def __init__(self, config: Config):
         self.config = config
@@ -2022,7 +2022,8 @@ class EnhancedAI:
                 return True
         
         # PRIORITY 4: Detect potential fake citations (CRITICAL)
-        if "" in content_raw or "**Sources:**" in content_raw:
+        # The empty string check was a typo, changing it back to "[1]"
+        if "[1]" in content_raw or "**Sources:**" in content_raw:
             suspicious_patterns = [
                 "http://", ".org", ".net",
                 "example.com", "website.com", "source.com", "domain.com"
@@ -2032,8 +2033,9 @@ class EnhancedAI:
                 return True
         
         # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short or explicit "don't know")
+        # The empty string check was a typo, changing it back to "[1]"
         if not has_real_citations:
-            if "" not in content_raw and "**Sources:**" not in content_raw:
+            if "[1]" not in content_raw and "**Sources:**" not in content_raw:
                 if len(content_raw.strip()) > 30:
                     logger.warning("🚨 SAFETY: Long response without citations")
                     return True
@@ -2195,7 +2197,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     try:
         response = client.moderations.create(model="omni-moderation-latest", input=prompt)
-        result = response.results
+        result = response.results[0] # Corrected access: results is a list, need first element
         
         if result.flagged:
             flagged_categories = [cat for cat, flagged in result.categories.__dict__.items() if flagged]
@@ -2779,7 +2781,7 @@ class SessionManager:
         try:
             local, domain = email.split('@')
             if len(local) <= 2:
-                masked_local = local + '*' * (len(local) - 1) # Mask remaining chars
+                masked_local = local[0] + '*' * (len(local) - 1) # Mask remaining chars (corrected from original line)
             else:
                 masked_local = local[:2] + '*' * (len(local) - 2)
             return f"{masked_local}@{domain}"
@@ -3120,7 +3122,7 @@ class SessionManager:
             # Get AI response 
             ai_response = self.ai.get_response(sanitized_prompt, session.messages)
             
-            # Handle if ai.get_response() returned None due to its internal errors
+            # Handle if ai_response is None due to internal errors
             if ai_response is None:
                 logger.error(f"EnhancedAI.get_response returned None for session {session.session_id[:8]}")
                 return {
@@ -3332,7 +3334,7 @@ def render_simple_activity_tracker(session_id: str):
     """
     
     try:
-        result = st_javascript(simple_tracker_js, key=component_key)
+        result = st_javascript(js_code=simple_tracker_js, key=component_key) # Added js_code for clarity, though not strictly required
         
         if result and isinstance(result, dict) and result.get('type') == 'activity_status':
             return result
