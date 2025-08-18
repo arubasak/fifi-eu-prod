@@ -1025,7 +1025,7 @@ class DatabaseManager:
                 UserType.EMAIL_VERIFIED_GUEST.value: 10,
                 UserType.REGISTERED_USER.value: 20  # CHANGED: Reduced from 40 to 20
             }
-            self.evasion_penalties =  # Escalating penalties in hours
+            self.evasion_penalties = [24, 48, 96, 192, 336]  # Escalating penalties in hours
         
         def detect_guest_email_evasion(self, session: UserSession, db_manager) -> bool:
             """
