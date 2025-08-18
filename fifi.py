@@ -4347,78 +4347,81 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                 st.markdown("---") # Visual separator
             
-            # NEW: Check for post-response Guest Email Prompt trigger (for Guest Users only)
+            # Check for post-response Guest Email Prompt trigger (for Guest Users only)
             if msg.get('role') == 'assistant' and msg.get('trigger_guest_email_prompt', False):
                 st.warning("⚠️ **Guest Limit Reached:** You've used your 4 free questions. Email verification is required to continue.")
                 st.markdown("---")
             
-            # NEW: Check for post-response Email Verified Guest Ban trigger
+            # Check for post-response Email Verified Guest Ban trigger
             if msg.get('role') == 'assistant' and msg.get('trigger_email_verified_guest_ban', False):
                 st.error("🚫 **Daily Limit Reached**")
                 st.info(session_manager.question_limits._get_email_verified_limit_message()) # Use the specific message
                 st.markdown("---")
 
-
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input = display_email_prompt_if_needed(session_manager, session)
 
-
     # Chat input
-    # Chat input should be disabled if blocked by dialog OR if a ban is active
     is_banned_by_status = session.ban_status.value != BanStatus.NONE.value
     st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                    disabled=should_disable_chat_input or is_banned_by_status,
-                   key="chat_input_main") # Added a key for stability
+                   key="chat_input_main")
     
-    # Process prompt from session state (needed because chat_input is cleared on interaction)
+    # Process prompt from session state
     prompt = st.session_state.get("chat_input_main")
     if prompt:
-        #st.session_state["chat_input_main"] = "" # Clear the input field
+        # === THIS IS THE CRITICAL FIX ===
+        # Pre-emptively check if a guest is at their limit BEFORE processing or displaying the prompt.
+        limit_check = session_manager.question_limits.is_within_limits(session)
+        is_guest_at_limit = (
+            session.user_type == UserType.GUEST and 
+            not limit_check.get('allowed') and 
+            limit_check.get('reason') == 'guest_limit'
+        )
+
+        if is_guest_at_limit:
+            # User has hit their limit. Do NOT process or display their prompt.
+            # Instead, trigger the verification dialog immediately.
+            logger.info(f"Guest {session.session_id[:8]} attempted 5th question. Intercepting to show email prompt.")
+            st.session_state.verification_stage = 'email_entry'
+            # Clear the input so it doesn't get processed again on the next run
+            st.session_state["chat_input_main"] = "" 
+            st.rerun()
+            st.stop() # Stop execution of this run to ensure clean transition
+        # === END OF CRITICAL FIX ===
+
+        # If the check passes, proceed with the normal flow
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
-        
         with st.chat_message("user"):
             st.markdown(prompt)
         
         with st.chat_message("assistant"):
             with st.spinner("🔍 Processing your question..."):
-                try:
-                    response = session_manager.get_ai_response(session, prompt)
+                response = session_manager.get_ai_response(session, prompt)
+                
+                # The 'banned' check is still valid for hard bans (24h, etc.)
+                if response.get('banned'):
+                    st.error(response.get("content", 'Access restricted.'))
+                    if response.get('time_remaining'):
+                        time_remaining = response['time_remaining']
+                        hours = int(time_remaining.total_seconds() // 3600)
+                        minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                        st.error(f"Time remaining: {hours}h {minutes}m")
+                    st.rerun() 
+                else:
+                    st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                     
-                    if response.get('banned'):
-                        st.error(response.get("content", 'Access restricted.'))
-                        if response.get('time_remaining'):
-                            time_remaining = response['time_remaining']
-                            hours = int(time_remaining.total_seconds() // 3600)
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                            st.error(f"Time remaining: {hours}h {minutes}m")
-                        # The ban message is already handled at the top of display_email_prompt_if_needed.
-                        # This return will just make sure it reruns to display the disabled chat input.
-                        st.rerun() 
-                    else:
-                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
-                        
-                        if response.get("source"):
-                            source_color = {
-                                "FiFi": "🧠", "FiFi Web Search": "🌐",
-                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                                "Error Handler": "❌"
-                            }.get(response['source'], "🤖")
-                            st.caption(f"{source_color} Source: {response['source']}")
-                        
-                        logger.info(f"✅ Question processed successfully")
-                        
-                        # Re-run if a new blocking state or ban was just applied post-response
-                        if response.get('trigger_guest_email_prompt', False) or \
-                           response.get('trigger_email_verified_guest_ban', False) or \
-                           response.get('tier1_ban_applied_post_response', False):
-                            logger.info(f"Rerunning to show post-response prompt/ban for session {session.session_id[:8]}")
-                            st.rerun() # This will trigger display_email_prompt_if_needed on the next run
-                        
-                except Exception as e:
-                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
-                    st.error("⚠️ I encountered an error. Please try again.")
-        
-        # If no specific trigger, just rerun to clear input and update UI
+                    if response.get("source"):
+                        source_color = {
+                            "FiFi": "🧠", "FiFi Web Search": "🌐",
+                            "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                            "Error Handler": "❌"
+                        }.get(response['source'], "🤖")
+                        st.caption(f"{source_color} Source: {response['source']}")
+                    
+                    logger.info(f"✅ Question processed successfully")
+
+        # Rerun to clear the input field and update the UI state
         st.rerun()
 
 # =============================================================================
