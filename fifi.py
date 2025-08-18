@@ -566,7 +566,8 @@ class DatabaseManager:
                  session.zoho_contact_id, session.created_at.isoformat(),
                  last_activity_iso, json_messages, int(session.active),
                  session.wp_token, int(session.timeout_saved_to_crm), session.fingerprint_id,
-                 session.fingerprint_method, session.visitor_type, # This is the corrected line for fingerprint_method
+                 session.finger_method, # This is the corrected line for fingerprint_method, was session.fingerprint_method
+                 session.visitor_type, # This is the corrected line for visitor_type, was session.visitor_type
                  session.daily_question_count,
                  session.total_question_count, 
                  session.last_question_time.isoformat() if session.last_question_time else None,
@@ -2022,8 +2023,7 @@ class EnhancedAI:
                 return True
         
         # PRIORITY 4: Detect potential fake citations (CRITICAL)
-        # The empty string check was a typo, changing it back to "[1]"
-        if "[1]" in content_raw or "**Sources:**" in content_raw:
+        if "[1]" in content_raw or "**Sources:**" in content_raw: # Corrected from empty string check
             suspicious_patterns = [
                 "http://", ".org", ".net",
                 "example.com", "website.com", "source.com", "domain.com"
@@ -2033,9 +2033,8 @@ class EnhancedAI:
                 return True
         
         # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short or explicit "don't know")
-        # The empty string check was a typo, changing it back to "[1]"
         if not has_real_citations:
-            if "[1]" not in content_raw and "**Sources:**" not in content_raw:
+            if "[1]" not in content_raw and "**Sources:**" not in content_raw: # Corrected from empty string check
                 if len(content_raw.strip()) > 30:
                     logger.warning("🚨 SAFETY: Long response without citations")
                     return True
@@ -2781,7 +2780,7 @@ class SessionManager:
         try:
             local, domain = email.split('@')
             if len(local) <= 2:
-                masked_local = local[0] + '*' * (len(local) - 1) # Mask remaining chars (corrected from original line)
+                masked_local = local[0] + '*' * (len(local) - 1) # Mask remaining chars. Original intent.
             else:
                 masked_local = local[:2] + '*' * (len(local) - 2)
             return f"{masked_local}@{domain}"
@@ -4630,18 +4629,4 @@ def main_fixed():
                 else:
                     activity_data_from_js = st.session_state.latest_activity_data_from_js
             
-            timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
-            if timeout_triggered:
-                return
-
-            render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
-                    
-    except Exception as page_error:
-        logger.error(f"Page routing error: {page_error}", exc_info=True)
-        st.error("⚠️ Page error occurred. Please refresh the page.")
-        st.stop()
-
-# Entry point
-if __name__ == "__main__":
-    main_fixed()
+            timeout_triggered = check_timeout_and
