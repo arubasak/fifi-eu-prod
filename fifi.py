@@ -4085,18 +4085,21 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     is_guest_limit_hit = (session.user_type == UserType.GUEST and 
                           session.daily_question_count >= session_manager.question_limits.question_limits[UserType.GUEST.value])
     
-    # --- Logic for BLOCKING prompts ---
+    # --- Core Logic for Blocking Prompts ---
+
+    # Priority 1: Device recognized with higher privilege
     if session.reverification_pending and st.session_state.verification_stage is None:
-        # User has a higher privilege account on this device, and hasn't explicitly declined to re-verify yet.
-        # This will set the stage to 'initial_check' and trigger the blocking dialog.
         st.session_state.verification_stage = 'initial_check'
-        st.session_state.guest_continue_active = False # New blocking event, clear any previous guest-continue
+        st.session_state.guest_continue_active = False # New blocking event, clear any previous guest-continue state
+
+    # Priority 2: Guest limit hit and no other *blocking* verification is in progress.
+    # This ensures that even if they previously declined a recognized email, once their guest questions run out,
+    # they are *forced* to verify.
+    elif is_guest_limit_hit and \
+         st.session_state.verification_stage not in ['email_entry', 'send_code_recognized', 'code_entry', 'initial_check']:
         
-    elif is_guest_limit_hit and st.session_state.verification_stage not in ['email_entry', 'send_code_recognized', 'code_entry'] and \
-         not (session.declined_recognized_email_at and st.session_state.guest_continue_active):
-        # Guest limit hit AND not already in another blocking verification stage AND not in a 'declined and continuing as guest' state
-        st.session_state.verification_stage = 'email_entry' # Force email entry for new guests hitting limit
-        st.session_state.guest_continue_active = False # New blocking event, clear any previous guest-continue
+        st.session_state.verification_stage = 'email_entry' # Force email entry for guests hitting limit
+        st.session_state.guest_continue_active = False # New blocking event, clear any previous guest-continue state
 
 
     # If currently in a blocking verification stage
@@ -4230,6 +4233,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     # This block should ONLY activate if we are NOT in a blocking state above.
     # This is a passive suggestion, not a forced action.
     elif session.declined_recognized_email_at and \
+         session.user_type == UserType.GUEST and \
          session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value] and \
          not st.session_state.guest_continue_active: # Only show if they haven't explicitly said "continue as guest" for this session
         
@@ -4599,39 +4603,4 @@ def main_fixed():
             session = session_manager.get_session() 
             
             if session is None or not session.active:
-                logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
-                st.session_state['page'] = None
-                st.rerun()
-                return
-                
-            activity_data_from_js = None
-            if session and session.session_id: 
-                activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
-                if activity_tracker_key_state_flag not in st.session_state or \
-                   st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
-                    
-                    logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
-                    activity_data_from_js = render_simple_activity_tracker(session.session_id)
-                    st.session_state[activity_tracker_key_state_flag] = True
-                    st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
-                    st.session_state.latest_activity_data_from_js = activity_data_from_js
-                else:
-                    activity_data_from_js = st.session_state.latest_activity_data_from_js
-            
-            timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
-            if timeout_triggered:
-                return
-
-            render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
-                    
-    except Exception as page_error:
-        logger.error(f"Page routing error: {page_error}", exc_info=True)
-        st.error("⚠️ Page error occurred. Please refresh the page.")
-        st.stop()
-
-# Entry point
-if __name__ == "__main__":
-    main_fixed()
+                logger.warning(f"Expected active session for 'chat' page but got None or inactive
