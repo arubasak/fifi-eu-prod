@@ -566,7 +566,7 @@ class DatabaseManager:
                  session.zoho_contact_id, session.created_at.isoformat(),
                  last_activity_iso, json_messages, int(session.active),
                  session.wp_token, int(session.timeout_saved_to_crm), session.fingerprint_id,
-                 session.finger_method, # This is the corrected line for fingerprint_method, was session.fingerprint_method
+                 session.fingerprint_method, # This is the corrected line for fingerprint_method, was session.finger_method
                  session.visitor_type, # This is the corrected line for visitor_type, was session.visitor_type
                  session.daily_question_count,
                  session.total_question_count, 
@@ -1580,12 +1580,12 @@ class ZohoCRMManager:
                     logger.error(f"Zoho note add failed with response: {data}")
                         
             except requests.exceptions.Timeout:
-                logger.error(f"Zoho note add timeout (attempt {attempt + 1}/{max_retries})")
+                logger.error(f"Zoho note add timeout (attempt {attempt_note + 1}/{max_retries_note})") # Corrected variable name
             except Exception as e:
-                logger.error(f"Error adding Zoho note (attempt {attempt + 1}/{max_retries}): {e}", exc_info=True)
+                logger.error(f"Error adding Zoho note (attempt {attempt_note + 1}/{max_retries_note}): {e}", exc_info=True) # Corrected variable name
             
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+            if attempt_note < max_retries_note - 1: # Corrected variable name
+                time.sleep(2 ** attempt_note) # Corrected variable name
 
         return False # Should only be reached if all note retries fail.
 
@@ -4596,7 +4596,7 @@ def main_fixed():
     current_page = st.session_state.get('page')
 
     # Route to appropriate page based on user intent
-    try:
+    try: 
         if current_page != "chat":
             # If not on chat page, render welcome page. No session is needed or created yet.
             render_welcome_page(session_manager)
@@ -4630,4 +4630,19 @@ def main_fixed():
                     activity_data_from_js = st.session_state.latest_activity_data_from_js
             
             timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+            
+            # This is the point where the previous SyntaxError occurred.
+            # The remaining logic for the 'chat' page should be here.
+            if not timeout_triggered: # Only render chat if no timeout was triggered
+                render_sidebar(session_manager, session, st.session_state.pdf_exporter)
+                render_chat_interface_simplified(session_manager, session, activity_data_from_js)
 
+    except Exception as e:
+        # Catch any unexpected errors in the main rendering/routing logic
+        st.error(f"❌ An unexpected error occurred: {str(e)}")
+        st.info("Please try refreshing the page.")
+        logger.critical(f"Unhandled error in main application loop: {e}", exc_info=True)
+
+
+if __name__ == "__main__":
+    main_fixed()
