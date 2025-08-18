@@ -3068,63 +3068,40 @@ class SessionManager:
         """Gets AI response and manages session state."""
         try:
             # Handle cases where fingerprint_id might still be temporary or None during early load.
-            # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
             rate_limiter_id = session.fingerprint_id
             if rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                # Fallback to session_id for truly un-fingerprinted or temporary cases,
-                # to still apply some level of protection, albeit less robust.
                 rate_limiter_id = session.session_id
                 logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
 
-            # Check rate limiting using fingerprint_id (or fallback session_id)
-            if not self.rate_limiter.is_allowed(rate_limiter_id): # MODIFIED: Use rate_limiter_id
+            # 1. Check rate limiting
+            if not self.rate_limiter.is_allowed(rate_limiter_id):
                 return {
                     'content': 'Too many requests. Please wait a moment before asking another question.',
                     'success': False,
                     'source': 'Rate Limiter'
                 }
             
-            # Content moderation check (MOVED HERE)
-            moderation_result = check_content_moderation(prompt, self.ai.openai_client) # Correctly pass self.ai.openai_client
+            # 2. Content moderation check
+            moderation_result = check_content_moderation(prompt, self.ai.openai_client)
             if moderation_result and moderation_result.get("flagged"):
                 logger.warning(f"Content moderation flagged input: {moderation_result.get('categories', [])}")
                 return {
                     "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
-                    "success": False,
-                    "source": "Content Moderation",
-                    "used_search": False,
-                    "used_pinecone": False,
-                    "has_citations": False,
-                    "has_inline_citations": False,
-                    "safety_override": False
+                    "success": False, "source": "Content Moderation", "used_search": False, "used_pinecone": False,
+                    "has_citations": False, "has_inline_citations": False, "safety_override": False
                 }
 
-            # *** THE FIX IS HERE ***
-            # Check for existing bans and guest limits BEFORE processing the question.
+            # 3. Final limit check (as a server-side safety net)
             limit_check_before_question = self.question_limits.is_within_limits(session)
             if not limit_check_before_question['allowed']:
-                # For a 'guest_limit', we return a standard message. The UI will rerun,
-                # and the `display_email_prompt_if_needed` function will correctly show the form.
-                # We specifically AVOID returning {'banned': True} for this case.
-                if limit_check_before_question.get('reason') == 'guest_limit':
-                    logger.info(f"Guest limit hit for session {session.session_id[:8]}. Blocking 5th question and triggering UI prompt.")
-                    return {
-                        'content': "You've reached your 4 free questions. Please verify your email to continue chatting.",
-                        'success': False,
-                        'source': "Question Limiter",
-                        'trigger_guest_email_prompt': True # Explicitly set flag
-                    }
-                
-                # For all other reasons (real bans), we return the 'banned' dictionary.
-                else:
-                    return {
-                        'banned': True,
-                        'content': limit_check_before_question.get("message", 'Access restricted due to usage policy.'),
-                        'time_remaining': limit_check_before_question.get('time_remaining')
-                    }
+                # This is a fallback. The UI should have caught this already.
+                return {
+                    'banned': True,
+                    'content': limit_check_before_question.get("message", 'Access restricted due to usage policy.'),
+                    'time_remaining': limit_check_before_question.get('time_remaining')
+                }
 
-
-            # Sanitize input
+            # 4. Sanitize input
             sanitized_prompt = sanitize_input(prompt, 4000)
             if not sanitized_prompt:
                 return {
@@ -3133,13 +3110,12 @@ class SessionManager:
                     'source': 'Input Validation'
                 }
             
-            # Record question (this increments daily_question_count)
+            # 5. Record the question ONLY AFTER all checks have passed
             self.question_limits.record_question(session)
             
-            # Get AI response 
+            # 6. Get AI response 
             ai_response = self.ai.get_response(sanitized_prompt, session.messages)
             
-            # Handle if ai.get_response() returned None due to its internal errors
             if ai_response is None:
                 logger.error(f"EnhancedAI.get_response returned None for session {session.session_id[:8]}")
                 return {
@@ -3148,7 +3124,7 @@ class SessionManager:
                     'source': 'AI System Internal Error'
                 }
 
-            # Add messages to session AFTER AI has responded
+            # 7. Add messages to session AFTER AI has responded
             user_message = {'role': 'user', 'content': sanitized_prompt}
             assistant_message = {
                 'role': 'assistant',
@@ -3161,39 +3137,28 @@ class SessionManager:
                 'safety_override': ai_response.get('safety_override', False)
             }
             
-            session.messages.extend([user_message, assistant_message])
-            
-            # --- Post-response limit checks to trigger UI actions for the *next* question ---
-            # This is where we determine if a prompt/ban should be displayed *after* this question's answer.
-            
-            # Check for guest limit hit (4th question for guest)
+            # 8. Add post-response triggers to the assistant's message
             if (session.user_type == UserType.GUEST and 
-                session.daily_question_count >= self.question_limits.question_limits[UserType.GUEST.value]): # Already 4 questions asked
-                # This flag is now set on the assistant's message itself, which the UI can see.
+                session.daily_question_count >= self.question_limits.question_limits[UserType.GUEST.value]):
                 assistant_message['trigger_guest_email_prompt'] = True
                 logger.info(f"Guest session {session.session_id[:8]} hit limit of {session.daily_question_count} questions. Setting trigger for email prompt.")
             
-            # Check for email-verified guest daily limit hit (10th question)
             elif (session.user_type == UserType.EMAIL_VERIFIED_GUEST and 
-                  session.daily_question_count >= self.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]): # Already 10 questions asked
+                  session.daily_question_count >= self.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]):
                 self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
                 assistant_message['trigger_email_verified_guest_ban'] = True
                 logger.info(f"Email-verified guest session {session.session_id[:8]} hit daily limit of {session.daily_question_count} questions. Applying 24h ban.")
 
-            # Check for Registered User Tier 1 limit hit (10th question)
             elif (session.user_type == UserType.REGISTERED_USER and 
                   session.daily_question_count == 10 and 
-                  session.ban_status == BanStatus.NONE): # Ensure ban isn't already active
-                
+                  session.ban_status == BanStatus.NONE):
                 self.question_limits._apply_ban(session, BanStatus.ONE_HOUR, "Tier 1 limit reached (10 questions)")
                 assistant_message['tier1_ban_applied_post_response'] = True
                 logger.info(f"Tier 1 ban applied to registered user {session.session_id[:8]} after 10th question's response was added.")
 
-
-            # Update activity and save session (will save new message, new daily_question_count, and any new ban status)
+            session.messages.extend([user_message, assistant_message])
             self._update_activity(session)
             
-            # Return the full AI response, not the assistant_message dict, since it contains other useful info
             return ai_response
             
         except Exception as e:
