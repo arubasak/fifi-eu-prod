@@ -3064,7 +3064,7 @@ class SessionManager:
             st.error("An unexpected error occurred during authentication. Please try again later.")
             return None
 
-        def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
         """Gets AI response and manages session state."""
         try:
             # Handle cases where fingerprint_id might still be temporary or None during early load.
