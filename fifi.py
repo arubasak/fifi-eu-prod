@@ -3064,7 +3064,7 @@ class SessionManager:
             st.error("An unexpected error occurred during authentication. Please try again later.")
             return None
 
-    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+        def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
         """Gets AI response and manages session state."""
         try:
             # Handle cases where fingerprint_id might still be temporary or None during early load.
@@ -3100,16 +3100,29 @@ class SessionManager:
                 }
 
             # *** THE FIX IS HERE ***
-            # Check for existing bans (including guest limits)
+            # Check for existing bans and guest limits BEFORE processing the question.
             limit_check_before_question = self.question_limits.is_within_limits(session)
             if not limit_check_before_question['allowed']:
-                # The UI should handle showing the prompt or ban message. 
-                # This return just ensures the AI doesn't process the question.
-                return {
-                    'banned': True,
-                    'content': limit_check_before_question.get("message", 'Access restricted due to usage policy.'),
-                    'time_remaining': limit_check_before_question.get('time_remaining')
-                }
+                # For a 'guest_limit', we return a standard message. The UI will rerun,
+                # and the `display_email_prompt_if_needed` function will correctly show the form.
+                # We specifically AVOID returning {'banned': True} for this case.
+                if limit_check_before_question.get('reason') == 'guest_limit':
+                    logger.info(f"Guest limit hit for session {session.session_id[:8]}. Blocking 5th question and triggering UI prompt.")
+                    return {
+                        'content': "You've reached your 4 free questions. Please verify your email to continue chatting.",
+                        'success': False,
+                        'source': "Question Limiter",
+                        'trigger_guest_email_prompt': True # Explicitly set flag
+                    }
+                
+                # For all other reasons (real bans), we return the 'banned' dictionary.
+                else:
+                    return {
+                        'banned': True,
+                        'content': limit_check_before_question.get("message", 'Access restricted due to usage policy.'),
+                        'time_remaining': limit_check_before_question.get('time_remaining')
+                    }
+
 
             # Sanitize input
             sanitized_prompt = sanitize_input(prompt, 4000)
@@ -3156,14 +3169,15 @@ class SessionManager:
             # Check for guest limit hit (4th question for guest)
             if (session.user_type == UserType.GUEST and 
                 session.daily_question_count >= self.question_limits.question_limits[UserType.GUEST.value]): # Already 4 questions asked
-                ai_response['trigger_guest_email_prompt'] = True
+                # This flag is now set on the assistant's message itself, which the UI can see.
+                assistant_message['trigger_guest_email_prompt'] = True
                 logger.info(f"Guest session {session.session_id[:8]} hit limit of {session.daily_question_count} questions. Setting trigger for email prompt.")
             
             # Check for email-verified guest daily limit hit (10th question)
             elif (session.user_type == UserType.EMAIL_VERIFIED_GUEST and 
                   session.daily_question_count >= self.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]): # Already 10 questions asked
                 self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
-                ai_response['trigger_email_verified_guest_ban'] = True
+                assistant_message['trigger_email_verified_guest_ban'] = True
                 logger.info(f"Email-verified guest session {session.session_id[:8]} hit daily limit of {session.daily_question_count} questions. Applying 24h ban.")
 
             # Check for Registered User Tier 1 limit hit (10th question)
@@ -3172,13 +3186,14 @@ class SessionManager:
                   session.ban_status == BanStatus.NONE): # Ensure ban isn't already active
                 
                 self.question_limits._apply_ban(session, BanStatus.ONE_HOUR, "Tier 1 limit reached (10 questions)")
-                ai_response['tier1_ban_applied_post_response'] = True
+                assistant_message['tier1_ban_applied_post_response'] = True
                 logger.info(f"Tier 1 ban applied to registered user {session.session_id[:8]} after 10th question's response was added.")
 
 
             # Update activity and save session (will save new message, new daily_question_count, and any new ban status)
             self._update_activity(session)
             
+            # Return the full AI response, not the assistant_message dict, since it contains other useful info
             return ai_response
             
         except Exception as e:
@@ -3188,7 +3203,6 @@ class SessionManager:
                 'success': False,
                 'source': 'Error Handler'
             }
-
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
         try:
