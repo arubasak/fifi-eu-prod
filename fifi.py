@@ -4628,4 +4628,5 @@ def main_fixed():
                 return
 
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_simplified(session_manager, session, activity_data_
+            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
+
