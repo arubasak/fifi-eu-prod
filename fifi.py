@@ -4630,3 +4630,10 @@ def main_fixed():
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
             render_chat_interface_simplified(session_manager, session, activity_data_from_js)
 
+    except Exception as e:
+        logger.error(f"Main application error: {e}", exc_info=True)
+        st.error("⚠️ An unexpected error occurred. Please refresh the page.")
+        st.info(f"Error details: {str(e)}")
+
+if __name__ == "__main__":
+    main_fixed()
