@@ -1476,7 +1476,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
+                if attempt_note < max_retries - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -3994,9 +3994,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             except Exception as e:
                 logger.error(f"Failed to update activity from JavaScript: {e}")
 
-    # The fingerprint component rendering is now handled within session_manager.get_session()
-    # It will be implicitly rendered under the "Preparing your chat session..." spinner.
-
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
             render_simplified_browser_close_detection(session.session_id)
@@ -4254,7 +4251,7 @@ def main_fixed():
             return # Stop execution if initial services fail to load
         
         logger.info("✅ Global application services initialized. Rerunning to proceed with session setup.")
-        st.experimental_rerun() # Rerun to clear the spinner and proceed with next steps
+        st.rerun() # Replaced st.experimental_rerun() with st.rerun()
         return # Important to return here to avoid executing further code on this run
 
     # Handle emergency saves AND fingerprint data from query parameters
