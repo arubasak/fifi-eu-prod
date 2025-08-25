@@ -4270,7 +4270,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     return disable_chat_input
 
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
-    """Chat interface with enhanced tier system notifications and session initialization progress."""
+    """Chat interface with enhanced tier system notifications."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
@@ -4305,30 +4305,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             render_simplified_browser_close_detection(session.session_id)
         except Exception as e:
             logger.error(f"Browser close detection failed: {e}")
-
-    # Simple non-blocking initialization indicator
-    initialization_key = f"initialization_shown_{session.session_id}"
-    show_brief_loading = not st.session_state.get(initialization_key, False)
-    
-    if show_brief_loading:
-        # Show brief loading message and mark as shown
-        st.info("🔄 Initializing your session...")
-        st.session_state[initialization_key] = True
-        # Auto-refresh to show the interface immediately
-        st.rerun()
-    
-    # Show subtle background process indicators (non-blocking)
-    fingerprint_in_progress = (
-        not session.fingerprint_id or
-        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-    )
-    
-    if fingerprint_in_progress:
-        # Small, non-blocking indicator that fingerprinting is happening
-        st.caption("🔍 Device recognition in progress... (running in background)")
-    
-    # Add some spacing
-    st.write("")
 
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input = display_email_prompt_if_needed(session_manager, session)
@@ -4381,17 +4357,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                     st.markdown("---") # Visual separator
 
-        # Determine chat input state and placeholder text
-        input_placeholder = "Ask me about ingredients, suppliers, or market trends..."
-        input_disabled = should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value
-        
-        if should_disable_chat_input:
-            input_placeholder = "Please complete email verification to continue..."
-        elif session.ban_status.value != BanStatus.NONE.value:
-            input_placeholder = "Chat is temporarily restricted..."
-
-        # Chat input - enabled once initialization is complete
-        prompt = st.chat_input(input_placeholder, disabled=input_disabled)
+        # Chat input
+        prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                                disabled=should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value)
         
         if prompt:
             logger.info(f"🎯 Processing question from {session.session_id[:8]}")
@@ -4441,6 +4409,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         st.error("⚠️ I encountered an error. Please try again.")
             
             st.rerun()
+
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
 # =============================================================================
