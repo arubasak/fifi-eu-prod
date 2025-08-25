@@ -3594,31 +3594,27 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         session_manager = st.session_state.get('session_manager')
         if not session_manager:
             logger.error("❌ Session manager not available during fingerprint processing from query.")
-            # Set loading to false as no manager means it can't load anyway
-            st.session_state.fingerprint_loading = False 
             return False
         
         session = session_manager.db.load_session(session_id)
         if not session:
             logger.error(f"❌ Fingerprint processing: Session '{session_id[:8]}' not found in database.")
-            st.session_state.fingerprint_loading = False 
             return False
         
         logger.info(f"✅ Processing fingerprint for session '{session_id[:8]}': ID={fingerprint_id[:8]}, Method={method}, Privacy={privacy}")
         
+        # The apply_fingerprinting method will now handle both setting the fingerprint
+        # and checking for inheritance based on this new 'real' fingerprint.
         processed_data = {
             'fingerprint_id': fingerprint_id,
             'fingerprint_method': method,
             'browser_privacy_level': privacy,
             'working_methods': working_methods
+            # visitor_type is determined by apply_fingerprinting after inheritance check
         }
         
         success = session_manager.apply_fingerprinting(session, processed_data)
         
-        # Always set fingerprint_loading to False after processing, regardless of success.
-        # The attempt to load the fingerprint via the component is complete.
-        st.session_state.fingerprint_loading = False 
-
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
             return True
@@ -3628,7 +3624,6 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         
     except Exception as e:
         logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
-        st.session_state.fingerprint_loading = False 
         return False
 
 def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
@@ -3750,8 +3745,6 @@ def handle_fingerprint_requests_from_query():
         if not fingerprint_id or not method:
             st.error("❌ **Fingerprint Error** - Missing required data in redirect")
             logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
-            # Ensure loading flag is reset even on error to unblock chat
-            st.session_state.fingerprint_loading = False 
             # Removed time.sleep(2)
             st.rerun()
             return
@@ -3765,8 +3758,6 @@ def handle_fingerprint_requests_from_query():
                 st.stop()
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
-            # Ensure loading flag is reset even on error to unblock chat
-            st.session_state.fingerprint_loading = False 
         
         return
     else:
@@ -4296,7 +4287,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             except Exception as e:
                 logger.error(f"Failed to update activity from JavaScript: {e}")
 
-    # Fingerprinting logic and loading state management
+    # Fingerprinting
     fingerprint_needed = (
         not session.fingerprint_id or
         session.fingerprint_method == "temporary_fallback_python" or
@@ -4304,13 +4295,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     )
     
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-    
     if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
         st.session_state[fingerprint_key] = True
-        st.session_state.fingerprint_loading = True # Set loading flag here when rendering starts
-        logger.info(f"Fingerprint component rendered, setting fingerprint_loading = True for session {session.session_id[:8]}")
-
 
     # Browser close detection for emergency saves
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
@@ -4370,11 +4357,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                     st.markdown("---") # Visual separator
 
-        # Chat input - now also disabled while fingerprinting is loading
+        # Chat input
         prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                                disabled=should_disable_chat_input or 
-                                         session.ban_status.value != BanStatus.NONE.value or
-                                         st.session_state.get('fingerprint_loading', False)) # ADDED fingerprint_loading check
+                                disabled=should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value)
         
         if prompt:
             logger.info(f"🎯 Processing question from {session.session_id[:8]}")
@@ -4540,8 +4525,6 @@ def ensure_initialization_fixed():
             # NEW: Initialize verification_stage and guest_continue_active
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
-            # NEW: Initialize fingerprint_loading to False by default
-            st.session_state.fingerprint_loading = False 
 
             init_progress.progress(1.0)
             status_text.text("✅ Initialization complete!")
