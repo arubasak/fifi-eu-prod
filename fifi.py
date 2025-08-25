@@ -1477,7 +1477,7 @@ class ZohoCRMManager:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
                 if attempt_note < max_retries - 1:
-                    time.sleep(2 ** attempt_note)
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
                     return False
@@ -2437,8 +2437,8 @@ class SessionManager:
                         session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
                         not st.session_state.get(fingerprint_checked_key, False)):
                         
-                        self.fingerprinting.render_fingerprint_component(session.session_id) # Render the component
-                        self._attempt_fingerprint_inheritance(session) # Process inheritance
+                        self.fingerprinting.render_fingerprint_component(session.session_id)
+                        self._attempt_fingerprint_inheritance(session)
                         self.db.save_session(session)
                         st.session_state[fingerprint_checked_key] = True
                         logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
@@ -3016,7 +3016,7 @@ def render_simple_activity_tracker(session_id: str):
                     }});
                 }}
             }} catch (e) {{
-                // Cross-origin restriction, ignore
+                # Cross-origin restriction, ignore
             }}
             
             state.listenersInitialized = true;
@@ -3543,6 +3543,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 
                 col1, col2, col3 = st.columns(3)
                 with col2:
+                    # Buttons on welcome page should be disabled during app-wide loading
                     submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True, disabled=st.session_state.app_loading)
                 
                 if submit_button:
@@ -3579,6 +3580,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.markdown("")
         col1, col2, col3 = st.columns(3)
         with col2:
+            # Buttons on welcome page should be disabled during app-wide loading
             if st.button("👤 Start as Guest", use_container_width=True, disabled=st.session_state.app_loading):
                 session = session_manager.get_session() 
                 if session and session.last_activity is None:
@@ -3751,6 +3753,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         with col1:
             clear_chat_help = "Hides all messages from the current conversation display. Messages are preserved in the database and new messages can still be added."
             
+            # Buttons in sidebar should be disabled during app-wide loading
             if st.button("🗑️ Clear Chat", use_container_width=True, help=clear_chat_help, disabled=st.session_state.app_loading):
                 session_manager.clear_chat_history(session)
                 st.success("🗑️ Chat display cleared! Messages preserved in database.")
@@ -3762,6 +3765,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 session.email and session.messages and session.daily_question_count >= 1):
                 signout_help += " Your conversation will be automatically saved to CRM before signing out."
             
+            # Buttons in sidebar should be disabled during app-wide loading
             if st.button("🚪 Sign Out", use_container_width=True, help=signout_help, disabled=st.session_state.app_loading):
                 session_manager.end_session(session)
                 st.rerun()
@@ -3771,6 +3775,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             
             pdf_buffer = pdf_exporter.generate_chat_pdf(session)
             if pdf_buffer:
+                # Buttons in sidebar should be disabled during app-wide loading
                 st.download_button(
                     label="📄 Download Chat PDF",
                     data=pdf_buffer,
@@ -3782,6 +3787,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 )
             
             if session_manager.zoho.config.ZOHO_ENABLED and session.email:
+                # Buttons in sidebar should be disabled during app-wide loading
                 if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Manually save your current chat transcript to your linked Zoho CRM contact.", disabled=st.session_state.app_loading):
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat automatically saves to CRM during Sign Out or browser/tab close.")
@@ -3849,6 +3855,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         
         col1, col2 = st.columns(2)
         with col1:
+            # Buttons within dialog should be disabled during app-wide loading
             if st.button("✅ Verify this email", use_container_width=True, key="reverify_yes_btn", disabled=st.session_state.app_loading):
                 session.recognition_response = "yes_reverify"
                 session.declined_recognized_email_at = None
@@ -3857,6 +3864,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                 session_manager.db.save_session(session)
                 st.rerun()
         with col2:
+            # Buttons within dialog should be disabled during app-wide loading
             if st.button("❌ No, I don't recognize the email", use_container_width=True, key="reverify_no_btn", disabled=st.session_state.app_loading):
                 session.recognition_response = "no_declined_reco"
                 session.declined_recognized_email_at = datetime.now()
@@ -3892,7 +3900,9 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
         with st.form("email_verification_form", clear_on_submit=False):
             st.markdown("**Please enter your email address to receive a verification code:**")
+            # Input fields within dialog should be disabled during app-wide loading
             current_email_input = st.text_input("Email Address", placeholder="your@email.com", value=st.session_state.get('verification_email', session.email or ""), key="manual_email_input", disabled=st.session_state.app_loading)
+            # Buttons within dialog should be disabled during app-wide loading
             submit_email = st.form_submit_button("Send Verification Code", use_container_width=True, disabled=st.session_state.app_loading)
             
             if submit_email:
@@ -3915,11 +3925,14 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.info("Please check your email, including spam/junk folders. The code is valid for 1 minute.")
         
         with st.form("code_verification_form", clear_on_submit=False):
+            # Input fields within dialog should be disabled during app-wide loading
             code = st.text_input("Enter Verification Code", placeholder="e.g., 123456", max_chars=6, key="verification_code_input", disabled=st.session_state.app_loading)
             col_code1, col_code2 = st.columns(2)
             with col_code1:
+                # Buttons within dialog should be disabled during app-wide loading
                 submit_code = st.form_submit_button("Verify Code", use_container_width=True, disabled=st.session_state.app_loading)
             with col_code2:
+                # Buttons within dialog should be disabled during app-wide loading
                 resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True, disabled=st.session_state.app_loading)
             
             if resend_code:
@@ -3962,12 +3975,14 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
         col_opts1, col_opts2 = st.columns(2)
         with col_opts1:
+            # Buttons within dialog should be disabled during app-wide loading
             if st.button("📧 Enter a New Email for Verification", use_container_width=True, key="new_email_opt_btn", disabled=st.session_state.app_loading):
                 st.session_state.verification_email = ""
                 st.session_state.verification_stage = "email_entry"
                 st.session_state.guest_continue_active = False
                 st.rerun()
         with col_opts2:
+            # Buttons within dialog should be disabled during app-wide loading
             if st.button("Continue as Guest for Now", use_container_width=True, key="continue_guest_btn", disabled=st.session_state.app_loading):
                 st.session_state.guest_continue_active = True
                 st.session_state.chat_blocked_by_dialog = False
@@ -4044,6 +4059,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                     st.markdown("---")
 
+        # Chat input should be disabled during app-wide loading, in addition to other conditions
         prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                                 disabled=st.session_state.app_loading or should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value)
         
@@ -4254,6 +4270,13 @@ def main_fixed():
         st.rerun() # Replaced st.experimental_rerun() with st.rerun()
         return # Important to return here to avoid executing further code on this run
 
+    # From this point, initial_services_loaded is guaranteed to be True.
+    # We now explicitly set app_loading to True for any subsequent page-specific loading.
+    # It will be set to False only when a page is fully ready for interaction.
+    # This prevents buttons on the welcome page from being prematurely enabled.
+    st.session_state.app_loading = True 
+
+
     # Handle emergency saves AND fingerprint data from query parameters
     # This needs to happen before rendering any main UI, as it might trigger a rerun or stop.
     try:
@@ -4281,9 +4304,10 @@ def main_fixed():
     # Main application logic
     try:
         if current_page != "chat":
-            # Welcome page is relatively light, just render it.
+            # We are on the welcome page. If we reached here, initial services are loaded.
+            # So, the welcome page should now be fully interactive.
+            st.session_state.app_loading = False # Set to False for the welcome page as it's ready for interaction
             render_welcome_page(session_manager)
-            st.session_state.app_loading = False # Welcome page is ready for interaction
         else:
             # For the chat page, we need to load the user session and related data.
             # This is the "second initialization" the user is referring to.
