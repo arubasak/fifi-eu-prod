@@ -9,7 +9,7 @@ import functools
 import io
 import html
 import jwt
-import threading 
+import threading
 import copy
 import sqlite3
 import hashlib
@@ -310,14 +310,6 @@ class UserSession:
     pending_zoho_contact_id: Optional[str] = None
     pending_wp_token: Optional[str] = None
 
-    # NEW: Pending count fields for reverification
-    # Removed these as they were not consistently merged in previous versions and caused issues.
-    # The current daily_question_count is now always inherited directly, and the pending fields
-    # only apply to identity re-verification.
-    # pending_daily_question_count: Optional[int] = None
-    # pending_total_question_count: Optional[int] = None
-    # pending_last_question_time: Optional[datetime] = None
-
     # NEW: Flag to allow guest questions after declining a recognized email
     declined_recognized_email_at: Optional[datetime] = None
 
@@ -519,7 +511,7 @@ class DatabaseManager:
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         """Save session with SQLite Cloud compatibility and connection health check"""
-        logger.debug(f"💾 SAVING SESSION TO DB: {session.session_id[:8]} | user_type={session.user_type.value} | email={session.email} | messages={len(session.messages)} | daily_q={session.daily_question_count} | fp_id={session.fingerprint_id[:8]} | active={session.active}")
+        logger.debug(f"💾 SAVING SESSION TO DB: {session.session_id[:8]} | user_type={session.user_type.value} | email={session.email} | messages={len(session.messages)} | daily_q={session.daily_question_count} | fp_id={session.fingerprint_id[:8] if session.fingerprint_id else 'None'} | active={session.active}")
         # with self.lock: # REMOVED THIS LINE
         # Check and ensure connection health before any DB operation
         current_config = st.session_state.get('session_manager').config if st.session_state.get('session_manager') else None
@@ -2308,7 +2300,7 @@ class SessionManager:
                     raise
 
     def _create_new_session(self) -> UserSession:
-        """Creates a new user session with temporary fingerprint until JS fingerprinting completes."""
+        """Creates a new user session, attempting to use URL fingerprint if available, otherwise temporary."""
         import traceback
         import inspect
         
@@ -2325,8 +2317,19 @@ class SessionManager:
         session_id = str(uuid.uuid4())
         session = UserSession(session_id=session_id, last_activity=None)
         
-        session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
-        session.fingerprint_method = "temporary_fallback_python"
+        # NEW: Check for fingerprint_id and method in URL query parameters when creating a new session
+        query_params = st.query_params
+        url_fingerprint_id = query_params.get("fingerprint_id")
+        url_fingerprint_method = query_params.get("method")
+
+        if url_fingerprint_id and url_fingerprint_method:
+            session.fingerprint_id = url_fingerprint_id
+            session.fingerprint_method = url_fingerprint_method
+            logger.debug(f"🆔 New session created: {session_id[:8]} with FINGERPRINT FROM URL: {url_fingerprint_id[:8]} (Method: {url_fingerprint_method})")
+        else:
+            session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
+            session.fingerprint_method = "temporary_fallback_python"
+            logger.debug(f"🆔 New session created: {session_id[:8]} with TEMPORARY fingerprint")
         
         logger.debug(f"🆔 New session created: {session_id[:8]} (NOT saved to DB yet, will be saved in get_session)")
         return session
@@ -2398,7 +2401,7 @@ class SessionManager:
         Prioritizes the highest user type and merges usage statistics.
         Crucially, it now sets a 'reverification_pending' flag for privilege inheritance.
         """
-        logger.info(f"🔄 Attempting fingerprint inheritance for session {session.session_id[:8]} with fingerprint {session.fingerprint_id[:8]}...")
+        logger.info(f"🔄 Attempting fingerprint inheritance for session {session.session_id[:8]} with fingerprint {session.fingerprint_id[:8] if session.fingerprint_id else 'None'}...")
         
         try:
             # 1. Get all sessions associated with this fingerprint, including the current one
@@ -2559,7 +2562,7 @@ class SessionManager:
                 session.last_activity = source_for_identity_and_base_data.last_activity
 
 
-            logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value} (from {original_session_user_type_for_log.value}), daily_q={session.daily_question_count}, total_q={session.total_question_count}, fp={session.fingerprint_id[:8]}, active={session.active}, rev_pending={session.reverification_pending}")
+            logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value} (from {original_session_user_type_for_log.value}), daily_q={session.daily_question_count}, total_q={session.total_question_count}, fp={session.fingerprint_id[:8] if session.fingerprint_id else 'None'}, active={session.active}, rev_pending={session.reverification_pending}")
             
         except Exception as e:
             logger.error(f"Error during fingerprint inheritance for session {session.session_id[:8]}: {e}", exc_info=True)
@@ -3300,7 +3303,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         # Also update re-verification flags
         session.reverification_pending = fresh_session_from_db.reverification_pending
         session.pending_user_type = fresh_session_from_db.pending_user_type
-        session.pending_email = fresh_session_from_db.pending_email # Corrected variable name from fresh_session_from_rb
+        session.pending_email = fresh_session_from_rb.pending_email # Corrected variable name from fresh_session_from_rb
         session.pending_full_name = fresh_session_from_db.pending_full_name
         session.pending_zoho_contact_id = fresh_session_from_db.pending_zoho_contact_id
         session.pending_wp_token = fresh_session_from_db.pending_wp_token
@@ -3451,6 +3454,11 @@ def render_simplified_browser_close_detection(session_id: str):
         const sessionId = '{session_id}';
         const FASTAPI_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save';
         
+        // Retrieve fingerprint from URL if present
+        const urlParams = new URLSearchParams(window.location.search);
+        const fingerprintId = urlParams.get('fingerprint_id');
+        const fingerprintMethod = urlParams.get('method');
+
         if (window.fifi_close_enhanced_initialized) return;
         window.fifi_close_enhanced_initialized = true;
         
@@ -3687,10 +3695,23 @@ def handle_emergency_save_requests_from_query():
         st.info("Please wait, your conversation is being saved...")
         
         # Clear query parameters to prevent re-triggering on rerun
-        params_to_clear = ["event", "session_id", "reason", "fallback"]
-        for param in params_to_clear: # Fixed: changed to params_to_clear from params_query_params
+        # MODIFIED: Keep 'fingerprint_id' and 'method' if they exist, as they are for session continuity
+        params_to_clear_for_emergency_save = ["event", "session_id", "reason", "fallback", "timestamp"]
+        
+        # Explicitly store fingerprint_id and method if they are in the current query params
+        preserved_params_for_emergency_save = {}
+        if "fingerprint_id" in query_params:
+            preserved_params_for_emergency_save["fingerprint_id"] = query_params["fingerprint_id"]
+        if "method" in query_params:
+            preserved_params_for_emergency_save["method"] = query_params["method"]
+            
+        for param in params_to_clear_for_emergency_save:
             if param in st.query_params:
                 del st.query_params[param]
+        
+        # Re-add preserved params to st.query_params
+        for key, value in preserved_params_for_emergency_save.items():
+            st.query_params[key] = value
         
         try:
             save_reason = f"{reason}_fallback" if fallback == "true" else reason
@@ -3737,11 +3758,15 @@ def handle_fingerprint_requests_from_query():
         logger.info(f"Extracted - ID: {fingerprint_id}, Method: {method}, Privacy: {privacy}, Working Methods: {working_methods}")
         
         # Clear query parameters AFTER extraction
-        params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
-        for param in params_to_clear:
+        # MODIFIED: Keep fingerprint_id and method in query params for session continuity across reloads.
+        params_to_clear_for_fingerprint = ["event", "session_id", "privacy", "working_methods", "timestamp"]
+        for param in params_to_clear_for_fingerprint:
             if param in st.query_params:
                 del st.query_params[param]
         
+        # Note: 'fingerprint_id' and 'method' are intentionally NOT cleared here,
+        # so they persist in st.query_params after the reload.
+
         if not fingerprint_id or not method:
             st.error("❌ **Fingerprint Error** - Missing required data in redirect")
             logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
