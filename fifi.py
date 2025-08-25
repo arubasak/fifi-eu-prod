@@ -2026,7 +2026,7 @@ class EnhancedAI:
         # PRIORITY 7: Question-answering patterns that suggest general knowledge
         qa_patterns = [
             "the answer is", "this is because", "the reason", "due to the fact",
-            "this happens when", "the cause of", "this occurs"
+            "this happens when", "this occurs"
         ]
         if any(pattern in content for pattern in qa_patterns):
             if not pinecone_response.get("has_citations", False):
@@ -4557,9 +4557,9 @@ def main_fixed():
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
 
-    # Initialize
+    # Initialize the core application components (Config, DB Manager, Zoho Manager, AI System, etc.)
     try:
-        with st.spinner("Initializing application..."):
+        with st.spinner("Initializing application services..."):
             init_success = ensure_initialization_fixed()
             
         if not init_success:
@@ -4573,7 +4573,8 @@ def main_fixed():
         logger.error(f"Main initialization error: {init_error}", exc_info=True)
         return
 
-    # Handle emergency saves AND fingerprint data first
+    # Handle emergency saves AND fingerprint data from query parameters
+    # This needs to happen before rendering any main UI, as it might trigger a rerun or stop.
     try:
         handle_emergency_save_requests_from_query()
         handle_fingerprint_requests_from_query()
@@ -4583,7 +4584,7 @@ def main_fixed():
     # Get session manager
     session_manager = st.session_state.get('session_manager')
     if not session_manager:
-        st.error("❌ Session Manager not available. Please refresh the page.")
+        st.error("❌ Session Manager not available after initialization. Please refresh the page.")
         return
 
     # Determine current page based on session state
@@ -4596,37 +4597,48 @@ def main_fixed():
             render_welcome_page(session_manager)
             # IMPORTANT: NO get_session() call here.
             # get_session() will ONLY be called *inside* render_welcome_page
-            # if a button is explicitly pressed.
+            # if a button is explicitly pressed to start a guest session or log in.
         else:
             # ONLY if current_page is 'chat', then we proceed to get/create a session
-            session = session_manager.get_session() 
-            
-            if session is None or not session.active:
-                logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
-                st.session_state['page'] = None
-                st.rerun()
-                return
-                
-            activity_data_from_js = None
-            if session and session.session_id: 
-                activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
-                if activity_tracker_key_state_flag not in st.session_state or \
-                   st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
+            # Wrap the session-specific loading in a spinner
+            chat_loading_placeholder = st.empty()
+            with chat_loading_placeholder.container():
+                st.markdown("### 🔄 Loading your conversation...")
+                with st.spinner("Please wait while we set up your chat session and check for device history..."):
+                    session = session_manager.get_session() 
                     
-                    logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
-                    activity_data_from_js = render_simple_activity_tracker(session.session_id)
-                    st.session_state[activity_tracker_key_state_flag] = True
-                    st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
-                    st.session_state.latest_activity_data_from_js = activity_data_from_js
-                else:
-                    activity_data_from_js = st.session_state.latest_activity_data_from_js
-            
-            timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
-            if timeout_triggered:
-                return
+                    if session is None or not session.active:
+                        logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
+                        # Clear Streamlit session state fully
+                        for key in list(st.session_state.keys()):
+                            del st.session_state[key]
+                        st.session_state['page'] = None
+                        st.rerun() # This will restart the script, clearing the spinner
+                        return
+                    
+                    activity_data_from_js = None
+                    if session and session.session_id: 
+                        activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
+                        if activity_tracker_key_state_flag not in st.session_state or \
+                           st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
+                            
+                            logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
+                            activity_data_from_js = render_simple_activity_tracker(session.session_id)
+                            st.session_state[activity_tracker_key_state_flag] = True
+                            st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
+                            st.session_state.latest_activity_data_from_js = activity_data_from_js
+                        else:
+                            activity_data_from_js = st.session_state.latest_activity_data_from_js
+                    
+                    timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+                    if timeout_triggered:
+                        # This path also leads to st.rerun() or st.stop(), implicitly clearing spinner
+                        return
 
+            # Clear the placeholder AFTER the loading is complete and before actual UI rendering
+            chat_loading_placeholder.empty()
+
+            # Now render the actual chat UI elements
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
             render_chat_interface_simplified(session_manager, session, activity_data_from_js)
 
