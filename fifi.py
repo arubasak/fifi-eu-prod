@@ -4295,9 +4295,13 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     )
     
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-    if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
+    fingerprint_in_progress = fingerprint_needed and not st.session_state.get(fingerprint_key, False)
+    
+    if fingerprint_in_progress:
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
         st.session_state[fingerprint_key] = True
+        # Show loading indicator while fingerprinting is in progress
+        st.info("🔍 Identifying your device for enhanced security and session continuity...")
 
     # Browser close detection for emergency saves
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
@@ -4359,7 +4363,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
 
         # Chat input
         prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                                disabled=should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value)
+                                disabled=should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value or fingerprint_in_progress)
         
         if prompt:
             logger.info(f"🎯 Processing question from {session.session_id[:8]}")
