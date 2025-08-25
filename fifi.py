@@ -4306,33 +4306,29 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         except Exception as e:
             logger.error(f"Browser close detection failed: {e}")
 
-    # Check if session is fully ready for interaction
-    fingerprint_ready = (
-        session.fingerprint_id and 
-        not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and
-        session.fingerprint_method != "temporary_fallback_python"
+    # Simple non-blocking initialization indicator
+    initialization_key = f"initialization_shown_{session.session_id}"
+    show_brief_loading = not st.session_state.get(initialization_key, False)
+    
+    if show_brief_loading:
+        # Show brief loading message and mark as shown
+        st.info("🔄 Initializing your session...")
+        st.session_state[initialization_key] = True
+        # Auto-refresh to show the interface immediately
+        st.rerun()
+    
+    # Show subtle background process indicators (non-blocking)
+    fingerprint_in_progress = (
+        not session.fingerprint_id or
+        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
     )
     
-    activity_tracker_ready = st.session_state.get(f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}', False)
+    if fingerprint_in_progress:
+        # Small, non-blocking indicator that fingerprinting is happening
+        st.caption("🔍 Device recognition in progress... (running in background)")
     
-    session_fully_ready = fingerprint_ready and activity_tracker_ready
-
-    # Show initialization progress if not ready
-    if not session_fully_ready:
-        progress_container = st.container()
-        with progress_container:
-            if not fingerprint_ready:
-                st.info("🔍 Setting up device recognition for enhanced security...")
-                st.progress(0.3, text="Initializing fingerprinting...")
-            elif not activity_tracker_ready:
-                st.info("📊 Finalizing session setup...")
-                st.progress(0.8, text="Starting activity tracking...")
-            else:
-                st.info("✅ Almost ready!")
-                st.progress(0.95, text="Completing initialization...")
-        
-        # Add some spacing
-        st.write("")
+    # Add some spacing
+    st.write("")
 
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input = display_email_prompt_if_needed(session_manager, session)
@@ -4389,18 +4385,15 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         input_placeholder = "Ask me about ingredients, suppliers, or market trends..."
         input_disabled = should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value
         
-        if not session_fully_ready:
-            input_placeholder = "Please wait while we complete session setup..."
-            input_disabled = True
-        elif should_disable_chat_input:
+        if should_disable_chat_input:
             input_placeholder = "Please complete email verification to continue..."
         elif session.ban_status.value != BanStatus.NONE.value:
             input_placeholder = "Chat is temporarily restricted..."
 
-        # Chat input - disabled until session is fully ready
+        # Chat input - enabled once initialization is complete
         prompt = st.chat_input(input_placeholder, disabled=input_disabled)
         
-        if prompt and session_fully_ready:  # Extra safety check
+        if prompt:
             logger.info(f"🎯 Processing question from {session.session_id[:8]}")
             
             with st.chat_message("user"):
@@ -4447,10 +4440,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         logger.error(f"❌ AI response failed: {e}", exc_info=True)
                         st.error("⚠️ I encountered an error. Please try again.")
             
-            st.rerun()
-        elif prompt and not session_fully_ready:
-            # User tried to submit while session not ready - show helpful message
-            st.warning("⚠️ Please wait for session setup to complete before asking questions.")
             st.rerun()
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
