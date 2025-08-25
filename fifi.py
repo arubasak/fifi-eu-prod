@@ -1309,7 +1309,7 @@ class ZohoCRMManager:
                 if not access_token: 
                     return None
                 headers['Authorization'] = f'Zoho-oauthtoken {access_token}'
-                response = requests.post(f"{self.base_url}/Contacts", headers=headers, json=contact_data, timeout=10)
+                response = requests.post(f"{self.base_url}/Contacts/search", headers=headers, params=params, timeout=10)
             
             response.raise_for_status()
             data = response.json()
@@ -2432,16 +2432,19 @@ class SessionManager:
                 st.session_state[f'loading_{session_id}'] = False
                 
                 if session and session.active:
+                    # Note: The actual rendering of the fingerprint component happens in main_fixed
+                    # when fingerprint_component_rendered_and_waiting is True.
+                    # Here, we just ensure inheritance happens if a temp_py_ fingerprint is detected.
                     fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
                     if (session.fingerprint_id and 
                         session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
                         not st.session_state.get(fingerprint_checked_key, False)):
                         
-                        self.fingerprinting.render_fingerprint_component(session.session_id)
-                        self._attempt_fingerprint_inheritance(session)
+                        # Only attempt inheritance here; rendering is handled in main_fixed waiting loop
+                        self._attempt_fingerprint_inheritance(session) 
                         self.db.save_session(session)
                         st.session_state[fingerprint_checked_key] = True
-                        logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
+                        logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]} within get_session with temp FP.")
 
                     limit_check = self.question_limits.is_within_limits(session)
                     if not limit_check.get('allowed', True):
@@ -2477,13 +2480,13 @@ class SessionManager:
             new_session = self._create_new_session()
             st.session_state.current_session_id = new_session.session_id
             
-            # Render fingerprint component for the new session and then attempt inheritance
-            self.fingerprinting.render_fingerprint_component(new_session.session_id)
-            self._attempt_fingerprint_inheritance(new_session)
-            st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
+            # The rendering of the fingerprint component for this new session is now
+            # explicitly handled in main_fixed, which will then trigger a rerun.
+            # We will perform inheritance after the real fingerprint is received.
             
-            self.db.save_session(new_session)
-            logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
+            # Temporarily save the new session with its initial temporary fingerprint
+            self.db.save_session(new_session) 
+            logger.info(f"Created and stored new session {new_session.session_id[:8]} (initial temp FP), active={new_session.active}, rev_pending={new_session.reverification_pending}")
             return new_session
             
         except Exception as e:
@@ -2519,6 +2522,8 @@ class SessionManager:
                 session.fingerprint_method = old_method
                 return False
             
+            # Now that the current session has its *real* fingerprint from JS,
+            # run the inheritance logic to see if this fingerprint has a history.
             self._attempt_fingerprint_inheritance(session)
             
             try:
@@ -3482,16 +3487,39 @@ def handle_fingerprint_requests_from_query():
             return
         
         try:
-            success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
-            logger.info(f"✅ Silent fingerprint processing: {success}")
+            session_manager = st.session_state.get('session_manager')
+            if not session_manager:
+                logger.error("❌ Session manager not available during fingerprint processing from query.")
+                return False
+            
+            session = session_manager.db.load_session(session_id)
+            if not session:
+                logger.error(f"❌ Fingerprint processing: Session '{session_id[:8]}' not found in database.")
+                return False
+
+            success = session_manager.apply_fingerprinting(session, processed_data={
+                'fingerprint_id': fingerprint_id,
+                'fingerprint_method': method,
+                'browser_privacy_level': privacy,
+                'working_methods': working_methods
+            })
             
             if success:
-                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
-                st.stop()
+                logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
+                # Mark fingerprint as resolved and trigger a rerun to proceed with normal app flow
+                st.session_state.fingerprint_component_rendered_and_waiting = False
+                st.rerun() 
+            else:
+                logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
+                # Even if failed, we should still unblock the app. A fallback FP will be used.
+                st.session_state.fingerprint_component_rendered_and_waiting = False
+                st.rerun()
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
+            st.session_state.fingerprint_component_rendered_and_waiting = False # Unblock on error
+            st.rerun()
         
-        return
+        st.stop() # Ensure no further code executes in this script thread after a redirect/rerun
     else:
         logger.debug("ℹ️ No fingerprint requests found in current URL query parameters.")
 
@@ -3583,11 +3611,18 @@ def render_welcome_page(session_manager: 'SessionManager'):
             # Buttons on welcome page should be disabled during app-wide loading
             if st.button("👤 Start as Guest", use_container_width=True, disabled=st.session_state.app_loading):
                 session = session_manager.get_session() 
-                if session and session.last_activity is None:
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
+                # After get_session, we expect a rerun by fingerprint processing if new session.
+                # If we get a session here, it might be a temporary one, and we need to
+                # ensure the fingerprinting process starts or continues.
+                
+                if session and (session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) or not session.fingerprint_id):
+                    # Set the flag to indicate we're waiting for fingerprint
+                    st.session_state.fingerprint_component_rendered_and_waiting = True
+                    # The main_fixed loop will catch this and render the spinner for FP capture
+                
                 st.session_state.page = "chat"
-                st.rerun()
+                st.rerun() # Trigger rerun to either enter FP waiting or chat
+                
 
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display."""
@@ -4119,6 +4154,9 @@ if 'app_loading' not in st.session_state:
     st.session_state.app_loading = True
 if 'initial_services_loaded' not in st.session_state:
     st.session_state.initial_services_loaded = False
+# New flag to manage fingerprint component rendering and waiting
+if 'fingerprint_component_rendered_and_waiting' not in st.session_state:
+    st.session_state.fingerprint_component_rendered_and_waiting = False
 
 
 def ensure_initialization_fixed():
@@ -4267,18 +4305,16 @@ def main_fixed():
             return # Stop execution if initial services fail to load
         
         logger.info("✅ Global application services initialized. Rerunning to proceed with session setup.")
-        st.rerun() # Replaced st.experimental_rerun() with st.rerun()
+        st.rerun() 
         return # Important to return here to avoid executing further code on this run
 
     # From this point, initial_services_loaded is guaranteed to be True.
-    # We now explicitly set app_loading to True for any subsequent page-specific loading.
+    # Set app_loading to True for any subsequent page-specific loading (e.g., chat page)
     # It will be set to False only when a page is fully ready for interaction.
-    # This prevents buttons on the welcome page from being prematurely enabled.
     st.session_state.app_loading = True 
 
 
     # Handle emergency saves AND fingerprint data from query parameters
-    # This needs to happen before rendering any main UI, as it might trigger a rerun or stop.
     try:
         handle_emergency_save_requests_from_query()
         handle_fingerprint_requests_from_query()
@@ -4294,7 +4330,6 @@ def main_fixed():
     session_manager = st.session_state.get('session_manager')
     if not session_manager:
         st.error("❌ Session Manager not available after initialization. Please refresh the page.")
-        # This is a critical failure, we cannot proceed
         st.session_state.app_loading = True # Keep loading state true
         return
 
@@ -4303,11 +4338,39 @@ def main_fixed():
 
     # Main application logic
     try:
-        if current_page != "chat":
-            # We are on the welcome page. If we reached here, initial services are loaded.
-            # So, the welcome page should now be fully interactive.
-            st.session_state.app_loading = False # Set to False for the welcome page as it's ready for interaction
+        # Check if we are waiting for fingerprint resolution
+        if st.session_state.fingerprint_component_rendered_and_waiting:
+            # Display a full-page spinner while waiting for fingerprint
+            with st.spinner("⏳ Detecting your device for a secure session..."):
+                # Render the fingerprint component only once here.
+                # It will redirect with query parameters upon completion, triggering a rerun.
+                # We need a session_id to render the fingerprint component.
+                # If current_session_id is not set yet, create a temporary one for fingerprinting.
+                current_session_id_for_fp = st.session_state.get('current_session_id')
+                if not current_session_id_for_fp:
+                    # Create a temporary session just for fingerprint component to get a session_id
+                    # This session won't be fully initialized or saved as a complete user session yet.
+                    temp_session = session_manager._create_new_session()
+                    st.session_state.current_session_id = temp_session.session_id
+                    current_session_id_for_fp = temp_session.session_id
+                    logger.info(f"Created temp session ID {current_session_id_for_fp[:8]} for fingerprinting component.")
+
+                session_manager.fingerprinting.render_fingerprint_component(current_session_id_for_fp)
+                # st.stop() is crucial here to prevent the rest of the script from executing
+                # until the fingerprint component redirects and triggers a rerun.
+                logger.info(f"Rendering fingerprint component for {current_session_id_for_fp[:8]} and stopping script to await callback.")
+                st.stop()
+            # This part of the code will only be reached on a rerun AFTER
+            # fingerprint_component_rendered_and_waiting has been set to False by
+            # handle_fingerprint_requests_from_query.
+        
+        # If not waiting for fingerprint and on welcome page
+        elif current_page != "chat":
+            # Welcome page is ready for interaction once initial services are loaded
+            st.session_state.app_loading = False 
             render_welcome_page(session_manager)
+        
+        # If not waiting for fingerprint and on chat page
         else:
             # For the chat page, we need to load the user session and related data.
             # This is the "second initialization" the user is referring to.
@@ -4315,6 +4378,7 @@ def main_fixed():
             with chat_setup_placeholder.container():
                 st.markdown("### ⏳ Preparing your chat session...")
                 with st.spinner("Loading profile, checking device history and security settings..."):
+                    # `get_session` will now load the session, and the fingerprint should already be resolved
                     session = session_manager.get_session() 
                     
                     if session is None or not session.active:
@@ -4344,7 +4408,6 @@ def main_fixed():
                     
                     timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
                     if timeout_triggered:
-                        # If timeout occurs, it handles rerunning, so we just return here
                         return
 
             # Clear the chat setup spinner/placeholder *before* rendering the actual chat UI
@@ -4365,3 +4428,4 @@ def main_fixed():
 
 if __name__ == "__main__":
     main_fixed()
+```
