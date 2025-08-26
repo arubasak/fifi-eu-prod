@@ -174,18 +174,17 @@ class EnhancedErrorHandler:
 
     def handle_api_error(self, component: str, operation: str, error: Exception) -> ErrorContext:
         error_str = str(error).lower()
-        error_type = type(error).__name__
         
         if "timeout" in error_str:
-            severity, message = ErrorSeverity.MEDIUM, "is responding slowly."
+            severity, message, error_type = ErrorSeverity.MEDIUM, "is responding slowly.", "Timeout"
         elif "unauthorized" in error_str or "401" in error_str or "403" in error_str:
-            severity, message = ErrorSeverity.HIGH, "authentication failed. Please check API keys."
+            severity, message, error_type = ErrorSeverity.HIGH, "authentication failed. Please check API keys.", "AuthenticationError"
         elif "rate limit" in error_str or "429" in error_str:
-            severity, message = ErrorSeverity.MEDIUM, "rate limit reached. Please wait."
+            severity, message, error_type = ErrorSeverity.MEDIUM, "rate limit reached. Please wait.", "RateLimitExceeded"
         elif "connection" in error_str or "network" in error_str:
-            severity, message = ErrorSeverity.HIGH, "is unreachable. Check your connection."
+            severity, message, error_type = ErrorSeverity.HIGH, "is unreachable. Check your connection.", "NetworkError"
         else:
-            severity, message = ErrorSeverity.MEDIUM, "encountered an unexpected error."
+            severity, message, error_type = ErrorSeverity.MEDIUM, "encountered an unexpected error.", type(error).__name__
 
         return ErrorContext(
             component=component, operation=operation, error_type=error_type,
@@ -4338,8 +4337,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.markdown("---") # Visual separator
 
         # Chat input
+        # Now explicitly check `app_fully_loaded` here
         prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                                disabled=should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value)
+                                disabled=not st.session_state.get('app_fully_loaded', False) or should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value)
         
         if prompt:
             logger.info(f"🎯 Processing question from {session.session_id[:8]}")
@@ -4400,6 +4400,9 @@ def ensure_initialization_fixed():
         logger.info("Starting application initialization sequence...")
         
         try:
+            # Initialize app_fully_loaded to False
+            st.session_state.app_fully_loaded = False 
+            
             progress_placeholder = st.empty()
             with progress_placeholder.container():
                 st.info("🔄 Initializing FiFi AI Assistant...")
@@ -4599,16 +4602,15 @@ def main_fixed():
             
             fingerprint_key = f"fingerprint_rendered_{session.session_id}"
             if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
-                # Create invisible container for fingerprinting
-                # The 'invisible_fp' is used as a context for st.markdown, but its content
-                # (including the st.components.v1.html call) will be rendered within
-                # the off-screen div, and the container itself is not cleared.
-                with st.container(): # Using a container ensures it's part of the Streamlit layout
-                    st.markdown('<div style="position: absolute; top: -1000px; left: -1000px;">', unsafe_allow_html=True)
+                # Create invisible container at top level, with stricter hiding CSS
+                # The st.container() ensures it's part of the Streamlit layout,
+                # while the inner markdown styles push the iframe completely off-screen.
+                with st.container():
+                    st.markdown('<div style="position: absolute; top: -10000px; left: -10000px; width: 0; height: 0; overflow: hidden;">', unsafe_allow_html=True)
                     _ = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
                     st.markdown('</div>', unsafe_allow_html=True)
                 st.session_state[fingerprint_key] = True
-                # The invisible_fp.empty() call has been removed here to allow the component to persist.
+                # The invisible_fp.empty() call has been REMOVED to allow the component to persist.
             
             activity_data_from_js = None
             if session and session.session_id: 
@@ -4635,6 +4637,10 @@ def main_fixed():
         logger.error(f"Main application error: {e}", exc_info=True)
         st.error("⚠️ An unexpected error occurred. Please refresh the page.")
         st.info(f"Error details: {str(e)}")
+    
+    # Ensure app_fully_loaded is set to True if we reach the end of main_fixed without error
+    # This ensures the chat input becomes enabled.
+    st.session_state.app_fully_loaded = True
 
 if __name__ == "__main__":
     main_fixed()
