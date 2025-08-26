@@ -4296,7 +4296,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
     if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
-        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+        # FIX APPLIED HERE: Capture the return value to prevent implicit display
+        _ = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
         st.session_state[fingerprint_key] = True
 
     # Browser close detection for emergency saves
@@ -4335,7 +4336,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 
                 if msg.get("source"):
                     source_color = {
-                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                        "FiFi": "🧠", "FiFi Web Search": "🌐",
                         "Content Moderation": "🛡️", "System Fallback": "⚠️",
                         "Error Handler": "❌"
                     }.get(msg['source'], "🤖")
