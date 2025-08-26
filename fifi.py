@@ -3678,6 +3678,7 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
             st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
+            st.session_state.page = "chat"
             logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
