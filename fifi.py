@@ -348,7 +348,7 @@ class UserSession:
     # Ban Management
     ban_status: BanStatus = BanStatus.NONE
     ban_start_time: Optional[datetime] = None
-    ban_end_time: Optional[datetime] = None
+    ban_end_time: Optional[str] = None
     ban_reason: Optional[str] = None
     
     # Evasion Tracking
@@ -3678,7 +3678,8 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
             st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
-            logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
+            st.session_state.page = "chat" # CRITICAL FIX: Explicitly set page to "chat" here
+            logger.info(f"Chat input unlocked and page set to 'chat' for session {session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
             logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
@@ -3778,7 +3779,6 @@ def handle_emergency_save_requests_from_query():
     else:
         logger.debug("ℹ️ No emergency save requests found in current URL query parameters.")
 
-# ===== CODE REPLACEMENT STARTS HERE =====
 def handle_fingerprint_requests_from_query():
     """Checks for and processes fingerprint data sent via URL query parameters."""
     logger.info("🔍 FINGERPRINT HANDLER: Checking for query parameter fingerprint data...")
@@ -3826,7 +3826,6 @@ def handle_fingerprint_requests_from_query():
         return
     else:
         logger.debug("ℹ️ No fingerprint requests found in current URL query parameters.")
-# ===== CODE REPLACEMENT ENDS HERE =====
 
 # =============================================================================
 # UI COMPONENTS
@@ -4624,6 +4623,10 @@ def main_fixed():
     # NEW: Ensure is_chat_ready is always present and initially False by default
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
+    
+    # NEW: Initialize st.session_state.page to None if not set
+    if 'page' not in st.session_state:
+        st.session_state.page = None
 
 
     # Handle loading states first
@@ -4718,8 +4721,7 @@ def main_fixed():
         # Initialize if needed (without loading overlay since it's already done or not triggered)
         if not st.session_state.get('initialized', False):
             # This path handles initial load when no button was pressed, or if initialization failed.
-            with st.spinner("Initializing application..."): # Keep a fallback spinner here for initial page load if loading_state was false but init wasn't complete.
-                 init_success = ensure_initialization_fixed()
+            init_success = ensure_initialization_fixed() # NO SPINNER HERE
             if not init_success:
                 st.error("⚠️ Application failed to initialize properly.")
                 st.info("Please refresh the page to try again.")
