@@ -862,8 +862,8 @@ class DatabaseManager:
                 
                 # Render with minimal visibility (height=0 for silent operation)
                 logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-                # REMOVE 'key' ARGUMENT HERE
-                st.components.v1.html(html_content, height=0, width=0, scrolling=False)
+                # ADDED unique key for targeted CSS hiding
+                st.components.v1.html(html_content, height=0, width=0, scrolling=False, key=f"fingerprint_component_{session_id}")
                 
                 logger.info(f"✅ External fingerprint component rendered successfully for session {session_id[:8]}")
                 return None # Always return None since data comes via redirect
@@ -1546,7 +1546,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
+                if attempt_note < max_retries - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -4575,13 +4575,8 @@ def main_fixed():
     # Route to appropriate page based on user intent
     try:
         if current_page != "chat":
-            # If not on chat page, render welcome page. No session is needed or created yet.
             render_welcome_page(session_manager)
-            # IMPORTANT: NO get_session() call here.
-            # get_session() will ONLY be called *inside* render_welcome_page
-            # if a button is explicitly pressed.
         else:
-            # ONLY if current_page is 'chat', then we proceed to get/create a session
             session = session_manager.get_session() 
             
             if session is None or not session.active:
@@ -4593,25 +4588,36 @@ def main_fixed():
                 return
             
             # Handle fingerprinting BEFORE rendering main interface
-            # This is the section that has been moved and modified
             fingerprint_needed = (
                 not session.fingerprint_id or
                 session.fingerprint_method == "temporary_fallback_python" or
                 session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
             )
             
-            fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-            if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
-                # Create invisible container at top level, with stricter hiding CSS
-                # The st.container() ensures it's part of the Streamlit layout,
-                # while the inner markdown styles push the iframe completely off-screen.
-                with st.container():
-                    st.markdown('<div style="position: absolute; top: -10000px; left: -10000px; width: 0; height: 0; overflow: hidden;">', unsafe_allow_html=True)
-                    _ = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-                    st.markdown('</div>', unsafe_allow_html=True)
-                st.session_state[fingerprint_key] = True
-                # The invisible_fp.empty() call has been REMOVED to allow the component to persist.
-            
+            fingerprint_component_key = f"fingerprint_component_{session.session_id}"
+            if fingerprint_needed and not st.session_state.get(f"fingerprint_rendered_{session.session_id}", False):
+                # This ensures the custom component HTML is rendered, but immediately hidden by CSS.
+                # The component's key ensures we can target its wrapper div.
+                _ = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                st.session_state[f"fingerprint_rendered_{session.session_id}"] = True
+                
+                # Inject CSS to hide the Streamlit wrapper div for the custom component
+                st.markdown(f"""
+                    <style>
+                    [data-testid="stCustomComponent-{fingerprint_component_key}"] {{
+                        display: none !important;
+                        visibility: hidden !important;
+                        width: 0 !important;
+                        height: 0 !important;
+                        position: absolute !important;
+                        top: -10000px !important;
+                        left: -10000px !important;
+                        overflow: hidden !important;
+                    }}
+                    </style>
+                """, unsafe_allow_html=True)
+                logger.debug(f"Injected CSS to hide fingerprint component {fingerprint_component_key}.")
+
             activity_data_from_js = None
             if session and session.session_id: 
                 activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
