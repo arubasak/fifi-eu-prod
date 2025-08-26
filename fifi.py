@@ -4137,7 +4137,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     # Initialize relevant session states if not present
     if 'verification_stage' not in st.session_state:
         st.session_state.verification_stage = None
-    if 'guest_continue_active' not not in st.session_state: # FIX: Changed `not not` to `not` here
+    if 'guest_continue_active' not in st.session_state: # FIX: Changed `not not` to `not` here
         st.session_state.guest_continue_active = False
 
     # Check if a hard block is in place first (non-email-verification related bans)
