@@ -1615,7 +1615,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
+                if attempt_note < max_retries - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -3813,23 +3813,17 @@ def handle_fingerprint_requests_from_query():
             st.rerun()
             return
         
-        # <<< CHANGE #1 - Main Fix >>>
         try:
             success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
             if success:
-                # Ensure we stay on the chat page after fingerprint processing
-                st.session_state['page'] = "chat"
-                # Also ensure the current session ID is maintained
-                st.session_state['current_session_id'] = session_id
-                logger.info(f"🔄 Fingerprint processed successfully, ensuring page stays on chat (session: {session_id[:8]}) and triggering rerun to enable chat input")
-                st.rerun()  # Changed from st.stop() to st.rerun() to enable chat input
+                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
+                st.stop()
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
         
         return
-        # <<< END OF CHANGE #1 >>>
     else:
         logger.debug("ℹ️ No fingerprint requests found in current URL query parameters.")
 
@@ -3837,6 +3831,7 @@ def handle_fingerprint_requests_from_query():
 # UI COMPONENTS
 # =============================================================================
 
+# Modified render_welcome_page function (from prompt)
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock."""
     
@@ -4354,7 +4349,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             except Exception as e:
                 logger.error(f"Failed to update activity from JavaScript: {e}")
 
-    # <<< CHANGE #2 - Fallback Fix >>>
     # Fingerprinting
     fingerprint_needed = (
         not session.fingerprint_id or
@@ -4366,20 +4360,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
         st.session_state[fingerprint_key] = True
-    
-    # FALLBACK: If fingerprint is not needed (meaning we have a real fingerprint) but chat is not ready, enable it
-    if not fingerprint_needed and not st.session_state.get('is_chat_ready', False):
-        st.session_state.is_chat_ready = True
-        logger.info(f"FALLBACK: Chat input enabled for session {session.session_id[:8]} - fingerprint already available: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'}")
-        st.rerun()
-    
-    # ADDITIONAL FALLBACK: If session is older than 30 seconds and has any fingerprint (even temp), enable chat to prevent indefinite blocking
-    session_age_seconds = (datetime.now() - session.created_at).total_seconds()
-    if session_age_seconds > 30 and not st.session_state.get('is_chat_ready', False):
-        st.session_state.is_chat_ready = True
-        logger.warning(f"EMERGENCY FALLBACK: Chat input enabled for session {session.session_id[:8]} after 30 seconds - preventing indefinite blocking")
-        st.rerun()
-    # <<< END OF CHANGE #2 >>>
 
     # Browser close detection for emergency saves
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
@@ -4439,26 +4419,18 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                     st.markdown("---") # Visual separator
 
-    # <<< CHANGE #3 - Debug Enhancement >>>
     # Chat input
     # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
     # And combine with other disabled conditions
-    is_chat_ready = st.session_state.get('is_chat_ready', False)
-    chat_blocked_by_dialog = st.session_state.get('chat_blocked_by_dialog', False)
-    ban_status_check = (session.ban_status.value != BanStatus.NONE.value)
-    
     overall_chat_disabled = (
-        not is_chat_ready or 
+        not st.session_state.get('is_chat_ready', False) or 
         should_disable_chat_input_by_dialog or 
-        ban_status_check
+        session.ban_status.value != BanStatus.NONE.value
     )
-
-    logger.debug(f"Chat input state for {session.session_id[:8]}: is_chat_ready={is_chat_ready}, blocked_by_dialog={chat_blocked_by_dialog}, should_disable_by_dialog={should_disable_chat_input_by_dialog}, ban_status_check={ban_status_check}, overall_disabled={overall_chat_disabled}")
 
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
-    # <<< END OF CHANGE #3 >>>
-
+    
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
@@ -4508,6 +4480,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         
         st.rerun()
 
+# Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
     """Fixed version without duplicate spinner since we have loading overlay"""
     if 'initialized' not in st.session_state or not st.session_state.initialized:
@@ -4600,6 +4573,7 @@ def ensure_initialization_fixed():
     
     return True
 
+# Modified main function with proper loading state handling (from prompt)
 def main_fixed():
     """Main entry point with loading state management"""
     try:
