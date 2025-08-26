@@ -184,8 +184,8 @@ def show_loading_overlay():
         </style>
         """
         st.components.v1.html(overlay_html, height=0)
-        return True
-    return False
+        return True # Indicate that the overlay is active
+    return False # Indicate that the overlay is not active
 
 # =============================================================================
 # CONFIGURATION
@@ -3837,7 +3837,9 @@ def render_welcome_page(session_manager: 'SessionManager'):
     
     # Show loading overlay if in loading state
     if show_loading_overlay():
-        return
+        # Even if overlay is shown, we need to allow the main_fixed to continue its logic
+        # to eventually set is_loading to False and rerun.
+        pass 
     
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
@@ -4598,26 +4600,27 @@ def main_fixed():
     
     # If we're in loading state, handle the actual operations
     if loading_state:
-        # Show the loading overlay
-        if show_loading_overlay():
-            return # Keep showing overlay
-        
+        # NEW: Display the overlay if loading, but do not exit the function immediately.
+        # This allows the initialization logic below to run in the same rerun.
+        show_loading_overlay() 
+
         # Perform the actual operations based on what triggered the loading
         try:
             # Initialize if not already done
             if not st.session_state.get('initialized', False):
+                logger.info("Main fixed: Application not initialized, calling ensure_initialization_fixed.")
                 init_success = ensure_initialization_fixed()
                 if not init_success:
-                    set_loading_state(False)
+                    set_loading_state(False, "Initialization failed. Please refresh.")
                     st.error("⚠️ Application failed to initialize properly.")
                     st.info("Please refresh the page to try again.")
-                    return
+                    return # Exit if critical init failed
             
             session_manager = st.session_state.get('session_manager')
             if not session_manager:
-                set_loading_state(False)
+                set_loading_state(False, "Session manager not found. Please refresh.")
                 st.error("❌ Session Manager not available. Please refresh the page.")
-                return
+                return # Exit if session manager is missing
             
             session = None # Initialize session to None for scope
             loading_reason = st.session_state.get('loading_reason', 'unknown')
@@ -4669,11 +4672,11 @@ def main_fixed():
 
             # Clear loading state and rerun to show the actual page (with chat input locked)
             set_loading_state(False)
-            st.rerun()
-            return
+            st.rerun() # Rerun to display the actual page content (with chat input disabled initially)
+            return # Exit after triggering rerun to avoid rendering transient state
             
         except Exception as e:
-            set_loading_state(False)
+            set_loading_state(False, f"Error during loading: {str(e)}")
             st.error(f"⚠️ Error during loading: {str(e)}")
             logger.error(f"Loading state error: {e}", exc_info=True)
             return
