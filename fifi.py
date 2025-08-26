@@ -4599,14 +4599,16 @@ def main_fixed():
             
             fingerprint_key = f"fingerprint_rendered_{session.session_id}"
             if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
-                # Create invisible container at top level
-                invisible_fp = st.empty()
-                with invisible_fp:
+                # Create invisible container for fingerprinting
+                # The 'invisible_fp' is used as a context for st.markdown, but its content
+                # (including the st.components.v1.html call) will be rendered within
+                # the off-screen div, and the container itself is not cleared.
+                with st.container(): # Using a container ensures it's part of the Streamlit layout
                     st.markdown('<div style="position: absolute; top: -1000px; left: -1000px;">', unsafe_allow_html=True)
                     _ = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
                     st.markdown('</div>', unsafe_allow_html=True)
                 st.session_state[fingerprint_key] = True
-                invisible_fp.empty()  # Clear the container immediately
+                # The invisible_fp.empty() call has been removed here to allow the component to persist.
             
             activity_data_from_js = None
             if session and session.session_id: 
