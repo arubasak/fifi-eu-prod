@@ -843,6 +843,7 @@ class DatabaseManager:
                 if not os.path.exists(html_file_path):
                     logger.error(f"❌ Fingerprint component file NOT FOUND at {html_file_path}")
                     logger.info(f"📁 Current directory contents: {os.listdir(current_dir)}")
+                    # If HTML file itself is missing, generate fallback fingerprint immediately
                     return self._generate_fallback_fingerprint()
                 
                 logger.debug(f"✅ Fingerprint component file found, reading content...")
@@ -3746,8 +3747,11 @@ def handle_fingerprint_requests_from_query():
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
             if success:
-                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
-                st.stop()
+                # On successful fingerprint, reset the timeout state
+                st.session_state.fingerprint_render_time = None
+                st.session_state.fingerprint_timeout_triggered = False
+                logger.info(f"🔄 Fingerprint processed successfully, resetting timeout state for {session_id[:8]}")
+                st.stop() # Rerun to apply changes and clear query params
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
         
@@ -4057,7 +4061,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat automatically saves to CRM during Sign Out or browser/tab close.")
 
-# NEW FUNCTION FOR EMAIL PROMPT MANAGEMENT
 def display_email_prompt_if_needed(session_manager: 'SessionManager', session: UserSession) -> bool:
     """
     Renders email verification dialog if needed.
@@ -4285,9 +4288,14 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     )
     
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+
+    # NEW: Determine if the fingerprint component needs to be rendered and manage its render time
     if fingerprint_needed_or_temp and not st.session_state.get(fingerprint_key, False):
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
         st.session_state[fingerprint_key] = True
+        st.session_state.fingerprint_render_time = datetime.now() # Record when it was rendered
+        st.session_state.fingerprint_timeout_triggered = False # Reset timeout flag
+        logger.info(f"Fingerprint component rendered, recording time for session {session.session_id[:8]}")
 
     # Browser close detection for emergency saves
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
@@ -4299,33 +4307,36 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input = display_email_prompt_if_needed(session_manager, session)
 
-    # NEW: Determine if chat should be temporarily disabled due to fingerprinting
-    # This takes precedence over other disablers for a short period
+    # --- NEW FINGERPRINT DISABLING LOGIC WITH TIMEOUT ---
     disable_for_fingerprint = False
+    fingerprint_message = None 
+    
     if fingerprint_needed_or_temp:
-        if st.session_state.get(fingerprint_key, False): # Component was rendered, now waiting for data
-            # Check if fingerprint data is pending from query params
-            query_params = st.query_params
-            if query_params.get("event") == "fingerprint_complete" and query_params.get("session_id") == session.session_id:
-                # Fingerprint data is in the URL, will be processed on the next rerun.
-                # Keep disabled until after processing.
-                disable_for_fingerprint = True
-                st.info("🔄 Identifying your device... Please wait.")
-                logger.debug(f"Chat input disabled for session {session.session_id[:8]} pending fingerprint processing from query.")
-            else:
-                # Component rendered, but no data yet in query, and it's still a temp fingerprint.
-                # Keep disabled and show a message.
-                disable_for_fingerprint = True
-                st.info("🔄 Identifying your device for secure access and usage tracking...")
-                logger.debug(f"Chat input disabled for session {session.session_id[:8]} awaiting fingerprint data.")
+        if st.session_state.fingerprint_timeout_triggered:
+            # If timeout was already triggered, we've decided to unlock the chat.
+            disable_for_fingerprint = False 
+            fingerprint_message = "⚠️ Device identification failed to complete, but you can continue. Your session may have limited features or be less securely tracked."
+            logger.debug(f"Session {session.session_id[:8]}: Fingerprint timeout already triggered, allowing chat.")
+        elif st.session_state.fingerprint_render_time and \
+             (datetime.now() - st.session_state.fingerprint_render_time) > timedelta(seconds=10): # 10-second timeout
+            
+            # Timeout reached, assume JS component failed or never responded correctly
+            st.session_state.fingerprint_timeout_triggered = True # Mark timeout as triggered
+            disable_for_fingerprint = False # Release the lock
+            fingerprint_message = "⚠️ Device identification took too long. Proceeding without full identification, some features may be limited. If issues persist, please refresh the page."
+            logger.warning(f"Session {session.session_id[:8]}: Fingerprint identification timed out after 10s. Releasing chat input.")
         else:
-            # Fingerprint component not even rendered yet, but fingerprint is temporary.
-            # This case implies an extremely early load. The component rendering will happen,
-            # and then the previous `if` block will catch it.
+            # Still within timeout period or component just rendered, keep disabled
             disable_for_fingerprint = True
-            st.info("🔄 Starting device identification...")
-            logger.debug(f"Chat input disabled for session {session.session_id[:8]} before fingerprint component render.")
-
+            fingerprint_message = "🔄 Identifying your device for secure access and usage tracking... Please wait a moment."
+            logger.debug(f"Session {session.session_id[:8]}: Chat input disabled, awaiting fingerprint data or timeout.")
+    
+    # Display fingerprint message if applicable
+    if fingerprint_message:
+        if disable_for_fingerprint:
+            st.info(fingerprint_message)
+        else: # If not disabled, but message exists (meaning timeout triggered)
+            st.warning(fingerprint_message)
 
     # Render chat content
     # Chat content is displayed even if chat input is disabled, so user can see previous messages
@@ -4554,6 +4565,10 @@ def ensure_initialization_fixed():
             # NEW: Initialize verification_stage and guest_continue_active
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
+            # NEW: Initialize fingerprinting state for the timeout logic
+            st.session_state.fingerprint_render_time = None
+            st.session_state.fingerprint_timeout_triggered = False
+
 
             init_progress.progress(1.0)
             status_text.text("✅ Initialization complete!")
