@@ -3678,9 +3678,6 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
             st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
-            st.session_state.page = "chat"
-            set_loading_state(False)  # ← ADD THIS LINE TO CLEAR LOADING OVERLAY
-
             logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
@@ -3781,6 +3778,7 @@ def handle_emergency_save_requests_from_query():
     else:
         logger.debug("ℹ️ No emergency save requests found in current URL query parameters.")
 
+# ===== CODE REPLACEMENT STARTS HERE =====
 def handle_fingerprint_requests_from_query():
     """Checks for and processes fingerprint data sent via URL query parameters."""
     logger.info("🔍 FINGERPRINT HANDLER: Checking for query parameter fingerprint data...")
@@ -3812,8 +3810,7 @@ def handle_fingerprint_requests_from_query():
         if not fingerprint_id or not method:
             st.error("❌ **Fingerprint Error** - Missing required data in redirect")
             logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
-            # Removed time.sleep(2)
-            st.rerun()
+            st.rerun() # Rerun to show error and restart
             return
         
         try:
@@ -3821,13 +3818,15 @@ def handle_fingerprint_requests_from_query():
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
             if success:
-                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
+                logger.info(f"🔄 Fingerprint processed successfully, rerunning to update the UI...")
+                st.rerun() # CRITICAL FIX: Rerun the script to show the chat interface.
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
         
         return
     else:
         logger.debug("ℹ️ No fingerprint requests found in current URL query parameters.")
+# ===== CODE REPLACEMENT ENDS HERE =====
 
 # =============================================================================
 # UI COMPONENTS
@@ -4333,7 +4332,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     return disable_chat_input
 
-# ===== CODE REPLACEMENT STARTS HERE =====
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with hidden chat input until ready."""
     
@@ -4513,8 +4511,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         st.error("⚠️ I encountered an error. Please try again.")
             
             st.rerun()
-# ===== CODE REPLACEMENT ENDS HERE =====
-
 
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
@@ -4629,14 +4625,15 @@ def main_fixed():
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
 
+
     # Handle loading states first
     loading_state = st.session_state.get('is_loading', False)
-    
-    # DON'T capture current_page here yet - do it after fingerprint processing
+    current_page = st.session_state.get('page')
     
     # If we're in loading state, handle the actual operations
     if loading_state:
-        # Display the overlay if loading, but do not exit the function immediately.
+        # NEW: Display the overlay if loading, but do not exit the function immediately.
+        # This allows the initialization logic below to run in the same rerun.
         show_loading_overlay() 
 
         # Perform the actual operations based on what triggered the loading
@@ -4671,14 +4668,14 @@ def main_fixed():
                     del st.session_state['loading_reason']
                 
             elif loading_reason == 'authenticate':
-                # Handle authentication
+                # Handle authentication (you'll need to store username/password temporarily)
                 username = st.session_state.get('temp_username', '')
                 password = st.session_state.get('temp_password', '')
                 
                 if username and password:
                     authenticated_session = session_manager.authenticate_with_wordpress(username, password)
                     if authenticated_session:
-                        session = authenticated_session
+                        session = authenticated_session # Assign to session variable
                         st.session_state.current_session_id = authenticated_session.session_id
                         st.session_state.page = "chat"
                         # Clear temporary credentials
@@ -4692,6 +4689,7 @@ def main_fixed():
                         st.balloons()
                     else:
                         set_loading_state(False)
+                        # Error message already shown by authenticate_with_wordpress
                         return
                 else:
                     set_loading_state(False)
@@ -4699,8 +4697,10 @@ def main_fixed():
                     return
 
             # NEW: After session is established, but before rendering chat, explicitly set chat to not ready.
+            # It will be unlocked by process_fingerprint_from_query once a stable FP is acquired.
             st.session_state.is_chat_ready = False 
             logger.info(f"Chat input initially locked (is_chat_ready=False) after {loading_reason} for session {session.session_id[:8] if session else 'None'}.")
+
 
             # Clear loading state and rerun to show the actual page (with chat input locked)
             set_loading_state(False)
@@ -4717,19 +4717,17 @@ def main_fixed():
     try:
         # Initialize if needed (without loading overlay since it's already done or not triggered)
         if not st.session_state.get('initialized', False):
-            with st.spinner("Initializing application..."):
+            # This path handles initial load when no button was pressed, or if initialization failed.
+            with st.spinner("Initializing application..."): # Keep a fallback spinner here for initial page load if loading_state was false but init wasn't complete.
                  init_success = ensure_initialization_fixed()
             if not init_success:
                 st.error("⚠️ Application failed to initialize properly.")
                 st.info("Please refresh the page to try again.")
                 return
 
-        # Handle emergency saves and fingerprint data FIRST
+        # Handle emergency saves and fingerprint data
         handle_emergency_save_requests_from_query()
         handle_fingerprint_requests_from_query()
-
-        # MOVED: Capture current_page AFTER fingerprint processing
-        current_page = st.session_state.get('page')
 
         session_manager = st.session_state.get('session_manager')
         if not session_manager:
