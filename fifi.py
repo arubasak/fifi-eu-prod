@@ -1548,7 +1548,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
+                if attempt_note < max_retries - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -2568,6 +2568,25 @@ class SessionManager:
         try:
             session_id = st.session_state.get('current_session_id')
             
+            # NEW: Check for force reload flag
+            force_reload = st.session_state.get('force_session_reload', False)
+            if force_reload:
+                st.session_state.force_session_reload = False  # Clear the flag
+                logger.info(f"Force reloading session {session_id[:8]} due to fingerprint update")
+                # Intentionally bypass `st.session_state.get(f'loading_{session_id}', False)` check
+                # to ensure a fresh load from DB on force reload.
+                session = self.db.load_session(session_id)
+                if session:
+                    logger.info(f"Loaded session {session_id[:8]} via force reload.")
+                    # Log the fingerprint state for debugging
+                    logger.info(f"Loaded session {session_id[:8]}: fingerprint_id={session.fingerprint_id[:8] if session.fingerprint_id else 'None'}, method={session.fingerprint_method}")
+                    return session
+                else:
+                    logger.warning(f"Force reload failed to find session {session_id[:8]} in DB. Recreating.")
+                    if 'current_session_id' in st.session_state:
+                        del st.session_state['current_session_id']
+                    # Fall through to new session creation
+            
             if session_id:
                 # ADD THIS: Check if session loading is already in progress
                 if st.session_state.get(f'loading_{session_id}', False):
@@ -2579,6 +2598,9 @@ class SessionManager:
                 st.session_state[f'loading_{session_id}'] = False  # Clear the flag
                 
                 if session and session.active:
+                    # Log the fingerprint state for debugging
+                    logger.info(f"Loaded session {session_id[:8]}: fingerprint_id={session.fingerprint_id[:8] if session.fingerprint_id else 'None'}, method={session.fingerprint_method}")
+
                     # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
                     # And this check hasn't been performed for this session yet in the current rerun cycle.
                     fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
@@ -3738,7 +3760,6 @@ def handle_fingerprint_requests_from_query():
         if not fingerprint_id or not method:
             st.error("❌ **Fingerprint Error** - Missing required data in redirect")
             logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
-            # Removed time.sleep(2)
             st.rerun()
             return
         
@@ -3747,11 +3768,22 @@ def handle_fingerprint_requests_from_query():
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
             if success:
-                # On successful fingerprint, reset the timeout state
+                # IMPORTANT: Reset ALL fingerprint-related session state
                 st.session_state.fingerprint_render_time = None
                 st.session_state.fingerprint_timeout_triggered = False
-                logger.info(f"🔄 Fingerprint processed successfully, resetting timeout state for {session_id[:8]}")
-                st.stop() # Rerun to apply changes and clear query params
+                
+                # Clear the fingerprint rendered flag to prevent re-rendering
+                fingerprint_key = f"fingerprint_rendered_{session_id}"
+                if fingerprint_key in st.session_state:
+                    del st.session_state[fingerprint_key]
+                
+                # Force clear the current session from session_state to force reload in get_session()
+                if 'current_session_id' in st.session_state and st.session_state['current_session_id'] == session_id:
+                    st.session_state.force_session_reload = True # Set flag to trigger reload
+                
+                logger.info(f"🔄 Fingerprint processed successfully, forcing session reload for {session_id[:8]}")
+                st.rerun()  # Use st.rerun() instead of st.stop()
+                return
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
         
@@ -4060,207 +4092,26 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Manually save your current chat transcript to your linked Zoho CRM contact."):
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat automatically saves to CRM during Sign Out or browser/tab close.")
-
-def display_email_prompt_if_needed(session_manager: 'SessionManager', session: UserSession) -> bool:
-    """
-    Renders email verification dialog if needed.
-    Controls `st.session_state.chat_blocked_by_dialog` and returns if chat input should be disabled.
-    """
-    
-    # Initialize relevant session states if not present
-    if 'verification_stage' not in st.session_state:
-        st.session_state.verification_stage = None
-    if 'guest_continue_active' not in st.session_state:
-        st.session_state.guest_continue_active = False
-
-    # Check if a hard block is in place first (non-email-verification related bans)
-    limit_check = session_manager.question_limits.is_within_limits(session)
-    if not limit_check['allowed'] and limit_check.get('reason') != 'guest_limit':
-        st.session_state.chat_blocked_by_dialog = True # Hard ban, block everything
-        return True # Disable chat input
-
-    # Determine if an email prompt *should* be active
-    user_is_guest = (session.user_type.value == UserType.GUEST.value)
-    guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
-    daily_q_value = session.daily_question_count
-    daily_q_ge_limit = (daily_q_value >= guest_limit_value)
-
-    logger.debug(f"DEBUG_PROMPT_EVAL_COMPONENTS: SessionID={session.session_id[:8]} | IsGuest={user_is_guest} | DailyQ={daily_q_value} | GuestLimit={guest_limit_value} | DailyQ>=Limit={daily_q_ge_limit}")
-
-    is_guest_limit_hit = (user_is_guest and daily_q_ge_limit) # Use the explicitly evaluated component
-
-    logger.debug(f"DEBUG: display_email_prompt_if_needed: session_id={session.session_id[:8]} | user_type={session.user_type.value} | daily_q={session.daily_question_count} | is_guest_limit_hit={is_guest_limit_hit}")
-
-    should_show_prompt = False
-
-    if session.reverification_pending:
-        should_show_prompt = True
-        if st.session_state.verification_stage is None: # Initial entry to re-verification
-             st.session_state.verification_stage = 'initial_check'
-             st.session_state.guest_continue_active = False # Clear any previous guest-continue state
-    elif is_guest_limit_hit:
-        should_show_prompt = True
-        if st.session_state.verification_stage is None or st.session_state.verification_stage == 'declined_recognized_email_prompt_only':
-            st.session_state.verification_stage = 'email_entry' # Force email entry if limit hit
-            st.session_state.guest_continue_active = False # Clear any previous guest-continue state
-    elif session.declined_recognized_email_at and not st.session_state.guest_continue_active:
-        # This is the scenario where user declined recognized email, has questions left, but hasn't explicitly
-        # chosen "Continue as Guest for Now" in this session state.
-        should_show_prompt = True
-        if st.session_state.verification_stage is None:
-            st.session_state.verification_stage = 'declined_recognized_email_prompt_only'
-
-    # If no prompt should be shown based on conditions, ensure state is clean
-    if not should_show_prompt:
-        st.session_state.chat_blocked_by_dialog = False
-        st.session_state.verification_stage = None # Ensure stage is cleared
-        return False # No prompt, chat input enabled
-
-    # If a prompt should be shown, set chat_blocked_by_dialog to True
-    st.session_state.chat_blocked_by_dialog = True
-    st.error("📧 **Action Required**") # Display prompt header
-
-    current_stage = st.session_state.verification_stage
-    disable_chat_input = True # Default to disabling chat input while prompt is active
-
-    if current_stage == 'initial_check':
-        email_to_reverify = session.pending_email
-        masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
-        st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
-        st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("✅ Verify this email", use_container_width=True, key="reverify_yes_btn"):
-                session.recognition_response = "yes_reverify"
-                session.declined_recognized_email_at = None
-                st.session_state.verification_email = email_to_reverify
-                st.session_state.verification_stage = "send_code_recognized"
-                session_manager.db.save_session(session) # Save response
-                st.rerun()
-        with col2:
-            if st.button("❌ No, I don't recognize the email", use_container_width=True, key="reverify_no_btn"):
-                session.recognition_response = "no_declined_reco"
-                session.declined_recognized_email_at = datetime.now()
-                session.user_type = UserType.GUEST 
-                session.reverification_pending = False
-                session.pending_user_type = None
-                session.pending_email = None
-                session.pending_full_name = None
-                session.pending_zoho_contact_id = None
-                session.pending_wp_token = None
-                session_manager.db.save_session(session) # Persist this decision
-                st.session_state.guest_continue_active = True # Allow continuing as guest now
-                st.session_state.chat_blocked_by_dialog = False # UNBLOCK CHAT
-                st.session_state.verification_stage = None # Clear stage to dismiss dialog
-                st.success("You can now continue as a Guest.")
-                st.rerun()
-
-    elif current_stage == 'send_code_recognized':
-        email_to_verify = st.session_state.get('verification_email')
-        if email_to_verify:
-            with st.spinner(f"Sending verification code to {session_manager._mask_email(email_to_verify)}..."):
-                result = session_manager.handle_guest_email_verification(session, email_to_verify)
-                if result['success']:
-                    st.success(result['message'])
-                    st.session_state.verification_stage = "code_entry"
-                else:
-                    st.error(result['message'])
-                    if "unusual activity" in result['message'].lower(): st.stop()
-                    st.session_state.verification_stage = "email_entry" # Fallback to manual entry if send fails
-            st.rerun()
-
-    elif current_stage == 'email_entry':
-        st.info("You've used your 4 free questions. Please verify your email to unlock 10 questions per day.")
-        with st.form("email_verification_form", clear_on_submit=False):
-            st.markdown("**Please enter your email address to receive a verification code:**")
-            current_email_input = st.text_input("Email Address", placeholder="your@email.com", value=st.session_state.get('verification_email', session.email or ""), key="manual_email_input")
-            submit_email = st.form_submit_button("Send Verification Code", use_container_width=True)
+        # Add debugging information as requested
+        if st.checkbox("Show Debug Info", help="Show debugging information for troubleshooting"):
+            st.subheader("🔧 Debug Information")
+            st.text(f"Session ID (State): {st.session_state.get('current_session_id', 'None')}")
+            st.text(f"Session ID (Object): {session.session_id[:8] if session else 'None'}")
+            st.text(f"Fingerprint ID (Object): {session.fingerprint_id[:12] if session and session.fingerprint_id else 'None'}")
+            st.text(f"Fingerprint Method (Object): {session.fingerprint_method if session else 'None'}")
+            st.text(f"Fingerprint Render Time (State): {st.session_state.get('fingerprint_render_time')}")
+            st.text(f"Fingerprint Timeout Triggered (State): {st.session_state.get('fingerprint_timeout_triggered')}")
+            st.text(f"Chat Blocked by Dialog (State): {st.session_state.get('chat_blocked_by_dialog')}")
+            st.text(f"Force Session Reload (State): {st.session_state.get('force_session_reload', False)}")
             
-            if submit_email:
-                if current_email_input:
-                    result = session_manager.handle_guest_email_verification(session, current_email_input)
-                    if result['success']:
-                        st.success(result['message'])
-                        st.session_state.verification_email = current_email_input
-                        st.session_state.verification_stage = "code_entry"
-                        st.rerun()
-                    else:
-                        st.error(result['message'])
-                        if "unusual activity" in result['message'].lower(): st.stop()
-                else:
-                    st.error("Please enter an email address to receive the code.")
-        
-    elif current_stage == 'code_entry':
-        verification_email = st.session_state.get('verification_email', session.email)
-        st.success(f"📧 A verification code has been sent to **{session_manager._mask_email(verification_email)}**.")
-        st.info("Please check your email, including spam/junk folders. The code is valid for 1 minute.")
-        
-        with st.form("code_verification_form", clear_on_submit=False):
-            code = st.text_input("Enter Verification Code", placeholder="e.g., 123456", max_chars=6, key="verification_code_input")
-            col_code1, col_code2 = st.columns(2)
-            with col_code1:
-                submit_code = st.form_submit_button("Verify Code", use_container_width=True)
-            with col_code2:
-                resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
-            
-            if resend_code:
-                if verification_email:
-                    with st.spinner("Resending code..."):
-                        verification_sent = session_manager.email_verification.send_verification_code(verification_email)
-                        if verification_sent:
-                            st.success("Verification code resent successfully!")
-                            st.session_state.verification_stage = "code_entry"
-                        else:
-                            st.error("Failed to resend code. Please try again later.")
-                else:
-                    st.error("Error: No email address found to resend the code. Please go back and enter your email.")
-                    st.session_state.verification_stage = "email_entry"
-                st.rerun()
+            fingerprint_needed_local_check = (
+                not session.fingerprint_id or
+                (session.fingerprint_method == "temporary_fallback_python" if session.fingerprint_method else True) or # Handle None for method
+                (session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if session.fingerprint_id else True) # Handle None for id
+            )
+            st.text(f"Fingerprint Needed (Local Check): {fingerprint_needed_local_check}")
 
-            if submit_code:
-                if code:
-                    with st.spinner("Verifying code..."):
-                        result = session_manager.verify_email_code(session, code)
-                    if result['success']:
-                        st.success(result['message'])
-                        st.balloons()
-                        # Clean up verification state on success
-                        st.session_state.chat_blocked_by_dialog = False # UNBLOCK CHAT
-                        st.session_state.verification_stage = None
-                        st.session_state.guest_continue_active = False # Clear this flag too
-                        st.rerun()
-                    else:
-                        st.error(result['message'])
-                else:
-                    st.error("Please enter the verification code you received.")
-    
-    elif current_stage == 'declined_recognized_email_prompt_only':
-        # This state happens when a user declines a recognized email but still has guest questions left.
-        # It's a non-blocking prompt, meaning chat input should remain active.
-        disable_chat_input = False # ALLOW CHAT INPUT
-        st.session_state.chat_blocked_by_dialog = False # UNBLOCK CHAT (as it's non-blocking visual prompt)
-
-        remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
-        st.info(f"You chose not to verify the recognized email. You can still use your remaining **{remaining_questions} guest questions**.")
-        st.info("To ask more questions after this, or to save chat history, please verify your email.")
-
-        col_opts1, col_opts2 = st.columns(2)
-        with col_opts1:
-            if st.button("📧 Enter a New Email for Verification", use_container_width=True, key="new_email_opt_btn"):
-                st.session_state.verification_email = "" # Clear pre-filled email
-                st.session_state.verification_stage = "email_entry"
-                st.session_state.guest_continue_active = False # Reset if they change mind and go for new email
-                st.rerun()
-        with col_opts2:
-            if st.button("Continue as Guest for Now", use_container_width=True, key="continue_guest_btn"):
-                st.session_state.guest_continue_active = True
-                st.session_state.chat_blocked_by_dialog = False # Ensure UNBLOCKING
-                st.session_state.verification_stage = None # Clear stage to dismiss dialog
-                st.success("You can now continue as a Guest. The email prompt will reappear when your guest questions run out.")
-                st.rerun()
-
-    return disable_chat_input
 
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications."""
@@ -4288,6 +4139,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     )
     
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+    
+    # Log current fingerprint state for debugging
+    logger.debug(f"Fingerprint check for {session.session_id[:8]}: needed={fingerprint_needed_or_temp}, id={session.fingerprint_id[:8] if session.fingerprint_id else 'None'}, method={session.fingerprint_method}")
+
 
     # NEW: Determine if the fingerprint component needs to be rendered and manage its render time
     if fingerprint_needed_or_temp and not st.session_state.get(fingerprint_key, False):
@@ -4311,15 +4166,21 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     disable_for_fingerprint = False
     fingerprint_message = None 
     
+    # IMPORTANT: Only apply fingerprint logic if actually needed
     if fingerprint_needed_or_temp:
-        if st.session_state.fingerprint_timeout_triggered:
+        current_time = datetime.now()
+        render_time = st.session_state.get('fingerprint_render_time')
+        timeout_triggered = st.session_state.get('fingerprint_timeout_triggered', False)
+        
+        # Debug logging
+        logger.debug(f"Fingerprint timing for {session.session_id[:8]}: render_time={render_time}, timeout_triggered={timeout_triggered}, current_time={current_time}")
+        
+        if timeout_triggered:
             # If timeout was already triggered, we've decided to unlock the chat.
             disable_for_fingerprint = False 
             fingerprint_message = "⚠️ Device identification failed to complete, but you can continue. Your session may have limited features or be less securely tracked."
             logger.debug(f"Session {session.session_id[:8]}: Fingerprint timeout already triggered, allowing chat.")
-        elif st.session_state.fingerprint_render_time and \
-             (datetime.now() - st.session_state.fingerprint_render_time) > timedelta(seconds=10): # 10-second timeout
-            
+        elif render_time and (current_time - render_time) > timedelta(seconds=10): # 10-second timeout
             # Timeout reached, assume JS component failed or never responded correctly
             st.session_state.fingerprint_timeout_triggered = True # Mark timeout as triggered
             disable_for_fingerprint = False # Release the lock
@@ -4330,6 +4191,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             disable_for_fingerprint = True
             fingerprint_message = "🔄 Identifying your device for secure access and usage tracking... Please wait a moment."
             logger.debug(f"Session {session.session_id[:8]}: Chat input disabled, awaiting fingerprint data or timeout.")
+    else:
+        # Fingerprint not needed, ensure no blocking
+        logger.debug(f"Session {session.session_id[:8]}: Fingerprint not needed, id={session.fingerprint_id[:8] if session.fingerprint_id else 'None'}")
     
     # Display fingerprint message if applicable
     if fingerprint_message:
@@ -4568,6 +4432,8 @@ def ensure_initialization_fixed():
             # NEW: Initialize fingerprinting state for the timeout logic
             st.session_state.fingerprint_render_time = None
             st.session_state.fingerprint_timeout_triggered = False
+            # NEW: Initialize force_session_reload flag
+            st.session_state.force_session_reload = False
 
 
             init_progress.progress(1.0)
