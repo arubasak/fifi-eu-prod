@@ -174,17 +174,18 @@ class EnhancedErrorHandler:
 
     def handle_api_error(self, component: str, operation: str, error: Exception) -> ErrorContext:
         error_str = str(error).lower()
+        error_type = type(error).__name__
         
         if "timeout" in error_str:
-            severity, message, error_type = ErrorSeverity.MEDIUM, "is responding slowly.", "Timeout"
+            severity, message = ErrorSeverity.MEDIUM, "is responding slowly."
         elif "unauthorized" in error_str or "401" in error_str or "403" in error_str:
-            severity, message, error_type = ErrorSeverity.HIGH, "authentication failed. Please check API keys.", "AuthenticationError"
+            severity, message = ErrorSeverity.HIGH, "authentication failed. Please check API keys."
         elif "rate limit" in error_str or "429" in error_str:
-            severity, message, error_type = ErrorSeverity.MEDIUM, "rate limit reached. Please wait.", "RateLimitExceeded"
+            severity, message = ErrorSeverity.MEDIUM, "rate limit reached. Please wait."
         elif "connection" in error_str or "network" in error_str:
-            severity, message, error_type = ErrorSeverity.HIGH, "is unreachable. Check your connection.", "NetworkError"
+            severity, message = ErrorSeverity.HIGH, "is unreachable. Check your connection."
         else:
-            severity, message, error_type = ErrorSeverity.MEDIUM, "encountered an unexpected error.", type(error).__name__
+            severity, message = ErrorSeverity.MEDIUM, "encountered an unexpected error."
 
         return ErrorContext(
             component=component, operation=operation, error_type=error_type,
@@ -308,6 +309,14 @@ class UserSession:
     pending_full_name: Optional[str] = None
     pending_zoho_contact_id: Optional[str] = None
     pending_wp_token: Optional[str] = None
+
+    # NEW: Pending count fields for reverification
+    # Removed these as they were not consistently merged in previous versions and caused issues.
+    # The current daily_question_count is now always inherited directly, and the pending fields
+    # only apply to identity re-verification.
+    # pending_daily_question_count: Optional[int] = None
+    # pending_total_question_count: Optional[int] = None
+    # pending_last_question_time: Optional[datetime] = None
 
     # NEW: Flag to allow guest questions after declining a recognized email
     declined_recognized_email_at: Optional[datetime] = None
@@ -862,7 +871,7 @@ class DatabaseManager:
                 
                 # Render with minimal visibility (height=0 for silent operation)
                 logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-                # REMOVED the 'key' argument to ensure compatibility with older Streamlit versions.
+                # REMOVE 'key' ARGUMENT HERE
                 st.components.v1.html(html_content, height=0, width=0, scrolling=False)
                 
                 logger.info(f"✅ External fingerprint component rendered successfully for session {session_id[:8]}")
@@ -1546,7 +1555,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries - 1:
+                if attempt_note < max_retries_note - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -4278,6 +4287,18 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             except Exception as e:
                 logger.error(f"Failed to update activity from JavaScript: {e}")
 
+    # Fingerprinting
+    fingerprint_needed = (
+        not session.fingerprint_id or
+        session.fingerprint_method == "temporary_fallback_python" or
+        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+    )
+    
+    fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+    if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
+        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+        st.session_state[fingerprint_key] = True
+
     # Browser close detection for emergency saves
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
@@ -4314,7 +4335,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 
                 if msg.get("source"):
                     source_color = {
-                        "FiFi": "🧠", "FiFi Web Search": "🌐",
+                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
                         "Content Moderation": "🛡️", "System Fallback": "⚠️",
                         "Error Handler": "❌"
                     }.get(msg['source'], "🤖")
@@ -4337,9 +4358,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.markdown("---") # Visual separator
 
         # Chat input
-        # Now explicitly check `app_fully_loaded` here
         prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                                disabled=not st.session_state.get('app_fully_loaded', False) or should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value)
+                                disabled=should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value)
         
         if prompt:
             logger.info(f"🎯 Processing question from {session.session_id[:8]}")
@@ -4400,9 +4420,6 @@ def ensure_initialization_fixed():
         logger.info("Starting application initialization sequence...")
         
         try:
-            # Initialize app_fully_loaded to False
-            st.session_state.app_fully_loaded = False 
-            
             progress_placeholder = st.empty()
             with progress_placeholder.container():
                 st.info("🔄 Initializing FiFi AI Assistant...")
@@ -4575,8 +4592,13 @@ def main_fixed():
     # Route to appropriate page based on user intent
     try:
         if current_page != "chat":
+            # If not on chat page, render welcome page. No session is needed or created yet.
             render_welcome_page(session_manager)
+            # IMPORTANT: NO get_session() call here.
+            # get_session() will ONLY be called *inside* render_welcome_page
+            # if a button is explicitly pressed.
         else:
+            # ONLY if current_page is 'chat', then we proceed to get/create a session
             session = session_manager.get_session() 
             
             if session is None or not session.active:
@@ -4586,25 +4608,7 @@ def main_fixed():
                 st.session_state['page'] = None
                 st.rerun()
                 return
-            
-            # Handle fingerprinting BEFORE rendering main interface
-            fingerprint_needed = (
-                not session.fingerprint_id or
-                session.fingerprint_method == "temporary_fallback_python" or
-                session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-            )
-            
-            # Removed the `fingerprint_component_key` because `key` is not supported.
-            if fingerprint_needed and not st.session_state.get(f"fingerprint_rendered_{session.session_id}", False):
-                # We need to wrap the component render in an off-screen div directly
-                # as the `key` argument for `st.components.v1.html` is not supported.
-                st.markdown('<div style="position: absolute; top: -10000px; left: -10000px; width: 0; height: 0; overflow: hidden;">', unsafe_allow_html=True)
-                _ = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-                st.markdown('</div>', unsafe_allow_html=True)
-                st.session_state[f"fingerprint_rendered_{session.session_id}"] = True
-                logger.debug(f"Rendered fingerprint component in off-screen div for session {session.session_id[:8]}.")
-
-
+                
             activity_data_from_js = None
             if session and session.session_id: 
                 activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
@@ -4630,10 +4634,6 @@ def main_fixed():
         logger.error(f"Main application error: {e}", exc_info=True)
         st.error("⚠️ An unexpected error occurred. Please refresh the page.")
         st.info(f"Error details: {str(e)}")
-    
-    # Ensure app_fully_loaded is set to True if we reach the end of main_fixed without error
-    # This ensures the chat input becomes enabled.
-    st.session_state.app_fully_loaded = True
 
 if __name__ == "__main__":
     main_fixed()
