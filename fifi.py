@@ -862,8 +862,8 @@ class DatabaseManager:
                 
                 # Render with minimal visibility (height=0 for silent operation)
                 logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-                # ADDED unique key for targeted CSS hiding
-                st.components.v1.html(html_content, height=0, width=0, scrolling=False, key=f"fingerprint_component_{session_id}")
+                # REMOVED the 'key' argument to ensure compatibility with older Streamlit versions.
+                st.components.v1.html(html_content, height=0, width=0, scrolling=False)
                 
                 logger.info(f"✅ External fingerprint component rendered successfully for session {session_id[:8]}")
                 return None # Always return None since data comes via redirect
@@ -4594,29 +4594,16 @@ def main_fixed():
                 session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
             )
             
-            fingerprint_component_key = f"fingerprint_component_{session.session_id}"
+            # Removed the `fingerprint_component_key` because `key` is not supported.
             if fingerprint_needed and not st.session_state.get(f"fingerprint_rendered_{session.session_id}", False):
-                # This ensures the custom component HTML is rendered, but immediately hidden by CSS.
-                # The component's key ensures we can target its wrapper div.
+                # We need to wrap the component render in an off-screen div directly
+                # as the `key` argument for `st.components.v1.html` is not supported.
+                st.markdown('<div style="position: absolute; top: -10000px; left: -10000px; width: 0; height: 0; overflow: hidden;">', unsafe_allow_html=True)
                 _ = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                st.markdown('</div>', unsafe_allow_html=True)
                 st.session_state[f"fingerprint_rendered_{session.session_id}"] = True
-                
-                # Inject CSS to hide the Streamlit wrapper div for the custom component
-                st.markdown(f"""
-                    <style>
-                    [data-testid="stCustomComponent-{fingerprint_component_key}"] {{
-                        display: none !important;
-                        visibility: hidden !important;
-                        width: 0 !important;
-                        height: 0 !important;
-                        position: absolute !important;
-                        top: -10000px !important;
-                        left: -10000px !important;
-                        overflow: hidden !important;
-                    }}
-                    </style>
-                """, unsafe_allow_html=True)
-                logger.debug(f"Injected CSS to hide fingerprint component {fingerprint_component_key}.")
+                logger.debug(f"Rendered fingerprint component in off-screen div for session {session.session_id[:8]}.")
+
 
             activity_data_from_js = None
             if session and session.session_id: 
