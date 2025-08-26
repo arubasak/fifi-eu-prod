@@ -348,7 +348,7 @@ class UserSession:
     # Ban Management
     ban_status: BanStatus = BanStatus.NONE
     ban_start_time: Optional[datetime] = None
-    ban_end_time: Optional[str] = None
+    ban_end_time: Optional[datetime] = None
     ban_reason: Optional[str] = None
     
     # Evasion Tracking
@@ -1615,8 +1615,8 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
-                    time.sleep(2 ** attempt_note)
+                if attempt < max_retries_note - 1:
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
                     return False
@@ -2525,7 +2525,7 @@ class SessionManager:
                 if s.last_question_time and (not merged_last_question_time or s.last_question_time > merged_last_question_time):
                     merged_last_question_time = s.last_question_time
                 elif merged_last_question_time is None and s.last_question_time is not None:
-                    merged_last_question_time = s.last_question_time
+                    merged_last_question_time = s.last_activity
 
 
                 # Merge ban status (most restrictive)
@@ -4629,59 +4629,68 @@ def main_fixed():
         st.session_state.page = None
 
 
-    # Handle loading states first
+    # Always process query parameters first, as they can change state and trigger reruns
+    handle_emergency_save_requests_from_query()
+    handle_fingerprint_requests_from_query() # This might trigger a rerun and set is_chat_ready/page
+
     loading_state = st.session_state.get('is_loading', False)
     current_page = st.session_state.get('page')
     
-    # If we're in loading state, handle the actual operations
+    # If we're in a loading state, show the overlay and stop further rendering in this execution
     if loading_state:
-        # NEW: Display the overlay if loading, but do not exit the function immediately.
-        # This allows the initialization logic below to run in the same rerun.
-        show_loading_overlay() 
-
-        # Perform the actual operations based on what triggered the loading
+        show_loading_overlay()
+        # Perform the actual operations that were triggered to cause the loading
         try:
-            # Initialize if not already done
+            # Initialize if not already done. This should ideally be done before any loading is visible.
             if not st.session_state.get('initialized', False):
-                logger.info("Main fixed: Application not initialized, calling ensure_initialization_fixed.")
+                logger.info("Main fixed: Application not initialized during loading state, calling ensure_initialization_fixed.")
                 init_success = ensure_initialization_fixed()
                 if not init_success:
                     set_loading_state(False, "Initialization failed. Please refresh.")
                     st.error("⚠️ Application failed to initialize properly.")
                     st.info("Please refresh the page to try again.")
                     return # Exit if critical init failed
-            
+
+            # We need session_manager for loading operations
             session_manager = st.session_state.get('session_manager')
             if not session_manager:
-                set_loading_state(False, "Session manager not found. Please refresh.")
+                set_loading_state(False, "Session manager not found during loading. Please refresh.")
                 st.error("❌ Session Manager not available. Please refresh the page.")
                 return # Exit if session manager is missing
             
-            session = None # Initialize session to None for scope
+            # Retrieve session object for potential updates during loading
+            session = None
+            if st.session_state.get('current_session_id'):
+                session = session_manager.db.load_session(st.session_state.current_session_id)
+            
             loading_reason = st.session_state.get('loading_reason', 'unknown')
             
             if loading_reason == 'start_guest':
-                # Create guest session
-                session = session_manager.get_session()
+                # This block only executes if 'start_guest' was the reason for loading
+                # The session would have been created in get_session during the initial
+                # part of the previous run (before set_loading_state(True)) or
+                # via handle_fingerprint_requests_from_query.
+                # If the session is None here, it indicates a deeper issue or a very fast rerun.
+                if session is None: # Attempt to get session again if it somehow got lost
+                    session = session_manager.get_session() 
+                
                 if session and session.last_activity is None:
                     session.last_activity = datetime.now()
                     session_manager.db.save_session(session)
-                st.session_state.page = "chat"
+                st.session_state.page = "chat" # Ensure page is set to chat
                 if 'loading_reason' in st.session_state:
                     del st.session_state['loading_reason']
                 
             elif loading_reason == 'authenticate':
-                # Handle authentication (you'll need to store username/password temporarily)
                 username = st.session_state.get('temp_username', '')
                 password = st.session_state.get('temp_password', '')
                 
                 if username and password:
                     authenticated_session = session_manager.authenticate_with_wordpress(username, password)
                     if authenticated_session:
-                        session = authenticated_session # Assign to session variable
+                        session = authenticated_session
                         st.session_state.current_session_id = authenticated_session.session_id
-                        st.session_state.page = "chat"
-                        # Clear temporary credentials
+                        st.session_state.page = "chat" # Ensure page is set to chat
                         if 'temp_username' in st.session_state:
                             del st.session_state['temp_username']
                         if 'temp_password' in st.session_state:
@@ -4692,23 +4701,22 @@ def main_fixed():
                         st.balloons()
                     else:
                         set_loading_state(False)
-                        # Error message already shown by authenticate_with_wordpress
-                        return
+                        return # Auth failed, stop this execution
                 else:
                     set_loading_state(False)
                     st.error("Authentication failed: Missing username or password.")
                     return
 
-            # NEW: After session is established, but before rendering chat, explicitly set chat to not ready.
-            # It will be unlocked by process_fingerprint_from_query once a stable FP is acquired.
-            st.session_state.is_chat_ready = False 
-            logger.info(f"Chat input initially locked (is_chat_ready=False) after {loading_reason} for session {session.session_id[:8] if session else 'None'}.")
+            # After any loading operation, ensure chat is not ready until fingerprint confirms
+            # This will be overridden by process_fingerprint_from_query if applicable
+            if session and not st.session_state.is_chat_ready:
+                st.session_state.is_chat_ready = False 
+                logger.info(f"Chat input explicitly locked (is_chat_ready=False) during loading for session {session.session_id[:8]}.")
 
-
-            # Clear loading state and rerun to show the actual page (with chat input locked)
+            # Clear loading state and rerun to display the actual page content (with chat input locked initially)
             set_loading_state(False)
-            st.rerun() # Rerun to display the actual page content (with chat input disabled initially)
-            return # Exit after triggering rerun to avoid rendering transient state
+            st.rerun() # Trigger a rerun now that state is updated
+            return # IMPORTANT: Exit this script execution to prevent partial rendering
             
         except Exception as e:
             set_loading_state(False, f"Error during loading: {str(e)}")
@@ -4718,29 +4726,26 @@ def main_fixed():
 
     # Normal page rendering (when not in loading state)
     try:
-        # Initialize if needed (without loading overlay since it's already done or not triggered)
+        # Ensure initialization has occurred
         if not st.session_state.get('initialized', False):
-            # This path handles initial load when no button was pressed, or if initialization failed.
-            init_success = ensure_initialization_fixed() # NO SPINNER HERE
+            # This should ideally be caught by the loading_state above, but as a fallback
+            init_success = ensure_initialization_fixed()
             if not init_success:
                 st.error("⚠️ Application failed to initialize properly.")
                 st.info("Please refresh the page to try again.")
                 return
-
-        # Handle emergency saves and fingerprint data
-        handle_emergency_save_requests_from_query()
-        handle_fingerprint_requests_from_query()
 
         session_manager = st.session_state.get('session_manager')
         if not session_manager:
             st.error("❌ Session Manager not available. Please refresh the page.")
             return
 
-        # Route to appropriate page
+        # Route to appropriate page based on st.session_state['page']
         if current_page != "chat":
+            # Only render welcome page if not in chat mode and not loading
             render_welcome_page(session_manager)
         else:
-            # Get existing session (should already exist from loading state or prior direct creation)
+            # Get existing session
             session = session_manager.get_session()
             
             if session is None or not session.active:
