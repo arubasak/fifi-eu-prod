@@ -3779,16 +3779,20 @@ def handle_fingerprint_requests_from_query():
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
             if success:
-                logger.info(f"🔄 Fingerprint processed successfully, triggering browser reload to clear state.")
+                logger.info(f"🔄 Fingerprint processed successfully, triggering Streamlit rerun to update UI.")
                 # Force a full browser reload using streamlit_js_eval
-                if JS_EVAL_AVAILABLE:
-                    streamlit_js_eval(js_expressions="window.location.reload()")
-                else:
-                    # Fallback for environments where streamlit_js_eval is not available
-                    st.warning("Device identification complete. Please refresh your browser to continue.")
-                st.stop() # Ensure the current script run halts immediately
+                # ORIGINAL: streamlit_js_eval(js_expressions="window.location.reload()")
+                # CHANGE: Use st.rerun() for immediate Streamlit state update
+                st.rerun() 
+                # st.stop() # Ensure the current script run halts immediately - st.rerun() already stops the current execution.
+            else:
+                logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
+                # Fallback in case of failure to process fingerprint, keep current page and allow manual retry if needed
+                st.rerun() # Re-render to show potential error messages from process_fingerprint_from_query
         except Exception as e:
-            logger.error(f"Silent fingerprint processing failed: {e}")
+            logger.error(f"Silent fingerprint processing failed: {e}", exc_info=True)
+            st.error(f"❌ An error occurred during device identification: {str(e)}")
+            st.rerun()
         
         return
     else:
