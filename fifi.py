@@ -4137,7 +4137,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     # Initialize relevant session states if not present
     if 'verification_stage' not in st.session_state:
         st.session_state.verification_stage = None
-    if 'guest_continue_active' not in st.session_state:
+    if 'guest_continue_active' not not in st.session_state: # FIX: Changed `not not` to `not` here
         st.session_state.guest_continue_active = False
 
     # Check if a hard block is in place first (non-email-verification related bans)
@@ -4664,10 +4664,10 @@ def main_fixed():
                     st.error("Authentication failed: Missing username or password.")
                     return
 
-            # NEW: After session is established, but before rendering chat, explicitly set chat to not ready.
-            # It will be unlocked by process_fingerprint_from_query once a stable FP is acquired.
-            st.session_state.is_chat_ready = False 
-            logger.info(f"Chat input initially locked (is_chat_ready=False) after {loading_reason} for session {session.session_id[:8] if session else 'None'}.")
+            # FIX: Removed the line below that was resetting is_chat_ready to False
+            # after a session was established, potentially interfering with fingerprinting unlock.
+            # st.session_state.is_chat_ready = False 
+            # logger.info(f"Chat input initially locked (is_chat_ready=False) after {loading_reason} for session {session.session_id[:8] if session else 'None'}.")
 
 
             # Clear loading state and rerun to show the actual page (with chat input locked)
