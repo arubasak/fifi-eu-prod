@@ -310,14 +310,6 @@ class UserSession:
     pending_zoho_contact_id: Optional[str] = None
     pending_wp_token: Optional[str] = None
 
-    # NEW: Pending count fields for reverification
-    # Removed these as they were not consistently merged in previous versions and caused issues.
-    # The current daily_question_count is now always inherited directly, and the pending fields
-    # only apply to identity re-verification.
-    # pending_daily_question_count: Optional[int] = None
-    # pending_total_question_count: Optional[int] = None
-    # pending_last_question_time: Optional[datetime] = None
-
     # NEW: Flag to allow guest questions after declining a recognized email
     declined_recognized_email_at: Optional[datetime] = None
 
@@ -4287,19 +4279,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             except Exception as e:
                 logger.error(f"Failed to update activity from JavaScript: {e}")
 
-    # Fingerprinting
-    fingerprint_needed = (
-        not session.fingerprint_id or
-        session.fingerprint_method == "temporary_fallback_python" or
-        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-    )
-    
-    fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-    if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
-        # FIX APPLIED HERE: Capture the return value to prevent implicit display
-        _ = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-        st.session_state[fingerprint_key] = True
-
     # Browser close detection for emergency saves
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
@@ -4609,7 +4588,26 @@ def main_fixed():
                 st.session_state['page'] = None
                 st.rerun()
                 return
-                
+            
+            # Handle fingerprinting BEFORE rendering main interface
+            # This is the section that has been moved and modified
+            fingerprint_needed = (
+                not session.fingerprint_id or
+                session.fingerprint_method == "temporary_fallback_python" or
+                session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+            )
+            
+            fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+            if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
+                # Create invisible container at top level
+                invisible_fp = st.empty()
+                with invisible_fp:
+                    st.markdown('<div style="position: absolute; top: -1000px; left: -1000px;">', unsafe_allow_html=True)
+                    _ = session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                    st.markdown('</div>', unsafe_allow_html=True)
+                st.session_state[fingerprint_key] = True
+                invisible_fp.empty()  # Clear the container immediately
+            
             activity_data_from_js = None
             if session and session.session_id: 
                 activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
