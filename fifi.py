@@ -9,7 +9,7 @@ import functools
 import io
 import html
 import jwt
-import threading 
+import threading
 import copy
 import sqlite3
 import hashlib
@@ -118,6 +118,75 @@ def safe_json_loads(data: Optional[str], default_value: Any = None) -> Any:
     except (json.JSONDecodeError, TypeError) as e:
         logger.error(f"Failed to decode JSON: {data[:50]}... Error: {e}")
         return default_value
+
+# =============================================================================
+# LOADING STATE MANAGEMENT (NEW)
+# =============================================================================
+
+def set_loading_state(loading: bool, message: str = ""):
+    """Centralized loading state management"""
+    st.session_state.is_loading = loading
+    if loading:
+        st.session_state.loading_message = message
+    else:
+        st.session_state.loading_message = ""
+
+def is_loading():
+    """Check if system is in loading state"""
+    return st.session_state.get('is_loading', False)
+
+def show_loading_overlay():
+    """Show loading overlay that blocks all interaction"""
+    if is_loading():
+        loading_message = st.session_state.get('loading_message', 'Loading...')
+        
+        # Create a full-screen overlay using HTML/CSS
+        overlay_html = f"""
+        <div style="
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(255, 255, 255, 0.9);
+            z-index: 9999;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            font-family: Arial, sans-serif;
+        ">
+            <div style="
+                background: white;
+                padding: 2rem;
+                border-radius: 10px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+                text-align: center;
+                max-width: 400px;
+            ">
+                <div style="
+                    width: 40px;
+                    height: 40px;
+                    border: 4px solid #f3f3f3;
+                    border-top: 4px solid #ff6b6b;
+                    border-radius: 50%;
+                    animation: spin 1s linear infinite;
+                    margin: 0 auto 1rem;
+                "></div>
+                <h3 style="color: #333; margin-bottom: 0.5rem;">🤖 FiFi AI Assistant</h3>
+                <p style="color: #666; margin: 0;">{loading_message}</p>
+            </div>
+        </div>
+        <style>
+            @keyframes spin {{
+                0% {{ transform: rotate(0deg); }}
+                100% {{ transform: rotate(360deg); }}
+            }}
+        </style>
+        """
+        st.components.v1.html(overlay_html, height=0)
+        return True
+    return False
 
 # =============================================================================
 # CONFIGURATION
@@ -309,14 +378,6 @@ class UserSession:
     pending_full_name: Optional[str] = None
     pending_zoho_contact_id: Optional[str] = None
     pending_wp_token: Optional[str] = None
-
-    # NEW: Pending count fields for reverification
-    # Removed these as they were not consistently merged in previous versions and caused issues.
-    # The current daily_question_count is now always inherited directly, and the pending fields
-    # only apply to identity re-verification.
-    # pending_daily_question_count: Optional[int] = None
-    # pending_total_question_count: Optional[int] = None
-    # pending_last_question_time: Optional[datetime] = None
 
     # NEW: Flag to allow guest questions after declining a recognized email
     declined_recognized_email_at: Optional[datetime] = None
@@ -3767,8 +3828,14 @@ def handle_fingerprint_requests_from_query():
 # UI COMPONENTS
 # =============================================================================
 
+# Modified render_welcome_page function (from prompt)
 def render_welcome_page(session_manager: 'SessionManager'):
-    """Enhanced welcome page with registration tracking."""
+    """Enhanced welcome page with loading lock."""
+    
+    # Show loading overlay if in loading state
+    if show_loading_overlay():
+        return
+    
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
     
@@ -3817,21 +3884,14 @@ def render_welcome_page(session_manager: 'SessionManager'):
                     if not username or not password:
                         st.error("Please enter both username and password to sign in.")
                     else:
-                        with st.spinner("🔐 Authenticating..."):
-                            authenticated_session = session_manager.authenticate_with_wordpress(username, password)
-                            
-                        if authenticated_session:
-                            st.balloons()
-                            st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
-                            
-                            st.session_state.current_session_id = authenticated_session.session_id
-                            st.session_state.page = "chat"
-                            
-                            # Removed time.sleep(1.5)
-                            st.rerun()
+                        # Store credentials temporarily and set loading state (NEW)
+                        st.session_state.temp_username = username
+                        st.session_state.temp_password = password
+                        st.session_state.loading_reason = 'authenticate'
+                        set_loading_state(True, "Authenticating and preparing your session...")
+                        st.rerun()  # Immediately show loading state (NEW)
             
             st.markdown("---")
-            
             st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
     
     with tab2:
@@ -3849,13 +3909,10 @@ def render_welcome_page(session_manager: 'SessionManager'):
         col1, col2, col3 = st.columns(3)
         with col2:
             if st.button("👤 Start as Guest", use_container_width=True):
-                # When "Start as Guest" is clicked, we trigger the session creation/retrieval
-                session = session_manager.get_session() 
-                if session and session.last_activity is None: # Only set if it's truly a new session starting activity
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session) # Save immediately to persist last_activity
-                st.session_state.page = "chat"
-                st.rerun()
+                # Set loading state and reason BEFORE any session operations (NEW)
+                st.session_state.loading_reason = 'start_guest'
+                set_loading_state(True, "Setting up your session and initializing AI assistant...")
+                st.rerun()  # Immediately show loading state (NEW)
 
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display."""
@@ -4410,33 +4467,16 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             
             st.rerun()
 
-# =============================================================================
-# INITIALIZATION & MAIN FUNCTIONS
-# =============================================================================
-
+# Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
-    """Fixed version of ensure_initialization with better error handling and timeout prevention"""
+    """Fixed version without duplicate spinner since we have loading overlay"""
     if 'initialized' not in st.session_state or not st.session_state.initialized:
-        logger.info("Starting application initialization sequence...")
+        logger.info("Starting application initialization sequence (no spinner shown, overlay is active)...")
         
         try:
-            progress_placeholder = st.empty()
-            with progress_placeholder.container():
-                st.info("🔄 Initializing FiFi AI Assistant...")
-                init_progress = st.progress(0)
-                status_text = st.empty()
-            
-            status_text.text("Loading configuration...")
-            init_progress.progress(0.1)
             config = Config()
+            pdf_exporter = PDFExporter()
             
-            status_text.text("Setting up PDF exporter...")
-            init_progress.progress(0.2)
-            # PDFExporter is now a top-level class
-            pdf_exporter = PDFExporter() 
-            
-            status_text.text("Connecting to database...")
-            init_progress.progress(0.3)
             try:
                 db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
                 st.session_state.db_manager = db_manager
@@ -4450,13 +4490,8 @@ def ensure_initialization_fixed():
                     'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
                     'find_sessions_by_email': lambda self, email: []
                 })()
-                st.warning("⚠️ Database unavailable. Using temporary storage.")
-            
-            status_text.text("Setting up managers...")
-            init_progress.progress(0.5)
             
             try:
-                # ZohoCRMManager is now a top-level class
                 zoho_manager = ZohoCRMManager(config, pdf_exporter)
             except Exception as e:
                 logger.error(f"Zoho manager failed: {e}")
@@ -4464,8 +4499,6 @@ def ensure_initialization_fixed():
                     'config': config,
                     'save_chat_transcript_sync': lambda self, session, reason: False
                 })()
-            
-            init_progress.progress(0.6)
             
             try:
                 ai_system = EnhancedAI(config)
@@ -4479,16 +4512,11 @@ def ensure_initialization_fixed():
                     }
                 })()
             
-            init_progress.progress(0.7)
-            
-            rate_limiter = RateLimiter(max_requests=2, window_seconds=60) # UPDATED: 2 questions per 60 seconds
-            # These are correctly nested classes *within* DatabaseManager, so instantiate using db_manager
-            fingerprinting_manager = db_manager.FingerprintingManager()
-            
-            init_progress.progress(0.9)
+            rate_limiter = RateLimiter(max_requests=2, window_seconds=60)
+            fingerprinting_manager = st.session_state.db_manager.FingerprintingManager()
             
             try:
-                email_verification_manager = db_manager.EmailVerificationManager(config)
+                email_verification_manager = st.session_state.db_manager.EmailVerificationManager(config)
                 if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
                     email_verification_manager = type('DummyEmail', (), {
                         'send_verification_code': lambda self, email: False,
@@ -4501,12 +4529,7 @@ def ensure_initialization_fixed():
                     'verify_code': lambda self, email, code: False
                 })()
             
-            init_progress.progress(0.9)
-            
-            question_limit_manager = db_manager.QuestionLimitManager()
-            
-            status_text.text("Finalizing initialization...")
-            init_progress.progress(0.95)
+            question_limit_manager = st.session_state.db_manager.QuestionLimitManager()
             
             st.session_state.session_manager = SessionManager(
                 config, st.session_state.db_manager, zoho_manager, ai_system, 
@@ -4520,34 +4543,24 @@ def ensure_initialization_fixed():
             st.session_state.email_verification_manager = email_verification_manager
             st.session_state.question_limit_manager = question_limit_manager
 
-            # NEW: Initialize chat_blocked_by_dialog to False by default
             st.session_state.chat_blocked_by_dialog = False
-            # NEW: Initialize verification_stage and guest_continue_active
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
-
-            init_progress.progress(1.0)
-            status_text.text("✅ Initialization complete!")
-            
-            # Removed time.sleep(0.5)
-            progress_placeholder.empty()
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
             return True
             
         except Exception as e:
-            st.error("💥 Critical initialization error occurred.")
-            st.error(f"Error: {str(e)}")
             logger.critical(f"Critical initialization failure: {e}", exc_info=True)
-            
             st.session_state.initialized = False
             return False
     
     return True
 
+# Modified main function with proper loading state handling (from prompt)
 def main_fixed():
-    """Main entry point with enhanced tier system and evasion detection"""
+    """Main entry point with loading state management"""
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
@@ -4557,49 +4570,117 @@ def main_fixed():
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
 
-    # Initialize
-    try:
-        with st.spinner("Initializing application..."):
-            init_success = ensure_initialization_fixed()
+    # Initialize loading state if not already set (for first run)
+    if 'is_loading' not in st.session_state:
+        st.session_state.is_loading = False
+        st.session_state.loading_message = ""
+
+    # Handle loading states first
+    loading_state = st.session_state.get('is_loading', False)
+    current_page = st.session_state.get('page')
+    
+    # If we're in loading state, handle the actual initialization
+    if loading_state:
+        # Show the loading overlay
+        if show_loading_overlay():
+            pass  # Overlay is shown
+        
+        # Perform the actual operations based on what triggered the loading
+        try:
+            # Initialize if not already done
+            if not st.session_state.get('initialized', False):
+                init_success = ensure_initialization_fixed()  # Remove the spinner wrapper since we have overlay
+                if not init_success:
+                    set_loading_state(False)
+                    st.error("⚠️ Application failed to initialize properly.")
+                    st.info("Please refresh the page to try again.")
+                    return
             
-        if not init_success:
-            st.error("⚠️ Application failed to initialize properly.")
-            st.info("Please refresh the page to try again.")
+            session_manager = st.session_state.get('session_manager')
+            if not session_manager:
+                set_loading_state(False)
+                st.error("❌ Session Manager not available. Please refresh the page.")
+                return
+            
+            # Handle different loading scenarios
+            loading_reason = st.session_state.get('loading_reason', 'unknown')
+            
+            if loading_reason == 'start_guest':
+                # Create guest session
+                session = session_manager.get_session()
+                if session and session.last_activity is None:
+                    session.last_activity = datetime.now()
+                    session_manager.db.save_session(session)
+                st.session_state.page = "chat"
+                if 'loading_reason' in st.session_state:
+                    del st.session_state['loading_reason']
+                
+            elif loading_reason == 'authenticate':
+                # Handle authentication (you'll need to store username/password temporarily)
+                username = st.session_state.get('temp_username', '')
+                password = st.session_state.get('temp_password', '')
+                
+                if username and password:
+                    authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                    if authenticated_session:
+                        st.session_state.current_session_id = authenticated_session.session_id
+                        st.session_state.page = "chat"
+                        # Clear temporary credentials
+                        if 'temp_username' in st.session_state:
+                            del st.session_state['temp_username']
+                        if 'temp_password' in st.session_state:
+                            del st.session_state['temp_password']
+                        if 'loading_reason' in st.session_state:
+                            del st.session_state['loading_reason']
+                        st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
+                        st.balloons()
+                    else:
+                        set_loading_state(False)
+                        # Error message already shown by authenticate_with_wordpress
+                        return
+                else:
+                    set_loading_state(False)
+                    st.error("Authentication failed: Missing username or password.")
+                    return
+            
+            # Clear loading state and rerun to show the actual page
+            set_loading_state(False)
+            st.rerun()
             return
             
-    except Exception as init_error:
-        st.error(f"⚠️ Initialization error: {str(init_error)}")
-        st.info("Please refresh the page to try again.")
-        logger.error(f"Main initialization error: {init_error}", exc_info=True)
-        return
+        except Exception as e:
+            set_loading_state(False)
+            st.error(f"⚠️ Error during loading: {str(e)}")
+            logger.error(f"Loading state error: {e}", exc_info=True)
+            return
 
-    # Handle emergency saves AND fingerprint data first
+    # Normal page rendering (when not in loading state)
     try:
+        # Initialize if needed (without loading overlay since it's already done or not triggered)
+        if not st.session_state.get('initialized', False):
+            # This path handles initial load when no button was pressed, or if initialization failed.
+            with st.spinner("Initializing application..."): # Keep a fallback spinner here for initial page load if loading_state was false but init wasn't complete.
+                 init_success = ensure_initialization_fixed()
+            if not init_success:
+                st.error("⚠️ Application failed to initialize properly.")
+                st.info("Please refresh the page to try again.")
+                return
+
+        # Handle emergency saves and fingerprint data
         handle_emergency_save_requests_from_query()
         handle_fingerprint_requests_from_query()
-    except Exception as e:
-        logger.error(f"Query parameter handling failed: {e}")
 
-    # Get session manager
-    session_manager = st.session_state.get('session_manager')
-    if not session_manager:
-        st.error("❌ Session Manager not available. Please refresh the page.")
-        return
+        session_manager = st.session_state.get('session_manager')
+        if not session_manager:
+            st.error("❌ Session Manager not available. Please refresh the page.")
+            return
 
-    # Determine current page based on session state
-    current_page = st.session_state.get('page')
-
-    # Route to appropriate page based on user intent
-    try:
+        # Route to appropriate page
         if current_page != "chat":
-            # If not on chat page, render welcome page. No session is needed or created yet.
             render_welcome_page(session_manager)
-            # IMPORTANT: NO get_session() call here.
-            # get_session() will ONLY be called *inside* render_welcome_page
-            # if a button is explicitly pressed.
         else:
-            # ONLY if current_page is 'chat', then we proceed to get/create a session
-            session = session_manager.get_session() 
+            # Get existing session (should already exist from loading state or prior direct creation)
+            session = session_manager.get_session()
             
             if session is None or not session.active:
                 logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
@@ -4609,6 +4690,7 @@ def main_fixed():
                 st.rerun()
                 return
                 
+            # Render activity tracker and check for timeout
             activity_data_from_js = None
             if session and session.session_id: 
                 activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
