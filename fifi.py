@@ -1544,7 +1544,7 @@ class ZohoCRMManager:
                     return True
                 else:
                     logger.error("Failed to add note to Zoho contact.")
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries_note - 1:
                         time.sleep(2 ** attempt)
                     else:
                         logger.error("Max retries for note addition reached. Aborting save.")
@@ -1552,7 +1552,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt < max_retries - 1:
+                if attempt < max_retries_note - 1:
                     time.sleep(2 ** attempt)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -1615,7 +1615,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries - 1:
+                if attempt_note < max_retries_note - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -4331,6 +4331,77 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     return disable_chat_input
 
+# NEW FRAGMENT for dynamically enabling chat input
+@st.fragment(run_every=1)
+def render_chat_input_fragment(session_manager: 'SessionManager', session: UserSession, should_disable_chat_input_by_dialog: bool):
+    """
+    This fragment handles the chat input. It runs every second to check if the
+    fingerprinting is complete (`is_chat_ready` == True) and enables the input
+    dynamically without a full page rerun.
+    """
+    is_chat_ready = st.session_state.get('is_chat_ready', False)
+    
+    overall_chat_disabled = (
+        not is_chat_ready or 
+        should_disable_chat_input_by_dialog or 
+        session.ban_status.value != BanStatus.NONE.value
+    )
+    
+    placeholder_text = "Identifying your device, please wait..." if not is_chat_ready else "Ask me about ingredients, suppliers, or market trends..."
+
+    prompt = st.chat_input(
+        placeholder_text, 
+        disabled=overall_chat_disabled,
+        key="chat_prompt_input"
+    )
+
+    if prompt and not overall_chat_disabled:
+        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
+        
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Processing your question..."):
+                try:
+                    response = session_manager.get_ai_response(session, prompt)
+                    
+                    if response.get('requires_email'):
+                        st.error("📧 Please verify your email to continue.")
+                        st.session_state.verification_stage = 'email_entry' 
+                        st.session_state.chat_blocked_by_dialog = True
+                        st.rerun()
+                    elif response.get('banned'):
+                        st.error(response.get("content", 'Access restricted.'))
+                        if response.get('time_remaining'):
+                            time_remaining = response['time_remaining']
+                            hours = int(time_remaining.total_seconds() // 3600)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.rerun()
+                    else:
+                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                        
+                        if response.get("source"):
+                            source_color = {
+                                "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                "Error Handler": "❌"
+                            }.get(response['source'], "🤖")
+                            st.caption(f"{source_color} Source: {response['source']}")
+                        
+                        logger.info(f"✅ Question processed successfully")
+                        
+                        if response.get('tier1_ban_applied_post_response', False):
+                            logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
+                            st.rerun()
+                        
+                except Exception as e:
+                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
+                    st.error("⚠️ I encountered an error. Please try again.")
+        
+        st.rerun()
+
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications."""
     
@@ -4419,66 +4490,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                     st.markdown("---") # Visual separator
 
-    # Chat input
-    # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
-    # And combine with other disabled conditions
-    overall_chat_disabled = (
-        not st.session_state.get('is_chat_ready', False) or 
-        should_disable_chat_input_by_dialog or 
-        session.ban_status.value != BanStatus.NONE.value
-    )
-
-    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=overall_chat_disabled)
-    
-    if prompt:
-        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
-        
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        with st.chat_message("assistant"):
-            with st.spinner("🔍 Processing your question..."):
-                try:
-                    response = session_manager.get_ai_response(session, prompt)
-                    
-                    if response.get('requires_email'):
-                        st.error("📧 Please verify your email to continue.")
-                        # This should be handled by display_email_prompt_if_needed on next rerun
-                        st.session_state.verification_stage = 'email_entry' 
-                        st.session_state.chat_blocked_by_dialog = True # Force block chat
-                        st.rerun()
-                    elif response.get('banned'):
-                        st.error(response.get("content", 'Access restricted.'))
-                        if response.get('time_remaining'):
-                            time_remaining = response['time_remaining']
-                            hours = int(time_remaining.total_seconds() // 3600)
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                            st.error(f"Time remaining: {hours}h {minutes}m")
-                        st.rerun()
-                    else:
-                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
-                        
-                        if response.get("source"):
-                            source_color = {
-                                "FiFi": "🧠", "FiFi Web Search": "🌐",
-                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                                "Error Handler": "❌"
-                            }.get(response['source'], "🤖")
-                            st.caption(f"{source_color} Source: {response['source']}")
-                        
-                        logger.info(f"✅ Question processed successfully")
-                        
-                        # Only re-run if a ban was just applied post-response to update UI (disable input, show message)
-                        if response.get('tier1_ban_applied_post_response', False):
-                            logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
-                            st.rerun()
-                        
-                except Exception as e:
-                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
-                    st.error("⚠️ I encountered an error. Please try again.")
-        
-        st.rerun()
+    # Call the fragment to handle the chat input and its processing.
+    render_chat_input_fragment(session_manager, session, should_disable_chat_input_by_dialog)
 
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
