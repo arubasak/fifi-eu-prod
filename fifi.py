@@ -310,14 +310,6 @@ class UserSession:
     pending_zoho_contact_id: Optional[str] = None
     pending_wp_token: Optional[str] = None
 
-    # NEW: Pending count fields for reverification
-    # Removed these as they were not consistently merged in previous versions and caused issues.
-    # The current daily_question_count is now always inherited directly, and the pending fields
-    # only apply to identity re-verification.
-    # pending_daily_question_count: Optional[int] = None
-    # pending_total_question_count: Optional[int] = None
-    # pending_last_question_time: Optional[datetime] = None
-
     # NEW: Flag to allow guest questions after declining a recognized email
     declined_recognized_email_at: Optional[datetime] = None
 
@@ -4085,9 +4077,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         return True # Disable chat input
 
     # Determine if an email prompt *should* be active
-    # --- FIX APPLIED HERE: Compare .value of the enum ---
     user_is_guest = (session.user_type.value == UserType.GUEST.value)
-    # --- END FIX ---
     guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
     daily_q_value = session.daily_question_count
     daily_q_ge_limit = (daily_q_value >= guest_limit_value)
@@ -4287,15 +4277,15 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             except Exception as e:
                 logger.error(f"Failed to update activity from JavaScript: {e}")
 
-    # Fingerprinting
-    fingerprint_needed = (
+    # Fingerprinting rendering logic
+    fingerprint_needed_or_temp = (
         not session.fingerprint_id or
         session.fingerprint_method == "temporary_fallback_python" or
         session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
     )
     
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-    if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
+    if fingerprint_needed_or_temp and not st.session_state.get(fingerprint_key, False):
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
         st.session_state[fingerprint_key] = True
 
@@ -4309,106 +4299,145 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input = display_email_prompt_if_needed(session_manager, session)
 
-    # Render chat content ONLY if not blocked by a dialog
-    if not st.session_state.get('chat_blocked_by_dialog', False):
-        # ENHANCED: Show tier warnings for registered users
-        # Note: I've also updated the `is_within_limits` calls to use `.get('allowed')` properly
-        # and added `.value` for Enum comparisons for consistency and robustness.
-        limit_check_for_display = session_manager.question_limits.is_within_limits(session)
-        if (session.user_type.value == UserType.REGISTERED_USER.value and 
-            limit_check_for_display.get('allowed') and 
-            limit_check_for_display.get('tier')):
-            
-            tier = limit_check_for_display.get('tier')
-            remaining = limit_check_for_display.get('remaining', 0)
-            
-            if tier == 2 and remaining <= 3:
-                st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until 24-hour reset!")
-            elif tier == 1 and remaining <= 2:
-                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until 1-hour break.")
+    # NEW: Determine if chat should be temporarily disabled due to fingerprinting
+    # This takes precedence over other disablers for a short period
+    disable_for_fingerprint = False
+    if fingerprint_needed_or_temp:
+        if st.session_state.get(fingerprint_key, False): # Component was rendered, now waiting for data
+            # Check if fingerprint data is pending from query params
+            query_params = st.query_params
+            if query_params.get("event") == "fingerprint_complete" and query_params.get("session_id") == session.session_id:
+                # Fingerprint data is in the URL, will be processed on the next rerun.
+                # Keep disabled until after processing.
+                disable_for_fingerprint = True
+                st.info("🔄 Identifying your device... Please wait.")
+                logger.debug(f"Chat input disabled for session {session.session_id[:8]} pending fingerprint processing from query.")
+            else:
+                # Component rendered, but no data yet in query, and it's still a temp fingerprint.
+                # Keep disabled and show a message.
+                disable_for_fingerprint = True
+                st.info("🔄 Identifying your device for secure access and usage tracking...")
+                logger.debug(f"Chat input disabled for session {session.session_id[:8]} awaiting fingerprint data.")
+        else:
+            # Fingerprint component not even rendered yet, but fingerprint is temporary.
+            # This case implies an extremely early load. The component rendering will happen,
+            # and then the previous `if` block will catch it.
+            disable_for_fingerprint = True
+            st.info("🔄 Starting device identification...")
+            logger.debug(f"Chat input disabled for session {session.session_id[:8]} before fingerprint component render.")
 
-        # Display chat messages (respects soft clear offset)
-        visible_messages = session.messages[session.display_message_offset:]
-        for msg in visible_messages:
-            with st.chat_message(msg.get("role", "user")):
-                st.markdown(msg.get("content", ""), unsafe_allow_html=True)
-                
-                if msg.get("source"):
-                    source_color = {
-                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
-                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                        "Error Handler": "❌"
-                    }.get(msg['source'], "🤖")
-                    st.caption(f"{source_color} Source: {msg['source']}")
-                
-                indicators = []
-                if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
-                if msg.get("used_search"): indicators.append("🌐 Web Search")
-                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-                
-                if msg.get("safety_override"):
-                    st.warning("🛡️ Safety Override: Switched to verified sources")
-                
-                if msg.get("has_citations") and msg.get("has_inline_citations"):
-                    st.caption("📚 Response includes verified citations")
-                
-                # Check for post-response Tier 1 ban notification (for Registered Users only)
-                if msg.get('role') == 'assistant' and msg.get('tier1_ban_applied_post_response', False):
-                    st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
-                    st.markdown("---") # Visual separator
 
-        # Chat input
-        prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                                disabled=should_disable_chat_input or session.ban_status.value != BanStatus.NONE.value)
+    # Render chat content
+    # Chat content is displayed even if chat input is disabled, so user can see previous messages
+    # and the identification/dialog messages.
+    # We DO NOT wrap this in `if not st.session_state.get('chat_blocked_by_dialog', False):` anymore
+    # because the fingerprinting message is part of the chat area.
+    # The email prompt itself is a higher-level display.
+
+    # ENHANCED: Show tier warnings for registered users
+    limit_check_for_display = session_manager.question_limits.is_within_limits(session)
+    if (session.user_type.value == UserType.REGISTERED_USER.value and 
+        limit_check_for_display.get('allowed') and 
+        limit_check_for_display.get('tier')):
         
-        if prompt:
-            logger.info(f"🎯 Processing question from {session.session_id[:8]}")
+        tier = limit_check_for_display.get('tier')
+        remaining = limit_check_for_display.get('remaining', 0)
+        
+        if tier == 2 and remaining <= 3:
+            st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until 24-hour reset!")
+        elif tier == 1 and remaining <= 2:
+            st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until 1-hour break.")
+
+    # Display chat messages (respects soft clear offset)
+    visible_messages = session.messages[session.display_message_offset:]
+    for msg in visible_messages:
+        with st.chat_message(msg.get("role", "user")):
+            st.markdown(msg.get("content", ""), unsafe_allow_html=True)
             
-            with st.chat_message("user"):
-                st.markdown(prompt)
+            if msg.get("source"):
+                source_color = {
+                    "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                    "Error Handler": "❌"
+                }.get(msg['source'], "🤖")
+                st.caption(f"{source_color} Source: {msg['source']}")
             
-            with st.chat_message("assistant"):
-                with st.spinner("🔍 Processing your question..."):
-                    try:
-                        response = session_manager.get_ai_response(session, prompt)
+            indicators = []
+            if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
+            if msg.get("used_search"): indicators.append("🌐 Web Search")
+            if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+            
+            if msg.get("safety_override"):
+                st.warning("🛡️ Safety Override: Switched to verified sources")
+            
+            if msg.get("has_citations") and msg.get("has_inline_citations"):
+                st.caption("📚 Response includes verified citations")
+            
+            # Check for post-response Tier 1 ban notification (for Registered Users only)
+            if msg.get('role') == 'assistant' and msg.get('tier1_ban_applied_post_response', False):
+                st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
+                st.markdown("---") # Visual separator
+
+    # --- CHAT INPUT MODIFICATION ---
+    # The chat input is disabled if:
+    # 1. A blocking email/ban dialog is active (`should_disable_chat_input`)
+    # 2. The user has a non-email-related ban (`session.ban_status.value != BanStatus.NONE.value`)
+    # 3. The system is still acquiring the definitive fingerprint (`disable_for_fingerprint`)
+    final_disabled_state = should_disable_chat_input or \
+                           session.ban_status.value != BanStatus.NONE.value or \
+                           disable_for_fingerprint # NEW CONDITION
+
+    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                            disabled=final_disabled_state)
+    
+    if prompt:
+        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
+        
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Processing your question..."):
+                try:
+                    response = session_manager.get_ai_response(session, prompt)
+                    
+                    if response.get('requires_email'):
+                        st.error("📧 Please verify your email to continue.")
+                        # This should be handled by display_email_prompt_if_needed on next rerun
+                        st.session_state.verification_stage = 'email_entry' 
+                        st.session_state.chat_blocked_by_dialog = True # Force block chat
+                        st.rerun()
+                    elif response.get('banned'):
+                        st.error(response.get("content", 'Access restricted.'))
+                        if response.get('time_remaining'):
+                            time_remaining = response['time_remaining']
+                            hours = int(time_remaining.total_seconds() // 3600)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.rerun()
+                    else:
+                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         
-                        if response.get('requires_email'):
-                            st.error("📧 Please verify your email to continue.")
-                            # This should be handled by display_email_prompt_if_needed on next rerun
-                            st.session_state.verification_stage = 'email_entry' 
-                            st.session_state.chat_blocked_by_dialog = True # Force block chat
+                        if response.get("source"):
+                            source_color = {
+                                "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                "Error Handler": "❌"
+                            }.get(response['source'], "🤖")
+                            st.caption(f"{source_color} Source: {response['source']}")
+                        
+                        logger.info(f"✅ Question processed successfully")
+                        
+                        # Only re-run if a ban was just applied post-response to update UI (disable input, show message)
+                        if response.get('tier1_ban_applied_post_response', False):
+                            logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
                             st.rerun()
-                        elif response.get('banned'):
-                            st.error(response.get("content", 'Access restricted.'))
-                            if response.get('time_remaining'):
-                                time_remaining = response['time_remaining']
-                                hours = int(time_remaining.total_seconds() // 3600)
-                                minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                                st.error(f"Time remaining: {hours}h {minutes}m")
-                            st.rerun()
-                        else:
-                            st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
-                            
-                            if response.get("source"):
-                                source_color = {
-                                    "FiFi": "🧠", "FiFi Web Search": "🌐",
-                                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                                    "Error Handler": "❌"
-                                }.get(response['source'], "🤖")
-                                st.caption(f"{source_color} Source: {response['source']}")
-                            
-                            logger.info(f"✅ Question processed successfully")
-                            
-                            # Only re-run if a ban was just applied post-response to update UI (disable input, show message)
-                            if response.get('tier1_ban_applied_post_response', False):
-                                logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
-                                st.rerun()
-                            
-                    except Exception as e:
-                        logger.error(f"❌ AI response failed: {e}", exc_info=True)
-                        st.error("⚠️ I encountered an error. Please try again.")
-            
-            st.rerun()
+                        
+                except Exception as e:
+                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
+                    st.error("⚠️ I encountered an error. Please try again.")
+        
+        st.rerun()
 
 # =============================================================================
 # INITIALIZATION & MAIN FUNCTIONS
