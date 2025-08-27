@@ -4455,10 +4455,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # NEW: Display a message to the user explaining why the chat is disabled
     if not st.session_state.get('is_chat_ready', False) and not should_disable_chat_input_by_dialog:
         st.info("🔄 Initializing secure connection, please wait...", icon="🔒")
-
+        st.empty()
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
-    st.rerun()
+    
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
