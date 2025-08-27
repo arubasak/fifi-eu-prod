@@ -4458,7 +4458,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
 
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
-    
+    st.rerun()
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
