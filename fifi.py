@@ -4426,16 +4426,18 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     )
     
     # <<< START OF AMENDED CODE >>>
-    # Create a placeholder for the "Initializing" message
-    initializing_placeholder = st.empty()
-
-    # Display the message in the placeholder if the chat is not ready
-    if not overall_chat_disabled:
+    # Create a placeholder for the "Initializing" message, only shown once per session.
+    if not st.session_state.get('initial_decoy_shown', False):
+        initializing_placeholder = st.empty()
+        
+        # Display the message in the placeholder.
         initializing_placeholder.info("🔄 Initializing secure connection, please wait...")
-        # Wait for 5 seconds
+        # Wait for 5 seconds to allow JS fingerprinting to complete.
         time.sleep(5)
-        # Clear the placeholder
+        # Clear the placeholder.
         initializing_placeholder.empty()
+        # Set the flag to True so this block doesn't run again for this session.
+        st.session_state.initial_decoy_shown = True
     # <<< END OF AMENDED CODE >>>
 
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
@@ -4571,6 +4573,7 @@ def ensure_initialization_fixed():
             st.session_state.guest_continue_active = False
             # NEW: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
+            st.session_state.initial_decoy_shown = False # <<< AMENDED CODE
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
