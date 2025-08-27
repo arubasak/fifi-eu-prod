@@ -3361,7 +3361,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         # Also update re-verification flags
         session.reverification_pending = fresh_session_from_db.reverification_pending
         session.pending_user_type = fresh_session_from_db.pending_user_type
-        session.pending_email = fresh_session_from_rb.pending_email # Corrected variable name from fresh_session_from_rb
+        session.pending_email = fresh_session_from_db.pending_email # Corrected variable name from fresh_session_from_rb
         session.pending_full_name = fresh_session_from_db.pending_full_name
         session.pending_zoho_contact_id = fresh_session_from_db.pending_zoho_contact_id
         session.pending_wp_token = fresh_session_from_db.pending_wp_token
