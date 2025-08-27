@@ -3361,7 +3361,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         # Also update re-verification flags
         session.reverification_pending = fresh_session_from_db.reverification_pending
         session.pending_user_type = fresh_session_from_db.pending_user_type
-        session.pending_email = fresh_session_from_db.pending_email # Corrected variable name from fresh_session_from_rb
+        session.pending_email = fresh_session_from_db.pending_email 
         session.pending_full_name = fresh_session_from_db.pending_full_name
         session.pending_zoho_contact_id = fresh_session_from_db.pending_zoho_contact_id
         session.pending_wp_token = fresh_session_from_db.pending_wp_token
@@ -3678,8 +3678,10 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
-            st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
+            st.session_state.is_chat_ready = True # Explicitly unlock chat input here
+            st.session_state.fingerprint_id_extracted = True # <<< AMENDED CODE: Set this flag
             logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
+            st.rerun() # <<< AMENDED CODE: Force a rerun to update UI state immediately
             return True
         else:
             logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
@@ -3751,7 +3753,7 @@ def handle_emergency_save_requests_from_query():
         
         # Clear query parameters to prevent re-triggering on rerun
         params_to_clear = ["event", "session_id", "reason", "fallback"]
-        for param in params_to_clear: # Fixed: changed to params_to_clear from params_query_params
+        for param in params_to_clear: 
             if param in st.query_params:
                 del st.query_params[param]
         
@@ -3772,7 +3774,6 @@ def handle_emergency_save_requests_from_query():
             st.error(f"❌ An unexpected error occurred during emergency save: {str(e)}")
             logger.critical(f"Emergency save processing crashed from query parameter: {e}", exc_info=True)
         
-        # Removed time.sleep(2)
         st.stop()
     else:
         logger.debug("ℹ️ No emergency save requests found in current URL query parameters.")
@@ -3808,17 +3809,17 @@ def handle_fingerprint_requests_from_query():
         if not fingerprint_id or not method:
             st.error("❌ **Fingerprint Error** - Missing required data in redirect")
             logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
-            # Removed time.sleep(2)
             st.rerun()
             return
         
         try:
+            # This call now also sets st.session_state.fingerprint_id_extracted = True and calls st.rerun()
             success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
             if success:
-                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
-                st.stop()
+                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state. Rerunning to update UI.")
+                st.stop() # This rerun is already handled by process_fingerprint_from_query
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
         
@@ -4349,15 +4350,17 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Fingerprinting
     fingerprint_needed = (
         not session.fingerprint_id or
-        session.fingerprint_method == "temporary_fallback_python" or
         session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
     )
     
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-    if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
+    if fingerprint_needed:
+        # Always render the fingerprint component to ensure the JS runs and eventually reports back
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-        st.session_state[fingerprint_key] = True
-
+        # We don't set a state flag here for "rendered" because it needs to be constantly rendered
+        # until the JS redirect happens. The `initial_decoy_shown` and `fingerprint_id_extracted`
+        # flags will manage the UI state.
+        
     # Browser close detection for emergency saves
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
@@ -4371,8 +4374,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Render chat content ONLY if not blocked by a dialog
     if not st.session_state.get('chat_blocked_by_dialog', False):
         # ENHANCED: Show tier warnings for registered users
-        # Note: I've also updated the `is_within_limits` calls to use `.get('allowed')` properly
-        # and added `.value` for Enum comparisons for consistency and robustness.
         limit_check_for_display = session_manager.question_limits.is_within_limits(session)
         if (session.user_type.value == UserType.REGISTERED_USER.value and 
             limit_check_for_display.get('allowed') and 
@@ -4417,41 +4418,29 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.markdown("---") # Visual separator
 
     # Chat input
+    # Chat input is disabled if:
+    # 1. Fingerprint ID hasn't been extracted yet.
+    # 2. A dialog is blocking the chat (e.g., email verification).
+    # 3. The user is currently banned.
     overall_chat_disabled = (
-        not st.session_state.get('is_chat_ready', False) or 
+        not st.session_state.get('fingerprint_id_extracted', False) or # <<< AMENDED CODE: NEW Condition
         should_disable_chat_input_by_dialog or 
         session.ban_status.value != BanStatus.NONE.value
     )
     
-    # <<< START OF AMENDED CODE >>>
-    # Only show the initial decoy message if it hasn't been shown yet AND the chat is not already disabled by other factors.
-    # The 'initial_decoy_shown' ensures it's truly once per session.
-    # The 'not overall_chat_disabled' ensures we only show it if the chat is *about* to become active,
-    # effectively acting as the first gate.
-    if not st.session_state.get('initial_decoy_shown', False) and not overall_chat_disabled:
+    # Decoy message logic
+    if not st.session_state.get('initial_decoy_shown', False) and not st.session_state.get('fingerprint_id_extracted', False):
         decoy_placeholder = st.empty()
         decoy_placeholder.info("🔄 Initializing secure connection, please wait...")
+        # We don't sleep here; the rerun will happen when fingerprint is extracted,
+        # and this message will remain until then.
+        st.session_state.initial_decoy_shown = True # Mark shown to avoid re-rendering multiple times, but it will stay there
         
-        # Introduce the delay (decoy time)
-        time.sleep(5) 
+        # This initial display of the placeholder will automatically disable the chat input
+        # due to `overall_chat_disabled` being True.
+        # No explicit `st.rerun()` needed *here* because `st.chat_input` itself will cause reruns
+        # and the `process_fingerprint_from_query` will call `st.rerun()` when ready.
         
-        # Clear the message from the placeholder
-        decoy_placeholder.empty()
-        
-        # Mark that the initial decoy has been shown for this session
-        st.session_state.initial_decoy_shown = True
-        
-        # Trigger a rerun. This is crucial:
-        # 1. It forces Streamlit to re-evaluate the state *after* the sleep.
-        # 2. `is_chat_ready` (which is influenced by JS fingerprinting) will be re-checked.
-        # 3. The `st.chat_input` will then render with its correct `disabled` state.
-        st.rerun() 
-        # The `st.rerun()` stops the current script execution here. 
-        # The function will be called again from the top on the next run, 
-        # but `initial_decoy_shown` will be True, so this block will be skipped.
-        return 
-    # <<< END OF AMENDED CODE >>>
-
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
     
@@ -4585,7 +4574,8 @@ def ensure_initialization_fixed():
             st.session_state.guest_continue_active = False
             # NEW: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
-            st.session_state.initial_decoy_shown = False # <<< AMENDED CODE: Initialized to False for new session
+            st.session_state.initial_decoy_shown = False # Initialized to False for new session
+            st.session_state.fingerprint_id_extracted = False # <<< AMENDED CODE: NEW flag
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
@@ -4695,19 +4685,22 @@ def main_fixed():
                 # that's still waiting for the JS component to return its data).
                 # The `fingerprint_checked_for_inheritance_{session.session_id}` flag, set by get_session(),
                 # indicates that the initial inheritance/fingerprint check has occurred.
-                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                fingerprint_is_stable = not (session.fingerprint_id and session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))) # Corrected logic
                 inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
 
                 if fingerprint_is_stable or inheritance_checked:
                     st.session_state.is_chat_ready = True
+                    st.session_state.fingerprint_id_extracted = True # <<< AMENDED CODE: Set true here too if already stable
                     logger.info(f"Chat input unlocked for session {session.session_id[:8]} after initial session/fingerprint setup.")
                 else:
                     # If it's still a temporary fingerprint and inheritance check hasn't happened yet, 
                     # keep chat locked. This state implies the JS fingerprint component is expected to run.
                     st.session_state.is_chat_ready = False
+                    st.session_state.fingerprint_id_extracted = False # <<< AMENDED CODE: Ensure false if not stable
                     logger.info(f"Chat input remains locked for session {session.session_id[:8]} pending JS fingerprinting.")
             else:
                 st.session_state.is_chat_ready = False # Ensure locked if no session obtained
+                st.session_state.fingerprint_id_extracted = False # <<< AMENDED CODE: Ensure false if no session
 
 
             # Clear loading state and rerun to show the actual page
