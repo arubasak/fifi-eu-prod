@@ -140,6 +140,7 @@ def show_loading_overlay():
     if is_loading():
         loading_message = st.session_state.get('loading_message', 'Loading...')
         
+        # Create a full-screen overlay using HTML/CSS
         overlay_html = f"""
         <div style="
             position: fixed;
@@ -1615,7 +1616,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries - 1:
+                if attempt_note < max_retries_note - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -2481,7 +2482,7 @@ class SessionManager:
             merged_user_type = session.user_type 
             merged_daily_question_count = session.daily_question_count
             merged_total_question_count = session.total_question_count
-            merged_last_question_time = session.last_activity # Use current session's LQT as baseline
+            merged_last_question_time = session.last_question_time # Use current session's LQT as baseline
             merged_question_limit_reached = session.question_limit_reached
             merged_ban_status = session.ban_status
             merged_ban_start_time = session.ban_start_time
@@ -3682,8 +3683,6 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
             return True
         else:
             logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
-            # If fingerprint application fails, the chat input will remain locked
-            # as is_chat_ready will not be set to True here.
             return False
         
     except Exception as e:
@@ -3752,7 +3751,7 @@ def handle_emergency_save_requests_from_query():
         
         # Clear query parameters to prevent re-triggering on rerun
         params_to_clear = ["event", "session_id", "reason", "fallback"]
-        for param in params_to_clear:
+        for param in params_to_clear: # Fixed: changed to params_to_clear from params_query_params
             if param in st.query_params:
                 del st.query_params[param]
         
@@ -4557,7 +4556,7 @@ def ensure_initialization_fixed():
             st.session_state.chat_blocked_by_dialog = False
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
-            # NEW: Initialize chat readiness flag to False, to be explicitly set to True later
+            # NEW: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
             
             st.session_state.initialized = True
@@ -4587,7 +4586,7 @@ def main_fixed():
     if 'is_loading' not in st.session_state:
         st.session_state.is_loading = False
         st.session_state.loading_message = ""
-    # NEW: Ensure is_chat_ready is always present and initially False by default
+    # NEW: Ensure is_chat_ready is always present and initially False
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
 
@@ -4596,17 +4595,17 @@ def main_fixed():
     loading_state = st.session_state.get('is_loading', False)
     current_page = st.session_state.get('page')
     
-    # If we're in loading state, handle the actual operations
+    # If we're in loading state, handle the actual initialization
     if loading_state:
         # Show the loading overlay
         if show_loading_overlay():
-            return # Keep showing overlay
+            pass  # Overlay is shown
         
         # Perform the actual operations based on what triggered the loading
         try:
             # Initialize if not already done
             if not st.session_state.get('initialized', False):
-                init_success = ensure_initialization_fixed()
+                init_success = ensure_initialization_fixed()  # Remove the spinner wrapper since we have overlay
                 if not init_success:
                     set_loading_state(False)
                     st.error("⚠️ Application failed to initialize properly.")
@@ -4619,9 +4618,10 @@ def main_fixed():
                 st.error("❌ Session Manager not available. Please refresh the page.")
                 return
             
-            session = None # Initialize session to None for scope
+            # Handle different loading scenarios
             loading_reason = st.session_state.get('loading_reason', 'unknown')
             
+            session = None # Initialize session to None for scope
             if loading_reason == 'start_guest':
                 # Create guest session
                 session = session_manager.get_session()
@@ -4661,13 +4661,28 @@ def main_fixed():
                     st.error("Authentication failed: Missing username or password.")
                     return
 
-            # NEW: After session is established, but before rendering chat, explicitly set chat to not ready.
-            # It will be unlocked by process_fingerprint_from_query once a stable FP is acquired.
-            st.session_state.is_chat_ready = False 
-            logger.info(f"Chat input initially locked (is_chat_ready=False) after {loading_reason} for session {session.session_id[:8] if session else 'None'}.")
+            # NEW: Logic to unlock chat input after session is created/authenticated and initial fingerprint check
+            if session:
+                # Check if the session has a *stable* fingerprint (not a temporary Python fallback 
+                # that's still waiting for the JS component to return its data).
+                # The `fingerprint_checked_for_inheritance_{session.session_id}` flag, set by get_session(),
+                # indicates that the initial inheritance/fingerprint check has occurred.
+                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
+
+                if fingerprint_is_stable or inheritance_checked:
+                    st.session_state.is_chat_ready = True
+                    logger.info(f"Chat input unlocked for session {session.session_id[:8]} after initial session/fingerprint setup.")
+                else:
+                    # If it's still a temporary fingerprint and inheritance check hasn't happened yet, 
+                    # keep chat locked. This state implies the JS fingerprint component is expected to run.
+                    st.session_state.is_chat_ready = False
+                    logger.info(f"Chat input remains locked for session {session.session_id[:8]} pending JS fingerprinting.")
+            else:
+                st.session_state.is_chat_ready = False # Ensure locked if no session obtained
 
 
-            # Clear loading state and rerun to show the actual page (with chat input locked)
+            # Clear loading state and rerun to show the actual page
             set_loading_state(False)
             st.rerun()
             return
