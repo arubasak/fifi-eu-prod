@@ -184,8 +184,8 @@ def show_loading_overlay():
         </style>
         """
         st.components.v1.html(overlay_html, height=0)
-        return True # Indicate that the overlay is active
-    return False # Indicate that the overlay is not active
+        return True
+    return False
 
 # =============================================================================
 # CONFIGURATION
@@ -1615,7 +1615,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
+                if attempt_note < max_retries - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -3837,9 +3837,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
     
     # Show loading overlay if in loading state
     if show_loading_overlay():
-        # Even if overlay is shown, we need to allow the main_fixed to continue its logic
-        # to eventually set is_loading to False and rerun.
-        pass 
+        return
     
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
@@ -4137,7 +4135,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     # Initialize relevant session states if not present
     if 'verification_stage' not in st.session_state:
         st.session_state.verification_stage = None
-    if 'guest_continue_active' not in st.session_state: 
+    if 'guest_continue_active' not in st.session_state:
         st.session_state.guest_continue_active = False
 
     # Check if a hard block is in place first (non-email-verification related bans)
@@ -4147,7 +4145,9 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         return True # Disable chat input
 
     # Determine if an email prompt *should* be active
+    # --- FIX APPLIED HERE: Compare .value of the enum ---
     user_is_guest = (session.user_type.value == UserType.GUEST.value)
+    # --- END FIX ---
     guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
     daily_q_value = session.daily_question_count
     daily_q_ge_limit = (daily_q_value >= guest_limit_value)
@@ -4329,44 +4329,12 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     return disable_chat_input
 
-# ====== RECTIFIED FRAGMENT & INTERFACE ======
-
-@st.fragment(run_every=1)
-def render_chat_input_fragment(session: UserSession, should_disable_chat_input_by_dialog: bool):
-    """
-    This fragment's ONLY job is to render the st.chat_input widget.
-    It runs every second to poll the `is_chat_ready` state and will
-    dynamically enable the input without a full page rerun.
-    It does NOT handle prompt processing logic.
-    """
-    is_chat_ready = st.session_state.get('is_chat_ready', False)
-    
-    overall_chat_disabled = (
-        not is_chat_ready or 
-        should_disable_chat_input_by_dialog or 
-        session.ban_status.value != BanStatus.NONE.value
-    )
-    
-    placeholder_text = "Identifying your device, please wait..." if not is_chat_ready else "Ask me about ingredients, suppliers, or market trends..."
-
-    # This just renders the widget. When the user submits, Streamlit automatically
-    # puts the value in `st.session_state.chat_prompt_input` and triggers a single rerun.
-    st.chat_input(
-        placeholder_text, 
-        disabled=overall_chat_disabled,
-        key="chat_prompt_input"  # The key is essential for the main script to get the value
-    )
-
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
-    """
-    Renders the main chat UI, calling the fragment for the input box and
-    handling the prompt processing logic in the main script body.
-    """
+    """Chat interface with enhanced tier system notifications."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # ... (all the existing setup logic remains the same) ...
     # Simple activity tracking
     if activity_result:
         js_last_activity_timestamp = activity_result.get('last_activity')
@@ -4403,7 +4371,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
 
     # Render chat content ONLY if not blocked by a dialog
     if not st.session_state.get('chat_blocked_by_dialog', False):
-        # ... (existing message display and tier warning logic) ...
+        # ENHANCED: Show tier warnings for registered users
+        # Note: I've also updated the `is_within_limits` calls to use `.get('allowed')` properly
+        # and added `.value` for Enum comparisons for consistency and robustness.
         limit_check_for_display = session_manager.question_limits.is_within_limits(session)
         if (session.user_type.value == UserType.REGISTERED_USER.value and 
             limit_check_for_display.get('allowed') and 
@@ -4417,6 +4387,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             elif tier == 1 and remaining <= 2:
                 st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until 1-hour break.")
 
+        # Display chat messages (respects soft clear offset)
         visible_messages = session.messages[session.display_message_offset:]
         for msg in visible_messages:
             with st.chat_message(msg.get("role", "user")):
@@ -4441,39 +4412,40 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 if msg.get("has_citations") and msg.get("has_inline_citations"):
                     st.caption("📚 Response includes verified citations")
                 
+                # Check for post-response Tier 1 ban notification (for Registered Users only)
                 if msg.get('role') == 'assistant' and msg.get('tier1_ban_applied_post_response', False):
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
-                    st.markdown("---")
+                    st.markdown("---") # Visual separator
 
-    # Call the fragment to just RENDER the input box.
-    # The fragment is now truly "display-only" and won't trigger reruns for prompt processing.
-    render_chat_input_fragment(session, should_disable_chat_input_by_dialog)
+    # Chat input
+    # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
+    # And combine with other disabled conditions
+    overall_chat_disabled = (
+        not st.session_state.get('is_chat_ready', False) or 
+        should_disable_chat_input_by_dialog or 
+        session.ban_status.value != BanStatus.NONE.value
+    )
 
-    # --- NEW PROCESSING LOGIC ---
-    # This block now lives in the main script, *outside* the fragment.
-    # It checks session_state for the prompt submitted by the chat_input widget.
-    if prompt := st.session_state.get("chat_prompt_input"):
-        logger.info(f"🎯 Processing question from {session.session_id[:8]} (retrieved from session_state)")
+    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                            disabled=overall_chat_disabled)
+    
+    if prompt:
+        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
-        # Immediately display the user's message (this will append to the chat history)
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Process the prompt and display the assistant's response
         with st.chat_message("assistant"):
             with st.spinner("🔍 Processing your question..."):
                 try:
                     response = session_manager.get_ai_response(session, prompt)
                     
-                    # Clear the input from session state *after* processing to prevent
-                    # re-processing the same input on subsequent reruns.
-                    del st.session_state.chat_prompt_input
-
                     if response.get('requires_email'):
                         st.error("📧 Please verify your email to continue.")
-                        st.session_state.verification_stage = 'email_entry'
-                        st.session_state.chat_blocked_by_dialog = True
-                        st.rerun() # Rerun to display the email prompt immediately
+                        # This should be handled by display_email_prompt_if_needed on next rerun
+                        st.session_state.verification_stage = 'email_entry' 
+                        st.session_state.chat_blocked_by_dialog = True # Force block chat
+                        st.rerun()
                     elif response.get('banned'):
                         st.error(response.get("content", 'Access restricted.'))
                         if response.get('time_remaining'):
@@ -4481,9 +4453,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             hours = int(time_remaining.total_seconds() // 3600)
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
-                        st.rerun() # Rerun to update disabled state/messages
+                        st.rerun()
                     else:
-                        # Display AI response
                         st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         
                         if response.get("source"):
@@ -4496,18 +4467,16 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         
                         logger.info(f"✅ Question processed successfully")
                         
-                        # Only rerun if a ban was just applied post-response to update UI (disable input, show message)
+                        # Only re-run if a ban was just applied post-response to update UI (disable input, show message)
                         if response.get('tier1_ban_applied_post_response', False):
                             logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
                             st.rerun()
-                        # IMPORTANT: NO `st.rerun()` HERE FOR NORMAL SUCCESSFUL RESPONSES
-                        # The app should now become idle and wait for the *next* user input.
                         
                 except Exception as e:
-                    del st.session_state.chat_prompt_input # Also clear on error
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
-                    st.rerun() # Rerun to clear the error message if needed, or update state.
+        
+        st.rerun()
 
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
@@ -4629,27 +4598,26 @@ def main_fixed():
     
     # If we're in loading state, handle the actual operations
     if loading_state:
-        # NEW: Display the overlay if loading, but do not exit the function immediately.
-        # This allows the initialization logic below to run in the same rerun.
-        show_loading_overlay() 
-
+        # Show the loading overlay
+        if show_loading_overlay():
+            return # Keep showing overlay
+        
         # Perform the actual operations based on what triggered the loading
         try:
             # Initialize if not already done
             if not st.session_state.get('initialized', False):
-                logger.info("Main fixed: Application not initialized, calling ensure_initialization_fixed.")
                 init_success = ensure_initialization_fixed()
                 if not init_success:
-                    set_loading_state(False, "Initialization failed. Please refresh.")
+                    set_loading_state(False)
                     st.error("⚠️ Application failed to initialize properly.")
                     st.info("Please refresh the page to try again.")
-                    return # Exit if critical init failed
+                    return
             
             session_manager = st.session_state.get('session_manager')
             if not session_manager:
-                set_loading_state(False, "Session manager not found. Please refresh.")
+                set_loading_state(False)
                 st.error("❌ Session Manager not available. Please refresh the page.")
-                return # Exit if session manager is missing
+                return
             
             session = None # Initialize session to None for scope
             loading_reason = st.session_state.get('loading_reason', 'unknown')
@@ -4693,19 +4661,19 @@ def main_fixed():
                     st.error("Authentication failed: Missing username or password.")
                     return
 
-            # FIX: Removed the line below that was resetting is_chat_ready to False
-            # after a session was established, potentially interfering with fingerprinting unlock.
-            # st.session_state.is_chat_ready = False 
-            # logger.info(f"Chat input initially locked (is_chat_ready=False) after {loading_reason} for session {session.session_id[:8] if session else 'None'}.")
+            # NEW: After session is established, but before rendering chat, explicitly set chat to not ready.
+            # It will be unlocked by process_fingerprint_from_query once a stable FP is acquired.
+            st.session_state.is_chat_ready = False 
+            logger.info(f"Chat input initially locked (is_chat_ready=False) after {loading_reason} for session {session.session_id[:8] if session else 'None'}.")
 
 
             # Clear loading state and rerun to show the actual page (with chat input locked)
             set_loading_state(False)
-            st.rerun() # Rerun to display the actual page content (with chat input disabled initially)
-            return # Exit after triggering rerun to avoid rendering transient state
+            st.rerun()
+            return
             
         except Exception as e:
-            set_loading_state(False, f"Error during loading: {str(e)}")
+            set_loading_state(False)
             st.error(f"⚠️ Error during loading: {str(e)}")
             logger.error(f"Loading state error: {e}", exc_info=True)
             return
