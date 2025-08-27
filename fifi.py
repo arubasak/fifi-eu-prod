@@ -1616,8 +1616,8 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
-                    time.sleep(2 ** attempt_note)
+                if attempt_note < max_retries - 1:
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
                     return False
@@ -3361,7 +3361,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         # Also update re-verification flags
         session.reverification_pending = fresh_session_from_db.reverification_pending
         session.pending_user_type = fresh_session_from_db.pending_user_type
-        session.pending_email = fresh_session_from_db.pending_email # Corrected variable name from fresh_session_from_rb
+        session.pending_email = fresh_session_from_rb.pending_email # Corrected variable name from fresh_session_from_rb
         session.pending_full_name = fresh_session_from_db.pending_full_name
         session.pending_zoho_contact_id = fresh_session_from_db.pending_zoho_contact_id
         session.pending_wp_token = fresh_session_from_db.pending_wp_token
@@ -4417,8 +4417,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.markdown("---") # Visual separator
 
     # Chat input
-    # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
-    # And combine with other disabled conditions
     overall_chat_disabled = (
         not st.session_state.get('is_chat_ready', False) or 
         should_disable_chat_input_by_dialog or 
@@ -4426,18 +4424,32 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     )
     
     # <<< START OF AMENDED CODE >>>
-    # Create a placeholder for the "Initializing" message, only shown once per session.
-    if not st.session_state.get('initial_decoy_shown', False):
-        initializing_placeholder = st.empty()
+    # Only show the initial decoy message if it hasn't been shown yet AND the chat is not already disabled by other factors.
+    # The 'initial_decoy_shown' ensures it's truly once per session.
+    # The 'not overall_chat_disabled' ensures we only show it if the chat is *about* to become active,
+    # effectively acting as the first gate.
+    if not st.session_state.get('initial_decoy_shown', False) and not overall_chat_disabled:
+        decoy_placeholder = st.empty()
+        decoy_placeholder.info("🔄 Initializing secure connection, please wait...")
         
-        # Display the message in the placeholder.
-        initializing_placeholder.info("🔄 Initializing secure connection, please wait...")
-        # Wait for 5 seconds to allow JS fingerprinting to complete.
-        time.sleep(5)
-        # Clear the placeholder.
-        initializing_placeholder.empty()
-        # Set the flag to True so this block doesn't run again for this session.
+        # Introduce the delay (decoy time)
+        time.sleep(5) 
+        
+        # Clear the message from the placeholder
+        decoy_placeholder.empty()
+        
+        # Mark that the initial decoy has been shown for this session
         st.session_state.initial_decoy_shown = True
+        
+        # Trigger a rerun. This is crucial:
+        # 1. It forces Streamlit to re-evaluate the state *after* the sleep.
+        # 2. `is_chat_ready` (which is influenced by JS fingerprinting) will be re-checked.
+        # 3. The `st.chat_input` will then render with its correct `disabled` state.
+        st.rerun() 
+        # The `st.rerun()` stops the current script execution here. 
+        # The function will be called again from the top on the next run, 
+        # but `initial_decoy_shown` will be True, so this block will be skipped.
+        return 
     # <<< END OF AMENDED CODE >>>
 
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
@@ -4573,7 +4585,7 @@ def ensure_initialization_fixed():
             st.session_state.guest_continue_active = False
             # NEW: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
-            st.session_state.initial_decoy_shown = False # <<< AMENDED CODE
+            st.session_state.initial_decoy_shown = False # <<< AMENDED CODE: Initialized to False for new session
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
