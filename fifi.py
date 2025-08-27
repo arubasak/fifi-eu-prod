@@ -2249,169 +2249,6 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     return {"flagged": False}
 
 # =============================================================================
-# QUESTION QUEUING SYSTEM FOR FINGERPRINT READINESS
-# =============================================================================
-
-class QuestionQueue:
-    """Manages queued questions when system isn't ready for processing"""
-    
-    def __init__(self):
-        self.queue = []
-        self.processing = False
-        self.last_check = None
-    
-    def add_question(self, question: str, session_id: str) -> bool:
-        """Add a question to the queue. Returns True if added successfully."""
-        if not question or not session_id:
-            return False
-        
-        # Prevent duplicate questions in queue
-        for queued_item in self.queue:
-            if queued_item['question'] == question and queued_item['session_id'] == session_id:
-                logger.debug(f"Duplicate question detected, not adding to queue: {question[:50]}...")
-                return False
-        
-        queue_item = {
-            'question': question,
-            'session_id': session_id,
-            'timestamp': datetime.now(),
-            'attempts': 0
-        }
-        self.queue.append(queue_item)
-        logger.info(f"📥 Question queued for session {session_id[:8]}: '{question[:50]}...' (Queue size: {len(self.queue)})")
-        return True
-    
-    def has_pending_questions(self, session_id: str = None) -> bool:
-        """Check if there are pending questions (optionally for specific session)"""
-        if session_id:
-            return any(item['session_id'] == session_id for item in self.queue)
-        return len(self.queue) > 0
-    
-    def get_next_question(self, session_id: str = None) -> Optional[Dict[str, Any]]:
-        """Get the next question to process (optionally for specific session)"""
-        if not self.queue:
-            return None
-        
-        if session_id:
-            for i, item in enumerate(self.queue):
-                if item['session_id'] == session_id:
-                    return self.queue.pop(i)
-        else:
-            return self.queue.pop(0)
-        
-        return None
-    
-    def clear_expired_questions(self, max_age_minutes: int = 5):
-        """Remove questions older than specified age"""
-        cutoff_time = datetime.now() - timedelta(minutes=max_age_minutes)
-        original_count = len(self.queue)
-        self.queue = [item for item in self.queue if item['timestamp'] > cutoff_time]
-        removed_count = original_count - len(self.queue)
-        if removed_count > 0:
-            logger.info(f"🧹 Removed {removed_count} expired questions from queue")
-
-def initialize_question_queue():
-    """Initialize the question queue in session state"""
-    if 'question_queue' not in st.session_state:
-        st.session_state.question_queue = QuestionQueue()
-        logger.debug("📋 Question queue initialized")
-
-def process_queued_questions(session_manager: 'SessionManager', session: UserSession) -> bool:
-    """Process any queued questions for the current session. Returns True if questions were processed."""
-    if not st.session_state.get('is_chat_ready', False):
-        return False
-    
-    queue = st.session_state.get('question_queue')
-    if not queue or not queue.has_pending_questions(session.session_id):
-        return False
-    
-    if queue.processing:  # Prevent recursive processing
-        return False
-    
-    queue.processing = True
-    questions_processed = 0
-    
-    try:
-        # Clean up expired questions first
-        queue.clear_expired_questions()
-        
-        # Process up to 3 queued questions to prevent overwhelming
-        max_process = 3
-        while questions_processed < max_process:
-            queued_item = queue.get_next_question(session.session_id)
-            if not queued_item:
-                break
-            
-            question = queued_item['question']
-            attempts = queued_item.get('attempts', 0)
-            
-            logger.info(f"🔄 Processing queued question for session {session.session_id[:8]}: '{question[:50]}...'")
-            
-            try:
-                # Show user feedback about processing queued question
-                with st.chat_message("user"):
-                    st.markdown(question)
-                    st.caption("💭 *Question was queued while system was initializing*")
-                
-                with st.chat_message("assistant"):
-                    with st.spinner("🔍 Processing your queued question..."):
-                        response = session_manager.get_ai_response(session, question)
-                        
-                        if response.get('requires_email'):
-                            st.error("📧 Please verify your email to continue.")
-                            st.session_state.verification_stage = 'email_entry' 
-                            st.session_state.chat_blocked_by_dialog = True
-                        elif response.get('banned'):
-                            st.error(response.get("content", 'Access restricted.'))
-                            if response.get('time_remaining'):
-                                time_remaining = response['time_remaining']
-                                hours = int(time_remaining.total_seconds() // 3600)
-                                minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                                st.error(f"Time remaining: {hours}h {minutes}m")
-                        else:
-                            st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
-                            
-                            if response.get("source"):
-                                source_color = {
-                                    "FiFi": "🧠", "FiFi Web Search": "🌐",
-                                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                                    "Error Handler": "❌"
-                                }.get(response['source'], "🤖")
-                                st.caption(f"{source_color} Source: {response['source']}")
-                        
-                        questions_processed += 1
-                        logger.info(f"✅ Queued question processed successfully ({questions_processed})")
-                        
-            except Exception as e:
-                logger.error(f"❌ Failed to process queued question: {e}")
-                
-                # Re-queue if attempts < 3
-                if attempts < 3:
-                    queued_item['attempts'] = attempts + 1
-                    queue.queue.append(queued_item)
-                    logger.warning(f"🔄 Re-queuing failed question (attempt {attempts + 1}/3)")
-                else:
-                    logger.error(f"❌ Dropping question after 3 failed attempts: {question[:50]}...")
-        
-        if questions_processed > 0:
-            logger.info(f"✅ Processed {questions_processed} queued questions for session {session.session_id[:8]}")
-            return True
-            
-    finally:
-        queue.processing = False
-    
-    return False
-
-def show_queued_questions_indicator(session_id: str):
-    """Show indicator when questions are queued"""
-    queue = st.session_state.get('question_queue')
-    if queue and queue.has_pending_questions(session_id):
-        pending_count = sum(1 for item in queue.queue if item['session_id'] == session_id)
-        if pending_count > 0:
-            st.info(f"💭 {pending_count} question{'s' if pending_count > 1 else ''} queued while system initializes...")
-
-
-# =============================================================================
 # SESSION MANAGER - MAIN ORCHESTRATOR CLASS
 # =============================================================================
 
@@ -3841,7 +3678,7 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
-            st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
+            st.session_state.is_chat_ready = True # MODIFIED: Explicitly unlock chat input here
             logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
@@ -4491,15 +4328,11 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     return disable_chat_input
 
-# MODIFIED: Renamed to clearly indicate it's the version with the queue
-def render_chat_interface_simplified_with_queue(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
-    """Chat interface with question queuing system for fingerprint readiness."""
+def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
+    """Chat interface with enhanced tier system notifications."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
-    
-    # Initialize question queue (if not already)
-    initialize_question_queue()
 
     # Simple activity tracking
     if activity_result:
@@ -4532,22 +4365,14 @@ def render_chat_interface_simplified_with_queue(session_manager: 'SessionManager
         except Exception as e:
             logger.error(f"Browser close detection failed: {e}")
 
-    # Show queued questions indicator
-    show_queued_questions_indicator(session.session_id)
-
-    # Process any queued questions if system is ready
-    system_ready = st.session_state.get('is_chat_ready', False)
-    if system_ready:
-        questions_were_processed = process_queued_questions(session_manager, session)
-        if questions_were_processed:
-            st.rerun()  # Refresh to show processed questions
-
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
 
     # Render chat content ONLY if not blocked by a dialog
     if not st.session_state.get('chat_blocked_by_dialog', False):
         # ENHANCED: Show tier warnings for registered users
+        # Note: I've also updated the `is_within_limits` calls to use `.get('allowed')` properly
+        # and added `.value` for Enum comparisons for consistency and robustness.
         limit_check_for_display = session_manager.question_limits.is_within_limits(session)
         if (session.user_type.value == UserType.REGISTERED_USER.value and 
             limit_check_for_display.get('allowed') and 
@@ -4591,86 +4416,66 @@ def render_chat_interface_simplified_with_queue(session_manager: 'SessionManager
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                     st.markdown("---") # Visual separator
 
-    # Chat input with enhanced readiness checking
+    # Chat input
+    # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
+    # And combine with other disabled conditions
     overall_chat_disabled = (
-        not system_ready or 
+        not st.session_state.get('is_chat_ready', False) or 
         should_disable_chat_input_by_dialog or 
         session.ban_status.value != BanStatus.NONE.value
     )
 
-    # Enhanced chat input placeholder based on readiness state
-    if not system_ready:
-        if fingerprint_needed:
-            placeholder_text = "🔄 Initializing device fingerprint... Please wait..."
-        else:
-            placeholder_text = "🔄 System initializing... Please wait..."
-    elif should_disable_chat_input_by_dialog:
-        placeholder_text = "Please complete the required action above..."
-    elif session.ban_status.value != BanStatus.NONE.value:
-        placeholder_text = "Access currently restricted..."
-    else:
-        placeholder_text = "Ask me about ingredients, suppliers, or market trends..."
-
-    prompt = st.chat_input(placeholder_text, disabled=overall_chat_disabled)
+    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                            disabled=overall_chat_disabled)
     
     if prompt:
-        # Check if system is ready for immediate processing
-        if system_ready:
-            logger.info(f"🎯 Processing question immediately from {session.session_id[:8]}")
-            
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            
-            with st.chat_message("assistant"):
-                with st.spinner("🔍 Processing your question..."):
-                    try:
-                        response = session_manager.get_ai_response(session, prompt)
+        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
+        
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Processing your question..."):
+                try:
+                    response = session_manager.get_ai_response(session, prompt)
+                    
+                    if response.get('requires_email'):
+                        st.error("📧 Please verify your email to continue.")
+                        # This should be handled by display_email_prompt_if_needed on next rerun
+                        st.session_state.verification_stage = 'email_entry' 
+                        st.session_state.chat_blocked_by_dialog = True # Force block chat
+                        st.rerun()
+                    elif response.get('banned'):
+                        st.error(response.get("content", 'Access restricted.'))
+                        if response.get('time_remaining'):
+                            time_remaining = response['time_remaining']
+                            hours = int(time_remaining.total_seconds() // 3600)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.rerun()
+                    else:
+                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         
-                        if response.get('requires_email'):
-                            st.error("📧 Please verify your email to continue.")
-                            st.session_state.verification_stage = 'email_entry' 
-                            st.session_state.chat_blocked_by_dialog = True
+                        if response.get("source"):
+                            source_color = {
+                                "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                "Error Handler": "❌"
+                            }.get(response['source'], "🤖")
+                            st.caption(f"{source_color} Source: {response['source']}")
+                        
+                        logger.info(f"✅ Question processed successfully")
+                        
+                        # Only re-run if a ban was just applied post-response to update UI (disable input, show message)
+                        if response.get('tier1_ban_applied_post_response', False):
+                            logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
                             st.rerun()
-                        elif response.get('banned'):
-                            st.error(response.get("content", 'Access restricted.'))
-                            if response.get('time_remaining'):
-                                time_remaining = response['time_remaining']
-                                hours = int(time_remaining.total_seconds() // 3600)
-                                minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                                st.error(f"Time remaining: {hours}h {minutes}m")
-                            st.rerun()
-                        else:
-                            st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
-                            
-                            if response.get("source"):
-                                source_color = {
-                                    "FiFi": "🧠", "FiFi Web Search": "🌐",
-                                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                                    "Error Handler": "❌"
-                                }.get(response['source'], "🤖") # Fixed typo: "�🤖" to "🤖"
-                                st.caption(f"{source_color} Source: {response['source']}")
-                            
-                            logger.info(f"✅ Question processed immediately")
-                            
-                            # Only re-run if a ban was just applied post-response
-                            if response.get('tier1_ban_applied_post_response', False):
-                                logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
-                                st.rerun()
-                            
-                    except Exception as e:
-                        logger.error(f"❌ AI response failed: {e}", exc_info=True)
-                        st.error("⚠️ I encountered an error. Please try again.")
-            
-            st.rerun()
-        else:
-            # Queue the question for later processing
-            queue = st.session_state.get('question_queue')
-            if queue and queue.add_question(prompt, session.session_id):
-                st.success("💭 Your question has been queued and will be processed once the system finishes initializing!")
-                logger.info(f"📥 Question queued successfully for {session.session_id[:8]}")
-                st.rerun()  # Refresh to show the queue indicator
-            else:
-                st.error("❌ Failed to queue your question. Please try again.")
+                        
+                except Exception as e:
+                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
+                    st.error("⚠️ I encountered an error. Please try again.")
+        
+        st.rerun()
 
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
@@ -4751,7 +4556,7 @@ def ensure_initialization_fixed():
             st.session_state.chat_blocked_by_dialog = False
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
-            # NEW: Initialize chat readiness flag
+            # MODIFIED: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
             
             st.session_state.initialized = True
@@ -4766,8 +4571,8 @@ def ensure_initialization_fixed():
     return True
 
 # Modified main function with proper loading state handling (from prompt)
-def main_with_question_queue():
-    """Main entry point with loading state management and question queuing."""
+def main_fixed():
+    """Main entry point with loading state management"""
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
@@ -4781,7 +4586,7 @@ def main_with_question_queue():
     if 'is_loading' not in st.session_state:
         st.session_state.is_loading = False
         st.session_state.loading_message = ""
-    # NEW: Ensure is_chat_ready is always present and initially False
+    # MODIFIED: Ensure is_chat_ready is always present and initially False
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
 
@@ -4856,7 +4661,7 @@ def main_with_question_queue():
                     st.error("Authentication failed: Missing username or password.")
                     return
 
-            # NEW: Logic to unlock chat input after session is created/authenticated and initial fingerprint check
+            # MODIFIED: Logic to unlock chat input after session is created/authenticated and initial fingerprint check
             if session:
                 # Check if the session has a *stable* fingerprint (not a temporary Python fallback 
                 # that's still waiting for the JS component to return its data).
@@ -4944,7 +4749,7 @@ def main_with_question_queue():
                 return
 
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_simplified_with_queue(session_manager, session, activity_data_from_js)
+            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
 
     except Exception as e:
         logger.error(f"Main application error: {e}", exc_info=True)
@@ -4952,5 +4757,4 @@ def main_with_question_queue():
         st.info(f"Error details: {str(e)}")
 
 if __name__ == "__main__":
-    # Call the new main function that includes the question queuing system
-    main_with_question_queue()
+    main_fixed()
