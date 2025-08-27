@@ -1544,7 +1544,7 @@ class ZohoCRMManager:
                     return True
                 else:
                     logger.error("Failed to add note to Zoho contact.")
-                    if attempt < max_retries_note - 1:
+                    if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
                     else:
                         logger.error("Max retries for note addition reached. Aborting save.")
@@ -1552,7 +1552,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt < max_retries_note - 1:
+                if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -4137,7 +4137,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     # Initialize relevant session states if not present
     if 'verification_stage' not in st.session_state:
         st.session_state.verification_stage = None
-    if 'guest_continue_active' not in st.session_state: # FIX: Changed `not not` to `not` here
+    if 'guest_continue_active' not in st.session_state: 
         st.session_state.guest_continue_active = False
 
     # Check if a hard block is in place first (non-email-verification related bans)
@@ -4147,9 +4147,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         return True # Disable chat input
 
     # Determine if an email prompt *should* be active
-    # --- FIX APPLIED HERE: Compare .value of the enum ---
     user_is_guest = (session.user_type.value == UserType.GUEST.value)
-    # --- END FIX ---
     guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
     daily_q_value = session.daily_question_count
     daily_q_ge_limit = (daily_q_value >= guest_limit_value)
@@ -4448,15 +4446,16 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.markdown("---")
 
     # Call the fragment to just RENDER the input box.
+    # The fragment is now truly "display-only" and won't trigger reruns for prompt processing.
     render_chat_input_fragment(session, should_disable_chat_input_by_dialog)
 
     # --- NEW PROCESSING LOGIC ---
-    # This block now lives in the main script, outside the fragment.
+    # This block now lives in the main script, *outside* the fragment.
     # It checks session_state for the prompt submitted by the chat_input widget.
     if prompt := st.session_state.get("chat_prompt_input"):
         logger.info(f"🎯 Processing question from {session.session_id[:8]} (retrieved from session_state)")
         
-        # Immediately display the user's message
+        # Immediately display the user's message (this will append to the chat history)
         with st.chat_message("user"):
             st.markdown(prompt)
         
@@ -4466,15 +4465,15 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 try:
                     response = session_manager.get_ai_response(session, prompt)
                     
-                    # Clear the input from session state *before* any potential st.rerun() or st.stop()
-                    # to prevent reprocessing the same input.
+                    # Clear the input from session state *after* processing to prevent
+                    # re-processing the same input on subsequent reruns.
                     del st.session_state.chat_prompt_input
 
                     if response.get('requires_email'):
                         st.error("📧 Please verify your email to continue.")
                         st.session_state.verification_stage = 'email_entry'
                         st.session_state.chat_blocked_by_dialog = True
-                        st.rerun()
+                        st.rerun() # Rerun to display the email prompt immediately
                     elif response.get('banned'):
                         st.error(response.get("content", 'Access restricted.'))
                         if response.get('time_remaining'):
@@ -4482,8 +4481,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             hours = int(time_remaining.total_seconds() // 3600)
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
-                        st.rerun()
+                        st.rerun() # Rerun to update disabled state/messages
                     else:
+                        # Display AI response
                         st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         
                         if response.get("source"):
@@ -4495,13 +4495,19 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             st.caption(f"{source_color} Source: {response['source']}")
                         
                         logger.info(f"✅ Question processed successfully")
-                        st.rerun() # Rerun to display the new messages correctly in history.
+                        
+                        # Only rerun if a ban was just applied post-response to update UI (disable input, show message)
+                        if response.get('tier1_ban_applied_post_response', False):
+                            logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
+                            st.rerun()
+                        # IMPORTANT: NO `st.rerun()` HERE FOR NORMAL SUCCESSFUL RESPONSES
+                        # The app should now become idle and wait for the *next* user input.
                         
                 except Exception as e:
                     del st.session_state.chat_prompt_input # Also clear on error
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
-                    st.rerun()
+                    st.rerun() # Rerun to clear the error message if needed, or update state.
 
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
