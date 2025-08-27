@@ -1545,7 +1545,7 @@ class ZohoCRMManager:
                     return True
                 else:
                     logger.error("Failed to add note to Zoho contact.")
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries_note - 1:
                         time.sleep(2 ** attempt)
                     else:
                         logger.error("Max retries for note addition reached. Aborting save.")
@@ -4424,6 +4424,19 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         should_disable_chat_input_by_dialog or 
         session.ban_status.value != BanStatus.NONE.value
     )
+    
+    # <<< START OF AMENDED CODE >>>
+    # Create a placeholder for the "Initializing" message
+    initializing_placeholder = st.empty()
+
+    # Display the message in the placeholder if the chat is not ready
+    if not overall_chat_disabled:
+        initializing_placeholder.info("🔄 Initializing secure connection, please wait...")
+        # Wait for 5 seconds
+        time.sleep(5)
+        # Clear the placeholder
+        initializing_placeholder.empty()
+    # <<< END OF AMENDED CODE >>>
 
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
