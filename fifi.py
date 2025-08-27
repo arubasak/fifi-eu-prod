@@ -4368,6 +4368,28 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
 
+    # Combined chat disabled status
+    overall_chat_disabled = (
+        not st.session_state.get('is_chat_ready', False) or 
+        should_disable_chat_input_by_dialog or 
+        session.ban_status.value != BanStatus.NONE.value
+    )
+    
+    # <<< START OF AMENDED CODE >>>
+    # Create a placeholder for the "Initializing" message, only shown once per session.
+    if not st.session_state.get('is_chat_ready', False) and not st.session_state.get('initial_decoy_shown', False):
+        initializing_placeholder = st.empty()
+        
+        # Display the message in the placeholder.
+        initializing_placeholder.info("🔄 Initializing secure connection, please wait...")
+        # Wait for 5 seconds to allow JS fingerprinting to complete.
+        time.sleep(5)
+        # Clear the placeholder.
+        initializing_placeholder.empty()
+        # Set the flag to True so this block doesn't run again for this session.
+        st.session_state.initial_decoy_shown = True
+    # <<< END OF AMENDED CODE >>>
+
     # Render chat content ONLY if not blocked by a dialog
     if not st.session_state.get('chat_blocked_by_dialog', False):
         # ENHANCED: Show tier warnings for registered users
@@ -4419,27 +4441,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Chat input
     # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
     # And combine with other disabled conditions
-    overall_chat_disabled = (
-        not st.session_state.get('is_chat_ready', False) or 
-        should_disable_chat_input_by_dialog or 
-        session.ban_status.value != BanStatus.NONE.value
-    )
-    
-    # <<< START OF AMENDED CODE >>>
-    # Create a placeholder for the "Initializing" message, only shown once per session.
-    if not st.session_state.get('initial_decoy_shown', False):
-        initializing_placeholder = st.empty()
-        
-        # Display the message in the placeholder.
-        initializing_placeholder.info("🔄 Initializing secure connection, please wait...")
-        # Wait for 5 seconds to allow JS fingerprinting to complete.
-        time.sleep(5)
-        # Clear the placeholder.
-        initializing_placeholder.empty()
-        # Set the flag to True so this block doesn't run again for this session.
-        st.session_state.initial_decoy_shown = True
-    # <<< END OF AMENDED CODE >>>
-
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
     
