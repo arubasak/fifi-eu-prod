@@ -2537,7 +2537,6 @@ class SessionManager:
                         merged_ban_status = s.ban_status
                         merged_ban_start_time = s.ban_start_time
                         merged_ban_end_time = s.ban_end_time
-                        merged_ban_reason = s.ban_reason
                         merged_question_limit_reached = s.question_limit_reached 
 
                 # Merge evasion stats (take max)
@@ -3073,8 +3072,24 @@ class SessionManager:
                 rate_limiter_id = session.session_id
                 logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
 
+            # Clear previous rate limit message before checking
+            if 'rate_limit_info' in st.session_state:
+                del st.session_state['rate_limit_info']
+
             # Check rate limiting using fingerprint_id (or fallback session_id)
             if not self.rate_limiter.is_allowed(rate_limiter_id): # MODIFIED: Use rate_limiter_id
+                # Store rate limit info in session_state to display persistently
+                # Calculate time until reset based on the oldest request in the window
+                oldest_request_time = self.rate_limiter.requests[rate_limiter_id][0] if self.rate_limiter.requests[rate_limiter_id] else time.time()
+                reset_time_seconds = self.rate_limiter.window_seconds - (time.time() - oldest_request_time)
+                
+                st.session_state.rate_limit_info = {
+                    'active': True,
+                    'message': 'Too many requests. Please wait a moment before asking another question.',
+                    'max_requests': self.rate_limiter.max_requests,
+                    'window_seconds': self.rate_limiter.window_seconds,
+                    'reset_timestamp': time.time() + max(0, reset_time_seconds) # Ensure non-negative
+                }
                 return {
                     'content': 'Too many requests. Please wait a moment before asking another question.',
                     'success': False,
@@ -3181,6 +3196,19 @@ class SessionManager:
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
         try:
+            # Attempt CRM save for eligible users (manual save - no 15-minute requirement)
+            if self._is_manual_crm_save_eligible(session):
+                with st.spinner("Saving your conversation to CRM..."):
+                    try:
+                        success = self.zoho.save_chat_transcript_sync(session, "Clear Chat")
+                        if success:
+                            st.success("✅ Conversation saved to CRM successfully before clearing!")
+                        else:
+                            st.warning("⚠️ Conversation save failed during clear chat, but chat will still be cleared.")
+                    except Exception as e:
+                        logger.error(f"CRM save during clear chat failed: {e}")
+                        st.warning("⚠️ Conversation save failed during clear chat, but chat will still be cleared.")
+
             # Soft clear: set offset to hide all current messages
             session.display_message_offset = len(session.messages)
             
@@ -4368,6 +4396,24 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
 
+    # --- NEW: Display persistent rate limit message ---
+    rate_limit_info = st.session_state.get('rate_limit_info')
+    if rate_limit_info and rate_limit_info.get('active'):
+        # Check if the reset time has passed
+        current_time_epoch = time.time()
+        if current_time_epoch < rate_limit_info['reset_timestamp']:
+            time_remaining_seconds = int(rate_limit_info['reset_timestamp'] - current_time_epoch)
+            st.error(f"⏳ {rate_limit_info['message']} You can ask {rate_limit_info['max_requests']} questions every {rate_limit_info['window_seconds']} seconds. Please wait {time_remaining_seconds} seconds.")
+            # Ensure chat input is disabled if rate limit is active
+            should_disable_chat_input_by_dialog = True
+        else:
+            # If reset time passed, clear the info, allowing the chat input to re-enable
+            # and the next question attempt to re-evaluate the rate limit.
+            logger.info("Rate limit reset time passed. Clearing persistent message and rerunning.")
+            del st.session_state['rate_limit_info']
+            st.rerun() # Rerun to clear the message and re-enable input if other conditions allow
+    # --- END NEW ---
+
     # Render chat content ONLY if not blocked by a dialog
     if not st.session_state.get('chat_blocked_by_dialog', False):
         # ENHANCED: Show tier warnings for registered users
@@ -4452,6 +4498,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             hours = int(time_remaining.total_seconds() // 3600)
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.rerun()
+                    elif response.get('source') == 'Rate Limiter':
+                        # The rate limit message is now handled by the persistent display logic
+                        # No need to display it here again. Just rerun to update UI.
                         st.rerun()
                     else:
                         st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
@@ -4558,6 +4608,8 @@ def ensure_initialization_fixed():
             st.session_state.guest_continue_active = False
             # NEW: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
+            # NEW: Initialize rate_limit_info
+            st.session_state.rate_limit_info = {'active': False}
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
@@ -4589,6 +4641,9 @@ def main_fixed():
     # NEW: Ensure is_chat_ready is always present and initially False
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
+    # NEW: Ensure rate_limit_info is always present
+    if 'rate_limit_info' not in st.session_state:
+        st.session_state.rate_limit_info = {'active': False}
 
 
     # Handle loading states first
