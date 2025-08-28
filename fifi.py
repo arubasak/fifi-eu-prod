@@ -1545,7 +1545,7 @@ class ZohoCRMManager:
                     return True
                 else:
                     logger.error("Failed to add note to Zoho contact.")
-                    if attempt < max_retries_note - 1:
+                    if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
                     else:
                         logger.error("Max retries for note addition reached. Aborting save.")
@@ -3678,7 +3678,7 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
-            st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
+            st.session_state.is_chat_ready = True # MODIFIED: Explicitly unlock chat input here
             logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
@@ -4368,28 +4368,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
 
-    # Combined chat disabled status
-    overall_chat_disabled = (
-        not st.session_state.get('is_chat_ready', False) or 
-        should_disable_chat_input_by_dialog or 
-        session.ban_status.value != BanStatus.NONE.value
-    )
-    
-    # <<< START OF AMENDED CODE >>>
-    # Create a placeholder for the "Initializing" message, only shown once per session.
-    if not st.session_state.get('is_chat_ready', False) and not st.session_state.get('initial_decoy_shown', False):
-        initializing_placeholder = st.empty()
-        
-        # Display the message in the placeholder.
-        initializing_placeholder.info("🔄 Initializing secure connection, please wait...")
-        # Wait for 5 seconds to allow JS fingerprinting to complete.
-        time.sleep(5)
-        # Clear the placeholder.
-        initializing_placeholder.empty()
-        # Set the flag to True so this block doesn't run again for this session.
-        st.session_state.initial_decoy_shown = True
-    # <<< END OF AMENDED CODE >>>
-
     # Render chat content ONLY if not blocked by a dialog
     if not st.session_state.get('chat_blocked_by_dialog', False):
         # ENHANCED: Show tier warnings for registered users
@@ -4441,6 +4419,12 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Chat input
     # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
     # And combine with other disabled conditions
+    overall_chat_disabled = (
+        not st.session_state.get('is_chat_ready', False) or 
+        should_disable_chat_input_by_dialog or 
+        session.ban_status.value != BanStatus.NONE.value
+    )
+
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
     
@@ -4572,9 +4556,8 @@ def ensure_initialization_fixed():
             st.session_state.chat_blocked_by_dialog = False
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
-            # NEW: Initialize chat readiness flag
+            # MODIFIED: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
-            st.session_state.initial_decoy_shown = False # <<< AMENDED CODE
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
@@ -4603,7 +4586,7 @@ def main_fixed():
     if 'is_loading' not in st.session_state:
         st.session_state.is_loading = False
         st.session_state.loading_message = ""
-    # NEW: Ensure is_chat_ready is always present and initially False
+    # MODIFIED: Ensure is_chat_ready is always present and initially False
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
 
@@ -4678,7 +4661,7 @@ def main_fixed():
                     st.error("Authentication failed: Missing username or password.")
                     return
 
-            # NEW: Logic to unlock chat input after session is created/authenticated and initial fingerprint check
+            # MODIFIED: Logic to unlock chat input after session is created/authenticated and initial fingerprint check
             if session:
                 # Check if the session has a *stable* fingerprint (not a temporary Python fallback 
                 # that's still waiting for the JS component to return its data).
