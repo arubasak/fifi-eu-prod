@@ -1616,7 +1616,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
+                if attempt_note < max_retries - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -1671,33 +1671,16 @@ class RateLimiter:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
 
-    def is_allowed(self, identifier: str) -> Dict[str, Any]:
+    def is_allowed(self, identifier: str) -> bool:
         with self._lock:
             now = time.time()
             self.requests[identifier] = [t for t in self.requests[identifier] if t > now - self.window_seconds]
-            
             if len(self.requests[identifier]) < self.max_requests:
                 self.requests[identifier].append(now)
                 logger.debug(f"Rate limit allowed for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-                return {
-                    'allowed': True,
-                    'requests_made': len(self.requests[identifier]),
-                    'max_requests': self.max_requests,
-                    'window_seconds': self.window_seconds
-                }
-            
-            # Calculate time until next request is allowed
-            oldest_request = min(self.requests[identifier])
-            time_until_next = int((oldest_request + self.window_seconds) - now)
-            
+                return True
             logger.warning(f"Rate limit exceeded for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-            return {
-                'allowed': False,
-                'requests_made': len(self.requests[identifier]),
-                'max_requests': self.max_requests,
-                'window_seconds': self.window_seconds,
-                'time_until_next': max(0, time_until_next)
-            }
+            return False
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
     """Sanitizes user input to prevent XSS and limit length."""
@@ -2554,7 +2537,6 @@ class SessionManager:
                         merged_ban_status = s.ban_status
                         merged_ban_start_time = s.ban_start_time
                         merged_ban_end_time = s.ban_end_time
-                        merged_ban_reason = s.ban_reason
                         merged_question_limit_reached = s.question_limit_reached 
 
                 # Merge evasion stats (take max)
@@ -3090,27 +3072,33 @@ class SessionManager:
                 rate_limiter_id = session.session_id
                 logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
 
+            # Clear previous rate limit message before checking
+            # This is important: if a JS-driven rate limit message was active, Python clears its state
+            # for the next question attempt, so JS doesn't get re-instructed to display it.
+            if 'rate_limit_info' in st.session_state:
+                del st.session_state['rate_limit_info']
+
             # Check rate limiting using fingerprint_id (or fallback session_id)
-            rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
-            if not rate_limit_result['allowed']:
-                time_until_next = rate_limit_result.get('time_until_next', 0)
-                max_requests = rate_limit_result.get('max_requests', 2)
-                window_seconds = rate_limit_result.get('window_seconds', 60)
+            if not self.rate_limiter.is_allowed(rate_limiter_id): # MODIFIED: Use rate_limiter_id
+                # Store rate limit info in session_state to display persistently
+                # Calculate time until reset based on the oldest request in the window
+                oldest_request_time = self.rate_limiter.requests[rate_limiter_id][0] if self.rate_limiter.requests[rate_limiter_id] else time.time()
+                # Convert to milliseconds for JavaScript consistency
+                reset_timestamp_ms = int((oldest_request_time + self.rate_limiter.window_seconds) * 1000)
                 
-                # Store detailed rate limit info in session state
-                st.session_state.rate_limit_hit = {
-                    'timestamp': datetime.now(),
-                    'time_until_next': time_until_next,
-                    'max_requests': max_requests,
-                    'window_seconds': window_seconds,
-                    'expires_at': datetime.now() + timedelta(seconds=15)  # Show for 15 seconds
+                st.session_state.rate_limit_info = {
+                    'active': True,
+                    'message': 'Too many requests. Please wait a moment before asking another question.',
+                    'max_requests': self.rate_limiter.max_requests,
+                    'window_seconds': self.rate_limiter.window_seconds,
+                    'reset_timestamp_ms': reset_timestamp_ms # Store in milliseconds for JS
                 }
-                
+                # Return an immediate response indicating rate limit
                 return {
-                    'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
+                    'content': 'Too many requests. Rate limit active.', # Content to show in chat (can be generic)
                     'success': False,
                     'source': 'Rate Limiter',
-                    'time_until_next': time_until_next
+                    'is_rate_limited': True # Custom flag for UI handling
                 }
             
             # Content moderation check (MOVED HERE)
@@ -3213,6 +3201,19 @@ class SessionManager:
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
         try:
+            # Attempt CRM save for eligible users (manual save - no 15-minute requirement)
+            if self._is_manual_crm_save_eligible(session):
+                with st.spinner("Saving your conversation to CRM..."):
+                    try:
+                        success = self.zoho.save_chat_transcript_sync(session, "Clear Chat")
+                        if success:
+                            st.success("✅ Conversation saved to CRM successfully before clearing!")
+                        else:
+                            st.warning("⚠️ Conversation save failed during clear chat, but chat will still be cleared.")
+                    except Exception as e:
+                        logger.error(f"CRM save during clear chat failed: {e}")
+                        st.warning("⚠️ Conversation save failed during clear chat, but chat will still be cleared.")
+
             # Soft clear: set offset to hide all current messages
             session.display_message_offset = len(session.messages)
             
@@ -4202,7 +4203,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             st.session_state.verification_stage = 'email_entry' # Force email entry if limit hit
             st.session_state.guest_continue_active = False # Clear any previous guest-continue state
     elif session.declined_recognized_email_at and not st.session_state.guest_continue_active:
-        # This is the scenario where user declined recognized email, has questions left, but hasn't explicitly
+        # This is the scenario where user declines a recognized email, has questions left, but hasn't explicitly
         # chosen "Continue as Guest for Now" in this session state.
         should_show_prompt = True
         if st.session_state.verification_stage is None:
@@ -4397,28 +4398,109 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         except Exception as e:
             logger.error(f"Browser close detection failed: {e}")
 
-    # Enhanced rate limit display
-    if 'rate_limit_hit' in st.session_state:
-        rate_limit_info = st.session_state.rate_limit_hit
-        if datetime.now() < rate_limit_info['expires_at']:
-            st.error("🚫 **Rate Limit Exceeded**")
-            
-            time_until_next = rate_limit_info.get('time_until_next', 0)
-            max_requests = rate_limit_info.get('max_requests', 2)
-            window_seconds = rate_limit_info.get('window_seconds', 60)
-            
-            if time_until_next > 0:
-                st.warning(f"⏱️ Please wait **{time_until_next} seconds** before asking another question.")
-            else:
-                st.warning("⏱️ Please wait a moment before asking another question.")
-                
-            st.info(f"ℹ️ Rate limit: {max_requests} questions per {window_seconds} seconds to ensure fair usage for all users.")
-        else:
-            # Clean up expired rate limit message
-            del st.session_state.rate_limit_hit
-
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
+
+    # --- NEW: Display persistent rate limit message and inject JS ---
+    rate_limit_info = st.session_state.get('rate_limit_info')
+    
+    if rate_limit_info and rate_limit_info.get('active'):
+        reset_timestamp_ms = rate_limit_info['reset_timestamp_ms']
+        
+        # Render the custom HTML div for the rate limit message
+        st.markdown(
+            f"""
+            <div id="fifi-rate-limit-message" style="
+                background-color: #fee2e2; /* light red */
+                color: #dc2626; /* dark red */
+                padding: 1rem;
+                border-radius: 0.5rem;
+                border: 1px solid #fca5a5;
+                margin-bottom: 1rem;
+                font-weight: bold;
+            ">
+                ⏳ Too many requests. You can ask {rate_limit_info['max_requests']} questions every {rate_limit_info['window_seconds']} seconds. <span id="fifi-rate-limit-countdown"></span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        
+        # Inject JavaScript to handle the countdown and UI updates
+        # Ensure this script is executed *after* the chat input is rendered
+        st.components.v1.html(
+            f"""
+            <script>
+                // Clear any previous interval to prevent multiple timers running
+                if (window.fifiRateLimitInterval) {{
+                    clearInterval(window.fifiRateLimitInterval);
+                }}
+
+                const resetTimestampMs = {reset_timestamp_ms};
+                const rateLimitMessageDiv = document.getElementById('fifi-rate-limit-message');
+                const countdownSpan = document.getElementById('fifi-rate-limit-countdown');
+                // Find the chat input. Streamlit's chat input is a textarea inside a form, often with aria-label
+                // This selector might need adjustment if Streamlit's DOM changes significantly.
+                const chatInput = document.querySelector('[data-testid="stForm"] textarea[aria-label^="Ask me about ingredients"]');
+
+                function updateCountdown() {{
+                    const now = Date.now();
+                    const timeLeftMs = resetTimestampMs - now;
+
+                    if (timeLeftMs <= 0) {{
+                        if (rateLimitMessageDiv) {{
+                            rateLimitMessageDiv.style.display = 'none';
+                        }}
+                        if (chatInput) {{
+                            chatInput.removeAttribute('disabled');
+                            chatInput.focus(); // Give focus back to the input
+                        }}
+                        clearInterval(window.fifiRateLimitInterval);
+                        window.fifiRateLimitInterval = null;
+                        // Optionally, trigger a small, silent rerun in Streamlit to clear the session_state flag
+                        // (though the next user interaction will naturally clear it too)
+                        // This might be done by sending data back via st_javascript, but for just clearing a flag,
+                        // relying on the next user action is simpler to avoid unnecessary reruns.
+                    }} else {{
+                        const seconds = Math.ceil(timeLeftMs / 1000);
+                        if (countdownSpan) {{
+                            countdownSpan.textContent = `Please wait ${seconds} seconds.`;
+                        }}
+                        if (chatInput) {{
+                            chatInput.setAttribute('disabled', 'true'); // Ensure it's disabled if still counting
+                        }}
+                    }}
+                }}
+
+                // Run immediately and then every second
+                updateCountdown();
+                window.fifiRateLimitInterval = setInterval(updateCountdown, 1000);
+
+                // Clean up interval if component is removed (e.g., Streamlit reruns for other reasons)
+                // This is a best effort, as Streamlit's lifecycle with injected HTML can be tricky.
+                const observer = new MutationObserver(mutations => {{
+                    mutations.forEach(mutation => {{
+                        if (!document.body.contains(rateLimitMessageDiv)) {{
+                            if (window.fifiRateLimitInterval) {{
+                                clearInterval(window.fifiRateLimitInterval);
+                                window.fifiRateLimitInterval = null;
+                                console.log('Rate limit countdown stopped due to message removal.');
+                            }}
+                        }}
+                    }});
+                }});
+                observer.observe(document.body, {{ childList: true, subtree: true }});
+
+            </script>
+            """,
+            height=0, # Keep the component invisible itself
+            width=0,
+            scrolling=False
+        )
+        
+        # Ensure chat input is disabled by Python initially
+        should_disable_chat_input_by_dialog = True
+        
+    # --- END NEW ---
 
     # Render chat content ONLY if not blocked by a dialog
     if not st.session_state.get('chat_blocked_by_dialog', False):
@@ -4476,6 +4558,13 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         should_disable_chat_input_by_dialog or 
         session.ban_status.value != BanStatus.NONE.value
     )
+    
+    # If the rate limit is active (even if JS is managing the countdown), Python should still
+    # render the input as disabled. The JS will then re-enable it when the time is up.
+    # This prevents a momentary re-enable if a rerun happens before the JS timer finishes.
+    if rate_limit_info and rate_limit_info.get('active'):
+        overall_chat_disabled = True
+
 
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
@@ -4505,6 +4594,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.rerun()
+                    elif response.get('is_rate_limited'): # Check for the custom flag
+                        # The rate limit message is now handled by the persistent display logic in JS.
+                        # No need for an explicit message here, just let the UI update on next rerun.
+                        # Python's session_state will have the rate_limit_info for the next render.
+                        pass 
                     else:
                         st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         
@@ -4527,7 +4621,13 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
         
-        st.rerun()
+        # IMPORTANT: Do NOT call st.rerun() here unconditionally.
+        # Reruns should only be triggered by explicit user interaction (e.g., submitting a question),
+        # or other state-changing events that Streamlit needs to handle.
+        # The JS will handle the countdown and re-enabling. The Python state will
+        # implicitly catch up on the *next* actual Python rerun (e.g., when the user types again).
+        # However, if the response itself indicates a Python-side state change (like a ban),
+        # an explicit rerun might still be needed as handled in those specific blocks.
 
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
@@ -4610,6 +4710,8 @@ def ensure_initialization_fixed():
             st.session_state.guest_continue_active = False
             # NEW: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
+            # NEW: Initialize rate_limit_info
+            st.session_state.rate_limit_info = {'active': False}
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
@@ -4641,6 +4743,9 @@ def main_fixed():
     # NEW: Ensure is_chat_ready is always present and initially False
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
+    # NEW: Ensure rate_limit_info is always present
+    if 'rate_limit_info' not in st.session_state:
+        st.session_state.rate_limit_info = {'active': False}
 
 
     # Handle loading states first
