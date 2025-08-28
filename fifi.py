@@ -1545,7 +1545,7 @@ class ZohoCRMManager:
                     return True
                 else:
                     logger.error("Failed to add note to Zoho contact.")
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries_note - 1:
                         time.sleep(2 ** attempt)
                     else:
                         logger.error("Max retries for note addition reached. Aborting save.")
@@ -3678,7 +3678,7 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
-            st.session_state.is_chat_ready = True # MODIFIED: Explicitly unlock chat input here
+            st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
             logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
@@ -3829,34 +3829,6 @@ def handle_fingerprint_requests_from_query():
 # =============================================================================
 # UI COMPONENTS
 # =============================================================================
-
-# NEW/REVISED: Centralized function to check and update chat readiness
-def update_chat_readiness_status(session: Optional[UserSession]):
-    """
-    Decides if the chat input should be enabled based on fingerprint status.
-    This is the single source of truth for unlocking the chat input after the initial load.
-    """
-    # If the chat is already marked as ready, we don't need to do anything.
-    if st.session_state.get('is_chat_ready', False):
-        return
-
-    if session and session.fingerprint_id:
-        # The fingerprint is considered "stable" if it's not one of the temporary ones
-        # assigned by Python before the JavaScript component has returned a real value.
-        is_stable_fingerprint = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-        
-        if is_stable_fingerprint:
-            st.session_state.is_chat_ready = True
-            logger.info(f"Chat readiness CHECK: UNLOCKED for session {session.session_id[:8]} with stable fingerprint.")
-        else:
-            # If the fingerprint is still temporary, ensure the chat remains locked.
-            st.session_state.is_chat_ready = False
-            logger.info(f"Chat readiness CHECK: REMAINS LOCKED for session {session.session_id[:8]}, waiting for JS fingerprint.")
-    else:
-        # If there's no session or the session has no fingerprint ID, it should definitely be locked.
-        st.session_state.is_chat_ready = False
-        logger.info("Chat readiness CHECK: REMAINS LOCKED (no session or fingerprint).")
-
 
 # Modified render_welcome_page function (from prompt)
 def render_welcome_page(session_manager: 'SessionManager'):
@@ -4445,16 +4417,28 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.markdown("---") # Visual separator
 
     # Chat input
-    # Combine all disabled conditions
+    # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
+    # And combine with other disabled conditions
     overall_chat_disabled = (
         not st.session_state.get('is_chat_ready', False) or 
         should_disable_chat_input_by_dialog or 
         session.ban_status.value != BanStatus.NONE.value
     )
     
-    # NEW: Display a message to the user explaining why the chat is disabled
-    if not st.session_state.get('is_chat_ready', False) and not should_disable_chat_input_by_dialog:
-        st.info("🔄 Initializing secure connection, please wait...", icon="🔒")
+    # <<< START OF AMENDED CODE >>>
+    # Create a placeholder for the "Initializing" message, only shown once per session.
+    if not st.session_state.get('initial_decoy_shown', False):
+        initializing_placeholder = st.empty()
+        
+        # Display the message in the placeholder.
+        initializing_placeholder.info("🔄 Initializing secure connection, please wait...")
+        # Wait for 5 seconds to allow JS fingerprinting to complete.
+        time.sleep(5)
+        # Clear the placeholder.
+        initializing_placeholder.empty()
+        # Set the flag to True so this block doesn't run again for this session.
+        st.session_state.initial_decoy_shown = True
+    # <<< END OF AMENDED CODE >>>
 
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
@@ -4587,8 +4571,9 @@ def ensure_initialization_fixed():
             st.session_state.chat_blocked_by_dialog = False
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
-            # MODIFIED: Initialize chat readiness flag to False. This is the default locked state.
+            # NEW: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
+            st.session_state.initial_decoy_shown = False # <<< AMENDED CODE
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
@@ -4617,7 +4602,7 @@ def main_fixed():
     if 'is_loading' not in st.session_state:
         st.session_state.is_loading = False
         st.session_state.loading_message = ""
-    # MODIFIED: Ensure is_chat_ready is always present and initially False
+    # NEW: Ensure is_chat_ready is always present and initially False
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
 
@@ -4636,7 +4621,7 @@ def main_fixed():
         try:
             # Initialize if not already done
             if not st.session_state.get('initialized', False):
-                init_success = ensure_initialization_fixed()
+                init_success = ensure_initialization_fixed()  # Remove the spinner wrapper since we have overlay
                 if not init_success:
                     set_loading_state(False)
                     st.error("⚠️ Application failed to initialize properly.")
@@ -4652,6 +4637,7 @@ def main_fixed():
             # Handle different loading scenarios
             loading_reason = st.session_state.get('loading_reason', 'unknown')
             
+            session = None # Initialize session to None for scope
             if loading_reason == 'start_guest':
                 # Create guest session
                 session = session_manager.get_session()
@@ -4663,31 +4649,54 @@ def main_fixed():
                     del st.session_state['loading_reason']
                 
             elif loading_reason == 'authenticate':
-                # Handle authentication
+                # Handle authentication (you'll need to store username/password temporarily)
                 username = st.session_state.get('temp_username', '')
                 password = st.session_state.get('temp_password', '')
                 
                 if username and password:
                     authenticated_session = session_manager.authenticate_with_wordpress(username, password)
                     if authenticated_session:
+                        session = authenticated_session # Assign to session variable
                         st.session_state.current_session_id = authenticated_session.session_id
                         st.session_state.page = "chat"
                         # Clear temporary credentials
-                        if 'temp_username' in st.session_state: del st.session_state['temp_username']
-                        if 'temp_password' in st.session_state: del st.session_state['temp_password']
-                        if 'loading_reason' in st.session_state: del st.session_state['loading_reason']
+                        if 'temp_username' in st.session_state:
+                            del st.session_state['temp_username']
+                        if 'temp_password' in st.session_state:
+                            del st.session_state['temp_password']
+                        if 'loading_reason' in st.session_state:
+                            del st.session_state['loading_reason']
                         st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
                         st.balloons()
                     else:
                         set_loading_state(False)
+                        # Error message already shown by authenticate_with_wordpress
                         return
                 else:
                     set_loading_state(False)
                     st.error("Authentication failed: Missing username or password.")
                     return
 
-            # REMOVED the optimistic chat readiness check from here.
-            # The lock will now persist until explicitly unlocked.
+            # NEW: Logic to unlock chat input after session is created/authenticated and initial fingerprint check
+            if session:
+                # Check if the session has a *stable* fingerprint (not a temporary Python fallback 
+                # that's still waiting for the JS component to return its data).
+                # The `fingerprint_checked_for_inheritance_{session.session_id}` flag, set by get_session(),
+                # indicates that the initial inheritance/fingerprint check has occurred.
+                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
+
+                if fingerprint_is_stable or inheritance_checked:
+                    st.session_state.is_chat_ready = True
+                    logger.info(f"Chat input unlocked for session {session.session_id[:8]} after initial session/fingerprint setup.")
+                else:
+                    # If it's still a temporary fingerprint and inheritance check hasn't happened yet, 
+                    # keep chat locked. This state implies the JS fingerprint component is expected to run.
+                    st.session_state.is_chat_ready = False
+                    logger.info(f"Chat input remains locked for session {session.session_id[:8]} pending JS fingerprinting.")
+            else:
+                st.session_state.is_chat_ready = False # Ensure locked if no session obtained
+
 
             # Clear loading state and rerun to show the actual page
             set_loading_state(False)
@@ -4702,16 +4711,17 @@ def main_fixed():
 
     # Normal page rendering (when not in loading state)
     try:
-        # Initialize if needed
+        # Initialize if needed (without loading overlay since it's already done or not triggered)
         if not st.session_state.get('initialized', False):
-            with st.spinner("Initializing application..."):
+            # This path handles initial load when no button was pressed, or if initialization failed.
+            with st.spinner("Initializing application..."): # Keep a fallback spinner here for initial page load if loading_state was false but init wasn't complete.
                  init_success = ensure_initialization_fixed()
             if not init_success:
                 st.error("⚠️ Application failed to initialize properly.")
                 st.info("Please refresh the page to try again.")
                 return
 
-        # Handle emergency saves and fingerprint data from URL redirects
+        # Handle emergency saves and fingerprint data
         handle_emergency_save_requests_from_query()
         handle_fingerprint_requests_from_query()
 
@@ -4724,21 +4734,31 @@ def main_fixed():
         if current_page != "chat":
             render_welcome_page(session_manager)
         else:
-            # Get existing session
+            # Get existing session (should already exist from loading state or prior direct creation)
             session = session_manager.get_session()
             
             if session is None or not session.active:
                 logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
-                for key in list(st.session_state.keys()): del st.session_state[key]
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
                 st.session_state['page'] = None
                 st.rerun()
                 return
-            
-            # MODIFIED: Centralized chat readiness check on every rerun of the chat page.
-            update_chat_readiness_status(session)
                 
             # Render activity tracker and check for timeout
-            activity_data_from_js = render_simple_activity_tracker(session.session_id)
+            activity_data_from_js = None
+            if session and session.session_id: 
+                activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
+                if activity_tracker_key_state_flag not in st.session_state or \
+                   st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
+                    
+                    logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
+                    activity_data_from_js = render_simple_activity_tracker(session.session_id)
+                    st.session_state[activity_tracker_key_state_flag] = True
+                    st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
+                    st.session_state.latest_activity_data_from_js = activity_data_from_js
+                else:
+                    activity_data_from_js = st.session_state.latest_activity_data_from_js
             
             timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
             if timeout_triggered:
