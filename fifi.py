@@ -1617,7 +1617,7 @@ class ZohoCRMManager:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
                 if attempt_note < max_retries - 1:
-                    time.sleep(2 ** attempt_note)
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
                     return False
@@ -2622,8 +2622,8 @@ class SessionManager:
 
             # Update fingerprint to the 'real' one if current is temporary and a real one was found
             # The 'real' fingerprint should come from the most authoritative source.
-            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and \
-               not source_for_identity_and_base_data.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+            if (session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if session.fingerprint_id else True) and \
+               not (source_for_identity_and_base_data.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if source_for_identity_and_base_data.fingerprint_id else True):
                
                 logger.info(f"Updating temporary fingerprint {session.fingerprint_id[:8]} to recognized fingerprint {source_for_identity_and_base_data.fingerprint_id[:8]}")
                 session.fingerprint_id = source_for_identity_and_base_data.fingerprint_id
@@ -2667,8 +2667,7 @@ class SessionManager:
                     # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
                     # And this check hasn't been performed for this session yet in the current rerun cycle.
                     fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
-                    if (session.fingerprint_id and 
-                        (session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if session.fingerprint_id else True) and
+                    if ((session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if session.fingerprint_id else True) and
                         not st.session_state.get(fingerprint_checked_key, False)):
                         
                         self._attempt_fingerprint_inheritance(session)
@@ -3817,7 +3816,7 @@ def handle_emergency_save_requests_from_query():
             logger.critical(f"Emergency save processing crashed from query parameter: {e}", exc_info=True)
         
         # Removed time.sleep(2)
-        st.stop()
+        st.rerun() # Rerun after processing to ensure state is clean
     else:
         logger.debug("ℹ️ No emergency save requests found in current URL query parameters.")
 
@@ -3881,7 +3880,47 @@ def handle_fingerprint_requests_from_query():
 # UI COMPONENTS
 # =============================================================================
 
-# Modified render_welcome_page function (from prompt)
+def render_initialization_progress_message():
+    """Renders detailed initialization progress messages within the loading overlay."""
+    app_initialized = st.session_state.get('initialized', False)
+    # Check current session's fingerprint status if a session exists
+    session_manager_temp = st.session_state.get('session_manager')
+    current_session_for_msg = None
+    if session_manager_temp and st.session_state.get('current_session_id'):
+        current_session_for_msg = session_manager_temp.db.load_session(st.session_state['current_session_id'])
+
+    fingerprint_stable = not (current_session_for_msg.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if (current_session_for_msg and current_session_for_msg.fingerprint_id) else True)
+    chat_ready = st.session_state.get('is_chat_ready', False)
+
+    st.markdown("---")
+    progress_col1, progress_col2, progress_col3 = st.columns(3)
+    
+    with progress_col1:
+        if app_initialized:
+            st.success("✅ Core Systems")
+        else:
+            st.warning("🔄 Core Systems")
+            
+    with progress_col2:
+        if fingerprint_stable:
+            st.success("✅ Device ID")
+        else:
+            st.warning("🔄 Device ID")
+            
+    with progress_col3:
+        if chat_ready:
+            st.success("✅ Chat Ready")
+        else:
+            st.warning("🔄 Chat Ready")
+    
+    st.markdown("---")
+    if not fingerprint_stable:
+        st.caption("🔍 Identifying your device for session continuity...")
+    elif not chat_ready:
+        st.caption("🤖 Preparing AI assistant...")
+    else:
+        st.caption("🚀 Loading complete, redirecting...")
+
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock."""
     
@@ -4378,17 +4417,11 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     return disable_chat_input
 
-# Method 1: No longer needed here, global loading in main_fixed handles it.
-# def show_initialization_progress(session: UserSession): ...
-
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
-
-    # Note: show_initialization_progress is now handled by main_fixed to keep the overlay active
-    # This function is only called when st.session_state.is_chat_ready is True.
 
     # Simple activity tracking
     if activity_result:
@@ -4591,63 +4624,73 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
     """Fixed version without duplicate spinner since we have loading overlay"""
+    # This function is now called unconditionally at the start of main_fixed
+    # and its primary role is to ensure session_manager and other core items are in st.session_state.
     if 'initialized' not in st.session_state or not st.session_state.initialized:
-        logger.info("Starting application initialization sequence (no spinner shown, overlay is active)...")
+        logger.info("Starting application initialization sequence...")
         
         try:
             config = Config()
             pdf_exporter = PDFExporter()
             
+            # --- Database Manager ---
             try:
                 db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
                 st.session_state.db_manager = db_manager
             except Exception as db_e:
-                logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
+                logger.critical(f"Database manager initialization failed: {db_e}", exc_info=True)
+                # Fallback to a dummy DB manager
                 st.session_state.db_manager = type('FallbackDB', (), {
                     'db_type': 'memory',
                     'local_sessions': {},
-                    'save_session': lambda self, session: None,
-                    'load_session': lambda self, session_id: None,
-                    'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
-                    'find_sessions_by_email': lambda self, email: []
+                    'save_session': lambda session_self, session: None,
+                    'load_session': lambda session_self, session_id: None,
+                    'find_sessions_by_fingerprint': lambda session_self, fingerprint_id: [],
+                    'find_sessions_by_email': lambda session_self, email: []
                 })()
+                # If DB is critical, fail initialization
+                st.session_state.initialized = False
+                return False
             
+            # --- Zoho Manager ---
             try:
                 zoho_manager = ZohoCRMManager(config, pdf_exporter)
             except Exception as e:
-                logger.error(f"Zoho manager failed: {e}")
+                logger.error(f"Zoho manager failed: {e}", exc_info=True)
                 zoho_manager = type('FallbackZoho', (), {
                     'config': config,
-                    'save_chat_transcript_sync': lambda self, session, reason: False
+                    'save_chat_transcript_sync': lambda zoho_self, session, reason: False
                 })()
             
+            # --- AI System ---
             try:
                 ai_system = EnhancedAI(config)
             except Exception as e:
-                logger.error(f"AI system failed: {e}")
+                logger.error(f"AI system failed: {e}", exc_info=True)
                 ai_system = type('FallbackAI', (), {
                     "openai_client": None,
-                    'get_response': lambda self, prompt, history=None: {
+                    'get_response': lambda ai_self, prompt, history=None: {
                         "content": "AI system temporarily unavailable.",
                         "success": False
                     }
                 })()
             
             rate_limiter = RateLimiter(max_requests=2, window_seconds=60)
-            fingerprinting_manager = st.session_state.db_manager.FingerprintingManager()
+            # Need to ensure db_manager is in session_state before creating nested managers
+            fingerprinting_manager = st.session_state.db_manager.FingerprintingManager() 
             
             try:
                 email_verification_manager = st.session_state.db_manager.EmailVerificationManager(config)
                 if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
                     email_verification_manager = type('DummyEmail', (), {
-                        'send_verification_code': lambda self, email: False,
-                        'verify_code': lambda self, email, code: False
+                        'send_verification_code': lambda email_self, email: False,
+                        'verify_code': lambda email_self, email, code: False
                     })()
             except Exception as e:
-                logger.error(f"Email verification failed: {e}")
+                logger.error(f"Email verification failed: {e}", exc_info=True)
                 email_verification_manager = type('DummyEmail', (), {
-                    'send_verification_code': lambda self, email: False,
-                    'verify_code': lambda self, email, code: False
+                    'send_verification_code': lambda email_self, email: False,
+                    'verify_code': lambda email_self, email, code: False
                 })()
             
             question_limit_manager = st.session_state.db_manager.QuestionLimitManager()
@@ -4659,7 +4702,7 @@ def ensure_initialization_fixed():
             )
             
             st.session_state.pdf_exporter = pdf_exporter
-            st.session_state.error_handler = error_handler
+            st.session_state.error_handler = error_handler # error_handler is a global instance
             st.session_state.fingerprinting_manager = fingerprinting_manager
             st.session_state.email_verification_manager = email_verification_manager
             st.session_state.question_limit_manager = question_limit_manager
@@ -4667,8 +4710,7 @@ def ensure_initialization_fixed():
             st.session_state.chat_blocked_by_dialog = False
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
-            # NEW: Initialize chat readiness flag to False
-            st.session_state.is_chat_ready = False 
+            st.session_state.is_chat_ready = False # Default to False, will be set to True after fingerprinting
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
@@ -4679,11 +4721,10 @@ def ensure_initialization_fixed():
             st.session_state.initialized = False
             return False
     
-    return True
+    return True # Already initialized
 
-# Modified main function with proper loading state handling (from prompt)
 def main_fixed():
-    """Main entry point with loading state management"""
+    """Main entry point with robust loading state management"""
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
@@ -4693,121 +4734,134 @@ def main_fixed():
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
 
-    # Initialize loading state if not already set (for first run)
+    # Initialize loading state and readiness flags if not already set (for first run)
     if 'is_loading' not in st.session_state:
         st.session_state.is_loading = False
         st.session_state.loading_message = ""
-    # NEW: Ensure is_chat_ready is always present and initially False
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
+    if 'initialized' not in st.session_state:
+        st.session_state.initialized = False
 
-    # Handle emergency saves and fingerprint data from query parameters first
-    # These handlers might trigger a rerun and update session state
+    # --- PHASE 1: Ensure Core Initialization (SessionManager, DB, AI tools) ---
+    # This must happen first, even if it means displaying the loading overlay,
+    # before attempting any operation that relies on session_manager.
+    if not st.session_state.initialized:
+        # Set loading state for initial core systems setup
+        set_loading_state(True, "Initializing core application systems...")
+        if not show_loading_overlay():
+            # If overlay isn't shown (e.g., first run, not yet rendered),
+            # this is just a safeguard; the overlay will appear on rerun.
+            pass 
+            
+        init_success = ensure_initialization_fixed()
+        if not init_success:
+            # Critical failure during initial setup, display error and stop.
+            set_loading_state(False)
+            st.error("❌ Critical application error during initialization. Please refresh the page.")
+            return # Halt execution
+        else:
+            # Initialization successful, but may still be waiting for fingerprint
+            set_loading_state(False) # Turn off generic init loading, specific messages will take over
+            st.rerun() # Rerun to proceed to next phase with initialized components
+            return # Halt current execution
+
+    # --- PHASE 2: Handle Query Parameters (Fingerprint/Emergency Save) ---
+    # These handlers might trigger a rerun and update `is_chat_ready`.
     handle_emergency_save_requests_from_query()
-    handle_fingerprint_requests_from_query() # This is CRITICAL for setting is_chat_ready
+    handle_fingerprint_requests_from_query() 
+    # If a rerun happened above, this current script run will be aborted and restarted.
+    # So the following code only runs if no rerun was triggered by query params.
 
-    # Now, check the global loading state (driven by button clicks or internal logic)
-    # AND if we are in chat mode but not yet chat ready.
+    # Now that core systems are initialized, fetch session_manager safely
+    session_manager = st.session_state.get('session_manager')
+    if not session_manager:
+        # This case should ideally not be reached if ensure_initialization_fixed was successful.
+        # It's a fallback for unexpected state loss.
+        set_loading_state(False)
+        st.error("❌ Session Manager not available after initialization. Please refresh the page.")
+        return
+
+    # --- PHASE 3: Global Loading Overlay Management (for user actions or chat readiness) ---
+    # Determine if we should *still* be showing the global loading overlay.
+    # This happens if a user clicks a button that sets `is_loading = True`
+    # OR if we are trying to go to the chat page but `is_chat_ready` is false (e.g., waiting for fingerprint).
     in_global_loading_phase = st.session_state.get('is_loading', False) or \
                               (st.session_state.get('page') == "chat" and not st.session_state.get('is_chat_ready', False))
-
+    
     if in_global_loading_phase:
-        # Determine the specific loading message
-        if not st.session_state.get('initialized', False):
-            set_loading_state(True, "Initializing core systems...")
+        # Update the specific loading message based on granular progress
+        current_session = None
+        if st.session_state.get('current_session_id'):
+            current_session = session_manager.db.load_session(st.session_state['current_session_id'])
+
+        if current_session and (current_session.fingerprint_id is None or \
+                               (current_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if current_session.fingerprint_id else True)):
+            set_loading_state(True, "Identifying your device for session continuity...")
         elif st.session_state.get('page') == "chat" and not st.session_state.get('is_chat_ready', False):
-            # Try to get the current session to check fingerprint status for a more specific message
-            # This is a bit of a chicken-and-egg, but if session_manager exists, we can try.
-            session_manager_temp = st.session_state.get('session_manager')
-            if session_manager_temp and st.session_state.get('current_session_id'):
-                current_session_for_msg = session_manager_temp.db.load_session(st.session_state['current_session_id'])
-                if current_session_for_msg and \
-                   (current_session_for_msg.fingerprint_id is None or \
-                    (current_session_for_msg.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if current_session_for_msg.fingerprint_id else True)):
-                    set_loading_state(True, "Identifying your device for session continuity...")
-                else:
-                    set_loading_state(True, "Preparing AI assistant and chat interface...")
-            else:
-                set_loading_state(True, "Preparing your session...")
-        else: # Generic loading if reason isn't specific
-            set_loading_state(True, st.session_state.get('loading_message', "Loading application..."))
-        
-        # Show the global loading overlay
+             set_loading_state(True, "Preparing AI assistant and chat interface...")
+        elif st.session_state.get('loading_reason'): # For cases like 'authenticate' or 'start_guest'
+            set_loading_state(True, st.session_state.get('loading_message', "Loading..."))
+        else:
+            set_loading_state(True, "Loading application components...")
+
         if show_loading_overlay():
-            # If the overlay is shown, we need to ensure initialization and related logic runs
-            # but without rendering the main app content.
+            # If the overlay is active, also render the detailed progress bars
+            render_initialization_progress_message()
+
+            # Process user actions that trigger a loading phase
+            loading_reason = st.session_state.get('loading_reason')
             
-            # Perform application initialization if not already done
-            if not st.session_state.get('initialized', False):
-                init_success = ensure_initialization_fixed()
-                if not init_success:
-                    set_loading_state(False) # Turn off overlay if init failed
-                    st.error("⚠️ Application failed to initialize properly. Please refresh.")
-                    return # Stop here if init critically failed
-
-            # If session_manager is ready, process login/guest start
-            session_manager = st.session_state.get('session_manager')
-            if session_manager:
-                loading_reason = st.session_state.get('loading_reason')
+            if loading_reason == 'start_guest':
+                session = session_manager.get_session() 
+                if session and session.last_activity is None:
+                    session.last_activity = datetime.now()
+                    session_manager.db.save_session(session)
+                st.session_state.page = "chat"
+                if 'loading_reason' in st.session_state:
+                    del st.session_state['loading_reason']
+                # Crucially, now rerun to let `is_chat_ready` be evaluated in next run.
+                st.rerun() 
                 
-                if loading_reason == 'start_guest':
-                    session = session_manager.get_session() # Creates/loads, initiates fingerprint if needed
-                    if session and session.last_activity is None:
-                        session.last_activity = datetime.now()
-                        session_manager.db.save_session(session)
-                    st.session_state.page = "chat"
-                    if 'loading_reason' in st.session_state:
-                        del st.session_state['loading_reason']
-                    # Don't set is_loading=False immediately here. Let the 'is_chat_ready' check manage it.
-                    st.rerun() # Rerun to check is_chat_ready status
-                    
-                elif loading_reason == 'authenticate':
-                    username = st.session_state.get('temp_username', '')
-                    password = st.session_state.get('temp_password', '')
-                    
-                    if username and password:
-                        authenticated_session = session_manager.authenticate_with_wordpress(username, password)
-                        if authenticated_session:
-                            st.session_state.current_session_id = authenticated_session.session_id
-                            st.session_state.page = "chat"
-                            if 'temp_username' in st.session_state:
-                                del st.session_state['temp_username']
-                            if 'temp_password' in st.session_state:
-                                del st.session_state['temp_password']
-                            if 'loading_reason' in st.session_state:
-                                del st.session_state['loading_reason']
-                            st.success(f"🎉 Welcome back, {authenticated_session.full_name}!", icon="👋")
-                            st.balloons()
-                            # Don't set is_loading=False immediately here. Let the 'is_chat_ready' check manage it.
-                            st.rerun() # Rerun to check is_chat_ready status
-                        else:
-                            set_loading_state(False) # Authentication failed, turn off overlay
-                            # Error message already shown by authenticate_with_wordpress
-                            return
+            elif loading_reason == 'authenticate':
+                username = st.session_state.get('temp_username', '')
+                password = st.session_state.get('temp_password', '')
+                
+                if username and password:
+                    authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                    if authenticated_session:
+                        st.session_state.current_session_id = authenticated_session.session_id
+                        st.session_state.page = "chat"
+                        if 'temp_username' in st.session_state:
+                            del st.session_state['temp_username']
+                        if 'temp_password' in st.session_state:
+                            del st.session_state['temp_password']
+                        if 'loading_reason' in st.session_state:
+                            del st.session_state['loading_reason']
+                        st.success(f"🎉 Welcome back, {authenticated_session.full_name}!", icon="👋")
+                        st.balloons()
+                        # Rerun to let `is_chat_ready` be evaluated in next run.
+                        st.rerun() 
                     else:
-                        set_loading_state(False)
-                        st.error("Authentication failed: Missing username or password.")
+                        set_loading_state(False) # Authentication failed, turn off overlay
+                        # Error message already shown by authenticate_with_wordpress
+                        # No rerun here, user stays on welcome page with error
                         return
+                else:
+                    set_loading_state(False)
+                    st.error("Authentication failed: Missing username or password.")
+                    # No rerun here, user stays on welcome page with error
+                    return
+            
+            # If we're still in a loading phase and haven't redirected due to success/failure,
+            # we simply return here to keep the overlay active and await a state change (e.g., fingerprint return).
+            return 
 
-            # If we are in the loading phase (either initial or waiting for fingerprint)
-            # and nothing explicitly said to stop this phase (e.g., successful login/guest start
-            # doesn't immediately mean fingerprint is back yet), then we just stop this current
-            # rendering of the main app, letting the overlay persist and waiting for a rerun.
-            # No explicit `st.stop()` here, as the outer `if in_global_loading_phase` handles it by
-            # preventing subsequent code from running. The reruns driven by query params or timeouts
-            # will eventually break this loop.
-            return # IMPORTANT: Exit main_fixed here to keep overlay active
-
-    # If we reach here, it means in_global_loading_phase is False, so the overlay should be gone.
-    # Now render the actual application content.
-    set_loading_state(False) # Ensure loading is off if we're past the global loading phase
+    # --- PHASE 4: Render Main Application Content (Overlay is OFF) ---
+    # If we reach this point, in_global_loading_phase is False, so the overlay should be deactivated.
+    set_loading_state(False) # Explicitly ensure loading state is off
 
     try:
-        session_manager = st.session_state.get('session_manager')
-        if not session_manager:
-            st.error("❌ Session Manager not available. Please refresh the page.")
-            return
-
         current_page = st.session_state.get('page')
         if current_page != "chat":
             render_welcome_page(session_manager)
@@ -4821,7 +4875,7 @@ def main_fixed():
                 st.session_state['page'] = None
                 st.rerun()
                 return
-            
+                
             # Render activity tracker and check for timeout
             activity_data_from_js = None
             if session and session.session_id: 
