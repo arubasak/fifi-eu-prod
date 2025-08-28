@@ -1616,7 +1616,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
+                if attempt_note < max_retries - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -3710,8 +3710,17 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
-            st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
-            logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
+            
+            # Additional verification that fingerprint is truly stable (Method 2)
+            session_reloaded = session_manager.db.load_session(session_id) # Reload to ensure latest state
+            if session_reloaded and not session_reloaded.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                st.session_state.is_chat_ready = True
+                st.session_state.fingerprint_completion_confirmed = True # NEW: for more explicit tracking if needed
+                logger.info(f"🔓 Chat input CONFIRMED unlocked for session {session_id[:8]} after verified JS fingerprinting.")
+            else:
+                st.session_state.is_chat_ready = False
+                logger.warning(f"⚠️ Chat input remains locked - fingerprint verification failed or is still temporary")
+            
             return True
         else:
             logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
@@ -4360,11 +4369,59 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     return disable_chat_input
 
+# Method 1: Add show_initialization_progress function
+def show_initialization_progress(session: UserSession):
+    """Shows initialization progress to prevent premature question submission"""
+    
+    # Check various initialization states
+    app_initialized = st.session_state.get('initialized', False)
+    # Fingerprint is considered stable if it's not a temporary Python/fallback one
+    fingerprint_stable = not (session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if session.fingerprint_id else True)
+    chat_ready = st.session_state.get('is_chat_ready', False)
+    
+    if not app_initialized or not fingerprint_stable or not chat_ready:
+        st.info("🔄 **Initializing AI Assistant...**")
+        
+        # Progress indicators
+        progress_col1, progress_col2, progress_col3 = st.columns(3)
+        
+        with progress_col1:
+            if app_initialized:
+                st.success("✅ Core Systems")
+            else:
+                st.warning("🔄 Core Systems")
+                
+        with progress_col2:
+            if fingerprint_stable:
+                st.success("✅ Device ID")
+            else:
+                st.warning("🔄 Device ID")
+                
+        with progress_col3:
+            if chat_ready:
+                st.success("✅ Chat Ready")
+            else:
+                st.warning("🔄 Chat Ready")
+        
+        if not fingerprint_stable:
+            st.caption("🔍 Identifying your device for session continuity...")
+        elif not chat_ready:
+            st.caption("🤖 Preparing AI assistant...")
+            
+        return True  # Still initializing
+    
+    return False  # Initialization complete
+
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
+
+    # Method 1: Call show_initialization_progress at the start
+    if show_initialization_progress(session):
+        # Don't render the rest of the chat interface yet
+        return
 
     # Simple activity tracking
     if activity_result:
@@ -4379,6 +4436,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 logger.error(f"Failed to update activity from JavaScript: {e}")
 
     # Fingerprinting
+    # The check for fingerprint_needed and rendering the component is still important
+    # It ensures the JS component runs if the fingerprint is still temporary/fallback
     fingerprint_needed = (
         not session.fingerprint_id or
         session.fingerprint_method == "temporary_fallback_python" or
@@ -4464,17 +4523,24 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                     st.markdown("---") # Visual separator
 
-    # Chat input
-    # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
-    # And combine with other disabled conditions
+    # Method 1: Enhanced chat input with clear initialization feedback
     overall_chat_disabled = (
         not st.session_state.get('is_chat_ready', False) or 
         should_disable_chat_input_by_dialog or 
         session.ban_status.value != BanStatus.NONE.value
     )
 
-    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=overall_chat_disabled)
+    # Show specific message based on why chat is disabled
+    if not st.session_state.get('is_chat_ready', False):
+        chat_placeholder_message = "🔄 Initializing... Please wait for setup to complete"
+    elif should_disable_chat_input_by_dialog:
+        chat_placeholder_message = "📧 Complete email verification above to continue"
+    elif session.ban_status.value != BanStatus.NONE.value:
+        chat_placeholder_message = "🚫 Chat temporarily restricted"
+    else:
+        chat_placeholder_message = "Ask me about ingredients, suppliers, or market trends..."
+
+    prompt = st.chat_input(chat_placeholder_message, disabled=overall_chat_disabled)
     
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
@@ -4604,7 +4670,7 @@ def ensure_initialization_fixed():
             st.session_state.chat_blocked_by_dialog = False
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
-            # NEW: Initialize chat readiness flag
+            # NEW: Initialize chat readiness flag to False
             st.session_state.is_chat_ready = False 
             
             st.session_state.initialized = True
@@ -4715,10 +4781,13 @@ def main_fixed():
                 # that's still waiting for the JS component to return its data).
                 # The `fingerprint_checked_for_inheritance_{session.session_id}` flag, set by get_session(),
                 # indicates that the initial inheritance/fingerprint check has occurred.
-                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                fingerprint_is_stable = not (session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if session.fingerprint_id else True)
                 inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
 
                 if fingerprint_is_stable or inheritance_checked:
+                    # If fingerprint is already stable, or initial inheritance check found a stable one,
+                    # and the JS fingerprint component has had a chance to run (or is not expected to run further)
+                    # then we can set chat ready.
                     st.session_state.is_chat_ready = True
                     logger.info(f"Chat input unlocked for session {session.session_id[:8]} after initial session/fingerprint setup.")
                 else:
