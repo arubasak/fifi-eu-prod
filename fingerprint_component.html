@@ -11,7 +11,7 @@
     try {
         const sessionId = "{SESSION_ID}"; 
         
-        console.log('🔍 FiFi Fingerprinting: Starting for session', sessionId.substring(0, 8));
+        console.log('🔍 FiFi Fingerprinting (FingerprintJS v4): Starting for session', sessionId.substring(0, 8));
         
         // Prevent multiple executions
         if (window.fifi_fp_executed_for_session === sessionId) {
@@ -20,147 +20,109 @@
         }
         window.fifi_fp_executed_for_session = sessionId;
 
-        // Layer 1: Canvas Fingerprinting (Primary)
-        function generateCanvasFingerprint() {
-            try {
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-                canvas.width = 220; 
-                canvas.height = 100;
-                ctx.textBaseline = 'top'; 
-                ctx.font = '14px Arial';
-                ctx.fillStyle = '#f60'; 
-                ctx.fillRect(125, 1, 62, 20);
-                ctx.fillStyle = '#069'; 
-                ctx.fillText('FiFi AI Canvas Test 🤖', 2, 15);
-                ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; 
-                ctx.fillText('Food & Beverage Industry', 4, 45);
-                ctx.strokeStyle = '#000'; 
-                ctx.beginPath();
-                ctx.arc(50, 50, 20, 0, Math.PI * 2); 
-                ctx.stroke();
-                return btoa(canvas.toDataURL()).slice(0, 32);
-            } catch (e) {
-                console.error("❌ Canvas fingerprint failed:", e);
-                return 'canvas_blocked';
-            }
-        }
-        
-        // Layer 2: WebGL Fingerprinting (Secondary)
-        function generateWebGLFingerprint() {
-            try {
-                const canvas = document.createElement('canvas');
-                const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-                if (!gl) { return 'webgl_unavailable'; }
-                const webglData = {
-                    vendor: gl.getParameter(gl.VENDOR),
-                    renderer: gl.getParameter(gl.RENDERER),
-                    version: gl.getParameter(gl.VERSION),
-                    extensions: gl.getSupportedExtensions() ? gl.getSupportedExtensions().slice(0, 10) : []
-                };
-                return btoa(JSON.stringify(webglData)).slice(0, 32);
-            } catch (e) {
-                console.error("❌ WebGL fingerprint failed:", e);
-                return 'webgl_blocked';
-            }
-        }
-        
-        // Layer 3: Audio Context Fingerprinting (Tertiary)
-        function generateAudioFingerprint() {
-            try {
-                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                const oscillator = audioContext.createOscillator();
-                const analyser = audioContext.createAnalyser();
-                const gainNode = audioContext.createGain();
-                oscillator.type = 'triangle'; 
-                oscillator.frequency.value = 1000; 
-                gainNode.gain.value = 0;
-                oscillator.connect(analyser); 
-                analyser.connect(gainNode); 
-                gainNode.connect(audioContext.destination);
-                oscillator.start(0);
-                const frequencyData = new Uint8Array(analyser.frequencyBinCount);
-                analyser.getByteFrequencyData(frequencyData);
-                oscillator.stop(); 
-                audioContext.close();
-                return btoa(Array.from(frequencyData.slice(0, 32)).join(',')).slice(0, 32);
-            } catch (e) {
-                console.error("❌ Audio fingerprint failed:", e);
-                return 'audio_blocked';
-            }
-        }
-        
-        // Execute fingerprinting
-        const canvasFp = generateCanvasFingerprint();
-        const webglFp = generateWebGLFingerprint();
-        const audioFp = generateAudioFingerprint();
-        
-        // Determine method and fingerprint ID
-        let method = 'canvas'; 
-        let fingerprintId = canvasFp;
-        const workingMethods = [];
-        
-        if (canvasFp !== 'canvas_blocked') workingMethods.push('canvas');
-        if (webglFp !== 'webgl_blocked' && webglFp !== 'webgl_unavailable') workingMethods.push('webgl');  
-        if (audioFp !== 'audio_blocked') workingMethods.push('audio');
-        
-        if (workingMethods.length === 0) {
-            method = 'fallback';
-            fingerprintId = 'privacy_browser_' + Date.now();
-        } else if (workingMethods.length > 1) {
-            method = 'hybrid';
-            fingerprintId = btoa([canvasFp, webglFp, audioFp].join('|')).slice(0, 32);
-        } else {
-            method = workingMethods[0];
-            fingerprintId = (method === 'canvas' ? canvasFp : (method === 'webgl' ? webglFp : audioFp));
-        }
-        
-        // Determine privacy level
-        let privacy = 'standard';
-        if (canvasFp === 'canvas_blocked' && webglFp.includes('blocked') && audioFp === 'audio_blocked') {
-            privacy = 'high_privacy';
-        }
-        
-        console.log("🔍 FiFi Fingerprinting complete:", {
-            fingerprint_id: fingerprintId, 
-            method: method, 
-            privacy: privacy, 
-            working: workingMethods.length
-        });
-        
-        // REDIRECT METHOD: Send data via URL parameters
-        function getAppUrl() {
-            try {
-                if (window.parent && window.parent.location.origin === window.location.origin) {
-                    return window.parent.location.origin + window.parent.location.pathname;
+        // Load FingerprintJS v4 from CDN
+        import('https://openfpcdn.io/fingerprintjs/v4')
+            .then(FingerprintJS => FingerprintJS.load())
+            .then(fp => fp.get())
+            .then(result => {
+                // Map FingerprintJS result to existing structure
+                const fingerprintId = result.visitorId;
+                const method = 'fingerprintjs';
+                const workingMethods = ['fingerprintjs'];
+                
+                // Determine privacy level based on confidence
+                let privacy = 'standard';
+                if (result.confidence && result.confidence.score < 0.7) {
+                    privacy = 'high_privacy';  // Lower confidence suggests privacy measures
+                } else if (result.confidence && result.confidence.score < 0.9) {
+                    privacy = 'medium_privacy';
                 }
-            } catch (e) {
-                console.warn("Using current window location as fallback");
-            }
-            return window.location.origin + window.location.pathname;
-        }
-        
-        // Build fingerprint URL with parameters
-        const appUrl = getAppUrl();
-        const fingerprintUrl = `${appUrl}?event=fingerprint_complete&session_id=${sessionId}&fingerprint_id=${encodeURIComponent(fingerprintId)}&method=${encodeURIComponent(method)}&privacy=${encodeURIComponent(privacy)}&working_methods=${encodeURIComponent(workingMethods.join(','))}&timestamp=${Date.now()}`;
-        
-        console.log("🔍 FiFi Fingerprinting: Redirecting with data...");
-        
-        // Redirect to pass data to Python
-        try {
-            if (window.parent && window.parent.location.origin === window.location.origin) {
-                window.parent.location.href = fingerprintUrl;
-            } else {
-                window.location.href = fingerprintUrl;
-            }
-        } catch (e) {
-            console.error('Fingerprint redirect failed:', e);
-        }
+                
+                console.log("🔍 FiFi Fingerprinting (FingerprintJS v4) complete:", {
+                    fingerprint_id: fingerprintId, 
+                    method: method, 
+                    privacy: privacy, 
+                    confidence: result.confidence?.score,
+                    working: workingMethods.length
+                });
+                
+                // REDIRECT METHOD: Send data via URL parameters (same as original)
+                function getAppUrl() {
+                    try {
+                        if (window.parent && window.parent.location.origin === window.location.origin) {
+                            return window.parent.location.origin + window.parent.location.pathname;
+                        }
+                    } catch (e) {
+                        console.warn("Using current window location as fallback");
+                    }
+                    return window.location.origin + window.location.pathname;
+                }
+                
+                // Build fingerprint URL with parameters
+                const appUrl = getAppUrl();
+                const fingerprintUrl = `${appUrl}?event=fingerprint_complete&session_id=${sessionId}&fingerprint_id=${encodeURIComponent(fingerprintId)}&method=${encodeURIComponent(method)}&privacy=${encodeURIComponent(privacy)}&working_methods=${encodeURIComponent(workingMethods.join(','))}&timestamp=${Date.now()}`;
+                
+                console.log("🔍 FiFi Fingerprinting: Redirecting with data...");
+                
+                // Redirect to pass data to Python
+                try {
+                    if (window.parent && window.parent.location.origin === window.location.origin) {
+                        window.parent.location.href = fingerprintUrl;
+                    } else {
+                        window.location.href = fingerprintUrl;
+                    }
+                } catch (e) {
+                    console.error('Fingerprint redirect failed:', e);
+                }
+            })
+            .catch(fingerprintError => {
+                console.error("🚨 FingerprintJS failed, using fallback:", fingerprintError);
+                
+                // Fallback fingerprint generation (same logic as original)
+                const fingerprintId = 'fingerprintjs_failed_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+                const method = 'fallback';
+                const privacy = 'high_privacy';
+                const workingMethods = [];
+                
+                console.log("🔍 FiFi Fingerprinting: Using fallback fingerprint:", {
+                    fingerprint_id: fingerprintId, 
+                    method: method, 
+                    privacy: privacy, 
+                    working: workingMethods.length
+                });
+                
+                // Same redirect mechanism for fallback
+                function getAppUrl() {
+                    try {
+                        if (window.parent && window.parent.location.origin === window.location.origin) {
+                            return window.parent.location.origin + window.parent.location.pathname;
+                        }
+                    } catch (e) {
+                        console.warn("Using current window location as fallback");
+                    }
+                    return window.location.origin + window.location.pathname;
+                }
+                
+                const appUrl = getAppUrl();
+                const fallbackUrl = `${appUrl}?event=fingerprint_complete&session_id=${sessionId}&fingerprint_id=${encodeURIComponent(fingerprintId)}&method=${encodeURIComponent(method)}&privacy=${encodeURIComponent(privacy)}&working_methods=${encodeURIComponent(workingMethods.join(','))}&timestamp=${Date.now()}`;
+                
+                console.log("🔍 FiFi Fingerprinting: Redirecting with fallback data...");
+                
+                try {
+                    if (window.parent && window.parent.location.origin === window.location.origin) {
+                        window.parent.location.href = fallbackUrl;
+                    } else {
+                        window.location.href = fallbackUrl;
+                    }
+                } catch (e) {
+                    console.error('Fallback redirect failed:', e);
+                }
+            });
         
     } catch (error) {
         console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
         
-        // Redirect with error information
+        // Complete error handling - redirect with error information
         function getAppUrl() {
             try {
                 if (window.parent && window.parent.location.origin === window.location.origin) {
@@ -172,8 +134,16 @@
             return window.location.origin + window.location.pathname;
         }
         
+        // Create emergency fallback fingerprint for critical errors
+        const emergencyFingerprintId = 'emergency_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        const emergencyMethod = 'emergency_fallback';
+        const emergencyPrivacy = 'high_privacy';
+        const emergencyWorkingMethods = [];
+        
+        console.log("🚨 FiFi Fingerprinting: Using emergency fallback due to critical error");
+        
         const appUrl = getAppUrl();
-        const errorUrl = `${appUrl}?event=fingerprint_error&session_id=${sessionId}&error=${encodeURIComponent(error.message)}&timestamp=${Date.now()}`;
+        const errorUrl = `${appUrl}?event=fingerprint_complete&session_id=${sessionId}&fingerprint_id=${encodeURIComponent(emergencyFingerprintId)}&method=${encodeURIComponent(emergencyMethod)}&privacy=${encodeURIComponent(emergencyPrivacy)}&working_methods=${encodeURIComponent(emergencyWorkingMethods.join(','))}&error=${encodeURIComponent(error.message)}&timestamp=${Date.now()}`;
         
         try {
             if (window.parent && window.parent.location.origin === window.location.origin) {
@@ -182,7 +152,21 @@
                 window.location.href = errorUrl;
             }
         } catch (e) {
-            console.error('Error redirect failed:', e);
+            console.error('❌ Emergency error redirect also failed:', e);
+            
+            // Last resort: try to at least log the session ID for debugging
+            console.error('🆘 CRITICAL: All fingerprinting and redirect methods failed for session:', sessionId);
+            
+            // If even the redirect fails, try a simple reload as absolute last resort
+            try {
+                if (window.parent && window.parent !== window) {
+                    window.parent.location.reload();
+                } else {
+                    window.location.reload();
+                }
+            } catch (reloadError) {
+                console.error('💥 CATASTROPHIC: Even reload failed. Manual intervention required.', reloadError);
+            }
         }
     }
 })();
