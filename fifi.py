@@ -3710,8 +3710,9 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
-            st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
-            logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
+            st.session_state.is_chat_ready = True
+            st.session_state.fingerprint_processing_complete = True  # Smooth transition flag
+            logger.info(f"Chat interface ready for session {session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
             logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
@@ -3849,8 +3850,11 @@ def handle_fingerprint_requests_from_query():
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
             if success:
-                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
-                st.stop()
+                logger.info(f"🔄 Fingerprint processed successfully, triggering page update to show chat interface")
+                st.rerun()  # ✅ THIS ALLOWS SMOOTH TRANSITION TO CHAT
+            else:
+                logger.warning(f"⚠️ Fingerprint processing failed, staying on initialization screen")
+                st.stop()  # Only stop if processing actually failed
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
         
@@ -4378,25 +4382,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             except Exception as e:
                 logger.error(f"Failed to update activity from JavaScript: {e}")
 
-    # Fingerprinting
-    fingerprint_needed = (
-        not session.fingerprint_id or
-        session.fingerprint_method == "temporary_fallback_python" or
-        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-    )
-    
-    fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-    if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
-        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-        st.session_state[fingerprint_key] = True
-
-    # Browser close detection for emergency saves
-    if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
-        try:
-            render_simplified_browser_close_detection(session.session_id)
-        except Exception as e:
-            logger.error(f"Browser close detection failed: {e}")
-
     # Enhanced rate limit display with toast
     if 'rate_limit_hit' in st.session_state:
         rate_limit_info = st.session_state.rate_limit_hit
@@ -4709,27 +4694,6 @@ def main_fixed():
                     st.error("Authentication failed: Missing username or password.")
                     return
 
-            # NEW: Logic to unlock chat input after session is created/authenticated and initial fingerprint check
-            if session:
-                # Check if the session has a *stable* fingerprint (not a temporary Python fallback 
-                # that's still waiting for the JS component to return its data).
-                # The `fingerprint_checked_for_inheritance_{session.session_id}` flag, set by get_session(),
-                # indicates that the initial inheritance/fingerprint check has occurred.
-                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-                inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
-
-                if fingerprint_is_stable or inheritance_checked:
-                    st.session_state.is_chat_ready = True
-                    logger.info(f"Chat input unlocked for session {session.session_id[:8]} after initial session/fingerprint setup.")
-                else:
-                    # If it's still a temporary fingerprint and inheritance check hasn't happened yet, 
-                    # keep chat locked. This state implies the JS fingerprint component is expected to run.
-                    st.session_state.is_chat_ready = False
-                    logger.info(f"Chat input remains locked for session {session.session_id[:8]} pending JS fingerprinting.")
-            else:
-                st.session_state.is_chat_ready = False # Ensure locked if no session obtained
-
-
             # Clear loading state and rerun to show the actual page
             set_loading_state(False)
             st.rerun()
@@ -4797,7 +4761,43 @@ def main_fixed():
                 return
 
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
+            
+            # MOVE JavaScript components OUTSIDE chat interface so they run independently
+            # 1. Render fingerprinting component if needed
+            fingerprint_needed = (
+                not session.fingerprint_id or
+                session.fingerprint_method == "temporary_fallback_python" or
+                session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+            )
+            
+            fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+            if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
+                session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                st.session_state[fingerprint_key] = True
+            
+            # 2. Render browser close detection if needed
+            if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
+                try:
+                    render_simplified_browser_close_detection(session.session_id)
+                except Exception as e:
+                    logger.error(f"Browser close detection failed: {e}")
+            
+            # 3. Only render chat interface AFTER JavaScript fingerprinting is complete
+            if st.session_state.get('is_chat_ready', False):
+                render_chat_interface_simplified(session_manager, session, activity_data_from_js)
+            else:
+                # Check if fingerprinting just completed (for smooth transition)
+                if 'fingerprint_processing_complete' in st.session_state:
+                    st.success("✅ **Session Ready!**")
+                    st.caption("Loading your chat interface...")
+                    # Clear the flag after showing success
+                    del st.session_state['fingerprint_processing_complete']
+                    st.rerun()  # Immediate transition to chat
+                else:
+                    st.info("🔍 **Initializing secure session...**")
+                    st.caption("Please wait while we set up your secure browsing session.")
+                    if session.fingerprint_id and session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                        st.caption(f"Fingerprinting method: {session.fingerprint_method}")
 
     except Exception as e:
         logger.error(f"Main application error: {e}", exc_info=True)
