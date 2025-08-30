@@ -1617,7 +1617,7 @@ class ZohoCRMManager:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
                 if attempt_note < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
                     return False
@@ -1671,33 +1671,16 @@ class RateLimiter:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
 
-    def is_allowed(self, identifier: str) -> Dict[str, Any]:
+    def is_allowed(self, identifier: str) -> bool:
         with self._lock:
             now = time.time()
             self.requests[identifier] = [t for t in self.requests[identifier] if t > now - self.window_seconds]
-            
             if len(self.requests[identifier]) < self.max_requests:
                 self.requests[identifier].append(now)
                 logger.debug(f"Rate limit allowed for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-                return {
-                    'allowed': True,
-                    'requests_made': len(self.requests[identifier]),
-                    'max_requests': self.max_requests,
-                    'window_seconds': self.window_seconds
-                }
-            
-            # Calculate time until next request is allowed
-            oldest_request = min(self.requests[identifier])
-            time_until_next = int((oldest_request + self.window_seconds) - now)
-            
+                return True
             logger.warning(f"Rate limit exceeded for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-            return {
-                'allowed': False,
-                'requests_made': len(self.requests[identifier]),
-                'max_requests': self.max_requests,
-                'window_seconds': self.window_seconds,
-                'time_until_next': max(0, time_until_next)
-            }
+            return False
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
     """Sanitizes user input to prevent XSS and limit length."""
@@ -2554,7 +2537,6 @@ class SessionManager:
                         merged_ban_status = s.ban_status
                         merged_ban_start_time = s.ban_start_time
                         merged_ban_end_time = s.ban_end_time
-                        merged_ban_reason = s.ban_reason
                         merged_question_limit_reached = s.question_limit_reached 
 
                 # Merge evasion stats (take max)
@@ -2622,8 +2604,8 @@ class SessionManager:
 
             # Update fingerprint to the 'real' one if current is temporary and a real one was found
             # The 'real' fingerprint should come from the most authoritative source.
-            if (session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if session.fingerprint_id else True) and \
-               not (source_for_identity_and_base_data.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if source_for_identity_and_base_data.fingerprint_id else True):
+            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and \
+               not source_for_identity_and_base_data.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                
                 logger.info(f"Updating temporary fingerprint {session.fingerprint_id[:8]} to recognized fingerprint {source_for_identity_and_base_data.fingerprint_id[:8]}")
                 session.fingerprint_id = source_for_identity_and_base_data.fingerprint_id
@@ -2667,7 +2649,8 @@ class SessionManager:
                     # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
                     # And this check hasn't been performed for this session yet in the current rerun cycle.
                     fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
-                    if ((session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if session.fingerprint_id else True) and
+                    if (session.fingerprint_id and 
+                        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
                         not st.session_state.get(fingerprint_checked_key, False)):
                         
                         self._attempt_fingerprint_inheritance(session)
@@ -3083,33 +3066,39 @@ class SessionManager:
             # Handle cases where fingerprint_id might still be temporary or None during early load.
             # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
             rate_limiter_id = session.fingerprint_id
-            if rate_limiter_id is None or (rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if rate_limiter_id else True):
+            if rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 # Fallback to session_id for truly un-fingerprinted or temporary cases,
                 # to still apply some level of protection, albeit less robust.
                 rate_limiter_id = session.session_id
                 logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
 
+            # Clear previous rate limit message before checking
+            # This is important: if a JS-driven rate limit message was active, Python clears its state
+            # for the next question attempt, so JS doesn't get re-instructed to display it.
+            if 'rate_limit_info' in st.session_state:
+                del st.session_state['rate_limit_info']
+
             # Check rate limiting using fingerprint_id (or fallback session_id)
-            rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
-            if not rate_limit_result['allowed']:
-                time_until_next = rate_limit_result.get('time_until_next', 0)
-                max_requests = rate_limit_result.get('max_requests', 2)
-                window_seconds = rate_limit_result.get('window_seconds', 60)
+            if not self.rate_limiter.is_allowed(rate_limiter_id): # MODIFIED: Use rate_limiter_id
+                # Store rate limit info in session_state to display persistently
+                # Calculate time until reset based on the oldest request in the window
+                oldest_request_time = self.rate_limiter.requests[rate_limiter_id][0] if self.rate_limiter.requests[rate_limiter_id] else time.time()
+                # Convert to milliseconds for JavaScript consistency
+                reset_timestamp_ms = int((oldest_request_time + self.rate_limiter.window_seconds) * 1000)
                 
-                # Store detailed rate limit info in session state
-                st.session_state.rate_limit_hit = {
-                    'timestamp': datetime.now(),
-                    'time_until_next': time_until_next,
-                    'max_requests': max_requests,
-                    'window_seconds': window_seconds,
-                    'expires_at': datetime.now() + timedelta(seconds=15)  # Show for 15 seconds
+                st.session_state.rate_limit_info = {
+                    'active': True,
+                    'message': 'Too many requests. Please wait a moment before asking another question.',
+                    'max_requests': self.rate_limiter.max_requests,
+                    'window_seconds': self.rate_limiter.window_seconds,
+                    'reset_timestamp_ms': reset_timestamp_ms # Store in milliseconds for JS
                 }
-                
+                # Return an immediate response indicating rate limit
                 return {
-                    'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
+                    'content': 'Too many requests. Rate limit active.', # Content to show in chat (can be generic)
                     'success': False,
                     'source': 'Rate Limiter',
-                    'time_until_next': time_until_next
+                    'is_rate_limited': True # Custom flag for UI handling
                 }
             
             # Content moderation check (MOVED HERE)
@@ -3212,6 +3201,19 @@ class SessionManager:
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
         try:
+            # Attempt CRM save for eligible users (manual save - no 15-minute requirement)
+            if self._is_manual_crm_save_eligible(session):
+                with st.spinner("Saving your conversation to CRM..."):
+                    try:
+                        success = self.zoho.save_chat_transcript_sync(session, "Clear Chat")
+                        if success:
+                            st.success("✅ Conversation saved to CRM successfully before clearing!")
+                        else:
+                            st.warning("⚠️ Conversation save failed during clear chat, but chat will still be cleared.")
+                    except Exception as e:
+                        logger.error(f"CRM save during clear chat failed: {e}")
+                        st.warning("⚠️ Conversation save failed during clear chat, but chat will still be cleared.")
+
             # Soft clear: set offset to hide all current messages
             session.display_message_offset = len(session.messages)
             
@@ -3709,20 +3711,8 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
-            
-            # Additional verification that fingerprint is truly stable (Method 2)
-            # Reload session to ensure the current session object reflects the DB update
-            session_reloaded = session_manager.db.load_session(session_id) 
-            # Crucially, check if the reloaded session now has a non-temporary fingerprint
-            if session_reloaded and not (session_reloaded.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if session_reloaded.fingerprint_id else True):
-                st.session_state.is_chat_ready = True
-                st.session_state.fingerprint_completion_confirmed = True # NEW: for more explicit tracking if needed
-                logger.info(f"🔓 Chat input CONFIRMED unlocked for session {session_id[:8]} after verified JS fingerprinting.")
-            else:
-                # If after reload, fingerprint is still temporary/fallback, keep chat locked.
-                st.session_state.is_chat_ready = False
-                logger.warning(f"⚠️ Chat input remains locked - fingerprint verification failed or is still temporary")
-            
+            st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
+            logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
             logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
@@ -3816,7 +3806,7 @@ def handle_emergency_save_requests_from_query():
             logger.critical(f"Emergency save processing crashed from query parameter: {e}", exc_info=True)
         
         # Removed time.sleep(2)
-        st.rerun() # Rerun after processing to ensure state is clean
+        st.stop()
     else:
         logger.debug("ℹ️ No emergency save requests found in current URL query parameters.")
 
@@ -3842,8 +3832,7 @@ def handle_fingerprint_requests_from_query():
         
         logger.info(f"Extracted - ID: {fingerprint_id}, Method: {method}, Privacy: {privacy}, Working Methods: {working_methods}")
         
-        # Clear query parameters AFTER extraction, but before processing to avoid re-triggering
-        # This is CRITICAL to prevent infinite loops on subsequent reruns.
+        # Clear query parameters AFTER extraction
         params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
         for param in params_to_clear:
             if param in st.query_params:
@@ -3852,7 +3841,8 @@ def handle_fingerprint_requests_from_query():
         if not fingerprint_id or not method:
             st.error("❌ **Fingerprint Error** - Missing required data in redirect")
             logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
-            st.rerun() # Rerun to show error cleanly, query params are already cleared
+            # Removed time.sleep(2)
+            st.rerun()
             return
         
         try:
@@ -3860,72 +3850,26 @@ def handle_fingerprint_requests_from_query():
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
             if success:
-                # If processing was successful and is_chat_ready was set,
-                # trigger a rerun to immediately update the UI and reflect the new state.
-                logger.info(f"🔄 Fingerprint processed successfully, triggering rerun to update UI.")
-                st.rerun() # *** CRITICAL CHANGE: Rerun instead of st.stop() ***
-            else:
-                # If processing failed, we still want to clear the query params and perhaps show a general error
-                logger.warning("⚠️ Fingerprint processing failed, but query parameters cleared. Rerunning.")
-                st.rerun() # Re-render to clear any partial state
-                
+                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
+                st.stop()
         except Exception as e:
-            logger.error(f"Silent fingerprint processing crashed: {e}")
-            st.error(f"❌ An unexpected error occurred during fingerprint setup: {str(e)}")
-            st.rerun() # Re-render to clear error and params
+            logger.error(f"Silent fingerprint processing failed: {e}")
         
-        # No explicit return needed here, the reruns will handle the flow.
+        return
+    else:
+        logger.debug("ℹ️ No fingerprint requests found in current URL query parameters.")
 
 # =============================================================================
 # UI COMPONENTS
 # =============================================================================
 
-def render_initialization_progress_message():
-    """Renders detailed initialization progress messages within the loading overlay."""
-    app_initialized = st.session_state.get('initialized', False)
-    # Check current session's fingerprint status if a session exists
-    session_manager_temp = st.session_state.get('session_manager')
-    current_session_for_msg = None
-    if session_manager_temp and st.session_state.get('current_session_id'):
-        current_session_for_msg = session_manager_temp.db.load_session(st.session_state['current_session_id'])
-
-    fingerprint_stable = not (current_session_for_msg.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if (current_session_for_msg and current_session_for_msg.fingerprint_id) else True)
-    chat_ready = st.session_state.get('is_chat_ready', False)
-
-    st.markdown("---")
-    progress_col1, progress_col2, progress_col3 = st.columns(3)
-    
-    with progress_col1:
-        if app_initialized:
-            st.success("✅ Core Systems")
-        else:
-            st.warning("🔄 Core Systems")
-            
-    with progress_col2:
-        if fingerprint_stable:
-            st.success("✅ Device ID")
-        else:
-            st.warning("🔄 Device ID")
-            
-    with progress_col3:
-        if chat_ready:
-            st.success("✅ Chat Ready")
-        else:
-            st.warning("🔄 Chat Ready")
-    
-    st.markdown("---")
-    if not fingerprint_stable:
-        st.caption("🔍 Identifying your device for session continuity...")
-    elif not chat_ready:
-        st.caption("🤖 Preparing AI assistant...")
-    else:
-        st.caption("🚀 Loading complete, redirecting...")
-
+# Modified render_welcome_page function (from prompt)
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock."""
     
-    # The global loading overlay now handles preventing flashes of this page.
-    # This function is only called when not in the global loading phase.
+    # Show loading overlay if in loading state
+    if show_loading_overlay():
+        return
     
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
@@ -4066,7 +4010,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 
         # Show fingerprint status
         if session.fingerprint_id:
-            if (session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if session.fingerprint_id else True):
+            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 st.markdown("**Device ID:** Identifying...")
                 st.caption("Fingerprinting in progress...")                
             else:
@@ -4259,7 +4203,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             st.session_state.verification_stage = 'email_entry' # Force email entry if limit hit
             st.session_state.guest_continue_active = False # Clear any previous guest-continue state
     elif session.declined_recognized_email_at and not st.session_state.guest_continue_active:
-        # This is the scenario where user declined recognized email, has questions left, but hasn't explicitly
+        # This is the scenario where user declines a recognized email, has questions left, but hasn't explicitly
         # chosen "Continue as Guest for Now" in this session state.
         should_show_prompt = True
         if st.session_state.verification_stage is None:
@@ -4435,14 +4379,15 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             except Exception as e:
                 logger.error(f"Failed to update activity from JavaScript: {e}")
 
-    # Fingerprinting: ensure component is rendered if still using a temporary ID
-    fingerprint_still_needed = (
+    # Fingerprinting
+    fingerprint_needed = (
         not session.fingerprint_id or
-        (session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if session.fingerprint_id else True)
+        session.fingerprint_method == "temporary_fallback_python" or
+        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
     )
     
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-    if fingerprint_still_needed and not st.session_state.get(fingerprint_key, False):
+    if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
         st.session_state[fingerprint_key] = True
 
@@ -4453,63 +4398,115 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         except Exception as e:
             logger.error(f"Browser close detection failed: {e}")
 
-    # Enhanced rate limit display with toast
-    if 'rate_limit_hit' in st.session_state:
-        rate_limit_info = st.session_state.rate_limit_hit
-        if datetime.now() < rate_limit_info['expires_at']:
-            time_until_next = rate_limit_info.get('time_until_next', 0)
-            max_requests = rate_limit_info.get('max_requests', 2)
-            window_seconds = rate_limit_info.get('window_seconds', 60)
-            
-            if time_until_next > 0:
-                st.toast(f"Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.", icon="⚠️")
-            else:
-                st.toast("Rate limit exceeded. Please wait a moment before asking another question.", icon="⚠️")
-        else:
-            # Clean up expired rate limit message
-            del st.session_state.rate_limit_hit
-
-    # Method 3: Timeout-based Fallback for Fingerprinting (appears only if still not ready after a delay)
-    # This block should only activate IF is_chat_ready is still FALSE, even though render_chat_interface_simplified is called.
-    # This might happen if `is_chat_ready` was set to True by user choice, but the fingerprint_component is still "needed" from above.
-    if not st.session_state.get('is_chat_ready', False): # This condition should normally be False here
-        fingerprint_timeout_key = f"fingerprint_timeout_{session.session_id}"
-        
-        if fingerprint_still_needed: # Only show fallback options if fingerprint is still needed
-            if fingerprint_timeout_key not in st.session_state:
-                st.session_state[fingerprint_timeout_key] = time.time()
-            
-            time_elapsed = time.time() - st.session_state[fingerprint_timeout_key]
-            
-            if time_elapsed > 7:  # 7 seconds timeout for the component to return
-                st.warning("🔄 Device identification is taking longer than expected...")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("⏳ Keep Waiting", use_container_width=True, key="keep_waiting_fp"):
-                        st.session_state[fingerprint_timeout_key] = time.time()  # Reset timer
-                        st.rerun()
-                
-                with col2:
-                    if st.button("🚀 Continue Anyway", use_container_width=True, key="continue_anyway_fp"):
-                        # Force unlock with fallback fingerprint
-                        session.fingerprint_id = f"timeout_fallback_{session.session_id[:8]}"
-                        session.fingerprint_method = "timeout_fallback"
-                        session.browser_privacy_level = "high_privacy" 
-                        session_manager.db.save_session(session)
-                        st.session_state.is_chat_ready = True # User forces chat ready
-                        st.success("✅ Chat unlocked with temporary device ID")
-                        logger.info(f"Chat unlocked by user choice after fingerprint timeout for session {session.session_id[:8]}")
-                        st.rerun()
-                
-                st.caption("Device identification helps maintain your session across browser refreshes and ensures fair usage.")
-        
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
 
-    # Render chat content (only when not blocked by dialog, which is different from global loading)
+    # --- NEW: Display persistent rate limit message and inject JS ---
+    rate_limit_info = st.session_state.get('rate_limit_info')
+    
+    if rate_limit_info and rate_limit_info.get('active'):
+        reset_timestamp_ms = rate_limit_info['reset_timestamp_ms']
+        
+        # Render the custom HTML div for the rate limit message
+        st.markdown(
+            f"""
+            <div id="fifi-rate-limit-message" style="
+                background-color: #fee2e2; /* light red */
+                color: #dc2626; /* dark red */
+                padding: 1rem;
+                border-radius: 0.5rem;
+                border: 1px solid #fca5a5;
+                margin-bottom: 1rem;
+                font-weight: bold;
+            ">
+                ⏳ Too many requests. You can ask {rate_limit_info['max_requests']} questions every {rate_limit_info['window_seconds']} seconds. <span id="fifi-rate-limit-countdown"></span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        
+        # Inject JavaScript to handle the countdown and UI updates
+        # Ensure this script is executed *after* the chat input is rendered
+        st.components.v1.html(
+            f"""
+            <script>
+                // Clear any previous interval to prevent multiple timers running
+                if (window.fifiRateLimitInterval) {{
+                    clearInterval(window.fifiRateLimitInterval);
+                }}
+
+                const resetTimestampMs = {reset_timestamp_ms};
+                const rateLimitMessageDiv = document.getElementById('fifi-rate-limit-message');
+                const countdownSpan = document.getElementById('fifi-rate-limit-countdown');
+                // Find the chat input. Streamlit's chat input is a textarea inside a form, often with aria-label
+                // This selector might need adjustment if Streamlit's DOM changes significantly.
+                const chatInput = document.querySelector('[data-testid="stForm"] textarea[aria-label^="Ask me about ingredients"]');
+
+                function updateCountdown() {{
+                    const now = Date.now();
+                    const timeLeftMs = resetTimestampMs - now;
+
+                    if (timeLeftMs <= 0) {{
+                        if (rateLimitMessageDiv) {{
+                            rateLimitMessageDiv.style.display = 'none';
+                        }}
+                        if (chatInput) {{
+                            chatInput.removeAttribute('disabled');
+                            chatInput.focus(); // Give focus back to the input
+                        }}
+                        clearInterval(window.fifiRateLimitInterval);
+                        window.fifiRateLimitInterval = null;
+                        // Optionally, trigger a small, silent rerun in Streamlit to clear the session_state flag
+                        // (though the next user interaction will naturally clear it too)
+                        // This might be done by sending data back via st_javascript, but for just clearing a flag,
+                        // relying on the next user action is simpler to avoid unnecessary reruns.
+                    }} else {{
+                        const seconds = Math.ceil(timeLeftMs / 1000);
+                        if (countdownSpan) {{
+                            countdownSpan.textContent = `Please wait ${seconds} seconds.`;
+                        }}
+                        if (chatInput) {{
+                            chatInput.setAttribute('disabled', 'true'); // Ensure it's disabled if still counting
+                        }}
+                    }}
+                }}
+
+                // Run immediately and then every second
+                updateCountdown();
+                window.fifiRateLimitInterval = setInterval(updateCountdown, 1000);
+
+                // Clean up interval if component is removed (e.g., Streamlit reruns for other reasons)
+                // This is a best effort, as Streamlit's lifecycle with injected HTML can be tricky.
+                const observer = new MutationObserver(mutations => {{
+                    mutations.forEach(mutation => {{
+                        if (!document.body.contains(rateLimitMessageDiv)) {{
+                            if (window.fifiRateLimitInterval) {{
+                                clearInterval(window.fifiRateLimitInterval);
+                                window.fifiRateLimitInterval = null;
+                                console.log('Rate limit countdown stopped due to message removal.');
+                            }}
+                        }}
+                    }});
+                }});
+                observer.observe(document.body, {{ childList: true, subtree: true }});
+
+            </script>
+            """,
+            height=0, # Keep the component invisible itself
+            width=0,
+            scrolling=False
+        )
+        
+        # Ensure chat input is disabled by Python initially
+        should_disable_chat_input_by_dialog = True
+        
+    # --- END NEW ---
+
+    # Render chat content ONLY if not blocked by a dialog
     if not st.session_state.get('chat_blocked_by_dialog', False):
         # ENHANCED: Show tier warnings for registered users
+        # Note: I've also updated the `is_within_limits` calls to use `.get('allowed')` properly
+        # and added `.value` for Enum comparisons for consistency and robustness.
         limit_check_for_display = session_manager.question_limits.is_within_limits(session)
         if (session.user_type.value == UserType.REGISTERED_USER.value and 
             limit_check_for_display.get('allowed') and 
@@ -4553,24 +4550,24 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                     st.markdown("---") # Visual separator
 
-    # Method 1 (Part 2): Enhanced chat input with clear initialization feedback
+    # Chat input
+    # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
+    # And combine with other disabled conditions
     overall_chat_disabled = (
         not st.session_state.get('is_chat_ready', False) or 
         should_disable_chat_input_by_dialog or 
         session.ban_status.value != BanStatus.NONE.value
     )
+    
+    # If the rate limit is active (even if JS is managing the countdown), Python should still
+    # render the input as disabled. The JS will then re-enable it when the time is up.
+    # This prevents a momentary re-enable if a rerun happens before the JS timer finishes.
+    if rate_limit_info and rate_limit_info.get('active'):
+        overall_chat_disabled = True
 
-    # Show specific message based on why chat is disabled
-    if not st.session_state.get('is_chat_ready', False):
-        chat_placeholder_message = "🔄 Initializing... Please wait for setup to complete"
-    elif should_disable_chat_input_by_dialog:
-        chat_placeholder_message = "📧 Complete email verification above to continue"
-    elif session.ban_status.value != BanStatus.NONE.value:
-        chat_placeholder_message = "🚫 Chat temporarily restricted"
-    else:
-        chat_placeholder_message = "Ask me about ingredients, suppliers, or market trends..."
 
-    prompt = st.chat_input(chat_placeholder_message, disabled=overall_chat_disabled)
+    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                            disabled=overall_chat_disabled)
     
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
@@ -4597,6 +4594,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.rerun()
+                    elif response.get('is_rate_limited'): # Check for the custom flag
+                        # The rate limit message is now handled by the persistent display logic in JS.
+                        # No need for an explicit message here, just let the UI update on next rerun.
+                        # Python's session_state will have the rate_limit_info for the next render.
+                        pass 
                     else:
                         st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         
@@ -4619,78 +4621,74 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
         
-        st.rerun()
+        # IMPORTANT: Do NOT call st.rerun() here unconditionally.
+        # Reruns should only be triggered by explicit user interaction (e.g., submitting a question),
+        # or other state-changing events that Streamlit needs to handle.
+        # The JS will handle the countdown and re-enabling. The Python state will
+        # implicitly catch up on the *next* actual Python rerun (e.g., when the user types again).
+        # However, if the response itself indicates a Python-side state change (like a ban),
+        # an explicit rerun might still be needed as handled in those specific blocks.
 
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
     """Fixed version without duplicate spinner since we have loading overlay"""
-    # This function is now called unconditionally at the start of main_fixed
-    # and its primary role is to ensure session_manager and other core items are in st.session_state.
     if 'initialized' not in st.session_state or not st.session_state.initialized:
-        logger.info("Starting application initialization sequence...")
+        logger.info("Starting application initialization sequence (no spinner shown, overlay is active)...")
         
         try:
             config = Config()
             pdf_exporter = PDFExporter()
             
-            # --- Database Manager ---
             try:
                 db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
                 st.session_state.db_manager = db_manager
             except Exception as db_e:
-                logger.critical(f"Database manager initialization failed: {db_e}", exc_info=True)
-                # Fallback to a dummy DB manager
+                logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
                 st.session_state.db_manager = type('FallbackDB', (), {
                     'db_type': 'memory',
                     'local_sessions': {},
-                    'save_session': lambda session_self, session: None,
-                    'load_session': lambda session_self, session_id: None,
-                    'find_sessions_by_fingerprint': lambda session_self, fingerprint_id: [],
-                    'find_sessions_by_email': lambda session_self, email: []
+                    'save_session': lambda self, session: None,
+                    'load_session': lambda self, session_id: None,
+                    'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
+                    'find_sessions_by_email': lambda self, email: []
                 })()
-                # If DB is critical, fail initialization
-                st.session_state.initialized = False
-                return False
             
-            # --- Zoho Manager ---
             try:
                 zoho_manager = ZohoCRMManager(config, pdf_exporter)
             except Exception as e:
-                logger.error(f"Zoho manager failed: {e}", exc_info=True)
+                logger.error(f"Zoho manager failed: {e}")
                 zoho_manager = type('FallbackZoho', (), {
                     'config': config,
-                    'save_chat_transcript_sync': lambda zoho_self, session, reason: False
+                    'save_chat_transcript_sync': lambda self, session, reason: False
                 })()
             
-            # --- AI System ---
             try:
                 ai_system = EnhancedAI(config)
             except Exception as e:
-                logger.error(f"AI system failed: {e}", exc_info=True)
+                logger.error(f"AI system failed: {e}")
                 ai_system = type('FallbackAI', (), {
                     "openai_client": None,
-                    'get_response': lambda ai_self, prompt, history=None: {
+                    'get_response': lambda self, prompt, history=None: {
                         "content": "AI system temporarily unavailable.",
                         "success": False
                     }
                 })()
             
             rate_limiter = RateLimiter(max_requests=2, window_seconds=60)
-            # Need to ensure db_manager is in session_state before creating nested managers
-            fingerprinting_manager = st.session_state.db_manager.FingerprintingManager() 
+            fingerprinting_manager = st.session_state.db_manager.FingerprintingManager()
             
             try:
                 email_verification_manager = st.session_state.db_manager.EmailVerificationManager(config)
                 if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
                     email_verification_manager = type('DummyEmail', (), {
-                        'send_verification_code': lambda email_self, email: False,
-                        'verify_code': lambda email_self, email, code: False
+                        'send_verification_code': lambda self, email: False,
+                        'verify_code': lambda self, email, code: False
                     })()
             except Exception as e:
-                logger.error(f"Email verification failed: {e}", exc_info=True)
+                logger.error(f"Email verification failed: {e}")
                 email_verification_manager = type('DummyEmail', (), {
-                    'send_verification_code': lambda email_self, email: False,
-                    'verify_code': lambda email_self, email, code: False
+                    'send_verification_code': lambda self, email: False,
+                    'verify_code': lambda self, email, code: False
                 })()
             
             question_limit_manager = st.session_state.db_manager.QuestionLimitManager()
@@ -4702,7 +4700,7 @@ def ensure_initialization_fixed():
             )
             
             st.session_state.pdf_exporter = pdf_exporter
-            st.session_state.error_handler = error_handler # error_handler is a global instance
+            st.session_state.error_handler = error_handler
             st.session_state.fingerprinting_manager = fingerprinting_manager
             st.session_state.email_verification_manager = email_verification_manager
             st.session_state.question_limit_manager = question_limit_manager
@@ -4710,7 +4708,10 @@ def ensure_initialization_fixed():
             st.session_state.chat_blocked_by_dialog = False
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
-            st.session_state.is_chat_ready = False # Default to False, will be set to True after fingerprinting
+            # NEW: Initialize chat readiness flag
+            st.session_state.is_chat_ready = False 
+            # NEW: Initialize rate_limit_info
+            st.session_state.rate_limit_info = {'active': False}
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
@@ -4721,10 +4722,11 @@ def ensure_initialization_fixed():
             st.session_state.initialized = False
             return False
     
-    return True # Already initialized
+    return True
 
+# Modified main function with proper loading state handling (from prompt)
 def main_fixed():
-    """Main entry point with robust loading state management"""
+    """Main entry point with loading state management"""
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
@@ -4734,138 +4736,146 @@ def main_fixed():
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
 
-    # Initialize loading state and readiness flags if not already set (for first run)
+    # Initialize loading state if not already set (for first run)
     if 'is_loading' not in st.session_state:
         st.session_state.is_loading = False
         st.session_state.loading_message = ""
+    # NEW: Ensure is_chat_ready is always present and initially False
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
-    if 'initialized' not in st.session_state:
-        st.session_state.initialized = False
+    # NEW: Ensure rate_limit_info is always present
+    if 'rate_limit_info' not in st.session_state:
+        st.session_state.rate_limit_info = {'active': False}
 
-    # --- PHASE 1: Ensure Core Initialization (SessionManager, DB, AI tools) ---
-    # This must happen first, even if it means displaying the loading overlay,
-    # before attempting any operation that relies on session_manager.
-    if not st.session_state.initialized:
-        # Set loading state for initial core systems setup
-        set_loading_state(True, "Initializing core application systems...")
-        if not show_loading_overlay():
-            # If overlay isn't shown (e.g., first run, not yet rendered),
-            # this is just a safeguard; the overlay will appear on rerun.
-            pass 
-            
-        init_success = ensure_initialization_fixed()
-        if not init_success:
-            # Critical failure during initial setup, display error and stop.
-            set_loading_state(False)
-            st.error("❌ Critical application error during initialization. Please refresh the page.")
-            return # Halt execution
-        else:
-            # Initialization successful, but may still be waiting for fingerprint
-            set_loading_state(False) # Turn off generic init loading, specific messages will take over
-            st.rerun() # Rerun to proceed to next phase with initialized components
-            return # Halt current execution
 
-    # --- PHASE 2: Handle Query Parameters (Fingerprint/Emergency Save) ---
-    # These handlers might trigger a rerun and update `is_chat_ready`.
-    handle_emergency_save_requests_from_query()
-    handle_fingerprint_requests_from_query() 
-    # If a rerun happened above, this current script run will be aborted and restarted.
-    # So the following code only runs if no rerun was triggered by query params.
-
-    # Now that core systems are initialized, fetch session_manager safely
-    session_manager = st.session_state.get('session_manager')
-    if not session_manager:
-        # This case should ideally not be reached if ensure_initialization_fixed was successful.
-        # It's a fallback for unexpected state loss.
-        set_loading_state(False)
-        st.error("❌ Session Manager not available after initialization. Please refresh the page.")
-        return
-
-    # --- PHASE 3: Global Loading Overlay Management (for user actions or chat readiness) ---
-    # Determine if we should *still* be showing the global loading overlay.
-    # This happens if a user clicks a button that sets `is_loading = True`
-    # OR if we are trying to go to the chat page but `is_chat_ready` is false (e.g., waiting for fingerprint).
-    in_global_loading_phase = st.session_state.get('is_loading', False) or \
-                              (st.session_state.get('page') == "chat" and not st.session_state.get('is_chat_ready', False))
+    # Handle loading states first
+    loading_state = st.session_state.get('is_loading', False)
+    current_page = st.session_state.get('page')
     
-    if in_global_loading_phase:
-        # Update the specific loading message based on granular progress
-        current_session = None
-        if st.session_state.get('current_session_id'):
-            current_session = session_manager.db.load_session(st.session_state['current_session_id'])
-
-        if current_session and (current_session.fingerprint_id is None or \
-                               (current_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) if current_session.fingerprint_id else True)):
-            set_loading_state(True, "Identifying your device for session continuity...")
-        elif st.session_state.get('page') == "chat" and not st.session_state.get('is_chat_ready', False):
-             set_loading_state(True, "Preparing AI assistant and chat interface...")
-        elif st.session_state.get('loading_reason'): # For cases like 'authenticate' or 'start_guest'
-            set_loading_state(True, st.session_state.get('loading_message', "Loading..."))
-        else:
-            set_loading_state(True, "Loading application components...")
-
+    # If we're in loading state, handle the actual initialization
+    if loading_state:
+        # Show the loading overlay
         if show_loading_overlay():
-            # If the overlay is active, also render the detailed progress bars
-            render_initialization_progress_message()
-
-            # Process user actions that trigger a loading phase
-            loading_reason = st.session_state.get('loading_reason')
+            pass  # Overlay is shown
+        
+        # Perform the actual operations based on what triggered the loading
+        try:
+            # Initialize if not already done
+            if not st.session_state.get('initialized', False):
+                init_success = ensure_initialization_fixed()  # Remove the spinner wrapper since we have overlay
+                if not init_success:
+                    set_loading_state(False)
+                    st.error("⚠️ Application failed to initialize properly.")
+                    st.info("Please refresh the page to try again.")
+                    return
             
+            session_manager = st.session_state.get('session_manager')
+            if not session_manager:
+                set_loading_state(False)
+                st.error("❌ Session Manager not available. Please refresh the page.")
+                return
+            
+            # Handle different loading scenarios
+            loading_reason = st.session_state.get('loading_reason', 'unknown')
+            
+            session = None # Initialize session to None for scope
             if loading_reason == 'start_guest':
-                session = session_manager.get_session() 
+                # Create guest session
+                session = session_manager.get_session()
                 if session and session.last_activity is None:
                     session.last_activity = datetime.now()
                     session_manager.db.save_session(session)
                 st.session_state.page = "chat"
                 if 'loading_reason' in st.session_state:
                     del st.session_state['loading_reason']
-                # Crucially, now rerun to let `is_chat_ready` be evaluated in next run.
-                st.rerun() 
                 
             elif loading_reason == 'authenticate':
+                # Handle authentication (you'll need to store username/password temporarily)
                 username = st.session_state.get('temp_username', '')
                 password = st.session_state.get('temp_password', '')
                 
                 if username and password:
                     authenticated_session = session_manager.authenticate_with_wordpress(username, password)
                     if authenticated_session:
+                        session = authenticated_session # Assign to session variable
                         st.session_state.current_session_id = authenticated_session.session_id
                         st.session_state.page = "chat"
+                        # Clear temporary credentials
                         if 'temp_username' in st.session_state:
                             del st.session_state['temp_username']
                         if 'temp_password' in st.session_state:
                             del st.session_state['temp_password']
                         if 'loading_reason' in st.session_state:
                             del st.session_state['loading_reason']
-                        st.success(f"🎉 Welcome back, {authenticated_session.full_name}!", icon="👋")
+                        st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
                         st.balloons()
-                        # Rerun to let `is_chat_ready` be evaluated in next run.
-                        st.rerun() 
                     else:
-                        set_loading_state(False) # Authentication failed, turn off overlay
+                        set_loading_state(False)
                         # Error message already shown by authenticate_with_wordpress
-                        # No rerun here, user stays on welcome page with error
                         return
                 else:
                     set_loading_state(False)
                     st.error("Authentication failed: Missing username or password.")
-                    # No rerun here, user stays on welcome page with error
                     return
+
+            # NEW: Logic to unlock chat input after session is created/authenticated and initial fingerprint check
+            if session:
+                # Check if the session has a *stable* fingerprint (not a temporary Python fallback 
+                # that's still waiting for the JS component to return its data).
+                # The `fingerprint_checked_for_inheritance_{session.session_id}` flag, set by get_session(),
+                # indicates that the initial inheritance/fingerprint check has occurred.
+                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
+
+                if fingerprint_is_stable or inheritance_checked:
+                    st.session_state.is_chat_ready = True
+                    logger.info(f"Chat input unlocked for session {session.session_id[:8]} after initial session/fingerprint setup.")
+                else:
+                    # If it's still a temporary fingerprint and inheritance check hasn't happened yet, 
+                    # keep chat locked. This state implies the JS fingerprint component is expected to run.
+                    st.session_state.is_chat_ready = False
+                    logger.info(f"Chat input remains locked for session {session.session_id[:8]} pending JS fingerprinting.")
+            else:
+                st.session_state.is_chat_ready = False # Ensure locked if no session obtained
+
+
+            # Clear loading state and rerun to show the actual page
+            set_loading_state(False)
+            st.rerun()
+            return
             
-            # If we're still in a loading phase and haven't redirected due to success/failure,
-            # we simply return here to keep the overlay active and await a state change (e.g., fingerprint return).
-            return 
+        except Exception as e:
+            set_loading_state(False)
+            st.error(f"⚠️ Error during loading: {str(e)}")
+            logger.error(f"Loading state error: {e}", exc_info=True)
+            return
 
-    # --- PHASE 4: Render Main Application Content (Overlay is OFF) ---
-    # If we reach this point, in_global_loading_phase is False, so the overlay should be deactivated.
-    set_loading_state(False) # Explicitly ensure loading state is off
-
+    # Normal page rendering (when not in loading state)
     try:
-        current_page = st.session_state.get('page')
+        # Initialize if needed (without loading overlay since it's already done or not triggered)
+        if not st.session_state.get('initialized', False):
+            # This path handles initial load when no button was pressed, or if initialization failed.
+            with st.spinner("Initializing application..."): # Keep a fallback spinner here for initial page load if loading_state was false but init wasn't complete.
+                 init_success = ensure_initialization_fixed()
+            if not init_success:
+                st.error("⚠️ Application failed to initialize properly.")
+                st.info("Please refresh the page to try again.")
+                return
+
+        # Handle emergency saves and fingerprint data
+        handle_emergency_save_requests_from_query()
+        handle_fingerprint_requests_from_query()
+
+        session_manager = st.session_state.get('session_manager')
+        if not session_manager:
+            st.error("❌ Session Manager not available. Please refresh the page.")
+            return
+
+        # Route to appropriate page
         if current_page != "chat":
             render_welcome_page(session_manager)
         else:
+            # Get existing session (should already exist from loading state or prior direct creation)
             session = session_manager.get_session()
             
             if session is None or not session.active:
@@ -4880,17 +4890,16 @@ def main_fixed():
             activity_data_from_js = None
             if session and session.session_id: 
                 activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
-                # Ensure the activity tracker is rendered only once per session (or re-rendered if session changes)
-                if (activity_tracker_key_state_flag not in st.session_state or 
-                    st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id):
+                if activity_tracker_key_state_flag not in st.session_state or \
+                   st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
                     
                     logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
                     activity_data_from_js = render_simple_activity_tracker(session.session_id)
                     st.session_state[activity_tracker_key_state_flag] = True
                     st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
-                    st.session_state.latest_activity_data_from_js = activity_data_from_js # Cache the result
+                    st.session_state.latest_activity_data_from_js = activity_data_from_js
                 else:
-                    activity_data_from_js = st.session_state.latest_activity_data_from_js # Use cached result
+                    activity_data_from_js = st.session_state.latest_activity_data_from_js
             
             timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
             if timeout_triggered:
