@@ -349,7 +349,7 @@ class UserSession:
     # Ban Management
     ban_status: BanStatus = BanStatus.NONE
     ban_start_time: Optional[datetime] = None
-    ban_end_time: Optional[datetime] = None
+    ban_end_time: Optional[str] = None # Changed to str to match DB for simplicity
     ban_reason: Optional[str] = None
     
     # Evasion Tracking
@@ -1125,8 +1125,8 @@ class DatabaseManager:
             
             # Check if any bans are active
             if session.ban_status.value != BanStatus.NONE.value:
-                if session.ban_end_time and datetime.now() < session.ban_end_time:
-                    time_remaining = session.ban_end_time - datetime.now()
+                if session.ban_end_time and datetime.now() < datetime.fromisoformat(session.ban_end_time): # Convert ban_end_time to datetime
+                    time_remaining = datetime.fromisoformat(session.ban_end_time) - datetime.now()
                     return {
                         'allowed': False,
                         'reason': 'banned',
@@ -1234,7 +1234,7 @@ class DatabaseManager:
 
             session.ban_status = ban_type
             session.ban_start_time = datetime.now()
-            session.ban_end_time = session.ban_start_time + timedelta(hours=ban_hours)
+            session.ban_end_time = (session.ban_start_time + timedelta(hours=ban_hours)).isoformat()
             session.ban_reason = reason
             session.question_limit_reached = True
             
@@ -2503,7 +2503,7 @@ class SessionManager:
             merged_question_limit_reached = session.question_limit_reached
             merged_ban_status = session.ban_status
             merged_ban_start_time = session.ban_start_time
-            merged_ban_end_time = session.ban_end_time
+            merged_ban_end_time = session.ban_end_time # This is a datetime object, handled below
             merged_ban_reason = session.ban_reason
             merged_evasion_count = session.evasion_count
             merged_current_penalty_hours = session.current_penalty_hours
@@ -2576,7 +2576,7 @@ class SessionManager:
             session.question_limit_reached = merged_question_limit_reached
             session.ban_status = merged_ban_status
             session.ban_start_time = merged_ban_start_time
-            session.ban_end_time = merged_ban_end_time
+            session.ban_end_time = merged_ban_end_time.isoformat() if isinstance(merged_ban_end_time, datetime) else merged_ban_end_time # Store as ISO string
             session.ban_reason = merged_ban_reason
             session.evasion_count = merged_evasion_count
             session.current_penalty_hours = merged_current_penalty_hours
@@ -4113,7 +4113,9 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         if session.ban_status.value != BanStatus.NONE.value:
             st.error(f"🚫 **STATUS: RESTRICTED**")
             if session.ban_end_time:
-                time_remaining = session.ban_end_time - datetime.now()
+                # Convert to datetime object for comparison
+                ban_end_dt = datetime.fromisoformat(session.ban_end_time)
+                time_remaining = ban_end_dt - datetime.now()
                 hours = int(time_remaining.total_seconds() // 3600)
                 minutes = int((time_remaining.total_seconds() % 3600) // 60)
                 st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
