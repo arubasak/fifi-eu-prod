@@ -1616,7 +1616,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
+                if attempt_note < max_retries - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -3711,7 +3711,7 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
             st.session_state.is_chat_ready = True
-            st.session_state.fingerprint_processing_complete = True  # Smooth transition flag
+            # Removed: st.session_state.fingerprint_processing_complete = True # Removed this flag
             logger.info(f"Chat interface ready for session {session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
@@ -3851,7 +3851,8 @@ def handle_fingerprint_requests_from_query():
             
             if success:
                 logger.info(f"🔄 Fingerprint processed successfully, triggering page update to show chat interface")
-                st.rerun()  # ✅ THIS ALLOWS SMOOTH TRANSITION TO CHAT
+                st.set_query_params(init="complete") # Signal for main_fixed to take over
+                st.stop() # Stop current execution to prevent rendering old UI
             else:
                 logger.warning(f"⚠️ Fingerprint processing failed, staying on initialization screen")
                 st.stop()  # Only stop if processing actually failed
@@ -4623,6 +4624,14 @@ def main_fixed():
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
 
+    # NEW: Check for the completion signal from the fingerprinting redirect
+    if st.query_params.get("init") == "complete":
+        logger.info("Initialization signal received. Unlocking chat interface.")
+        st.session_state.is_chat_ready = True
+        # Clear the query param to create a clean URL for the user
+        st.query_params.clear() # This will trigger one final, clean rerun
+        # No st.stop() here, allow the rest of main_fixed to run which will render the chat.
+
 
     # Handle loading states first
     loading_state = st.session_state.get('is_loading', False)
@@ -4786,18 +4795,11 @@ def main_fixed():
             if st.session_state.get('is_chat_ready', False):
                 render_chat_interface_simplified(session_manager, session, activity_data_from_js)
             else:
-                # Check if fingerprinting just completed (for smooth transition)
-                if 'fingerprint_processing_complete' in st.session_state:
-                    st.success("✅ **Session Ready!**")
-                    st.caption("Loading your chat interface...")
-                    # Clear the flag after showing success
-                    del st.session_state['fingerprint_processing_complete']
-                    st.rerun()  # Immediate transition to chat
-                else:
-                    st.info("🔍 **Initializing secure session...**")
-                    st.caption("Please wait while we set up your secure browsing session.")
-                    if session.fingerprint_id and session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                        st.caption(f"Fingerprinting method: {session.fingerprint_method}")
+                # Simplified initialization message, removed the now-redundant transition logic
+                st.info("🔍 **Initializing secure session...**")
+                st.caption("Please wait while we set up your secure browsing session.")
+                if session.fingerprint_id and session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                    st.caption(f"Fingerprinting method: {session.fingerprint_method}")
 
     except Exception as e:
         logger.error(f"Main application error: {e}", exc_info=True)
