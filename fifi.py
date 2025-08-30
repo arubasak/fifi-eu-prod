@@ -1671,16 +1671,33 @@ class RateLimiter:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
 
-    def is_allowed(self, identifier: str) -> bool:
+    def is_allowed(self, identifier: str) -> Dict[str, Any]:
         with self._lock:
             now = time.time()
             self.requests[identifier] = [t for t in self.requests[identifier] if t > now - self.window_seconds]
+            
             if len(self.requests[identifier]) < self.max_requests:
                 self.requests[identifier].append(now)
                 logger.debug(f"Rate limit allowed for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-                return True
+                return {
+                    'allowed': True,
+                    'requests_made': len(self.requests[identifier]),
+                    'max_requests': self.max_requests,
+                    'window_seconds': self.window_seconds
+                }
+            
+            # Calculate time until next request is allowed
+            oldest_request = min(self.requests[identifier])
+            time_until_next = int((oldest_request + self.window_seconds) - now)
+            
             logger.warning(f"Rate limit exceeded for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-            return False
+            return {
+                'allowed': False,
+                'requests_made': len(self.requests[identifier]),
+                'max_requests': self.max_requests,
+                'window_seconds': self.window_seconds,
+                'time_until_next': max(0, time_until_next)
+            }
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
     """Sanitizes user input to prevent XSS and limit length."""
@@ -3074,11 +3091,26 @@ class SessionManager:
                 logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
 
             # Check rate limiting using fingerprint_id (or fallback session_id)
-            if not self.rate_limiter.is_allowed(rate_limiter_id): # MODIFIED: Use rate_limiter_id
+            rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
+            if not rate_limit_result['allowed']:
+                time_until_next = rate_limit_result.get('time_until_next', 0)
+                max_requests = rate_limit_result.get('max_requests', 2)
+                window_seconds = rate_limit_result.get('window_seconds', 60)
+                
+                # Store detailed rate limit info in session state
+                st.session_state.rate_limit_hit = {
+                    'timestamp': datetime.now(),
+                    'time_until_next': time_until_next,
+                    'max_requests': max_requests,
+                    'window_seconds': window_seconds,
+                    'expires_at': datetime.now() + timedelta(seconds=15)  # Show for 15 seconds
+                }
+                
                 return {
-                    'content': 'Too many requests. Please wait a moment before asking another question.',
+                    'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
                     'success': False,
-                    'source': 'Rate Limiter'
+                    'source': 'Rate Limiter',
+                    'time_until_next': time_until_next
                 }
             
             # Content moderation check (MOVED HERE)
@@ -4364,6 +4396,22 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             render_simplified_browser_close_detection(session.session_id)
         except Exception as e:
             logger.error(f"Browser close detection failed: {e}")
+
+    # Enhanced rate limit display with toast
+    if 'rate_limit_hit' in st.session_state:
+        rate_limit_info = st.session_state.rate_limit_hit
+        if datetime.now() < rate_limit_info['expires_at']:
+            time_until_next = rate_limit_info.get('time_until_next', 0)
+            max_requests = rate_limit_info.get('max_requests', 2)
+            window_seconds = rate_limit_info.get('window_seconds', 60)
+            
+            if time_until_next > 0:
+                st.toast(f"Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.", icon="⚠️")
+            else:
+                st.toast("Rate limit exceeded. Please wait a moment before asking another question.", icon="⚠️")
+        else:
+            # Clean up expired rate limit message
+            del st.session_state.rate_limit_hit
 
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
