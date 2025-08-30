@@ -111,7 +111,7 @@ DEFAULT_EXCLUDED_DOMAINS = [
 # Utility for safe JSON loading
 def safe_json_loads(data: Optional[str], default_value: Any = None) -> Any:
     """Safely loads JSON string, returning default_value on error or None/empty string."""
-    if data === None or data == "":
+    if data == None or data == "":
         return default_value
     try:
         return json.loads(data)
