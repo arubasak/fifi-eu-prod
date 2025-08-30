@@ -349,7 +349,7 @@ class UserSession:
     # Ban Management
     ban_status: BanStatus = BanStatus.NONE
     ban_start_time: Optional[datetime] = None
-    ban_end_time: Optional[str] = None # Changed to str to match DB for simplicity
+    ban_end_time: Optional[datetime] = None
     ban_reason: Optional[str] = None
     
     # Evasion Tracking
@@ -901,106 +901,46 @@ class DatabaseManager:
             self.fingerprint_cache = {}
             self.component_attempts = defaultdict(int)
 
-        # 3. ENHANCED FINGERPRINT COMPONENT (add timeout and better error handling)
-        # This replaces the original `render_fingerprint_component` method.
         def render_fingerprint_component(self, session_id: str):
-            """Render fingerprint component with race condition prevention."""
-            
+            """Renders fingerprinting component using external fingerprint_component.html file."""
             try:
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
                 
+                logger.debug(f"🔍 Looking for fingerprint component at: {html_file_path}")
+                
                 if not os.path.exists(html_file_path):
-                    raise FileNotFoundError(f"fingerprint_component.html not found at {html_file_path}")
+                    logger.error(f"❌ Fingerprint component file NOT FOUND at {html_file_path}")
+                    logger.info(f"📁 Current directory contents: {os.listdir(current_dir)}")
+                    return self._generate_fallback_fingerprint()
+                
+                logger.debug(f"✅ Fingerprint component file found, reading content...")
                 
                 with open(html_file_path, 'r', encoding='utf-8') as f:
                     html_content = f.read()
                 
-                if '{SESSION_ID}' not in html_content:
-                    raise ValueError("HTML component missing {SESSION_ID} placeholder")
+                logger.debug(f"📄 Read {len(html_content)} characters from fingerprint component file")
                 
+                # Replace session ID placeholder in the HTML
+                original_content = html_content
                 html_content = html_content.replace('{SESSION_ID}', session_id)
                 
-                # ENHANCED: Add race condition prevention
-                race_prevention_script = f"""
-                <script>
-                // Prevent multiple executions and race conditions
-                if (window.fifi_fingerprint_lock_{session_id.replace('-', '_')}) {{
-                    console.log('🔒 FINGERPRINT: Execution locked for session {session_id[:8]}, skipping');
-                    return;
-                }}
-                window.fifi_fingerprint_lock_{session_id.replace('-', '_')} = true;
+                if original_content == html_content:
+                    logger.warning(f"⚠️ No {{SESSION_ID}} placeholder found in HTML content!")
+                else:
+                    logger.debug(f"✅ Replaced {{SESSION_ID}} placeholder with {session_id[:8]}...")
                 
-                console.log('🔓 FINGERPRINT: Lock acquired for session {session_id[:8]}');
-                
-                // Add timeout to prevent infinite waiting
-                setTimeout(function() {{
-                    if (!window.fifi_fingerprint_completed) {{
-                        console.error('⏰ FINGERPRINT TIMEOUT: Forcing fallback for session {session_id[:8]}');
-                        // Force page refresh as fallback (this will re-trigger the Streamlit app)
-                        window.location.href = window.location.origin + window.location.pathname;
-                    }}
-                }}, 15000); // 15 seconds timeout
-                </script>
-                """
-                
-                # ENHANCED FINGERPRINT COMPONENT DEBUG SCRIPT:
-                debug_fingerprint_script = f"""
-                <script>
-                // Enhanced debugging for race conditions
-                window.fifi_debug_log = window.fifi_debug_log || [];
-
-                function logDebug(message, data = {{}}) {{
-                    const timestamp = new Date().toISOString();
-                    const logEntry = {{ timestamp, message, data }};
-                    
-                    console.log('🔍 FP DEBUG:', message, data);
-                    window.fifi_debug_log.push(logEntry);
-                    
-                    // Keep only last 20 entries
-                    if (window.fifi_debug_log.length > 20) {{
-                        window.fifi_debug_log = window.fifi_debug_log.slice(-20);
-                    }}
-                }}
-
-                // Track page state changes
-                let lastUrl = window.location.href;
-                let lastQueryParams = new URLSearchParams(window.location.search).toString();
-
-                setInterval(function() {{
-                    const currentUrl = window.location.href;
-                    const currentQueryParams = new URLSearchParams(window.location.search).toString();
-                    
-                    if (currentUrl !== lastUrl) {{
-                        logDebug('URL Changed', {{ from: lastUrl, to: currentUrl }});
-                        lastUrl = currentUrl;
-                    }}
-                    
-                    if (currentQueryParams !== lastQueryParams) {{
-                        logDebug('Query Params Changed', {{ from: lastQueryParams, to: currentQueryParams }});
-                        lastQueryParams = currentQueryParams;
-                    }}
-                }}, 500);
-
-                // Track fingerprinting events
-                logDebug('Fingerprint Component Loaded', {{ sessionId: '{session_id}' }});
-                </script>
-                """
-
-                # Insert debug script and race prevention before main fingerprint script
-                html_content = html_content.replace('<script>', debug_fingerprint_script + race_prevention_script + '<script>', 1)
-                
-                logger.info(f"🔄 FINGERPRINT: Rendering component for session {session_id[:8]}")
-                # Removed 'key' argument as it can interfere with multiple renders / state updates
+                # Render with minimal visibility (height=0 for silent operation)
+                logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
+                # REMOVE 'key' ARGUMENT HERE
                 st.components.v1.html(html_content, height=0, width=0, scrolling=False)
                 
-                logger.info(f"✅ FINGERPRINT: Component rendered successfully")
-                return None
+                logger.info(f"✅ External fingerprint component rendered successfully for session {session_id[:8]}")
+                return None # Always return None since data comes via redirect
                 
             except Exception as e:
-                logger.error(f"❌ FINGERPRINT: Component render failed: {e}", exc_info=True)
-                raise
-
+                logger.error(f"❌ Failed to render external fingerprint component: {e}", exc_info=True)
+                return self._generate_fallback_fingerprint()
 
         def process_fingerprint_data(self, fingerprint_data: Dict[str, Any]) -> Dict[str, Any]:
             """Processes fingerprint data received from the custom component."""
@@ -1185,8 +1125,8 @@ class DatabaseManager:
             
             # Check if any bans are active
             if session.ban_status.value != BanStatus.NONE.value:
-                if session.ban_end_time and datetime.now() < datetime.fromisoformat(session.ban_end_time): # Convert ban_end_time to datetime
-                    time_remaining = datetime.fromisoformat(session.ban_end_time) - datetime.now()
+                if session.ban_end_time and datetime.now() < session.ban_end_time:
+                    time_remaining = session.ban_end_time - datetime.now()
                     return {
                         'allowed': False,
                         'reason': 'banned',
@@ -1294,7 +1234,7 @@ class DatabaseManager:
 
             session.ban_status = ban_type
             session.ban_start_time = datetime.now()
-            session.ban_end_time = (session.ban_start_time + timedelta(hours=ban_hours)).isoformat()
+            session.ban_end_time = session.ban_start_time + timedelta(hours=ban_hours)
             session.ban_reason = reason
             session.question_limit_reached = True
             
@@ -1676,7 +1616,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries - 1:
+                if attempt_note < max_retries_note - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -1731,33 +1671,16 @@ class RateLimiter:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
 
-    def is_allowed(self, identifier: str) -> Dict[str, Any]:
+    def is_allowed(self, identifier: str) -> bool:
         with self._lock:
             now = time.time()
             self.requests[identifier] = [t for t in self.requests[identifier] if t > now - self.window_seconds]
-            
             if len(self.requests[identifier]) < self.max_requests:
                 self.requests[identifier].append(now)
                 logger.debug(f"Rate limit allowed for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-                return {
-                    'allowed': True,
-                    'requests_made': len(self.requests[identifier]),
-                    'max_requests': self.max_requests,
-                    'window_seconds': self.window_seconds
-                }
-            
-            # Calculate time until next request is allowed
-            oldest_request = min(self.requests[identifier])
-            time_until_next = int((oldest_request + self.window_seconds) - now)
-            
+                return True
             logger.warning(f"Rate limit exceeded for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-            return {
-                'allowed': False,
-                'requests_made': len(self.requests[identifier]),
-                'max_requests': self.max_requests,
-                'window_seconds': self.window_seconds,
-                'time_until_next': max(0, time_until_next)
-            }
+            return False
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
     """Sanitizes user input to prevent XSS and limit length."""
@@ -2563,7 +2486,7 @@ class SessionManager:
             merged_question_limit_reached = session.question_limit_reached
             merged_ban_status = session.ban_status
             merged_ban_start_time = session.ban_start_time
-            merged_ban_end_time = session.ban_end_time # This is a datetime object, handled below
+            merged_ban_end_time = session.ban_end_time
             merged_ban_reason = session.ban_reason
             merged_evasion_count = session.evasion_count
             merged_current_penalty_hours = session.current_penalty_hours
@@ -2636,7 +2559,7 @@ class SessionManager:
             session.question_limit_reached = merged_question_limit_reached
             session.ban_status = merged_ban_status
             session.ban_start_time = merged_ban_start_time
-            session.ban_end_time = merged_ban_end_time.isoformat() if isinstance(merged_ban_end_time, datetime) else merged_ban_end_time # Store as ISO string
+            session.ban_end_time = merged_ban_end_time
             session.ban_reason = merged_ban_reason
             session.evasion_count = merged_evasion_count
             session.current_penalty_hours = merged_current_penalty_hours
@@ -3151,26 +3074,11 @@ class SessionManager:
                 logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
 
             # Check rate limiting using fingerprint_id (or fallback session_id)
-            rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
-            if not rate_limit_result['allowed']:
-                time_until_next = rate_limit_result.get('time_until_next', 0)
-                max_requests = rate_limit_result.get('max_requests', 2)
-                window_seconds = rate_limit_result.get('window_seconds', 60)
-                
-                # Store detailed rate limit info in session state
-                st.session_state.rate_limit_hit = {
-                    'timestamp': datetime.now(),
-                    'time_until_next': time_until_next,
-                    'max_requests': max_requests,
-                    'window_seconds': window_seconds,
-                    'expires_at': datetime.now() + timedelta(seconds=15)  # Show for 15 seconds
-                }
-                
+            if not self.rate_limiter.is_allowed(rate_limiter_id): # MODIFIED: Use rate_limiter_id
                 return {
-                    'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
+                    'content': 'Too many requests. Please wait a moment before asking another question.',
                     'success': False,
-                    'source': 'Rate Limiter',
-                    'time_until_next': time_until_next
+                    'source': 'Rate Limiter'
                 }
             
             # Content moderation check (MOVED HERE)
@@ -3741,93 +3649,45 @@ def render_simplified_browser_close_detection(session_id: str):
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close detection: {e}")
 
-# OLD handle_fingerprint_requests_from_query (replaced by comprehensive fix)
-# def handle_fingerprint_requests_from_query():
-#    ... (original code) ...
-
-# 1. SIMPLIFIED QUERY PARAMETER HANDLER (replaces handle_fingerprint_requests_from_query)
-def handle_fingerprint_requests_from_query():
-    """Simplified fingerprint handler that avoids race conditions."""
-    query_params = st.query_params
-    event = query_params.get("event")
-    session_id = query_params.get("session_id")
-    
-    # Only process if we have the right event and session
-    if event == "fingerprint_complete" and session_id:
-        logger.info("🔍 FINGERPRINT REDIRECT: Processing fingerprint completion")
+def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
+    """Processes fingerprint data received via URL query parameters."""
+    try:
+        session_manager = st.session_state.get('session_manager')
+        if not session_manager:
+            logger.error("❌ Session manager not available during fingerprint processing from query.")
+            return False
         
-        # Extract ALL parameters immediately 
-        fingerprint_id = query_params.get("fingerprint_id")
-        method = query_params.get("method") 
-        privacy = query_params.get("privacy")
-        working_methods_str = query_params.get("working_methods", "")
-        working_methods = working_methods_str.split(",") if working_methods_str else []
+        session = session_manager.db.load_session(session_id)
+        if not session:
+            logger.error(f"❌ Fingerprint processing: Session '{session_id[:8]}' not found in database.")
+            return False
         
-        # CRITICAL: Clear query params FIRST to prevent reprocessing
-        # Create a mutable copy to iterate and delete
-        current_params_keys = list(st.query_params.keys())
-        for param_key in current_params_keys:
-            del st.query_params[param_key]
+        logger.info(f"✅ Processing fingerprint for session '{session_id[:8]}': ID={fingerprint_id[:8]}, Method={method}, Privacy={privacy}")
         
-        # Validate required data
-        if not fingerprint_id or not method:
-            logger.error(f"❌ FINGERPRINT: Missing data - ID={fingerprint_id}, Method={method}")
-            st.error("❌ Fingerprint data incomplete. Reloading...")
-            st.rerun()
+        # The apply_fingerprinting method will now handle both setting the fingerprint
+        # and checking for inheritance based on this new 'real' fingerprint.
+        processed_data = {
+            'fingerprint_id': fingerprint_id,
+            'fingerprint_method': method,
+            'browser_privacy_level': privacy,
+            'working_methods': working_methods
+            # visitor_type is determined by apply_fingerprinting after inheritance check
+        }
+        
+        success = session_manager.apply_fingerprinting(session, processed_data)
+        
+        if success:
+            logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
+            st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
+            logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
             return True
+        else:
+            logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
+            return False
         
-        # Process immediately in this execution cycle
-        try:
-            session_manager = st.session_state.get('session_manager')
-            if not session_manager:
-                logger.error("❌ FINGERPRINT: No session manager")
-                st.error("❌ Session manager missing. Reloading...")
-                st.rerun()
-                return True
-            
-            session = session_manager.db.load_session(session_id)
-            if not session:
-                logger.error(f"❌ FINGERPRINT: Session {session_id[:8]} not found")
-                st.error("❌ Session not found. Reloading...")  
-                st.rerun()
-                return True
-            
-            # Apply fingerprint data
-            processed_data = {
-                'fingerprint_id': fingerprint_id,
-                'fingerprint_method': method,
-                'browser_privacy_level': privacy,
-                'working_methods': working_methods
-            }
-            
-            success = session_manager.apply_fingerprinting(session, processed_data)
-            
-            if success:
-                # CRITICAL: Set chat ready in this same execution cycle
-                st.session_state.is_chat_ready = True
-                st.session_state.fingerprint_completed = True
-                
-                logger.info(f"✅ FINGERPRINT: Success! Chat ready for {session_id[:8]}")
-                
-                # Show immediate success message
-                st.success("✅ **Fingerprinting Complete!** Loading chat interface...")
-                
-                # Force immediate rerun to show chat
-                st.rerun()
-                return True
-            else:
-                logger.error(f"❌ FINGERPRINT: Processing failed for {session_id[:8]}")
-                st.error("❌ Fingerprint processing failed. Reloading...")
-                st.rerun()
-                return True
-                
-        except Exception as e:
-            logger.error(f"❌ FINGERPRINT: Exception during processing: {e}", exc_info=True)
-            st.error(f"❌ Fingerprint error: {str(e)}. Reloading...")
-            st.rerun()
-            return True
-    
-    return False  # No fingerprint processing needed
+    except Exception as e:
+        logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
+        return False
 
 def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
     """Processes emergency save request from query parameters."""
@@ -3891,11 +3751,9 @@ def handle_emergency_save_requests_from_query():
         
         # Clear query parameters to prevent re-triggering on rerun
         params_to_clear = ["event", "session_id", "reason", "fallback"]
-        # Create a mutable copy to iterate and delete
-        current_params_keys = list(st.query_params.keys())
-        for param_key in current_params_keys:
-            if param_key in params_to_clear:
-                del st.query_params[param_key]
+        for param in params_to_clear: # Fixed: changed to params_to_clear from params_query_params
+            if param in st.query_params:
+                del st.query_params[param]
         
         try:
             save_reason = f"{reason}_fallback" if fallback == "true" else reason
@@ -3919,6 +3777,54 @@ def handle_emergency_save_requests_from_query():
     else:
         logger.debug("ℹ️ No emergency save requests found in current URL query parameters.")
 
+def handle_fingerprint_requests_from_query():
+    """Checks for and processes fingerprint data sent via URL query parameters."""
+    logger.info("🔍 FINGERPRINT HANDLER: Checking for query parameter fingerprint data...")
+    
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    
+    if event == "fingerprint_complete" and session_id:
+        logger.info("=" * 80)
+        logger.info("🔍 FINGERPRINT DATA DETECTED VIA URL QUERY PARAMETERS!")
+        logger.info(f"Session ID: {session_id}, Event: {event}")
+        logger.info("=" * 80)
+        
+        # EXTRACT PARAMETERS BEFORE CLEARING THEM
+        fingerprint_id = query_params.get("fingerprint_id")
+        method = query_params.get("method")
+        privacy = query_params.get("privacy")
+        working_methods = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
+        
+        logger.info(f"Extracted - ID: {fingerprint_id}, Method: {method}, Privacy: {privacy}, Working Methods: {working_methods}")
+        
+        # Clear query parameters AFTER extraction
+        params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
+        for param in params_to_clear:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        if not fingerprint_id or not method:
+            st.error("❌ **Fingerprint Error** - Missing required data in redirect")
+            logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
+            # Removed time.sleep(2)
+            st.rerun()
+            return
+        
+        try:
+            success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
+            logger.info(f"✅ Silent fingerprint processing: {success}")
+            
+            if success:
+                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
+                st.stop()
+        except Exception as e:
+            logger.error(f"Silent fingerprint processing failed: {e}")
+        
+        return
+    else:
+        logger.debug("ℹ️ No fingerprint requests found in current URL query parameters.")
 
 # =============================================================================
 # UI COMPONENTS
@@ -4170,9 +4076,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         if session.ban_status.value != BanStatus.NONE.value:
             st.error(f"🚫 **STATUS: RESTRICTED**")
             if session.ban_end_time:
-                # Convert to datetime object for comparison
-                ban_end_dt = datetime.fromisoformat(session.ban_end_time)
-                time_remaining = ban_end_dt - datetime.now()
+                time_remaining = session.ban_end_time - datetime.now()
                 hours = int(time_remaining.total_seconds() // 3600)
                 minutes = int((time_remaining.total_seconds() % 3600) // 60)
                 st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
@@ -4442,21 +4346,24 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             except Exception as e:
                 logger.error(f"Failed to update activity from JavaScript: {e}")
 
-    # Enhanced rate limit display with toast
-    if 'rate_limit_hit' in st.session_state:
-        rate_limit_info = st.session_state.rate_limit_hit
-        if datetime.now() < rate_limit_info['expires_at']:
-            time_until_next = rate_limit_info.get('time_until_next', 0)
-            max_requests = rate_limit_info.get('max_requests', 2)
-            window_seconds = rate_limit_info.get('window_seconds', 60)
-            
-            if time_until_next > 0:
-                st.toast(f"Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.", icon="⚠️")
-            else:
-                st.toast("Rate limit exceeded. Please wait a moment before asking another question.", icon="⚠️")
-        else:
-            # Clean up expired rate limit message
-            del st.session_state.rate_limit_hit
+    # Fingerprinting
+    fingerprint_needed = (
+        not session.fingerprint_id or
+        session.fingerprint_method == "temporary_fallback_python" or
+        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+    )
+    
+    fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+    if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
+        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+        st.session_state[fingerprint_key] = True
+
+    # Browser close detection for emergency saves
+    if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
+        try:
+            render_simplified_browser_close_detection(session.session_id)
+        except Exception as e:
+            logger.error(f"Browser close detection failed: {e}")
 
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
@@ -4570,139 +4477,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         
         st.rerun()
 
-# --- NEW DEBUGGING AND FALLBACK FUNCTIONS ---
-
-def debug_race_condition_state():
-    """Debug function to track race condition issues."""
-    current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    
-    # Get current URL and query params
-    query_params = dict(st.query_params)
-    
-    # Get session info
-    session_id = st.session_state.get('current_session_id', 'None')
-    
-    # Get fingerprint states
-    is_chat_ready = st.session_state.get('is_chat_ready', False)
-    fingerprint_completed = st.session_state.get('fingerprint_completed', False)
-    
-    # Get fingerprint rendering states
-    fingerprint_keys = [k for k in st.session_state.keys() if 'fingerprint_rendered_' in k]
-    
-    logger.info("🔍 RACE CONDITION DEBUG:")
-    logger.info(f"  Time: {current_time}")
-    logger.info(f"  Session ID: {session_id}")
-    logger.info(f"  Query Params: {query_params}")
-    logger.info(f"  Chat Ready: {is_chat_ready}")
-    logger.info(f"  Fingerprint Completed: {fingerprint_completed}")
-    logger.info(f"  Fingerprint Render Keys: {fingerprint_keys}")
-    logger.info(f"  Page: {st.session_state.get('page', 'None')}")
-    
-    return {
-        'time': current_time,
-        'session_id': session_id,
-        'query_params': query_params,
-        'is_chat_ready': is_chat_ready,
-        'fingerprint_completed': fingerprint_completed,
-        'fingerprint_keys': fingerprint_keys
-    }
-
-def check_and_apply_ultimate_fallback(session: UserSession):
-    """Ultimate fallback to ensure chat interface always loads eventually."""
-    
-    # Check how long the session has been in fingerprinting state
-    session_age_key = f"session_start_time_{session.session_id}"
-    
-    if session_age_key not in st.session_state:
-        st.session_state[session_age_key] = datetime.now()
-        logger.info(f"🔄 FALLBACK: Session start time recorded for {session.session_id[:8]}")
-        return False
-    
-    session_start_time = st.session_state[session_age_key]
-    session_age = datetime.now() - session_start_time
-    
-    # If session has been waiting for more than 30 seconds, force enable chat
-    if session_age.total_seconds() > 30:
-        logger.warning(f"⏰ FALLBACK: Session {session.session_id[:8]} stuck for {session_age.total_seconds():.1f}s - forcing chat enable")
-        
-        # Force enable chat with fallback fingerprint
-        st.session_state.is_chat_ready = True
-        st.session_state.fingerprint_completed = True
-        
-        # Apply basic fallback fingerprint if needed
-        if (not session.fingerprint_id or 
-            session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))):
-            
-            fallback_data = {
-                'fingerprint_id': f"ultimate_fallback_{int(time.time())}_{secrets.token_hex(6)}",
-                'fingerprint_method': 'ultimate_fallback',
-                'browser_privacy_level': 'unknown',
-                'working_methods': ['fallback']
-            }
-            
-            try:
-                session_manager = st.session_state.get('session_manager')
-                if session_manager:
-                    session_manager.apply_fingerprinting(session, fallback_data)
-                    logger.info(f"✅ FALLBACK: Applied ultimate fallback fingerprint to {session.session_id[:8]}")
-            except Exception as e:
-                logger.error(f"❌ FALLBACK: Even ultimate fallback failed: {e}")
-        
-        return True  # Fallback was applied
-    
-    return False  # No fallback needed yet
-
-def show_skip_fingerprinting_option(session: UserSession):
-    """Show option to skip fingerprinting after reasonable wait time."""
-    
-    session_age_key = f"session_start_time_{session.session_id}"
-    if session_age_key not in st.session_state:
-        return False
-    
-    session_start_time = st.session_state[session_age_key]
-    session_age = datetime.now() - session_start_time
-    
-    # Show skip option after 15 seconds
-    if session_age.total_seconds() > 15 and not st.session_state.get('fingerprint_completed', False):
-        st.warning("⏰ **Fingerprinting is taking longer than usual**")
-        
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            st.caption("This may be due to privacy settings or browser extensions blocking JavaScript.")
-        with col2:
-            if st.button("⚡ Skip & Continue", help="Use basic fingerprinting and start chatting immediately"):
-                logger.info(f"👤 USER SKIP: User chose to skip fingerprinting for {session.session_id[:8]}")
-                
-                # Apply immediate fallback
-                st.session_state.is_chat_ready = True
-                st.session_state.fingerprint_completed = True
-                
-                # Apply basic fallback fingerprint if needed
-                if (not session.fingerprint_id or 
-                    session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))):
-                    
-                    fallback_data = {
-                        'fingerprint_id': f"user_skip_fallback_{int(time.time())}_{secrets.token_hex(6)}",
-                        'fingerprint_method': 'user_skip_fallback',
-                        'browser_privacy_level': 'unknown',
-                        'working_methods': ['fallback']
-                    }
-                    try:
-                        session_manager = st.session_state.get('session_manager')
-                        if session_manager:
-                            session_manager.apply_fingerprinting(session, fallback_data)
-                            logger.info(f"✅ FALLBACK: Applied user skip fallback fingerprint to {session.session_id[:8]}")
-                    except Exception as e:
-                        logger.error(f"❌ FALLBACK: User skip fallback failed: {e}")
-
-                st.success("⚡ **Skipped to Chat Mode** - You can start asking questions now!")
-                st.rerun()
-                return True
-    
-    return False
-
-# --- END NEW DEBUGGING AND FALLBACK FUNCTIONS ---
-
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
     """Fixed version without duplicate spinner since we have loading overlay"""
@@ -4784,8 +4558,6 @@ def ensure_initialization_fixed():
             st.session_state.guest_continue_active = False
             # NEW: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
-            # NEW: Initialize fingerprint completion flag
-            st.session_state.fingerprint_completed = False 
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
@@ -4817,12 +4589,7 @@ def main_fixed():
     # NEW: Ensure is_chat_ready is always present and initially False
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
-    # NEW: Ensure fingerprint_completed is always present and initially False
-    if 'fingerprint_completed' not in st.session_state:
-        st.session_state.fingerprint_completed = False
 
-    # DEBUG: Track race conditions
-    debug_state = debug_race_condition_state() # Placed at the very start of main_fixed
 
     # Handle loading states first
     loading_state = st.session_state.get('is_loading', False)
@@ -4894,6 +4661,27 @@ def main_fixed():
                     st.error("Authentication failed: Missing username or password.")
                     return
 
+            # NEW: Logic to unlock chat input after session is created/authenticated and initial fingerprint check
+            if session:
+                # Check if the session has a *stable* fingerprint (not a temporary Python fallback 
+                # that's still waiting for the JS component to return its data).
+                # The `fingerprint_checked_for_inheritance_{session.session_id}` flag, set by get_session(),
+                # indicates that the initial inheritance/fingerprint check has occurred.
+                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
+
+                if fingerprint_is_stable or inheritance_checked:
+                    st.session_state.is_chat_ready = True
+                    logger.info(f"Chat input unlocked for session {session.session_id[:8]} after initial session/fingerprint setup.")
+                else:
+                    # If it's still a temporary fingerprint and inheritance check hasn't happened yet, 
+                    # keep chat locked. This state implies the JS fingerprint component is expected to run.
+                    st.session_state.is_chat_ready = False
+                    logger.info(f"Chat input remains locked for session {session.session_id[:8]} pending JS fingerprinting.")
+            else:
+                st.session_state.is_chat_ready = False # Ensure locked if no session obtained
+
+
             # Clear loading state and rerun to show the actual page
             set_loading_state(False)
             st.rerun()
@@ -4917,37 +4705,27 @@ def main_fixed():
                 st.info("Please refresh the page to try again.")
                 return
 
+        # Handle emergency saves and fingerprint data
+        handle_emergency_save_requests_from_query()
+        handle_fingerprint_requests_from_query()
+
         session_manager = st.session_state.get('session_manager')
         if not session_manager:
             st.error("❌ Session Manager not available. Please refresh the page.")
             return
 
-        # CRITICAL: Handle fingerprint redirects FIRST, before any other logic
-        if handle_fingerprint_requests_from_query():
-            # If fingerprint processing occurred, stop here and let rerun handle the rest
-            return
-        
-        # Handle other query handlers
-        handle_emergency_save_requests_from_query()
-
         # Route to appropriate page
         if current_page != "chat":
             render_welcome_page(session_manager)
-        else: # current_page == "chat"
+        else:
+            # Get existing session (should already exist from loading state or prior direct creation)
             session = session_manager.get_session()
             
             if session is None or not session.active:
-                logger.warning("Expected active session but got None/inactive. Resetting.")
-                # ENHANCED: Clear all state to prevent corruption
-                keys_to_clear = list(st.session_state.keys())
-                for key in keys_to_clear:
-                    # Keep essential managers and initialization flag
-                    if key not in ['initialized', 'session_manager', 'db_manager', 'pdf_exporter', 'error_handler', 'fingerprinting_manager', 'email_verification_manager', 'question_limit_manager']:  
-                        del st.session_state[key]
+                logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
                 st.session_state['page'] = None
-                # NEW: Reset chat readiness and fingerprint completion flags
-                st.session_state.is_chat_ready = False
-                st.session_state.fingerprint_completed = False
                 st.rerun()
                 return
                 
@@ -4971,106 +4749,7 @@ def main_fixed():
                 return
 
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            
-            # 3. SIMPLIFIED FINGERPRINT COMPONENT LOGIC
-            # Check if fingerprinting is needed
-            needs_fingerprinting = (
-                not session.fingerprint_id or
-                session.fingerprint_method == "temporary_fallback_python" or  
-                session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-            )
-            
-            is_chat_ready = st.session_state.get('is_chat_ready', False)
-            fingerprint_completed = st.session_state.get('fingerprint_completed', False)
-            
-            logger.info(f"🔍 MAIN: Session {session.session_id[:8]} - Needs FP: {needs_fingerprinting}, Chat Ready: {is_chat_ready}, FP Complete: {fingerprint_completed}")
-            
-            if needs_fingerprinting and not fingerprint_completed:
-                # Check for ultimate fallback before doing anything else
-                fallback_applied = check_and_apply_ultimate_fallback(session)
-                
-                if fallback_applied:
-                    st.warning("⚠️ **Fallback Mode Activated**")
-                    st.info("Fingerprinting took too long - using basic device identification")
-                    st.info("🔄 **Loading Chat Interface...**")
-                    time.sleep(1)  # Brief pause to show message
-                    st.rerun()
-                    return
-                
-                # Show skip option after reasonable wait
-                if show_skip_fingerprinting_option(session):
-                    return
-
-                # Render fingerprint component ONCE
-                fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-                if not st.session_state.get(fingerprint_key, False):
-                    logger.info(f"🔄 MAIN: Rendering fingerprint component for {session.session_id[:8]}")
-                    
-                    try:
-                        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-                        st.session_state[fingerprint_key] = True
-                        logger.info(f"✅ MAIN: Fingerprint component rendered")
-                    except Exception as fp_error:
-                        logger.error(f"❌ MAIN: Fingerprint component failed: {fp_error}")
-                        st.error("❌ **Fingerprinting Failed**")
-                        st.error(f"Error: {str(fp_error)}")
-                        
-                        # FALLBACK: Enable chat anyway after showing error
-                        st.warning("⚠️ **Using Fallback Mode** - Chat enabled without advanced fingerprinting")
-                        st.session_state.is_chat_ready = True
-                        st.session_state.fingerprint_completed = True
-                        time.sleep(2)
-                        st.rerun()
-                        return
-                
-                # Show waiting message with better status
-                st.info("🔍 **Extracting Device Fingerprint**")
-                st.caption("JavaScript fingerprinting in progress... This usually takes 2-5 seconds.")
-                
-                # Add progress indication
-                progress_js = f"""
-                <script>
-                let dots = 0;
-                const progressInterval = setInterval(function() {{
-                    dots = (dots + 1) % 4;
-                    const dotString = '.'.repeat(dots);
-                    console.log('⏳ Fingerprinting progress' + dotString);
-                }}, 1000);
-                
-                // Clear progress when done (after 20s or if we detect completion)
-                const completionCheck = setInterval(function() {{
-                    if (window.fifi_fingerprint_completed || (Date.now() - window.fifi_fingerprint_start_time > 20000)) {{
-                        clearInterval(progressInterval);
-                        clearInterval(completionCheck);
-                        console.log('✅ Fingerprinting progress halted.');
-                    }}
-                }}, 500);
-
-                // Set a start time for accurate timeout calculation in JS
-                window.fifi_fingerprint_start_time = Date.now();
-                </script>
-                """
-                st.components.v1.html(progress_js, height=0)
-                
-            elif is_chat_ready or fingerprint_completed:
-                # Chat is ready - render interface
-                logger.info(f"✅ MAIN: Rendering chat interface for {session.session_id[:8]}")
-                
-                # Render browser close detection for eligible users
-                if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
-                    try:
-                        render_simplified_browser_close_detection(session.session_id)
-                    except Exception as e:
-                        logger.error(f"❌ MAIN: Browser close detection failed: {e}")
-                
-                # Render chat interface
-                render_chat_interface_simplified(session_manager, session, activity_data_from_js)
-                
-            else:
-                # Shouldn't reach here, but handle it
-                logger.warning(f"🤔 MAIN: Unexpected state for {session.session_id[:8]} - enabling chat as fallback")
-                st.session_state.is_chat_ready = True
-                st.rerun()
+            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
 
     except Exception as e:
         logger.error(f"Main application error: {e}", exc_info=True)
