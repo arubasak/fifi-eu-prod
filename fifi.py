@@ -1,12 +1,3 @@
-You are absolutely right! My profound apologies for this glaring error. The `NameError: name 'main_final' is not defined` traceback is a classic Python scope issue.
-
-I made a mistake in placing the `main_final` function's definition **after** the `if __name__ == "__main__":` block. Python executes code from top to bottom, so when `main_final()` was called, its definition hadn't been encountered yet.
-
-I will correct this by moving the entire `main_final()` function, along with its direct helper functions (`show_loading_with_sleep` and `needs_fingerprinting` and `render_chat_interface_after_fingerprinting` that were part of your suggested code), to be **before** the `if __name__ == "__main__":` block. This ensures that `main_final` is defined before it's called.
-
-Thank you immensely for catching this crucial bug. Here is the corrected `fifi.py` file:
-
-```python
 import streamlit as st
 import os
 import uuid
@@ -1587,7 +1578,7 @@ class ZohoCRMManager:
                         logger.error("Max retries for note addition reached. Aborting save.")
                         return False
             except Exception as e:
-                logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt + 1} with an exception.")
+                logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
@@ -1771,7 +1762,7 @@ class PineconeAssistantTool:
                                     seen_items.add(display_text)
                 
                 if citations_list:
-                    content += citations_header + "\n".join(citations_list)
+                    content += citations_header + "\n".then(citations_list)
             
             return {
                 "content": content, 
@@ -3132,8 +3123,7 @@ class SessionManager:
             # Get AI response (now simple call to EnhancedAI's core function)
             ai_response = self.ai.get_response(sanitized_prompt, session.messages) # No extra args needed now
             
-            # Handle if ai.get_response() returned None due to its internal errors
-            if ai_response === None:
+            if ai_response is None:
                 logger.error(f"EnhancedAI.get_response returned None for session {session.session_id[:8]}")
                 return {
                     'content': 'I encountered an internal error while generating a response. Please try again later.',
@@ -4411,6 +4401,206 @@ def render_chat_interface_after_fingerprinting(session_manager, session, activit
 # INTEGRATION: REPLACE YOUR MAIN FUNCTION WITH THIS
 # =============================================================================
 
+# This is the `main_final` from your suggested code, with the critical reordering
+def main_final():
+    """Final main function with 10-second sleep approach AND CORRECTED LOGIC ORDER"""
+    
+    try:
+        st.set_page_config(
+            page_title="FiFi AI Assistant", 
+            page_icon="🤖", 
+            layout="wide"
+        )
+    except:
+        pass
+
+    # STEP 1: ALWAYS INITIALIZE FIRST
+    # This ensures that even on a redirect, the session_manager is ready.
+    if not st.session_state.get('initialized', False):
+        # Using a spinner here for the very first load before the main logic kicks in.
+        # This will be replaced by the loading overlay if triggered by a button.
+        with st.spinner("Initializing FiFi AI Assistant..."):
+            init_success = ensure_initialization_fixed()
+        if init_success:
+            st.rerun() # Rerun to ensure components are ready after init
+        else:
+            st.error("Application failed to initialize. Please refresh.")
+            return
+
+    session_manager = st.session_state.get('session_manager')
+    if not session_manager:
+        st.error("Session Manager not available. Please refresh.")
+        return
+
+    # STEP 2: HANDLE INCOMING DATA (FINGERPRINT/EMERGENCY)
+    # Now that session_manager is guaranteed to exist, these handlers are safe to run.
+    query_params = st.query_params
+    if query_params.get("event") == "fingerprint_complete":
+        logger.info("🎯 FINGERPRINT COMPLETION DETECTED!")
+        
+        session_id = query_params.get("session_id")
+        fingerprint_id = query_params.get("fingerprint_id") 
+        method = query_params.get("method")
+        privacy = query_params.get("privacy")
+        working_methods = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
+        
+        # Clear query parameters immediately
+        for param in ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        # Process fingerprint completion
+        if session_id and fingerprint_id and method:
+            success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
+            if success:
+                logger.info("✅ Fingerprinting completed successfully via query param!")
+                st.success("🔐 Secure session established!")
+                time.sleep(1) # Brief success message visible
+                st.rerun() # Rerun to remove success message and show chat
+        return
+
+    handle_emergency_save_requests_from_query()
+    
+    # STEP 3: Handle button-triggered session creation (e.g., "Start as Guest" or "Sign In")
+    loading_reason = st.session_state.get('loading_reason')
+    if loading_reason:
+        show_loading_with_sleep("Creating your session...")
+        
+        if loading_reason == 'start_guest':
+            session = session_manager.get_session()
+            if session:
+                st.session_state.page = "chat"
+                del st.session_state['loading_reason']
+                st.rerun()
+        
+        elif loading_reason == 'authenticate':
+            username = st.session_state.get('temp_username', '')
+            password = st.session_state.get('temp_password', '')
+            
+            if username and password:
+                authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                if authenticated_session:
+                    st.session_state.current_session_id = authenticated_session.session_id
+                    st.session_state.page = "chat"
+                    for key in ['temp_username', 'temp_password', 'loading_reason']:
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    st.success(f"Welcome back, {authenticated_session.full_name}!")
+                    st.rerun()
+                else: # Authentication failed, clear loading state so user can try again
+                    set_loading_state(False) 
+                    if 'loading_reason' in st.session_state:
+                        del st.session_state['loading_reason']
+                    # Error message already displayed by authenticate_with_wordpress
+                    return # Stop further execution
+        return
+
+    # STEP 4: The critical fingerprinting logic
+    fp_needed, session = needs_fingerprinting(session_manager)
+    
+    if fp_needed and session:
+        # Check if we've already started the 10-second wait
+        sleep_key = f"fingerprint_sleep_started_{session.session_id}"
+        
+        if not st.session_state.get(sleep_key, False):
+            logger.info(f"🔍 Starting 10-second fingerprinting wait for {session.session_id[:8]}")
+            
+            # Show loading screen
+            show_loading_with_sleep("🔍 Setting up your secure session...")
+            
+            # Render fingerprinting component ONCE
+            fp_component_key = f"fingerprint_rendered_{session.session_id}"
+            if not st.session_state.get(fp_component_key, False):
+                session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                st.session_state[fp_component_key] = True
+            
+            # Mark sleep as started
+            st.session_state[sleep_key] = True
+            st.session_state[f"sleep_start_time_{session.session_id}"] = time.time()
+            
+            # CRITICAL: 10-second sleep to let JavaScript complete
+            logger.info(f"⏳ Sleeping for 10 seconds to allow JavaScript execution...")
+            time.sleep(10)
+            
+            logger.info(f"⏰ 10-second wait complete, checking fingerprint status...")
+            st.rerun() # Rerun to re-evaluate the fingerprint status
+            return
+        
+        else: # We've already slept, check if fingerprinting completed or apply fallback
+            start_time = st.session_state.get(f"sleep_start_time_{session.session_id}", time.time())
+            elapsed = int(time.time() - start_time)
+            
+            # Reload session to check current fingerprint status from DB
+            fresh_session = session_manager.db.load_session(session.session_id)
+            if fresh_session:
+                still_temp = (
+                    not fresh_session.fingerprint_id or 
+                    fresh_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                )
+                
+                if not still_temp:
+                    # SUCCESS! Fingerprinting completed (detected after sleep)
+                    logger.info(f"✅ Fingerprinting completed for {session.session_id[:8]} (detected after sleep).")
+                    # Clean up sleep flags
+                    for key in [sleep_key, f"sleep_start_time_{session.session_id}"]:
+                        if key in st.session_state: del st.session_state[key]
+                    st.rerun() # Rerun to proceed to normal chat interface
+                    return
+                else:
+                    # TIMEOUT: Apply fallback after 10+ seconds
+                    if elapsed >= 10:
+                        logger.warning(f"⏰ Fingerprinting timeout for {session.session_id[:8]} - applying fallback")
+                        
+                        # Apply timeout fallback
+                        fresh_session.fingerprint_id = f"timeout_fallback_{secrets.token_hex(12)}"
+                        fresh_session.fingerprint_method = "timeout_fallback_10s"
+                        fresh_session.browser_privacy_level = "timeout_fallback"
+                        
+                        # Run inheritance with fallback fingerprint
+                        session_manager._attempt_fingerprint_inheritance(fresh_session)
+                        session_manager.db.save_session(fresh_session)
+                        
+                        # Clean up sleep flags
+                        for key in [sleep_key, f"sleep_start_time_{session.session_id}"]:
+                            if key in st.session_state: del st.session_state[key]
+                        
+                        logger.warning(f"✅ Timeout fallback applied for {session.session_id[:8]}")
+                        st.rerun() # Rerun to proceed to normal chat interface with fallback FP
+                        return
+                    else:
+                        # Still waiting, show progress and rerun after a short delay
+                        show_loading_with_sleep("🔍 Finalizing secure session setup...", elapsed)
+                        time.sleep(1) # Small sleep to update elapsed time visually
+                        st.rerun()
+                        return
+    
+    # NEW STEP 5: Normal interface (fingerprinting is complete)
+    current_page = st.session_state.get('page')
+    
+    if current_page != "chat":
+        render_welcome_page(session_manager)
+    else:
+        session = session_manager.get_session()
+        
+        if not session or not session.active:
+            logger.warning("Expected active session but got None/inactive. Resetting page.")
+            st.session_state['page'] = None # Go back to welcome page
+            st.rerun()
+            return
+            
+        # Activity tracking and timeout check (your existing code)
+        activity_data = None
+        if session.session_id:
+            activity_data = render_simple_activity_tracker(session.session_id)
+        
+        timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data)
+        if timeout_triggered:
+            return
+
+        # Render normal chat interface
+        render_sidebar(session_manager, session, st.session_state.pdf_exporter)
+        render_chat_interface_after_fingerprinting(session_manager, session, activity_data)
+
+
 if __name__ == "__main__":
     main_final()
-```
