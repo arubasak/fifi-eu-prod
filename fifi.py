@@ -111,7 +111,7 @@ DEFAULT_EXCLUDED_DOMAINS = [
 # Utility for safe JSON loading
 def safe_json_loads(data: Optional[str], default_value: Any = None) -> Any:
     """Safely loads JSON string, returning default_value on error or None/empty string."""
-    if data is None or data == "":
+    if data === None or data == "":
         return default_value
     try:
         return json.loads(data)
@@ -1572,7 +1572,7 @@ class ZohoCRMManager:
                     return True
                 else:
                     logger.error("Failed to add note to Zoho contact.")
-                    if attempt_note < max_retries_note - 1:
+                    if attempt_note < max_retries - 1:
                         time.sleep(2 ** attempt_note)
                     else:
                         logger.error("Max retries for note addition reached. Aborting save.")
@@ -1762,7 +1762,7 @@ class PineconeAssistantTool:
                                     seen_items.add(display_text)
                 
                 if citations_list:
-                    content += citations_header + "\n".then(citations_list)
+                    content += citations_header + "\n".join(citations_list)
             
             return {
                 "content": content, 
@@ -3123,6 +3123,7 @@ class SessionManager:
             # Get AI response (now simple call to EnhancedAI's core function)
             ai_response = self.ai.get_response(sanitized_prompt, session.messages) # No extra args needed now
             
+            # Handle if ai.get_response() returned None due to its internal errors
             if ai_response is None:
                 logger.error(f"EnhancedAI.get_response returned None for session {session.session_id[:8]}")
                 return {
@@ -3371,7 +3372,6 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         st.error("⏰ **Session Expired**")
         st.info("Your previous session has ended. Please start a new session.")
         
-        # Clear Streamlit session state fully
         for key in list(st.session_state.keys()):
             del st.session_state[key]
 
@@ -3768,6 +3768,54 @@ def handle_emergency_save_requests_from_query():
     else:
         logger.debug("ℹ️ No emergency save requests found in current URL query parameters.")
 
+def handle_fingerprint_requests_from_query():
+    """Checks for and processes fingerprint data sent via URL query parameters."""
+    logger.info("🔍 FINGERPRINT HANDLER: Checking for query parameter fingerprint data...")
+    
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    
+    if event == "fingerprint_complete" and session_id:
+        logger.info("=" * 80)
+        logger.info("🔍 FINGERPRINT DATA DETECTED VIA URL QUERY PARAMETERS!")
+        logger.info(f"Session ID: {session_id}, Event: {event}")
+        logger.info("=" * 80)
+        
+        # EXTRACT PARAMETERS BEFORE CLEARING THEM
+        fingerprint_id = query_params.get("fingerprint_id")
+        method = query_params.get("method")
+        privacy = query_params.get("privacy")
+        working_methods = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
+        
+        logger.info(f"Extracted - ID: {fingerprint_id}, Method: {method}, Privacy: {privacy}, Working Methods: {working_methods}")
+        
+        # Clear query parameters AFTER extraction
+        params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
+        for param in params_to_clear:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        if not fingerprint_id or not method:
+            st.error("❌ **Fingerprint Error** - Missing required data in redirect")
+            logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
+            st.rerun()
+            return
+        
+        try:
+            success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
+            logger.info(f"✅ Silent fingerprint processing: {success}")
+            
+            if success:
+                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
+                st.stop()
+        except Exception as e:
+            logger.error(f"Silent fingerprint processing failed: {e}")
+        
+        return
+    else:
+        logger.debug("ℹ️ No fingerprint requests found in current URL query parameters.")
+
 # =============================================================================
 # UI COMPONENTS
 # =============================================================================
@@ -4103,19 +4151,19 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     if session.reverification_pending:
         should_show_prompt = True
-        if st.session_state.verification_stage is None: # Initial entry to re-verification
+        if st.session_state.verification_stage === None: # Initial entry to re-verification
              st.session_state.verification_stage = 'initial_check'
              st.session_state.guest_continue_active = False # Clear any previous guest-continue state
     elif is_guest_limit_hit:
         should_show_prompt = True
-        if st.session_state.verification_stage is None or st.session_state.verification_stage == 'declined_recognized_email_prompt_only':
+        if st.session_state.verification_stage === None or st.session_state.verification_stage == 'declined_recognized_email_prompt_only':
             st.session_state.verification_stage = 'email_entry' # Force email entry if limit hit
             st.session_state.guest_continue_active = False # Clear any previous guest-continue state
     elif session.declined_recognized_email_at and not st.session_state.guest_continue_active:
         # This is the scenario where user declined recognized email, has questions left, but hasn't explicitly
         # chosen "Continue as Guest for Now" in this session state.
         should_show_prompt = True
-        if st.session_state.verification_stage is None:
+        if st.session_state.verification_stage === None:
             st.session_state.verification_stage = 'declined_recognized_email_prompt_only'
 
     # If no prompt should be shown based on conditions, ensure state is clean
@@ -4398,8 +4446,163 @@ def render_chat_interface_after_fingerprinting(session_manager, session, activit
         st.rerun()
 
 # =============================================================================
-# INTEGRATION: REPLACE YOUR MAIN FUNCTION WITH THIS
+# Helper Functions for main_final (Moved UP for correct scope)
 # =============================================================================
+
+def show_loading_with_sleep(message: str, elapsed_seconds: int = 0):
+    """Show loading screen during the 10-second wait"""
+    
+    st.markdown(f"""
+    <div style="
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 70vh;
+        flex-direction: column;
+        text-align: center;
+    ">
+        <div style="
+            background: white;
+            padding: 3rem;
+            border-radius: 15px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            max-width: 500px;
+            margin: 0 auto;
+        ">
+            <div style="
+                width: 60px;
+                height: 60px;
+                border: 6px solid #f3f3f3;
+                border-top: 6px solid #ff6b6b;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+                margin: 0 auto 2rem;
+            "></div>
+            <h2 style="color: #333; margin-bottom: 1rem;">🤖 FiFi AI Assistant</h2>
+            <p style="color: #666; font-size: 1.1rem; margin-bottom: 0.5rem;">{message}</p>
+            {f'<p style="color: #ff6b6b; font-weight: 500;">({elapsed_seconds}s / 10s)</p>' if elapsed_seconds > 0 else ''}
+            <p style="color: #999; font-size: 0.9rem; margin-top: 1rem;">
+                Please do not refresh the page or navigate away.
+            </p>
+        </div>
+    </div>
+    <style>
+        @keyframes spin {{
+            0% {{ transform: rotate(0deg); }}
+            100% {{ transform: rotate(360deg); }}
+        }}
+    </style>
+    """, unsafe_allow_html=True)
+
+def needs_fingerprinting(session_manager) -> tuple[bool, any]:
+    """Check if fingerprinting is needed"""
+    
+    if not st.session_state.get('current_session_id'):
+        return False, None
+    
+    session = session_manager.db.load_session(st.session_state.current_session_id)
+    if not session or not session.active:
+        return False, None
+    
+    # Check if fingerprint is temporary/missing
+    needs_fp = (
+        not session.fingerprint_id or 
+        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+    )
+    
+    return needs_fp, session
+
+# This is the `ensure_initialization_fixed` function, moved up.
+def ensure_initialization_fixed():
+    """Fixed version without duplicate spinner since we have loading overlay"""
+    if 'initialized' not in st.session_state or not st.session_state.initialized:
+        logger.info("Starting application initialization sequence (no spinner shown, overlay is active)...")
+        
+        try:
+            config = Config()
+            pdf_exporter = PDFExporter()
+            
+            try:
+                db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+                st.session_state.db_manager = db_manager
+            except Exception as db_e:
+                logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
+                st.session_state.db_manager = type('FallbackDB', (), {
+                    'db_type': 'memory',
+                    'local_sessions': {},
+                    'save_session': lambda self, session: None,
+                    'load_session': lambda self, session_id: None,
+                    'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
+                    'find_sessions_by_email': lambda self, email: []
+                })()
+            
+            try:
+                zoho_manager = ZohoCRMManager(config, pdf_exporter)
+            except Exception as e:
+                logger.error(f"Zoho manager failed: {e}")
+                zoho_manager = type('FallbackZoho', (), {
+                    'config': config,
+                    'save_chat_transcript_sync': lambda self, session, reason: False
+                })()
+            
+            try:
+                ai_system = EnhancedAI(config)
+            except Exception as e:
+                logger.error(f"AI system failed: {e}")
+                ai_system = type('FallbackAI', (), {
+                    "openai_client": None,
+                    'get_response': lambda self, prompt, history=None: {
+                        "content": "AI system temporarily unavailable.",
+                        "success": False
+                    }
+                })()
+            
+            rate_limiter = RateLimiter(max_requests=2, window_seconds=60)
+            fingerprinting_manager = st.session_state.db_manager.FingerprintingManager()
+            
+            try:
+                email_verification_manager = st.session_state.db_manager.EmailVerificationManager(config)
+                if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
+                    email_verification_manager = type('DummyEmail', (), {
+                        'send_verification_code': lambda self, email: False,
+                        'verify_code': lambda self, email, code: False
+                    })()
+            except Exception as e:
+                logger.error(f"Email verification failed: {e}")
+                email_verification_manager = type('DummyEmail', (), {
+                    'send_verification_code': lambda self, email: False,
+                    'verify_code': lambda self, email, code: False
+                })()
+            
+            question_limit_manager = st.session_state.db_manager.QuestionLimitManager()
+            
+            st.session_state.session_manager = SessionManager(
+                config, st.session_state.db_manager, zoho_manager, ai_system, 
+                rate_limiter, fingerprinting_manager, email_verification_manager, 
+                question_limit_manager
+            )
+            
+            st.session_state.pdf_exporter = pdf_exporter
+            st.session_state.error_handler = error_handler
+            st.session_state.fingerprinting_manager = fingerprinting_manager
+            st.session_state.email_verification_manager = email_verification_manager
+            st.session_state.question_limit_manager = question_limit_manager
+
+            st.session_state.chat_blocked_by_dialog = False
+            st.session_state.verification_stage = None
+            st.session_state.guest_continue_active = False
+            st.session_state.is_chat_ready = False 
+            
+            st.session_state.initialized = True
+            logger.info("✅ Application initialized successfully")
+            return True
+            
+        except Exception as e:
+            logger.critical(f"Critical initialization failure: {e}", exc_info=True)
+            st.session_state.initialized = False
+            return False
+    
+    return True
 
 # This is the `main_final` from your suggested code, with the critical reordering
 def main_final():
