@@ -4080,10 +4080,7 @@ def render_chat_interface_with_guaranteed_compatibility(session_manager: 'Sessio
             st.session_state.processing_question = True
             st.session_state.fingerprint_extraction_in_progress = True
             
-            # Clear the current question to prevent re-processing
-            if 'current_user_question' in st.session_state:
-                st.session_state.current_user_question = ""
-            
+            # DON'T try to clear the widget's session state - Streamlit will handle this naturally
             # Rerun to show the holding state and start fingerprint extraction
             st.rerun()
             
@@ -4134,10 +4131,7 @@ def render_chat_interface_with_guaranteed_compatibility(session_manager: 'Sessio
                         logger.error(f"❌ AI response failed: {e}", exc_info=True)
                         st.error("⚠️ I encountered an error. Please try again.")
             
-            # Clear the processed question
-            if 'current_user_question' in st.session_state:
-                st.session_state.current_user_question = ""
-            
+            # DON'T try to clear the widget's session state - let Streamlit handle it naturally
             st.rerun()
 
     # Reset the submission flag for next run
