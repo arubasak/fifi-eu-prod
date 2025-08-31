@@ -3649,46 +3649,6 @@ def render_simplified_browser_close_detection(session_id: str):
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close detection: {e}")
 
-def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
-    """Processes fingerprint data received via URL query parameters."""
-    try:
-        session_manager = st.session_state.get('session_manager')
-        if not session_manager:
-            logger.error("❌ Session manager not available during fingerprint processing from query.")
-            return False
-        
-        session = session_manager.db.load_session(session_id)
-        if not session:
-            logger.error(f"❌ Fingerprint processing: Session '{session_id[:8]}' not found in database.")
-            return False
-        
-        logger.info(f"✅ Processing fingerprint for session '{session_id[:8]}': ID={fingerprint_id[:8]}, Method={method}, Privacy={privacy}")
-        
-        # The apply_fingerprinting method will now handle both setting the fingerprint
-        # and checking for inheritance based on this new 'real' fingerprint.
-        processed_data = {
-            'fingerprint_id': fingerprint_id,
-            'fingerprint_method': method,
-            'browser_privacy_level': privacy,
-            'working_methods': working_methods
-            # visitor_type is determined by apply_fingerprinting after inheritance check
-        }
-        
-        success = session_manager.apply_fingerprinting(session, processed_data)
-        
-        if success:
-            logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
-            st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
-            logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
-            return True
-        else:
-            logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
-            return False
-        
-    except Exception as e:
-        logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
-        return False
-
 def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
     """Processes emergency save request from query parameters."""
     try:
@@ -3776,55 +3736,6 @@ def handle_emergency_save_requests_from_query():
         st.stop()
     else:
         logger.debug("ℹ️ No emergency save requests found in current URL query parameters.")
-
-def handle_fingerprint_requests_from_query():
-    """Checks for and processes fingerprint data sent via URL query parameters."""
-    logger.info("🔍 FINGERPRINT HANDLER: Checking for query parameter fingerprint data...")
-    
-    query_params = st.query_params
-    event = query_params.get("event")
-    session_id = query_params.get("session_id")
-    
-    if event == "fingerprint_complete" and session_id:
-        logger.info("=" * 80)
-        logger.info("🔍 FINGERPRINT DATA DETECTED VIA URL QUERY PARAMETERS!")
-        logger.info(f"Session ID: {session_id}, Event: {event}")
-        logger.info("=" * 80)
-        
-        # EXTRACT PARAMETERS BEFORE CLEARING THEM
-        fingerprint_id = query_params.get("fingerprint_id")
-        method = query_params.get("method")
-        privacy = query_params.get("privacy")
-        working_methods = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
-        
-        logger.info(f"Extracted - ID: {fingerprint_id}, Method: {method}, Privacy: {privacy}, Working Methods: {working_methods}")
-        
-        # Clear query parameters AFTER extraction
-        params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
-        for param in params_to_clear:
-            if param in st.query_params:
-                del st.query_params[param]
-        
-        if not fingerprint_id or not method:
-            st.error("❌ **Fingerprint Error** - Missing required data in redirect")
-            logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
-            # Removed time.sleep(2)
-            st.rerun()
-            return
-        
-        try:
-            success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
-            logger.info(f"✅ Silent fingerprint processing: {success}")
-            
-            if success:
-                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
-                st.stop()
-        except Exception as e:
-            logger.error(f"Silent fingerprint processing failed: {e}")
-        
-        return
-    else:
-        logger.debug("ℹ️ No fingerprint requests found in current URL query parameters.")
 
 # =============================================================================
 # UI COMPONENTS
@@ -4328,155 +4239,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     return disable_chat_input
 
-def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
-    """Chat interface with enhanced tier system notifications."""
-    
-    st.title("🤖 FiFi AI Assistant")
-    st.caption("Your intelligent food & beverage sourcing companion.")
-
-    # Simple activity tracking
-    if activity_result:
-        js_last_activity_timestamp = activity_result.get('last_activity')
-        if js_last_activity_timestamp:
-            try:
-                new_activity = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
-                if session.last_activity is None or new_activity > session.last_activity:
-                    session.last_activity = new_activity
-                    session_manager._save_session_with_retry(session)
-            except Exception as e:
-                logger.error(f"Failed to update activity from JavaScript: {e}")
-
-    # Fingerprinting
-    fingerprint_needed = (
-        not session.fingerprint_id or
-        session.fingerprint_method == "temporary_fallback_python" or
-        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-    )
-    
-    fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-    if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
-        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-        st.session_state[fingerprint_key] = True
-
-    # Browser close detection for emergency saves
-    if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
-        try:
-            render_simplified_browser_close_detection(session.session_id)
-        except Exception as e:
-            logger.error(f"Browser close detection failed: {e}")
-
-    # Display email prompt if needed AND get status to disable chat input
-    should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
-
-    # Render chat content ONLY if not blocked by a dialog
-    if not st.session_state.get('chat_blocked_by_dialog', False):
-        # ENHANCED: Show tier warnings for registered users
-        # Note: I've also updated the `is_within_limits` calls to use `.get('allowed')` properly
-        # and added `.value` for Enum comparisons for consistency and robustness.
-        limit_check_for_display = session_manager.question_limits.is_within_limits(session)
-        if (session.user_type.value == UserType.REGISTERED_USER.value and 
-            limit_check_for_display.get('allowed') and 
-            limit_check_for_display.get('tier')):
-            
-            tier = limit_check_for_display.get('tier')
-            remaining = limit_check_for_display.get('remaining', 0)
-            
-            if tier == 2 and remaining <= 3:
-                st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until 24-hour reset!")
-            elif tier == 1 and remaining <= 2:
-                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until 1-hour break.")
-
-        # Display chat messages (respects soft clear offset)
-        visible_messages = session.messages[session.display_message_offset:]
-        for msg in visible_messages:
-            with st.chat_message(msg.get("role", "user")):
-                st.markdown(msg.get("content", ""), unsafe_allow_html=True)
-                
-                if msg.get("source"):
-                    source_color = {
-                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
-                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                        "Error Handler": "❌"
-                    }.get(msg['source'], "🤖")
-                    st.caption(f"{source_color} Source: {msg['source']}")
-                
-                indicators = []
-                if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
-                if msg.get("used_search"): indicators.append("🌐 Web Search")
-                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-                
-                if msg.get("safety_override"):
-                    st.warning("🛡️ Safety Override: Switched to verified sources")
-                
-                if msg.get("has_citations") and msg.get("has_inline_citations"):
-                    st.caption("📚 Response includes verified citations")
-                
-                # Check for post-response Tier 1 ban notification (for Registered Users only)
-                if msg.get('role') == 'assistant' and msg.get('tier1_ban_applied_post_response', False):
-                    st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
-                    st.markdown("---") # Visual separator
-
-    # Chat input
-    # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
-    # And combine with other disabled conditions
-    overall_chat_disabled = (
-        not st.session_state.get('is_chat_ready', False) or 
-        should_disable_chat_input_by_dialog or 
-        session.ban_status.value != BanStatus.NONE.value
-    )
-
-    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=overall_chat_disabled)
-    
-    if prompt:
-        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
-        
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        with st.chat_message("assistant"):
-            with st.spinner("🔍 Processing your question..."):
-                try:
-                    response = session_manager.get_ai_response(session, prompt)
-                    
-                    if response.get('requires_email'):
-                        st.error("📧 Please verify your email to continue.")
-                        # This should be handled by display_email_prompt_if_needed on next rerun
-                        st.session_state.verification_stage = 'email_entry' 
-                        st.session_state.chat_blocked_by_dialog = True # Force block chat
-                        st.rerun()
-                    elif response.get('banned'):
-                        st.error(response.get("content", 'Access restricted.'))
-                        if response.get('time_remaining'):
-                            time_remaining = response['time_remaining']
-                            hours = int(time_remaining.total_seconds() // 3600)
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                            st.error(f"Time remaining: {hours}h {minutes}m")
-                        st.rerun()
-                    else:
-                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
-                        
-                        if response.get("source"):
-                            source_color = {
-                                "FiFi": "🧠", "FiFi Web Search": "🌐",
-                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                                "Error Handler": "❌"
-                            }.get(response['source'], "🤖")
-                            st.caption(f"{source_color} Source: {response['source']}")
-                        
-                        logger.info(f"✅ Question processed successfully")
-                        
-                        # Only re-run if a ban was just applied post-response to update UI (disable input, show message)
-                        if response.get('tier1_ban_applied_post_response', False):
-                            logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
-                            st.rerun()
-                        
-                except Exception as e:
-                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
-                    st.error("⚠️ I encountered an error. Please try again.")
-        
-        st.rerun()
-
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
     """Fixed version without duplicate spinner since we have loading overlay"""
@@ -4705,9 +4467,9 @@ def main_fixed():
                 st.info("Please refresh the page to try again.")
                 return
 
-        # Handle emergency saves and fingerprint data
+        # Handle emergency saves and fingerprint data from URL redirects
         handle_emergency_save_requests_from_query()
-        handle_fingerprint_requests_from_query()
+        handle_fingerprint_completion_from_query()
 
         session_manager = st.session_state.get('session_manager')
         if not session_manager:
@@ -4749,7 +4511,7 @@ def main_fixed():
                 return
 
             render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
+            render_chat_interface_with_guaranteed_compatibility(session_manager, session)
 
     except Exception as e:
         logger.error(f"Main application error: {e}", exc_info=True)
