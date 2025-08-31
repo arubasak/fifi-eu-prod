@@ -2482,7 +2482,7 @@ class SessionManager:
             merged_user_type = session.user_type 
             merged_daily_question_count = session.daily_question_count
             merged_total_question_count = session.total_question_count
-            merged_last_question_time = session.last_activity # Use current session's last activity as baseline
+            merged_last_question_time = session.last_question_time # Use current session's LQT as baseline
             merged_question_limit_reached = session.question_limit_reached
             merged_ban_status = session.ban_status
             merged_ban_start_time = session.ban_start_time
@@ -4416,54 +4416,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                     st.markdown("---") # Visual separator
 
-    # --- NEW LOGIC FOR HANDLING PENDING PROMPTS AFTER FINGERPRINT IS READY ---
-    if st.session_state.get("prompt_submitted_and_waiting_for_fingerprint", False) and st.session_state.get('is_chat_ready', False):
-        if st.session_state.pending_prompt:
-            with st.chat_message("user"):
-                st.markdown(st.session_state.pending_prompt)
-            
-            with st.chat_message("assistant"):
-                with st.spinner("🔍 Processing your queued question..."):
-                    try:
-                        response = session_manager.get_ai_response(session, st.session_state.pending_prompt)
-                        if response.get('requires_email'):
-                            st.error("📧 Please verify your email to continue.")
-                            st.session_state.verification_stage = 'email_entry'
-                            st.session_state.chat_blocked_by_dialog = True
-                            st.rerun()
-                        elif response.get('banned'):
-                            st.error(response.get("content", 'Access restricted.'))
-                            if response.get('time_remaining'):
-                                time_remaining = response['time_remaining']
-                                hours = int(time_remaining.total_seconds() // 3600)
-                                minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                                st.error(f"Time remaining: {hours}h {minutes}m")
-                            st.rerun()
-                        else:
-                            st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
-                            if response.get("source"):
-                                source_color = {
-                                    "FiFi": "🧠", "FiFi Web Search": "🌐",
-                                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                                    "Error Handler": "❌"
-                                }.get(response['source'], "🤖")
-                                st.caption(f"{source_color} Source: {response['source']}")
-                            
-                            logger.info(f"✅ Queued question processed successfully")
-                            if response.get('tier1_ban_applied_post_response', False):
-                                logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]} after queued question.")
-                                st.rerun()
-
-                    except Exception as e:
-                        logger.error(f"❌ AI response for queued question failed: {e}", exc_info=True)
-                        st.error("⚠️ I encountered an error processing your queued question. Please try again.")
-            
-            # Clear the pending prompt and flag after processing
-            st.session_state.pending_prompt = None
-            st.session_state.prompt_submitted_and_waiting_for_fingerprint = False
-            st.rerun() # Rerun to clear chat input and update UI
-    # --- END NEW LOGIC ---
-
     # Chat input
     # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
     # And combine with other disabled conditions
@@ -4473,29 +4425,12 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         session.ban_status.value != BanStatus.NONE.value
     )
 
-    prompt_placeholder = "Ask me about ingredients, suppliers, or market trends..."
-    if not st.session_state.get('is_chat_ready', False):
-        prompt_placeholder = "Initializing... Please wait for device fingerprinting."
-    elif st.session_state.get("prompt_submitted_and_waiting_for_fingerprint", False):
-        prompt_placeholder = "Your question is queued. Waiting for fingerprinting to complete..."
-
-
-    prompt = st.chat_input(prompt_placeholder, 
+    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
     
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
-        # Check if chat is disabled due to pending fingerprinting
-        if not st.session_state.get('is_chat_ready', False):
-            # If chat is not ready, store the prompt and set flag
-            st.session_state.pending_prompt = prompt
-            st.session_state.prompt_submitted_and_waiting_for_fingerprint = True
-            st.info("🕒 Device fingerprinting in progress. Your question has been queued and will be processed shortly.")
-            st.rerun() # Rerun to display message and wait for fingerprint
-            return # Exit function, don't process AI response yet
-        
-        # Normal processing if chat is ready
         with st.chat_message("user"):
             st.markdown(prompt)
         
@@ -4623,9 +4558,6 @@ def ensure_initialization_fixed():
             st.session_state.guest_continue_active = False
             # NEW: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
-            # NEW: Initialize pending prompt states
-            st.session_state.pending_prompt = None
-            st.session_state.prompt_submitted_and_waiting_for_fingerprint = False
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
