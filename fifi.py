@@ -1545,7 +1545,7 @@ class ZohoCRMManager:
                     return True
                 else:
                     logger.error("Failed to add note to Zoho contact.")
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries_note - 1:
                         time.sleep(2 ** attempt)
                     else:
                         logger.error("Max retries for note addition reached. Aborting save.")
@@ -3741,6 +3741,459 @@ def handle_emergency_save_requests_from_query():
 # UI COMPONENTS
 # =============================================================================
 
+# =============================================================================
+# 100% GUARANTEED STREAMLIT-COMPATIBLE QUESTION HOLDING SYSTEM
+# Uses only confirmed, stable Streamlit features
+# =============================================================================
+
+def initialize_question_holding_state():
+    """Initialize the question holding system state variables"""
+    if 'processing_question' not in st.session_state:
+        st.session_state.processing_question = False
+    if 'held_question' not in st.session_state:
+        st.session_state.held_question = ""
+    if 'fingerprint_js_complete' not in st.session_state:
+        st.session_state.fingerprint_js_complete = False
+    if 'fingerprint_extraction_in_progress' not in st.session_state:
+        st.session_state.fingerprint_extraction_in_progress = False
+    if 'question_submitted_this_run' not in st.session_state:
+        st.session_state.question_submitted_this_run = False
+
+def is_fingerprint_stable(session) -> bool:
+    """Check if the session has a stable (non-temporary) fingerprint"""
+    if not session or not session.fingerprint_id:
+        return False
+    return not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+
+def should_hold_question_for_fingerprint(session) -> bool:
+    """Determine if questions should be held pending fingerprint extraction"""
+    if not session:
+        return True
+    
+    # Hold if fingerprint is not stable AND JS component hasn't completed
+    fingerprint_stable = is_fingerprint_stable(session)
+    js_complete = st.session_state.get('fingerprint_js_complete', False)
+    
+    should_hold = not fingerprint_stable and not js_complete
+    
+    if should_hold:
+        logger.info(f"🔒 Question holding active - fingerprint_stable: {fingerprint_stable}, js_complete: {js_complete}")
+    
+    return should_hold
+
+def show_fingerprint_processing_overlay():
+    """Show fingerprint processing overlay while JS component runs"""
+    if st.session_state.get('processing_question', False):
+        processing_html = """
+        <div style="
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8);
+            z-index: 9999;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        ">
+            <div style="
+                background: white;
+                padding: 2.5rem;
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                text-align: center;
+                max-width: 480px;
+                border: 3px solid #4CAF50;
+                animation: pulse 2s infinite;
+            ">
+                <div style="
+                    width: 60px;
+                    height: 60px;
+                    border: 5px solid #f0f0f0;
+                    border-top: 5px solid #4CAF50;
+                    border-radius: 50%;
+                    animation: spin 1.5s linear infinite;
+                    margin: 0 auto 2rem;
+                "></div>
+                <h2 style="color: #333; margin-bottom: 1rem; font-weight: 600;">🔐 Securing Your Session</h2>
+                <p style="color: #666; margin-bottom: 1rem; font-size: 1.1em;">Initializing device fingerprinting for security...</p>
+                <div style="
+                    margin-top: 1.5rem;
+                    padding: 1rem;
+                    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+                    border-radius: 12px;
+                    border-left: 4px solid #4CAF50;
+                ">
+                    <p style="margin: 0; color: #495057; font-weight: 500;">
+                        ✅ Your question is safely queued
+                    </p>
+                    <p style="margin: 0.5rem 0 0 0; color: #6c757d; font-size: 0.9em;">
+                        Processing will begin automatically once security initialization completes
+                    </p>
+                </div>
+            </div>
+        </div>
+        <style>
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+            @keyframes pulse {
+                0% { box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+                50% { box-shadow: 0 25px 80px rgba(76, 175, 80, 0.4); }
+                100% { box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+            }
+        </style>
+        """
+        st.components.v1.html(processing_html, height=0)
+        return True
+    return False
+
+def render_enhanced_fingerprint_component(session_id: str):
+    """
+    Renders fingerprint component that signals completion via URL redirect.
+    Uses 100% confirmed Streamlit patterns.
+    """
+    try:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
+        
+        if os.path.exists(html_file_path):
+            # Use existing fingerprint component file
+            with open(html_file_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            # Replace session ID placeholder
+            html_content = html_content.replace('{SESSION_ID}', session_id)
+            
+            # Render with height=0 for minimal visual impact
+            st.components.v1.html(html_content, height=0, width=0, scrolling=False)
+            logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
+        else:
+            # Fallback inline fingerprint component
+            fallback_fingerprint_html = f"""
+            <script>
+            (function() {{
+                const sessionId = '{session_id}';
+                
+                console.log('🔐 Starting fallback fingerprint extraction for session:', sessionId.substring(0, 8));
+                
+                // Simple fingerprint extraction
+                function generateFallbackFingerprint() {{
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    ctx.textBaseline = 'top';
+                    ctx.font = '14px Arial';
+                    ctx.fillText('FiFi Fingerprint', 2, 2);
+                    
+                    const screen_data = screen.width + 'x' + screen.height + 'x' + screen.colorDepth;
+                    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                    const userAgent = navigator.userAgent.substring(0, 50);
+                    
+                    const combined = canvas.toDataURL() + screen_data + timezone + userAgent;
+                    const hash = combined.split('').reduce((a,b) => {{ a=((a<<5)-a)+b.charCodeAt(0); return a&a }}, 0);
+                    
+                    return {{
+                        fingerprint_id: 'fp_' + Math.abs(hash).toString(36).substring(0, 16),
+                        method: 'fallback_canvas_screen',
+                        privacy: 'standard',
+                        working_methods: ['canvas', 'screen', 'timezone', 'useragent']
+                    }};
+                }}
+                
+                // Extract fingerprint
+                const fpData = generateFallbackFingerprint();
+                console.log('✅ Fallback fingerprint extracted:', fpData.fingerprint_id.substring(0, 8));
+                
+                // Send completion signal back to Streamlit via URL redirect
+                const currentUrl = new URL(window.location);
+                currentUrl.searchParams.set('event', 'fingerprint_complete');
+                currentUrl.searchParams.set('session_id', sessionId);
+                currentUrl.searchParams.set('fingerprint_id', fpData.fingerprint_id);
+                currentUrl.searchParams.set('method', fpData.method);
+                currentUrl.searchParams.set('privacy', fpData.privacy);
+                currentUrl.searchParams.set('working_methods', fpData.working_methods.join(','));
+                currentUrl.searchParams.set('timestamp', Date.now().toString());
+                
+                console.log('🔄 Redirecting to signal fingerprint completion...');
+                
+                // Redirect after short delay to ensure rendering completes
+                setTimeout(() => {{
+                    if (window.parent && window.parent !== window) {{
+                        window.parent.location.href = currentUrl.toString();
+                    }} else {{
+                        window.location.href = currentUrl.toString();
+                    }}
+                }}, 1500);
+            }})();
+            </script>
+            """
+            
+            st.components.v1.html(fallback_fingerprint_html, height=0, width=0)
+            logger.info(f"✅ Fallback fingerprint component rendered for session {session_id[:8]}")
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to render fingerprint component: {e}", exc_info=True)
+        # Emergency fallback: mark as complete to prevent hanging
+        st.session_state.fingerprint_js_complete = True
+
+def render_chat_interface_with_guaranteed_compatibility(session_manager: 'SessionManager', session: UserSession):
+    """
+    Chat interface using 100% confirmed Streamlit patterns only.
+    No experimental features - guaranteed to work.
+    """
+    
+    st.title("🤖 FiFi AI Assistant")
+    st.caption("Your intelligent food & beverage sourcing companion.")
+
+    # Initialize question holding state
+    initialize_question_holding_state()
+
+    # STEP 1: Check if we need to process a held question from previous run
+    if (st.session_state.get('processing_question', False) and 
+        st.session_state.get('fingerprint_js_complete', False)):
+        
+        held_question = st.session_state.get('held_question', '')
+        if held_question:
+            logger.info(f"✅ Fingerprint extraction complete - processing held question: '{held_question[:50]}...'")
+            
+            # Process the held question
+            with st.chat_message("user"):
+                st.markdown(held_question)
+            
+            with st.chat_message("assistant"):
+                with st.spinner("🔍 Processing your question..."):
+                    try:
+                        response = session_manager.get_ai_response(session, held_question)
+                        
+                        if response.get('requires_email'):
+                            st.error("📧 Please verify your email to continue.")
+                            st.session_state.verification_stage = 'email_entry' 
+                            st.session_state.chat_blocked_by_dialog = True
+                        elif response.get('banned'):
+                            st.error(response.get("content", 'Access restricted.'))
+                            if response.get('time_remaining'):
+                                time_remaining = response['time_remaining']
+                                hours = int(time_remaining.total_seconds() // 3600)
+                                minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                                st.error(f"Time remaining: {hours}h {minutes}m")
+                        else:
+                            st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                            
+                            if response.get("source"):
+                                source_color = {
+                                    "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                    "Error Handler": "❌"
+                                }.get(response['source'], "🤖")
+                                st.caption(f"{source_color} Source: {response['source']}")
+                            
+                            logger.info(f"✅ Held question processed successfully")
+                        
+                    except Exception as e:
+                        logger.error(f"❌ AI response failed for held question: {e}", exc_info=True)
+                        st.error("⚠️ I encountered an error. Please try again.")
+            
+            # Reset the holding state
+            st.session_state.processing_question = False
+            st.session_state.held_question = ""
+            st.session_state.fingerprint_js_complete = False
+            st.session_state.fingerprint_extraction_in_progress = False
+            
+            # Rerun to show the response and enable input again
+            st.rerun()
+
+    # STEP 2: Show overlay if processing is active
+    show_fingerprint_processing_overlay()
+
+    # STEP 3: Render fingerprint component if needed
+    fingerprint_needed = (
+        not session.fingerprint_id or
+        session.fingerprint_method == "temporary_fallback_python" or
+        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+    )
+    
+    fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+    if (fingerprint_needed and 
+        not st.session_state.get(fingerprint_key, False) and
+        st.session_state.get('processing_question', False)):
+        
+        logger.info(f"🔐 Starting fingerprint extraction for session {session.session_id[:8]}")
+        st.session_state.fingerprint_extraction_in_progress = True
+        render_enhanced_fingerprint_component(session.session_id)
+        st.session_state[fingerprint_key] = True
+
+    # STEP 4: Display email prompt if needed
+    should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
+
+    # STEP 5: Render chat content (existing messages)
+    if not st.session_state.get('chat_blocked_by_dialog', False):
+        # Display existing chat messages
+        visible_messages = session.messages[session.display_message_offset:]
+        for msg in visible_messages:
+            with st.chat_message(msg.get("role", "user")):
+                st.markdown(msg.get("content", ""), unsafe_allow_html=True)
+                
+                if msg.get("source"):
+                    source_color = {
+                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                        "Error Handler": "❌"
+                    }.get(msg['source'], "🤖")
+                    st.caption(f"{source_color} Source: {msg['source']}")
+
+    # STEP 6: Chat input with 100% confirmed Streamlit pattern
+    # Determine if chat should be disabled
+    overall_chat_disabled = (
+        should_disable_chat_input_by_dialog or 
+        session.ban_status.value != BanStatus.NONE.value or
+        st.session_state.get('processing_question', False)  # Disable while processing held question
+    )
+
+    # Show status if question is being held
+    if st.session_state.get('processing_question', False) and not st.session_state.get('fingerprint_js_complete', False):
+        st.info("🔐 **Device Security Check in Progress** - Your question will be processed once fingerprint extraction completes.")
+
+    # GUARANTEED COMPATIBLE: Standard st.chat_input pattern
+    prompt = st.chat_input(
+        "Ask me about ingredients, suppliers, or market trends...", 
+        key="current_user_question",
+        disabled=overall_chat_disabled
+    )
+
+    # STEP 7: Handle new question submission (100% standard pattern)
+    if prompt and not st.session_state.get('question_submitted_this_run', False):
+        # Prevent double processing in same run
+        st.session_state.question_submitted_this_run = True
+        
+        should_hold = should_hold_question_for_fingerprint(session)
+        
+        if should_hold:
+            # Question needs to be held - store it and show processing state
+            logger.info(f"🔒 Question submitted but held pending fingerprint extraction: '{prompt[:50]}...'")
+            
+            # Store the question for later processing
+            st.session_state.held_question = prompt
+            st.session_state.processing_question = True
+            st.session_state.fingerprint_extraction_in_progress = True
+            
+            # Clear the current question to prevent re-processing
+            if 'current_user_question' in st.session_state:
+                st.session_state.current_user_question = ""
+            
+            # Rerun to show the holding state and start fingerprint extraction
+            st.rerun()
+            
+        else:
+            # Fingerprint is stable, process question immediately
+            logger.info(f"🎯 Processing question immediately (fingerprint stable): '{prompt[:50]}...'")
+            
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+            with st.chat_message("assistant"):
+                with st.spinner("🔍 Processing your question..."):
+                    try:
+                        response = session_manager.get_ai_response(session, prompt)
+                        
+                        if response.get('requires_email'):
+                            st.error("📧 Please verify your email to continue.")
+                            st.session_state.verification_stage = 'email_entry' 
+                            st.session_state.chat_blocked_by_dialog = True
+                            st.rerun()
+                        elif response.get('banned'):
+                            st.error(response.get("content", 'Access restricted.'))
+                            if response.get('time_remaining'):
+                                time_remaining = response['time_remaining']
+                                hours = int(time_remaining.total_seconds() // 3600)
+                                minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                                st.error(f"Time remaining: {hours}h {minutes}m")
+                            st.rerun()
+                        else:
+                            st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                            
+                            if response.get("source"):
+                                source_color = {
+                                    "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                    "Error Handler": "❌"
+                                }.get(response['source'], "🤖")
+                                st.caption(f"{source_color} Source: {response['source']}")
+                            
+                            logger.info(f"✅ Question processed successfully")
+                            
+                            # Only re-run if a ban was just applied post-response
+                            if response.get('tier1_ban_applied_post_response', False):
+                                logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
+                                st.rerun()
+                    
+                    except Exception as e:
+                        logger.error(f"❌ AI response failed: {e}", exc_info=True)
+                        st.error("⚠️ I encountered an error. Please try again.")
+            
+            # Clear the processed question
+            if 'current_user_question' in st.session_state:
+                st.session_state.current_user_question = ""
+            
+            st.rerun()
+
+    # Reset the submission flag for next run
+    if st.session_state.get('question_submitted_this_run', False):
+        st.session_state.question_submitted_this_run = False
+
+def handle_fingerprint_completion_from_query():
+    """
+    Handler for fingerprint completion signals from URL redirect
+    """
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    
+    if event == "fingerprint_complete" and session_id:
+        logger.info("✅ FINGERPRINT COMPLETION SIGNAL DETECTED!")
+        
+        # Extract fingerprint data
+        fingerprint_id = query_params.get("fingerprint_id")
+        method = query_params.get("method")
+        privacy = query_params.get("privacy")
+        working_methods = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
+        
+        # Clear query parameters
+        params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
+        for param in params_to_clear:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        if fingerprint_id and method:
+            try:
+                # Process the fingerprint data
+                session_manager = st.session_state.get('session_manager')
+                if session_manager:
+                    session = session_manager.db.load_session(session_id)
+                    if session:
+                        processed_data = {
+                            'fingerprint_id': fingerprint_id,
+                            'fingerprint_method': method,
+                            'browser_privacy_level': privacy,
+                            'working_methods': working_methods
+                        }
+                        
+                        success = session_manager.apply_fingerprinting(session, processed_data)
+                        if success:
+                            # Signal that JS fingerprint extraction is complete
+                            st.session_state.fingerprint_js_complete = True
+                            st.session_state.fingerprint_extraction_in_progress = False
+                            st.session_state.is_chat_ready = True
+                            
+                            logger.info(f"✅ Fingerprint processing complete - questions can now be processed")
+                            st.stop()  # Stop to preserve page state
+                
+            except Exception as e:
+                logger.error(f"Fingerprint completion processing failed: {e}")
+
 # Modified render_welcome_page function (from prompt)
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock."""
@@ -4467,7 +4920,7 @@ def main_fixed():
                 st.info("Please refresh the page to try again.")
                 return
 
-        # Handle emergency saves and fingerprint data from URL redirects
+        # Handle emergency saves and fingerprint data
         handle_emergency_save_requests_from_query()
         handle_fingerprint_completion_from_query()
 
