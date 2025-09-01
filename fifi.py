@@ -1916,26 +1916,85 @@ class TavilyFallbackAgent:
         # Fallback for unknown formats
         return "I couldn't find any relevant information for your query."
 
-    def query(self, message: str, chat_history: List[BaseMessage]) -> Dict[str, Any]:
+    # NEW: Determine search strategy based on question and Pinecone error type
+    def determine_search_strategy(self, question: str, pinecone_error_type: str = None) -> Dict[str, Any]:
+        """Determine whether to use domain-restricted or worldwide search."""
+        question_lower = question.lower()
+        
+        # Check for current information indicators in question
+        current_info_indicators = [
+            "today", "yesterday", "this week", "this month", "this year", "2025", "2024",
+            "current", "latest", "recent", "now", "currently", "updated",
+            "news", "weather", "stock", "price", "event", "happening"
+        ]
+        
+        has_time_sensitive_keywords = any(indicator in question_lower for indicator in current_info_indicators)
+        
+        # For major Pinecone errors, use two-tier approach
+        if pinecone_error_type in ["rate_limit", "authentication_error", "payment_required", "server_error"]:
+            if has_time_sensitive_keywords:
+                # Tier 2: Worldwide search with competitor exclusions
+                return {
+                    "strategy": "worldwide_with_exclusions",
+                    "include_domains": None,
+                    "exclude_domains": DEFAULT_EXCLUDED_DOMAINS,
+                    "reason": f"Time-sensitive question with Pinecone {pinecone_error_type}"
+                }
+            else:
+                # Tier 1: Domain-restricted to 12taste.com
+                return {
+                    "strategy": "domain_restricted", 
+                    "include_domains": ["12taste.com"],
+                    "exclude_domains": None,
+                    "reason": f"Domain-restricted fallback for Pinecone {pinecone_error_type}"
+                }
+        else:
+            # Normal fallback - worldwide with exclusions
+            return {
+                "strategy": "worldwide_with_exclusions",
+                "include_domains": None, 
+                "exclude_domains": DEFAULT_EXCLUDED_DOMAINS,
+                "reason": "Standard safety fallback"
+            }
+
+    def query(self, message: str, chat_history: List[BaseMessage], pinecone_error_type: str = None) -> Dict[str, Any]:
         try:
-            search_results = self.tavily_tool.invoke({"query": message})
+            # Determine search strategy
+            strategy = self.determine_search_strategy(message, pinecone_error_type)
+            
+            # Build Tavily query parameters
+            search_params = {"query": message}
+            
+            if strategy["include_domains"]:
+                # Domain-restricted search
+                domain_query = f"{message} site:{strategy['include_domains'][0]}"
+                search_params["query"] = domain_query
+                logger.info(f"🔍 Tavily domain-restricted search: {strategy['include_domains'][0]}")
+            elif strategy["exclude_domains"]:
+                # Worldwide with exclusions
+                exclusions = " ".join([f"-site:{domain}" for domain in strategy["exclude_domains"]])
+                search_params["query"] = f"{message} {exclusions}"
+                logger.info(f"🌐 Tavily worldwide search excluding {len(strategy['exclude_domains'])} competitor domains")
+            
+            search_results = self.tavily_tool.invoke(search_params)
             synthesized_content = self.synthesize_search_results(search_results, message)
             final_content = self.add_utm_to_links(synthesized_content)
             
             return {
                 "content": final_content,
                 "success": True,
-                "source": "FiFi Web Search",
+                "source": f"FiFi Web Search ({strategy['strategy']})",
                 "used_pinecone": False,
                 "used_search": True,
                 "has_citations": True,
                 "has_inline_citations": True,
-                "safety_override": False
+                "safety_override": False,
+                "search_strategy": strategy["strategy"],
+                "search_reason": strategy["reason"]
             }
         except Exception as e:
-            logger.error(f"Pinecone Assistant error: {str(e)}")
-            return None
-    
+            logger.error(f"Tavily search error: {str(e)}")
+            return None    
 class EnhancedAI:
     """Enhanced AI system with improved error handling and bidirectional fallback."""
     
@@ -2018,90 +2077,92 @@ class EnhancedAI:
         # Default to Pinecone first for other scenarios
         return True
 
-    def should_use_web_fallback(self, pinecone_response: Dict[str, Any]) -> bool:
-        """EXTREMELY aggressive fallback detection to prevent any hallucination."""
-        content = pinecone_response.get("content", "").lower()
-        content_raw = pinecone_response.get("content", "")
-        
-        # PRIORITY 1: Always fallback for current/recent information requests
-        current_info_indicators = [
-            "today", "yesterday", "this week", "this month", "this year", "2025", "2024",
-            "current", "latest", "recent", "now", "currently", "updated",
-            "news", "weather", "stock", "price", "event", "happening"
-        ]
-        if any(indicator in content for indicator in current_info_indicators):
-            return True
-        
-        # PRIORITY 2: Explicit "don't know" statements (allow these to pass)
-        explicit_unknown = [
-            "i don't have specific information", "i don't know", "i'm not sure",
-            "i cannot help", "i cannot provide", "cannot find specific information",
-            "no specific information", "no information about", "don't have information",
-            "not available in my knowledge", "unable to find", "no data available",
-            "insufficient information", "outside my knowledge", "cannot answer"
-        ]
-        if any(keyword in content for keyword in explicit_unknown):
-            return False # Don't fallback for explicit "don't know" responses
-        
-        # PRIORITY 3: Detect fake files/images/paths (CRITICAL SAFETY)
-        fake_file_patterns = [
-            ".jpg", ".jpeg", ".png", ".html", ".gif", ".doc", ".docx",
-            ".xls", ".xlsx", ".ppt", ".pptx", ".mp4", ".avi", ".mp3",
-            "/uploads/", "/files/", "/images/", "/documents/", "/media/",
-            "file://", "ftp://", "path:", "directory:", "folder:"
-        ]
-        
-        has_real_citations = pinecone_response.get("has_citations", False)
-        if any(pattern in content_raw for pattern in fake_file_patterns):
-            if not has_real_citations:
-                logger.warning("🚨 SAFETY: Detected fake file references without real citations")
-                return True
-        
-        # PRIORITY 4: Detect potential fake citations (CRITICAL)
-        if "[1]" in content_raw or "**Sources:**" in content_raw:
-            suspicious_patterns = [
-                "http://", ".org", ".net",
-                "example.com", "website.com", "source.com", "domain.com"
-            ]
-            if not has_real_citations and any(pattern in content_raw for pattern in suspicious_patterns):
-                logger.warning("🚨 SAFETY: Detected fake citations")
-                return True
-        
-        # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short or explicit "don't know")
+    def should_use_web_fallback(self, pinecone_response: Dict[str, Any], original_question: str) -> bool:
+    """EXTREMELY aggressive fallback detection to prevent any hallucination."""
+    content = pinecone_response.get("content", "").lower()
+    content_raw = pinecone_response.get("content", "")
+    question_lower = original_question.lower()  # NEW: Check question instead of response
+    
+    # PRIORITY 1: Always fallback for current/recent information requests IN QUESTION
+    current_info_indicators = [
+        "today", "yesterday", "this week", "this month", "this year", "2025", "2024",
+        "current", "latest", "recent", "now", "currently", "updated",
+        "news", "weather", "stock", "price", "event", "happening"
+    ]
+    # FIXED: Check original question instead of response content
+    if any(indicator in question_lower for indicator in current_info_indicators):
+        return True
+    
+    # PRIORITY 2: Explicit "don't know" statements (allow these to pass)
+    explicit_unknown = [
+        "i don't have specific information", "i don't know", "i'm not sure",
+        "i cannot help", "i cannot provide", "cannot find specific information",
+        "no specific information", "no information about", "don't have information",
+        "not available in my knowledge", "unable to find", "no data available",
+        "insufficient information", "outside my knowledge", "cannot answer"
+    ]
+    if any(keyword in content for keyword in explicit_unknown):
+        return False # Don't fallback for explicit "don't know" responses
+    
+    # PRIORITY 3: Detect fake files/images/paths (CRITICAL SAFETY)
+    fake_file_patterns = [
+        ".jpg", ".jpeg", ".png", ".html", ".gif", ".doc", ".docx",
+        ".xls", ".xlsx", ".ppt", ".pptx", ".mp4", ".avi", ".mp3",
+        "/uploads/", "/files/", "/images/", "/documents/", "/media/",
+        "file://", "ftp://", "path:", "directory:", "folder:"
+    ]
+    
+    has_real_citations = pinecone_response.get("has_citations", False)
+    if any(pattern in content_raw for pattern in fake_file_patterns):
         if not has_real_citations:
-            if "[1]" not in content_raw and "**Sources:**" not in content_raw:
-                if len(content_raw.strip()) > 30:
-                    logger.warning("🚨 SAFETY: Long response without citations")
-                    return True
-        
-        # PRIORITY 6: General knowledge indicators (likely hallucination)
-        general_knowledge_red_flags = [
-            "generally", "typically", "usually", "commonly", "often", "most",
-            "according to", "it is known", "studies show", "research indicates",
-            "experts say", "based on", "in general", "as a rule"
-        ]
-        if any(flag in content for flag in general_knowledge_red_flags):
-            logger.warning("🚨 SAFETY: Detected general knowledge indicators")
+            logger.warning("🚨 SAFETY: Detected fake file references without real citations")
             return True
-        
-        # PRIORITY 7: Question-answering patterns that suggest general knowledge
-        qa_patterns = [
-            "the answer is", "this is because", "the reason", "due to the fact",
-            "this happens when", "the cause of", "this occurs"
+    
+    # PRIORITY 4: Detect potential fake citations (CRITICAL)
+    if "[1]" in content_raw or "**Sources:**" in content_raw:
+        suspicious_patterns = [
+            "http://", ".org", ".net",
+            "example.com", "website.com", "source.com", "domain.com"
         ]
-        if any(pattern in content for pattern in qa_patterns):
-            if not pinecone_response.get("has_citations", False):
-                logger.warning("🚨 SAFETY: QA patterns without citations")
+        if not has_real_citations and any(pattern in content_raw for pattern in suspicious_patterns):
+            logger.warning("🚨 SAFETY: Detected fake citations")
+            return True
+    
+    # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short or explicit "don't know")
+    if not has_real_citations:
+        if "[1]" not in content_raw and "**Sources:**" not in content_raw:
+            if len(content_raw.strip()) > 30:
+                logger.warning("🚨 SAFETY: Long response without citations")
                 return True
-        
-        # PRIORITY 8: Response length suggests substantial answer without sources
-        response_length = pinecone_response.get("response_length", 0)
-        if response_length > 100 and not pinecone_response.get("has_citations", False):
-            logger.warning("🚨 SAFETY: Long response without sources")
+    
+    # PRIORITY 6: General knowledge indicators (likely hallucination)
+    general_knowledge_red_flags = [
+        "generally", "typically", "usually", "commonly", "often", "most",
+        "according to", "it is known", "studies show", "research indicates",
+        "experts say", "based on", "in general", "as a rule"
+    ]
+    if any(flag in content for flag in general_knowledge_red_flags):
+        logger.warning("🚨 SAFETY: Detected general knowledge indicators")
+        return True
+    
+    # PRIORITY 7: Question-answering patterns that suggest general knowledge
+    qa_patterns = [
+        "the answer is", "this is because", "the reason", "due to the fact",
+        "this happens when", "the cause of", "this occurs"
+    ]
+    if any(pattern in content for pattern in qa_patterns):
+        if not pinecone_response.get("has_citations", False):
+            logger.warning("🚨 SAFETY: QA patterns without citations")
             return True
-        
-        return False
-
+    
+    # PRIORITY 8: Response length suggests substantial answer without sources
+    response_length = pinecone_response.get("response_length", 0)
+    if response_length > 100 and not pinecone_response.get("has_citations", False):
+        logger.warning("🚨 SAFETY: Long response without sources")
+        return True
+    
+    return False
+    
     @handle_api_errors("AI System", "Get Response", show_to_user=True)
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """Enhanced AI response with bidirectional fallback and intelligent routing."""
