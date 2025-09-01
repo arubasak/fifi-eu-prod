@@ -4346,18 +4346,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             except Exception as e:
                 logger.error(f"Failed to update activity from JavaScript: {e}")
 
-    # Fingerprinting
-    fingerprint_needed = (
-        not session.fingerprint_id or
-        session.fingerprint_method == "temporary_fallback_python" or
-        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-    )
-    
-    fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-    if fingerprint_needed and not st.session_state.get(fingerprint_key, False):
-        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-        st.session_state[fingerprint_key] = True
-
     # Browser close detection for emergency saves
     if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
         try:
@@ -4728,9 +4716,23 @@ def main_fixed():
                 st.session_state['page'] = None
                 st.rerun()
                 return
-                
-            # 🔥 ADD THE TIMEOUT LOGIC HERE 🔥
-            # Fingerprint timeout logic
+            
+            # 🔥 RENDER FINGERPRINTING FIRST, BEFORE TIMEOUT LOGIC
+            fingerprint_needed = (
+                session is not None and (
+                    not session.fingerprint_id or
+                    session.fingerprint_method == "temporary_fallback_python" or
+                    session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                )
+            )
+            
+            if fingerprint_needed:
+                fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+                if not st.session_state.get(fingerprint_key, False):
+                    session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                    st.session_state[fingerprint_key] = True
+
+            # 🔥 NOW DO TIMEOUT LOGIC AFTER JAVASCRIPT IS RENDERED
             if session:
                 fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
                 
@@ -4749,25 +4751,24 @@ def main_fixed():
                         st.session_state.fingerprint_wait_start = current_time
                         st.session_state.is_chat_ready = False
                         logger.info(f"Starting fingerprint wait timer for session {session.session_id[:8]}")
-                    elif current_time - wait_start > 15:  # 15 second timeout
+                    elif current_time - wait_start > 5:  # ✅ 5 seconds is reasonable
                         # Timeout reached, enable chat with fallback fingerprint
                         st.session_state.is_chat_ready = True
-                        logger.warning(f"Fingerprint timeout - enabling chat with fallback for session {session.session_id[:8]}")
+                        logger.warning(f"Fingerprint timeout (5s) - enabling chat with fallback for session {session.session_id[:8]}")
                     else:
                         # Still waiting within timeout period
                         st.session_state.is_chat_ready = False
-                        remaining = 15 - (current_time - wait_start)
+                        remaining = 5 - (current_time - wait_start)
                         logger.debug(f"Fingerprint wait continues: {remaining:.1f}s remaining for session {session.session_id[:8]}")
             else:
                 st.session_state.is_chat_ready = False
-            # 🔥 END OF TIMEOUT LOGIC 🔥
 
             # Right after your timeout logic
             if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
-                time.sleep(1) # Add a small delay to prevent extremely fast loops
-                st.rerun()  # Keep checking until timeout reached
+                st.rerun() # Keep checking until timeout reached
+                return # Stop execution to allow rerun
             
-            # Render activity tracker and check for timeout (existing code continues...)
+            # Render activity tracker and check for timeout
             activity_data_from_js = None
             if session and session.session_id: 
                 activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
