@@ -4416,32 +4416,15 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                     st.markdown("---") # Visual separator
 
-    # Debug: Check all disable conditions
-    is_chat_ready = st.session_state.get('is_chat_ready', False)
-    dialog_blocking = st.session_state.get('chat_blocked_by_dialog', False)
-    ban_active = session.ban_status.value != BanStatus.NONE.value
-
-    st.write(f"🔍 **Chat Input Debug:**")
-    st.write(f"- is_chat_ready: {is_chat_ready}")
-    st.write(f"- chat_blocked_by_dialog: {dialog_blocking}")
-    st.write(f"- ban_active: {ban_active}")
-    st.write(f"- should_disable_chat_input_by_dialog (from function): {should_disable_chat_input_by_dialog}")
-
-    # TEMPORARY: Force enable chat for debugging
-    # st.session_state.is_chat_ready = True
-    # st.session_state.chat_blocked_by_dialog = False
-
-    overall_chat_disabled = (
-        not is_chat_ready or 
-        should_disable_chat_input_by_dialog or 
-        ban_active
-    )
-
-    st.write(f"- **overall_chat_disabled: {overall_chat_disabled}**")
-
     # Chat input
     # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
     # And combine with other disabled conditions
+    overall_chat_disabled = (
+        not st.session_state.get('is_chat_ready', False) or 
+        should_disable_chat_input_by_dialog or 
+        session.ban_status.value != BanStatus.NONE.value
+    )
+
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
     
@@ -4779,17 +4762,10 @@ def main_fixed():
                 st.session_state.is_chat_ready = False
             # 🔥 END OF TIMEOUT LOGIC 🔥
 
-            # Debug: Check timeout state
-            current_time = time.time()
-            wait_start = st.session_state.get('fingerprint_wait_start')
-            is_chat_ready = st.session_state.get('is_chat_ready', False)
-
-            st.write(f"🔍 **Debug Info:**")
-            st.write(f"- Current time: {current_time}")
-            st.write(f"- Wait start: {wait_start}")
-            st.write(f"- Elapsed: {current_time - wait_start if wait_start else 'N/A'}")
-            st.write(f"- is_chat_ready (after timeout logic): {is_chat_ready}")
-            st.write(f"- Fingerprint: {session.fingerprint_id}")
+            # Right after your timeout logic
+            if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
+                time.sleep(1) # Add a small delay to prevent extremely fast loops
+                st.rerun()  # Keep checking until timeout reached
             
             # Render activity tracker and check for timeout (existing code continues...)
             activity_data_from_js = None
