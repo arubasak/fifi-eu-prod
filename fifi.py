@@ -4334,6 +4334,24 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
+    # NEW: Show fingerprint waiting status
+    if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
+        current_time = time.time()
+        wait_start = st.session_state.get('fingerprint_wait_start')
+        elapsed = current_time - wait_start
+        remaining = max(0, 10 - elapsed)
+        
+        if remaining > 0:
+            st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
+            st.caption("FiFi is setting up device recognition for security and session management.")
+        else:
+            st.info("🔒 **Finalizing setup...** Almost ready!")
+        
+        # Add a subtle progress bar
+        progress_value = min(elapsed / 10, 1.0)
+        st.progress(progress_value, text="Session Security Setup")
+        st.markdown("---")
+
     # Simple activity tracking
     if activity_result:
         js_last_activity_timestamp = activity_result.get('last_activity')
