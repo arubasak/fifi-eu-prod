@@ -2314,6 +2314,91 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     return {"flagged": False}
 
+@handle_api_errors("Industry Context Check", "Validate Question Context", show_to_user=False)
+def check_industry_context(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
+    """Checks if user question is relevant to food & beverage ingredients industry using GPT-4o-mini."""
+    if not client or not hasattr(client, 'chat'):
+        logger.debug("OpenAI client not available for industry context check. Allowing question.")
+        return {"relevant": True, "reason": "context_check_unavailable"}
+    
+    try:
+        context_check_prompt = f"""You are an industry context validator for 1-2-Taste (12taste.com), a B2B digital marketplace for food ingredients.
+
+**COMPANY CONTEXT:**
+- B2B marketplace serving food & beverage manufacturers, processors, and producers
+- Focus on ingredient sourcing, product development, and technical support
+- Industries served: bakery, confectionery, beverage, dairy, ice cream, meat processing, snacks, etc.
+- Product categories: flavors, colors, sweeteners, proteins, emulsifiers, starches, texturizers, fibers, nutraceuticals, etc.
+- Target customers: legitimate businesses in food/beverage industry
+
+**TASK:** Determine if the following user question is relevant to the food & beverage ingredients industry.
+
+**ALLOW questions about:**
+- Food ingredients (flavors, colors, sweeteners, proteins, emulsifiers, etc.)
+- Beverage ingredients and formulation
+- Supplier sourcing and procurement in food industry
+- Food safety, regulations, and compliance
+- Product development and R&D for food/beverages
+- Market trends in food/beverage industry
+- Technical formulation and processing questions
+- Food manufacturing and production
+- Ingredient specifications and applications
+- Professional food business operations
+
+**FLAG questions about:**
+- Completely unrelated industries (automotive, finance, technology not food-related, etc.)
+- Personal consumer cooking advice (unless related to professional manufacturing)
+- Non-professional food questions (home recipes, diet advice, etc.)
+- Off-topic subjects (politics, sports, entertainment, etc.)
+- Medical advice or health claims
+- General knowledge unrelated to food industry
+
+**USER QUESTION:** "{prompt}"
+
+**INSTRUCTIONS:**
+Respond with ONLY a JSON object in this exact format:
+{{
+    "relevant": true/false,
+    "confidence": 0.0-1.0,
+    "category": "food_ingredients" | "beverage_formulation" | "supplier_sourcing" | "technical_support" | "market_trends" | "off_topic" | "personal_cooking" | "unrelated_industry",
+    "reason": "brief explanation why relevant or not relevant"
+}}
+
+Do NOT include any text outside the JSON object."""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are an industry context validator. Respond only with valid JSON."},
+                {"role": "user", "content": context_check_prompt}
+            ],
+            max_tokens=150,
+            temperature=0.1
+        )
+        
+        response_content = response.choices[0].message.content.strip()
+        
+        # Clean up response (remove any markdown formatting)
+        response_content = response_content.replace('```json', '').replace('```', '').strip()
+        
+        try:
+            result = json.loads(response_content)
+            
+            # Validate required fields
+            if not all(key in result for key in ['relevant', 'confidence', 'category', 'reason']):
+                logger.warning("Industry context check returned incomplete JSON structure")
+                return {"relevant": True, "reason": "context_check_invalid_response"}
+                
+            logger.info(f"Industry context check: relevant={result['relevant']}, category={result['category']}, confidence={result['confidence']:.2f}")
+            return result
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Industry context check returned invalid JSON: {response_content[:100]}... Error: {e}")
+            return {"relevant": True, "reason": "context_check_json_error"}
+            
+    except Exception as e:
+        logger.error(f"Industry context check failed: {e}", exc_info=True)
+        return {"relevant": True, "reason": "context_check_error"}
 # =============================================================================
 # SESSION MANAGER - MAIN ORCHESTRATOR CLASS
 # =============================================================================
