@@ -2062,20 +2062,24 @@ class EnhancedAI:
             return "unknown_error"
 
     def _should_use_pinecone_first(self) -> bool:
-        """NEW: Intelligent routing based on component health status."""
+        """Enhanced routing based on component health status."""
         pinecone_status = error_handler.component_status.get("Pinecone", "healthy")
         tavily_status = error_handler.component_status.get("Tavily", "healthy")
-        
-        # If Pinecone is healthy or has minor issues, use it first
-        if pinecone_status in ["healthy", "rate_limit"]:
+    
+        # If Pinecone is healthy, use it first
+        if pinecone_status in ["healthy"]:
             return True
-        
-        # If Pinecone has major issues but Tavily is healthy, use Tavily first
-        if pinecone_status in ["authentication_error", "payment_required", "server_error"] and tavily_status == "healthy":
+    
+        # If Pinecone has issues (including rate limits) but Tavily is healthy, use Tavily first
+        if pinecone_status in ["authentication_error", "payment_required", "server_error", "rate_limit"] and tavily_status == "healthy":
             return False
-        
+    
         # Default to Pinecone first for other scenarios
         return True
+
+def _get_current_pinecone_error_type(self) -> str:
+    """Get current Pinecone error type for Tavily strategy determination."""
+    return error_handler.component_status.get("Pinecone", "healthy")
 
     def should_use_web_fallback(self, pinecone_response: Dict[str, Any], original_question: str) -> bool:
     """EXTREMELY aggressive fallback detection to prevent any hallucination."""
