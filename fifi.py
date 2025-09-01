@@ -2168,104 +2168,73 @@ def _get_current_pinecone_error_type(self) -> str:
     return False
     
     @handle_api_errors("AI System", "Get Response", show_to_user=True)
-    def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """Enhanced AI response with bidirectional fallback and intelligent routing."""
-        
-        # Convert chat history to LangChain format
-        if chat_history:
-            langchain_history = []
-            for msg in chat_history[-10:]: # Limit to last 10 messages
-                if msg.get("role") == "user":
-                    langchain_history.append(HumanMessage(content=msg.get("content", "")))
-                elif msg.get("role") == "assistant":
-                    langchain_history.append(AIMessage(content=msg.get("content", "")))
-            langchain_history.append(HumanMessage(content=prompt))
-        else:
-            langchain_history = [HumanMessage(content=prompt)]
-        
-        # Intelligent routing based on component health
-        use_pinecone_first = self._should_use_pinecone_first()
-        
-        if use_pinecone_first:
-            # Try Pinecone first
-            if self.pinecone_tool:
-                try:
-                    logger.info("🔍 Querying Pinecone knowledge base (primary)...")
-                    pinecone_response = self.pinecone_tool.query(langchain_history)
-                    
-                    if pinecone_response and pinecone_response.get("success"):
-                        # Check if we should fallback to web search
-                        should_fallback = self.should_use_web_fallback(pinecone_response)
-                        
-                        if not should_fallback:
-                            logger.info("✅ Using Pinecone response (passed safety checks)")
-                            error_handler.mark_component_healthy("Pinecone")
-                            return pinecone_response
-                        else:
-                            logger.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switching to verified web sources.")
-                            
-                except Exception as e:
-                    error_type = self._detect_pinecone_error_type(e)
-                    logger.error(f"Pinecone query failed ({error_type}): {e}")
-            
-            # Fallback to web search
-            if self.tavily_agent:
-                try:
-                    logger.info("🌐 Falling back to web search...")
-                    web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
-                    
-                    if web_response and web_response.get("success"):
-                        logger.info("✅ Using web search response")
-                        error_handler.mark_component_healthy("Tavily")
-                        return web_response
-                        
-                except Exception as e:
-                    logger.error(f"Web search failed: {e}")
-                    error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
-            
-            # If Pinecone was supposed to be primary but failed/forced fallback, and Tavily also failed/was not configured,
-            # now we try Pinecone again as a last resort if it's available, even with its known issues.
-            if not self.tavily_agent: # This condition is critical after the above attempt to use Tavily.
-                if self.pinecone_tool:
-                    try:
-                        logger.info("🔍 Falling back to Pinecone knowledge base (re-attempt after web search failure/absence)...")
-                        pinecone_response = self.pinecone_tool.query(langchain_history)
-                        
-                        if pinecone_response and pinecone_response.get("success"):
-                            should_fallback = self.should_use_web_fallback(pinecone_response)
-                            
-                            if not should_fallback:
-                                logger.info("✅ Using Pinecone response (fallback)")
-                                return pinecone_response
-                                
-                    except Exception as e:
-                        error_type = self._detect_pinecone_error_type(e)
-                        logger.error(f"Pinecone fallback also failed ({error_type}): {e}")
-        else: # This path is taken if _should_use_pinecone_first() returned False initially
-              # (e.g., Pinecone had critical errors, but Tavily was healthy)
-            # Try Tavily first
-            if self.tavily_agent:
-                try:
-                    logger.info("🌐 Querying web search (primary due to Pinecone issues)...")
-                    web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
-                    
-                    if web_response and web_response.get("success"):
-                        logger.info("✅ Using web search response (primary)")
-                        error_handler.mark_component_healthy("Tavily")
-                        return web_response
-                                
-                except Exception as e:
-                    logger.error(f"Web search failed: {e}")
-                    error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
+def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
+    """Enhanced AI response with bidirectional fallback and intelligent routing."""
+    
+    # Convert chat history to LangChain format
+    if chat_history:
+        langchain_history = []
+        for msg in chat_history[-10:]: # Limit to last 10 messages
+            if msg.get("role") == "user":
+                langchain_history.append(HumanMessage(content=msg.get("content", "")))
+            elif msg.get("role") == "assistant":
+                langchain_history.append(AIMessage(content=msg.get("content", "")))
+        langchain_history.append(HumanMessage(content=prompt))
+    else:
+        langchain_history = [HumanMessage(content=prompt)]
+    
+    # Intelligent routing based on component health
+    use_pinecone_first = self._should_use_pinecone_first()
+    current_pinecone_error = self._get_current_pinecone_error_type()
+    
+    if use_pinecone_first:
+        # Try Pinecone first
+        if self.pinecone_tool:
+            try:
+                logger.info("🔍 Querying Pinecone knowledge base (primary)...")
+                pinecone_response = self.pinecone_tool.query(langchain_history)
                 
-            # Fallback to Pinecone (despite issues)
+                if pinecone_response and pinecone_response.get("success"):
+                    # Check if we should fallback to web search (FIXED: pass original question)
+                    should_fallback = self.should_use_web_fallback(pinecone_response, prompt)
+                    
+                    if not should_fallback:
+                        logger.info("✅ Using Pinecone response (passed safety checks)")
+                        error_handler.mark_component_healthy("Pinecone")
+                        return pinecone_response
+                    else:
+                        logger.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switching to verified web sources.")
+                        
+            except Exception as e:
+                error_type = self._detect_pinecone_error_type(e)
+                logger.error(f"Pinecone query failed ({error_type}): {e}")
+                current_pinecone_error = error_type  # Update error type for Tavily strategy
+        
+        # Fallback to web search with enhanced strategy
+        if self.tavily_agent:
+            try:
+                logger.info("🌐 Falling back to web search...")
+                # Pass the error type for strategy determination
+                web_response = self.tavily_agent.query(prompt, langchain_history[:-1], current_pinecone_error)
+                
+                if web_response and web_response.get("success"):
+                    logger.info(f"✅ Using web search response: {web_response.get('search_strategy', 'unknown strategy')}")
+                    error_handler.mark_component_healthy("Tavily")
+                    return web_response
+                    
+            except Exception as e:
+                logger.error(f"Web search failed: {e}")
+                error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
+        
+        # Final Pinecone fallback if Tavily failed
+        if not self.tavily_agent:
             if self.pinecone_tool:
                 try:
-                    logger.info("🔍 Falling back to Pinecone knowledge base (despite initial issues)...")
+                    logger.info("🔍 Falling back to Pinecone knowledge base (re-attempt after web search failure/absence)...")
                     pinecone_response = self.pinecone_tool.query(langchain_history)
                     
                     if pinecone_response and pinecone_response.get("success"):
-                        should_fallback = self.should_use_web_fallback(pinecone_response)
+                        should_fallback = self.should_use_web_fallback(pinecone_response, prompt)
                         
                         if not should_fallback:
                             logger.info("✅ Using Pinecone response (fallback)")
@@ -2274,20 +2243,52 @@ def _get_current_pinecone_error_type(self) -> str:
                 except Exception as e:
                     error_type = self._detect_pinecone_error_type(e)
                     logger.error(f"Pinecone fallback also failed ({error_type}): {e}")
-        
-        # Final fallback - basic response
-        logger.warning("⚠️ All AI tools unavailable, using basic fallback")
-        return {
-            "content": "I apologize, but I'm unable to process your request at the moment due to technical issues. Please try again later.",
-            "success": False,
-            "source": "System Fallback",
-            "used_search": False,
-            "used_pinecone": False,
-            "has_citations": False,
-            "has_inline_citations": False,
-            "safety_override": False
-        }
-
+    else:
+        # Try Tavily first due to Pinecone issues
+        if self.tavily_agent:
+            try:
+                logger.info("🌐 Querying web search (primary due to Pinecone issues)...")
+                # Pass the error type for strategy determination
+                web_response = self.tavily_agent.query(prompt, langchain_history[:-1], current_pinecone_error)
+                
+                if web_response and web_response.get("success"):
+                    logger.info(f"✅ Using web search response (primary): {web_response.get('search_strategy', 'unknown strategy')}")
+                    error_handler.mark_component_healthy("Tavily")
+                    return web_response
+                            
+            except Exception as e:
+                logger.error(f"Web search failed: {e}")
+                error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
+            
+        # Fallback to Pinecone (despite issues)
+        if self.pinecone_tool:
+            try:
+                logger.info("🔍 Falling back to Pinecone knowledge base (despite initial issues)...")
+                pinecone_response = self.pinecone_tool.query(langchain_history)
+                
+                if pinecone_response and pinecone_response.get("success"):
+                    should_fallback = self.should_use_web_fallback(pinecone_response, prompt)
+                    
+                    if not should_fallback:
+                        logger.info("✅ Using Pinecone response (fallback)")
+                        return pinecone_response
+                        
+            except Exception as e:
+                error_type = self._detect_pinecone_error_type(e)
+                logger.error(f"Pinecone fallback also failed ({error_type}): {e}")
+    
+    # Final fallback - basic response
+    logger.warning("⚠️ All AI tools unavailable, using basic fallback")
+    return {
+        "content": "I apologize, but I'm unable to process your request at the moment due to technical issues. Please try again later.",
+        "success": False,
+        "source": "System Fallback",
+        "used_search": False,
+        "used_pinecone": False,
+        "has_citations": False,
+        "has_inline_citations": False,
+        "safety_override": False
+    }
 @handle_api_errors("Content Moderation", "Check Prompt", show_to_user=False)
 def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
     """Checks user prompt against content moderation guidelines using OpenAI's moderation API."""
