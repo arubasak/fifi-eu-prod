@@ -4796,4 +4796,4 @@ def main_fixed():
         st.info(f"Error details: {str(e)}")
 
 if __name__ == "__main__":
-    main_fixed()
+    main_fixed(
