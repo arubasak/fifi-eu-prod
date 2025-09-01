@@ -2076,8 +2076,8 @@ class EnhancedAI:
     
         # Default to Pinecone first for other scenarios
         return True
-
-def _get_current_pinecone_error_type(self) -> str:
+    
+    def _get_current_pinecone_error_type(self) -> str:
     """Get current Pinecone error type for Tavily strategy determination."""
     return error_handler.component_status.get("Pinecone", "healthy")
 
