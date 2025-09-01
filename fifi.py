@@ -3842,29 +3842,8 @@ def render_welcome_page(session_manager: 'SessionManager'):
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
     
     st.markdown("---")
-    st.subheader("🎯 Usage Tiers")
     
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.success("👤 **Guest Users**")
-        st.markdown("• **4 questions** to try FiFi AI")
-        st.markdown("• Email verification required to continue")
-        st.markdown("• Quick start, no registration needed")
-    
-    with col2:
-        st.info("📧 **Email Verified Guest**")
-        st.markdown("• **10 questions per day** (rolling 24-hour period)")
-        st.markdown("• Email verification for access")
-        st.markdown("• No full registration required")
-    
-    with col3:
-        st.warning("🔐 **Registered Users**")
-        st.markdown("• **20 questions per day** with tier system:")
-        st.markdown("  - **Tier 1**: Questions 1-10 → 1-hour break")
-        st.markdown("  - **Tier 2**: Questions 11-20 → 24-hour reset")
-        st.markdown("• Cross-device tracking & chat saving")
-        st.markdown("• Priority access during high usage")
-    
+    # MOVED UP: Sign In/Start as Guest tabs (was previously below tiers)
     tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
     
     with tab1:
@@ -3916,6 +3895,31 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 set_loading_state(True, "Setting up your session and initializing AI assistant...")
                 st.rerun()  # Immediately show loading state (NEW)
 
+    # MOVED DOWN: Usage tiers explanation (was previously above tabs)
+    st.markdown("---")
+    st.subheader("🎯 Usage Tiers")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.success("👤 **Guest Users**")
+        st.markdown("• **4 questions** to try FiFi AI")
+        st.markdown("• Email verification required to continue")
+        st.markdown("• Quick start, no registration needed")
+    
+    with col2:
+        st.info("📧 **Email Verified Guest**")
+        st.markdown("• **10 questions per day** (rolling 24-hour period)")
+        st.markdown("• Email verification for access")
+        st.markdown("• No full registration required")
+    
+    with col3:
+        st.warning("🔐 **Registered Users**")
+        st.markdown("• **20 questions per day** with tier system:")
+        st.markdown("  - **Tier 1**: Questions 1-10 → 1-hour break")
+        st.markdown("  - **Tier 2**: Questions 11-20 → 24-hour reset")
+        st.markdown("• Cross-device tracking & chat saving")
+        st.markdown("• Priority access during high usage")
+        
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display."""
     with st.sidebar:
