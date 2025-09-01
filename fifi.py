@@ -1545,7 +1545,7 @@ class ZohoCRMManager:
                     return True
                 else:
                     logger.error("Failed to add note to Zoho contact.")
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries_note - 1:
                         time.sleep(2 ** attempt)
                     else:
                         logger.error("Max retries for note addition reached. Aborting save.")
@@ -4729,7 +4729,40 @@ def main_fixed():
                 st.rerun()
                 return
                 
-            # Render activity tracker and check for timeout
+            # 🔥 ADD THE TIMEOUT LOGIC HERE 🔥
+            # Fingerprint timeout logic
+            if session:
+                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                
+                if fingerprint_is_stable:
+                    # Real fingerprint already obtained, enable chat immediately
+                    st.session_state.is_chat_ready = True
+                    if 'fingerprint_wait_start' in st.session_state:
+                        del st.session_state['fingerprint_wait_start']  # Clear timeout
+                else:
+                    # Still waiting for JS fingerprinting
+                    current_time = time.time()
+                    wait_start = st.session_state.get('fingerprint_wait_start')
+                    
+                    if wait_start is None:
+                        # First time seeing temp fingerprint, start timeout
+                        st.session_state.fingerprint_wait_start = current_time
+                        st.session_state.is_chat_ready = False
+                        logger.info(f"Starting fingerprint wait timer for session {session.session_id[:8]}")
+                    elif current_time - wait_start > 15:  # 15 second timeout
+                        # Timeout reached, enable chat with fallback fingerprint
+                        st.session_state.is_chat_ready = True
+                        logger.warning(f"Fingerprint timeout - enabling chat with fallback for session {session.session_id[:8]}")
+                    else:
+                        # Still waiting within timeout period
+                        st.session_state.is_chat_ready = False
+                        remaining = 15 - (current_time - wait_start)
+                        logger.debug(f"Fingerprint wait continues: {remaining:.1f}s remaining for session {session.session_id[:8]}")
+            else:
+                st.session_state.is_chat_ready = False
+            # 🔥 END OF TIMEOUT LOGIC 🔥
+            
+            # Render activity tracker and check for timeout (existing code continues...)
             activity_data_from_js = None
             if session and session.session_id: 
                 activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
