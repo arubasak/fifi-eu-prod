@@ -3380,6 +3380,10 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         for key in list(st.session_state.keys()):
             del st.session_state[key]
 
+        # NEW: Force welcome page state before any reload attempts
+        st.session_state['page'] = None
+        st.session_state['session_expired'] = True
+
         if JS_EVAL_AVAILABLE:
             try:
                 streamlit_js_eval(js_expressions="parent.window.location.reload()")
@@ -3388,7 +3392,6 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
                 logger.error(f"Browser reload failed during inactive session handling: {e}")
         
         st.info("🏠 Redirecting to home page...")
-        # Removed time.sleep(5)
         st.rerun()
         st.stop()
         return True
@@ -3460,6 +3463,10 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         
+        # NEW: Force welcome page state and timeout flag
+        st.session_state['page'] = None
+        st.session_state['session_expired'] = True
+        
         # Show timeout message
         st.error("⏰ **Session Timeout**")
         st.info("Your session has expired due to 5 minutes of inactivity.")
@@ -3468,20 +3475,17 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         if JS_EVAL_AVAILABLE:
             try:
                 logger.info(f"🔄 Triggering browser reload for timeout")
-                # Removed time.sleep(5)
                 streamlit_js_eval(js_expressions="parent.window.location.reload()")
                 st.stop()
             except Exception as e:
                 logger.error(f"Browser reload failed during inactive session handling: {e}")
         
         st.info("🏠 Redirecting to home page...")
-        # Removed time.sleep(5)
         st.rerun()
         st.stop()
         return True
     
     return False
-
 def render_simplified_browser_close_detection(session_id: str):
     """Enhanced browser close detection with eligibility check."""
     if not session_id:
@@ -4591,6 +4595,14 @@ def main_fixed():
         )
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
+
+    # NEW: Check for expired session flag and force welcome page
+    if st.session_state.get('session_expired', False):
+        logger.info("Session expired flag detected - forcing welcome page")
+        st.session_state['page'] = None
+        if 'session_expired' in st.session_state:
+            del st.session_state['session_expired']
+        st.info("⏰ Your session expired. Please start a new session.")
 
     # Initialize loading state if not already set (for first run)
     if 'is_loading' not in st.session_state:
