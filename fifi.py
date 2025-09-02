@@ -1824,10 +1824,10 @@ class TavilyFallbackAgent:
 
     def add_utm_to_links(self, content: str) -> str:
         """Finds all Markdown links in a string and appends the UTM parameters."""
-    
+        
         if not content:
             return ""
-    
+        
         try:
             def replacer(match):
                 url = match.group(1)
@@ -1837,54 +1837,51 @@ class TavilyFallbackAgent:
                 else:
                     new_url = f"{url}?{utm_params}"
                 return f"({new_url})"
-        
-            # Use simpler regex pattern without negative lookbehind
-            result = re.sub(r'\]\(([^)]+)\)', r'](' + r'\1' + ')', content)
-            result = re.sub(r'\]\(([^)]+)\)', lambda m: f']({m.group(1)}{"&" if "?" in m.group(1) else "?"}utm_source=12taste.com&utm_medium=fifi-chat)', content)
-        
+            
+            # Actually USE the replacer function in the regex substitution
+            result = re.sub(r'\]\(([^)]+)\)', replacer, content)
             return result
-        
+            
         except Exception as e:
             logger.error(f"🔍 UTM processing failed: {e}")
             return content  # Always return original content if processing fails
 
-def synthesize_search_results(self, results, query: str) -> str:
-    """Simple synthesis: combine Tavily answer + sources, then apply UTM."""
-    
-    if not isinstance(results, dict):
-        return "I couldn't process the search results properly."
-    
-    # Get Tavily's pre-synthesized answer (remove arbitrary > 20 check)
-    answer = results.get('answer', '')
-    search_results = results.get('results', [])
-    
-    if not answer and not search_results:
-        return "I couldn't find any relevant information for your query."
-    
-    # Start with Tavily's answer
-    response_parts = []
-    if answer:  # Removed the > 20 check - use any answer Tavily provides
-        response_parts.append(answer)
-    
-    # Add sources in Pinecone format
-    sources = []
-    if search_results:
-        for result in search_results[:5]:
-            if isinstance(result, dict):
-                title = result.get('title', '')
-                url = result.get('url', '')
-                if url and title:
-                    sources.append(f"[{title}]({url})")
-    
-    # Append sources using Pinecone standard format
-    if sources:
-        response_parts.append(f"\n\n**Sources:**")
-        for i, source in enumerate(sources, 1):
-            response_parts.append(f"\n{i}. {source}")
-    
-    return "".join(response_parts)
+    def synthesize_search_results(self, results, query: str) -> str:
+        """Simple synthesis: combine Tavily answer + sources, then apply UTM."""
+        
+        if not isinstance(results, dict):
+            return "I couldn't process the search results properly."
+        
+        # Get Tavily's pre-synthesized answer
+        answer = results.get('answer', '')
+        search_results = results.get('results', [])
+        
+        if not answer and not search_results:
+            return "I couldn't find any relevant information for your query."
+        
+        # Start with Tavily's answer
+        response_parts = []
+        if answer:
+            response_parts.append(answer)
+        
+        # Add sources in Pinecone format
+        sources = []
+        if search_results:
+            for result in search_results[:5]:
+                if isinstance(result, dict):
+                    title = result.get('title', '')
+                    url = result.get('url', '')
+                    if url and title:
+                        sources.append(f"[{title}]({url})")
+        
+        # Append sources using Pinecone standard format
+        if sources:
+            response_parts.append(f"\n\n**Sources:**")
+            for i, source in enumerate(sources, 1):
+                response_parts.append(f"\n{i}. {source}")
+        
+        return "".join(response_parts)
 
-    # NEW: Determine search strategy based on question and Pinecone error type
     def determine_search_strategy(self, question: str, pinecone_error_type: str = None) -> Dict[str, Any]:
         """Determine whether to use domain-restricted or worldwide search."""
         question_lower = question.lower()
@@ -1901,7 +1898,6 @@ def synthesize_search_results(self, results, query: str) -> str:
         # For major Pinecone errors, use two-tier approach
         if pinecone_error_type in ["rate_limit", "authentication_error", "payment_required", "server_error"]:
             if has_time_sensitive_keywords:
-                # Tier 2: Worldwide search with competitor exclusions
                 return {
                     "strategy": "worldwide_with_exclusions",
                     "include_domains": None,
@@ -1909,7 +1905,6 @@ def synthesize_search_results(self, results, query: str) -> str:
                     "reason": f"Time-sensitive question with Pinecone {pinecone_error_type}"
                 }
             else:
-                # Tier 1: Domain-restricted to 12taste.com
                 return {
                     "strategy": "domain_restricted", 
                     "include_domains": ["12taste.com"],
@@ -1917,7 +1912,6 @@ def synthesize_search_results(self, results, query: str) -> str:
                     "reason": f"Domain-restricted fallback for Pinecone {pinecone_error_type}"
                 }
         else:
-            # Normal fallback - worldwide with exclusions
             return {
                 "strategy": "worldwide_with_exclusions",
                 "include_domains": None, 
@@ -1930,43 +1924,26 @@ def synthesize_search_results(self, results, query: str) -> str:
             # Determine search strategy
             strategy = self.determine_search_strategy(message, pinecone_error_type)
             
-            # Build Tavily query parameters
-            search_params = {"query": message}
-            
-            if strategy["include_domains"]:
-                # Domain-restricted search
-                domain_query = f"{message} site:{strategy['include_domains'][0]}"
-                search_params["query"] = domain_query
-                logger.info(f"🔍 Tavily domain-restricted search: {strategy['include_domains'][0]}")
-            elif strategy["exclude_domains"]:
-                # Worldwide with exclusions
-                search_params["query"] = message
-                logger.info(f"🌐 Tavily worldwide search excluding {len(strategy['exclude_domains'])} competitor domains")
-            
             # Build search parameters for direct SDK
             sdk_params = {
-                "query": search_params["query"],
+                "query": message,
                 "max_results": 5,
-                "include_answer": True,  # This is the key parameter!
+                "include_answer": True,
                 "search_depth": "basic"
             }
 
-            # Add domain restrictions if using include/exclude strategy
+            # Add domain restrictions
             if strategy.get("include_domains"):
                 sdk_params["include_domains"] = strategy["include_domains"]
+                logger.info(f"🔍 Tavily domain-restricted search: {strategy['include_domains'][0]}")
             elif strategy.get("exclude_domains"):
                 sdk_params["exclude_domains"] = strategy["exclude_domains"]
+                logger.info(f"🌐 Tavily worldwide search excluding {len(strategy['exclude_domains'])} competitor domains")
 
             logger.info(f"🔍 Direct Tavily SDK call with params: {list(sdk_params.keys())}")
             search_results = self.tavily_client.search(**sdk_params)
             synthesized_content = self.synthesize_search_results(search_results, message)
             final_content = self.add_utm_to_links(synthesized_content)
-            # ADD THESE DEBUG LINES:
-            logger.info(f"🔍 DEBUG: synthesized_content type = {type(synthesized_content)}")
-            logger.info(f"🔍 DEBUG: synthesized_content value = {repr(synthesized_content)}")
-            final_content = self.add_utm_to_links(synthesized_content)
-            # ADD THIS DEBUG LINE:
-            logger.info(f"🔍 DEBUG: final_content after UTM = {repr(final_content)}")
             
             return {
                 "content": final_content,
@@ -1982,7 +1959,8 @@ def synthesize_search_results(self, results, query: str) -> str:
             }
         except Exception as e:
             logger.error(f"Tavily search error: {str(e)}")
-            return None    
+            return None
+
 class EnhancedAI:
     """Enhanced AI system with improved error handling and bidirectional fallback."""
     
