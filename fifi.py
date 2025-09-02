@@ -1837,56 +1837,56 @@ class TavilyFallbackAgent:
     def synthesize_search_results(self, results, query: str) -> str:
         """Synthesize search results from direct Tavily SDK."""
     
-    logger.info(f"🔍 SYNTHESIS: Processing SDK results type = {type(results)}")
+        logger.info(f"🔍 SYNTHESIS: Processing SDK results type = {type(results)}")
     
-    if not isinstance(results, dict):
+        if not isinstance(results, dict):
         logger.warning("🔍 SYNTHESIS: Results not a dictionary")
         return "I couldn't process the search results properly."
     
-    # Direct SDK provides a pre-synthesized answer
-    answer = results.get('answer')
-    if answer and len(answer.strip()) > 20:
-        logger.info(f"🔍 SYNTHESIS: Using Tavily's pre-synthesized answer ({len(answer)} chars)")
-        return answer  # Return the answer directly, no "Based on my search:" prefix
+        # Direct SDK provides a pre-synthesized answer
+        answer = results.get('answer')
+        if answer and len(answer.strip()) > 20:
+            logger.info(f"🔍 SYNTHESIS: Using Tavily's pre-synthesized answer ({len(answer)} chars)")
+            return answer  # Return the answer directly, no "Based on my search:" prefix
     
-    # Fallback to manual synthesis if no answer provided
-    search_results = results.get('results', [])
-    logger.info(f"🔍 SYNTHESIS: Fallback synthesis with {len(search_results)} results")
+        # Fallback to manual synthesis if no answer provided
+        search_results = results.get('results', [])
+        logger.info(f"🔍 SYNTHESIS: Fallback synthesis with {len(search_results)} results")
     
-    if not search_results:
-        return "I couldn't find any relevant information for your query."
+        if not search_results:
+            return "I couldn't find any relevant information for your query."
     
-    # Process individual results
-    relevant_info = []
-    sources = []
+        # Process individual results
+        relevant_info = []
+        sources = []
     
-    for i, result in enumerate(search_results[:3], 1):
-        if isinstance(result, dict):
-            title = result.get('title', f'Result {i}')
-            content = result.get('content', '')
-            url = result.get('url', '')
+        for i, result in enumerate(search_results[:3], 1):
+            if isinstance(result, dict):
+                title = result.get('title', f'Result {i}')
+                content = result.get('content', '')
+                url = result.get('url', '')
             
-            if content:
-                if len(content) > 400:
-                    content = content[:400] + "..."
-                relevant_info.append(content)
+                if content:
+                    if len(content) > 400:
+                        content = content[:400] + "..."
+                    relevant_info.append(content)
                 
                 if url and title:
                     sources.append(f"[{title}]({url})")
     
-    if not relevant_info:
-        return "I found search results but couldn't extract readable content."
+        if not relevant_info:
+            return "I found search results but couldn't extract readable content."
     
-    # Build synthesized response
-    response_parts = []
-    if len(relevant_info) == 1:
-        response_parts.append(f"Based on my search: {relevant_info[0]}")
-    else:
-        response_parts.append("Based on my search:")
-        for i, info in enumerate(relevant_info, 1):
-            response_parts.append(f"\n\n**{i}.** {info}")
+        # Build synthesized response
+        response_parts = []
+        if len(relevant_info) == 1:
+            response_parts.append(f"Based on my search: {relevant_info[0]}")
+        else:
+            response_parts.append("Based on my search:")
+            for i, info in enumerate(relevant_info, 1):
+                response_parts.append(f"\n\n**{i}.** {info}")
     
-    # Add sources
+        # Add sources
     if sources:
         response_parts.append(f"\n\n**Sources:**")
         for i, source in enumerate(sources, 1):
