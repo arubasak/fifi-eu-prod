@@ -2180,7 +2180,7 @@ class EnhancedAI:
             # Fallback to web search with enhanced strategy
             if self.tavily_agent:
                 try:
-                    logger.info("🌐 Falling back to web search...")
+                    logger.info("🌐 Falling back to FiFi web search...")
                     # Pass the error type for strategy determination
                     web_response = self.tavily_agent.query(prompt, langchain_history[:-1], current_pinecone_error)
                     
@@ -2190,7 +2190,7 @@ class EnhancedAI:
                         return web_response
                         
                 except Exception as e:
-                    logger.error(f"Web search failed: {e}")
+                    logger.error(f"FiFi Web search failed: {e}")
                     error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
             
             # Final Pinecone fallback if Tavily failed
@@ -2214,17 +2214,17 @@ class EnhancedAI:
             # Try Tavily first due to Pinecone issues
             if self.tavily_agent:
                 try:
-                    logger.info("🌐 Querying web search (primary due to Pinecone issues)...")
+                    logger.info("🌐 Querying FiFi web search (primary due to Pinecone issues)...")
                     # Pass the error type for strategy determination
                     web_response = self.tavily_agent.query(prompt, langchain_history[:-1], current_pinecone_error)
                     
                     if web_response and web_response.get("success"):
-                        logger.info(f"✅ Using web search response (primary): {web_response.get('search_strategy', 'unknown strategy')}")
+                        logger.info(f"✅ Using FiFi web search response (primary): {web_response.get('search_strategy', 'unknown strategy')}")
                         error_handler.mark_component_healthy("Tavily")
                         return web_response
                                 
                 except Exception as e:
-                    logger.error(f"Web search failed: {e}")
+                    logger.error(f"FiFi Web search failed: {e}")
                     error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
                 
             # Fallback to Pinecone (despite issues)
@@ -4614,8 +4614,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.caption(f"{source_color} Source: {msg['source']}")
                 
                 indicators = []
-                if msg.get("used_pinecone"): indicators.append("🧠 Knowledge Base")
-                if msg.get("used_search"): indicators.append("🌐 Web Search")
+                if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
+                if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
                 if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                 
                 if msg.get("safety_override"):
