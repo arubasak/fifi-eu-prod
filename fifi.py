@@ -1824,6 +1824,12 @@ class TavilyFallbackAgent:
 
     def add_utm_to_links(self, content: str) -> str:
         """Finds all Markdown links in a string and appends the UTM parameters."""
+        # ADD DEBUG LOGGING:
+        logger.info(f"🔍 UTM DEBUG: Input content = {repr(content)}")
+    
+        if not content:  # ADD THIS CHECK
+            logger.warning("🔍 UTM DEBUG: Content is None or empty!")
+            return content or ""
     def replacer(match):
         url = match.group(1)
         utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
@@ -1973,7 +1979,12 @@ class TavilyFallbackAgent:
             logger.info(f"🔍 Direct Tavily SDK call with params: {list(sdk_params.keys())}")
             search_results = self.tavily_client.search(**sdk_params)
             synthesized_content = self.synthesize_search_results(search_results, message)
+            # ADD THESE DEBUG LINES:
+            logger.info(f"🔍 DEBUG: synthesized_content type = {type(synthesized_content)}")
+            logger.info(f"🔍 DEBUG: synthesized_content value = {repr(synthesized_content)}")
             final_content = self.add_utm_to_links(synthesized_content)
+            # ADD THIS DEBUG LINE:
+            logger.info(f"🔍 DEBUG: final_content after UTM = {repr(final_content)}")
             
             return {
                 "content": final_content,
