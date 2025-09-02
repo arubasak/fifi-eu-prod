@@ -1887,15 +1887,15 @@ class TavilyFallbackAgent:
                 response_parts.append(f"\n\n**{i}.** {info}")
     
         # Add sources
-    if sources:
-        response_parts.append(f"\n\n**Sources:**")
+        if sources:
+            response_parts.append(f"\n\n**Sources:**")
         for i, source in enumerate(sources, 1):
             response_parts.append(f"\n{i}. {source}")
     
-    return "".join(response_parts)
+        return "".join(response_parts)
         
-    # Fallback for unknown formats
-    return "I couldn't find any relevant information for your query."
+        # Fallback for unknown formats
+        return "I couldn't find any relevant information for your query."
 
     # NEW: Determine search strategy based on question and Pinecone error type
     def determine_search_strategy(self, question: str, pinecone_error_type: str = None) -> Dict[str, Any]:
