@@ -3380,10 +3380,6 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         for key in list(st.session_state.keys()):
             del st.session_state[key]
 
-        # NEW: Force welcome page state before any reload attempts
-        st.session_state['page'] = None
-        st.session_state['session_expired'] = True
-
         if JS_EVAL_AVAILABLE:
             try:
                 streamlit_js_eval(js_expressions="parent.window.location.reload()")
@@ -3392,6 +3388,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
                 logger.error(f"Browser reload failed during inactive session handling: {e}")
         
         st.info("🏠 Redirecting to home page...")
+        # Removed time.sleep(5)
         st.rerun()
         st.stop()
         return True
@@ -3463,10 +3460,6 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         
-        # NEW: Force welcome page state and timeout flag
-        st.session_state['page'] = None
-        st.session_state['session_expired'] = True
-        
         # Show timeout message
         st.error("⏰ **Session Timeout**")
         st.info("Your session has expired due to 5 minutes of inactivity.")
@@ -3475,17 +3468,20 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         if JS_EVAL_AVAILABLE:
             try:
                 logger.info(f"🔄 Triggering browser reload for timeout")
+                # Removed time.sleep(5)
                 streamlit_js_eval(js_expressions="parent.window.location.reload()")
                 st.stop()
             except Exception as e:
                 logger.error(f"Browser reload failed during inactive session handling: {e}")
         
         st.info("🏠 Redirecting to home page...")
+        # Removed time.sleep(5)
         st.rerun()
         st.stop()
         return True
     
     return False
+
 def render_simplified_browser_close_detection(session_id: str):
     """Enhanced browser close detection with eligibility check."""
     if not session_id:
@@ -3846,8 +3842,29 @@ def render_welcome_page(session_manager: 'SessionManager'):
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
     
     st.markdown("---")
+    st.subheader("🎯 Usage Tiers")
     
-    # MOVED UP: Sign In/Start as Guest tabs (was previously below tiers)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.success("👤 **Guest Users**")
+        st.markdown("• **4 questions** to try FiFi AI")
+        st.markdown("• Email verification required to continue")
+        st.markdown("• Quick start, no registration needed")
+    
+    with col2:
+        st.info("📧 **Email Verified Guest**")
+        st.markdown("• **10 questions per day** (rolling 24-hour period)")
+        st.markdown("• Email verification for access")
+        st.markdown("• No full registration required")
+    
+    with col3:
+        st.warning("🔐 **Registered Users**")
+        st.markdown("• **20 questions per day** with tier system:")
+        st.markdown("  - **Tier 1**: Questions 1-10 → 1-hour break")
+        st.markdown("  - **Tier 2**: Questions 11-20 → 24-hour reset")
+        st.markdown("• Cross-device tracking & chat saving")
+        st.markdown("• Priority access during high usage")
+    
     tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
     
     with tab1:
@@ -3899,31 +3916,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 set_loading_state(True, "Setting up your session and initializing AI assistant...")
                 st.rerun()  # Immediately show loading state (NEW)
 
-    # MOVED DOWN: Usage tiers explanation (was previously above tabs)
-    st.markdown("---")
-    st.subheader("🎯 Usage Tiers")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.success("👤 **Guest Users**")
-        st.markdown("• **4 questions** to try FiFi AI")
-        st.markdown("• Email verification required to continue")
-        st.markdown("• Quick start, no registration needed")
-    
-    with col2:
-        st.info("📧 **Email Verified Guest**")
-        st.markdown("• **10 questions per day** (rolling 24-hour period)")
-        st.markdown("• Email verification for access")
-        st.markdown("• No full registration required")
-    
-    with col3:
-        st.warning("🔐 **Registered Users**")
-        st.markdown("• **20 questions per day** with tier system:")
-        st.markdown("  - **Tier 1**: Questions 1-10 → 1-hour break")
-        st.markdown("  - **Tier 2**: Questions 11-20 → 24-hour reset")
-        st.markdown("• Cross-device tracking & chat saving")
-        st.markdown("• Priority access during high usage")
-        
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display."""
     with st.sidebar:
@@ -4342,24 +4334,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # NEW: Show fingerprint waiting status
-    if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
-        current_time = time.time()
-        wait_start = st.session_state.get('fingerprint_wait_start')
-        elapsed = current_time - wait_start
-        remaining = max(0, 10 - elapsed)
-        
-        if remaining > 0:
-            st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
-            st.caption("FiFi is setting up device recognition for security and session management.")
-        else:
-            st.info("🔒 **Finalizing setup...** Almost ready!")
-        
-        # Add a subtle progress bar
-        progress_value = min(elapsed / 10, 1.0)
-        st.progress(progress_value, text="Session Security Setup")
-        st.markdown("---")
-
     # Simple activity tracking
     if activity_result:
         js_last_activity_timestamp = activity_result.get('last_activity')
@@ -4595,14 +4569,6 @@ def main_fixed():
         )
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
-
-    # NEW: Check for expired session flag and force welcome page
-    if st.session_state.get('session_expired', False):
-        logger.info("Session expired flag detected - forcing welcome page")
-        st.session_state['page'] = None
-        if 'session_expired' in st.session_state:
-            del st.session_state['session_expired']
-        st.info("⏰ Your session expired. Please start a new session.")
 
     # Initialize loading state if not already set (for first run)
     if 'is_loading' not in st.session_state:
