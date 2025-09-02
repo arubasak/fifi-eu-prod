@@ -1671,17 +1671,35 @@ class RateLimiter:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
 
-    def is_allowed(self, identifier: str) -> bool:
+    def is_allowed(self, identifier: str) -> Dict[str, Any]:
+        """Returns detailed rate limit information including timer."""
         with self._lock:
             now = time.time()
             self.requests[identifier] = [t for t in self.requests[identifier] if t > now - self.window_seconds]
+            
             if len(self.requests[identifier]) < self.max_requests:
                 self.requests[identifier].append(now)
                 logger.debug(f"Rate limit allowed for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-                return True
-            logger.warning(f"Rate limit exceeded for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-            return False
-
+                return {
+                    'allowed': True,
+                    'current_count': len(self.requests[identifier]),
+                    'max_requests': self.max_requests,
+                    'window_seconds': self.window_seconds,
+                    'time_until_next': 0
+                }
+            else:
+                # Calculate time until next request is allowed
+                oldest_request = min(self.requests[identifier])
+                time_until_next = max(0, int((oldest_request + self.window_seconds) - now))
+                
+                logger.warning(f"Rate limit exceeded for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
+                return {
+                    'allowed': False,
+                    'current_count': len(self.requests[identifier]),
+                    'max_requests': self.max_requests,
+                    'window_seconds': self.window_seconds,
+                    'time_until_next': time_until_next
+                }
 def sanitize_input(text: str, max_length: int = 4000) -> str:
     """Sanitizes user input to prevent XSS and limit length."""
     if not isinstance(text, str):
