@@ -4574,9 +4574,69 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications."""
-
+    
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
+
+    # NEW: Enhanced error notifications with toast messages
+    current_time = datetime.now()
+    
+    # Enhanced rate limit display with toast
+    if 'rate_limit_hit' in st.session_state:
+        rate_limit_info = st.session_state.rate_limit_hit
+        if current_time < rate_limit_info['expires_at']:
+            time_until_next = rate_limit_info.get('time_until_next', 0)
+            max_requests = rate_limit_info.get('max_requests', 2)
+            window_seconds = rate_limit_info.get('window_seconds', 60)
+            
+            # Calculate remaining time dynamically
+            elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
+            remaining_time = max(0, int(time_until_next - elapsed))
+            
+            if remaining_time > 0:
+                st.toast(f"⏱️ Rate limit exceeded. Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds}s)", icon="⚠️")
+            else:
+                st.toast(f"⏱️ Rate limit exceeded. Please wait a moment before asking another question.", icon="⚠️")
+        else:
+            # Clean up expired rate limit message
+            del st.session_state.rate_limit_hit
+
+    # Enhanced moderation error display with toast
+    if 'moderation_flagged' in st.session_state:
+        moderation_info = st.session_state.moderation_flagged
+        if current_time < moderation_info['expires_at']:
+            categories = moderation_info.get('categories', [])
+            categories_text = ', '.join(categories) if categories else 'policy violation'
+            
+            # Calculate remaining display time
+            remaining_seconds = int((moderation_info['expires_at'] - current_time).total_seconds())
+            
+            st.toast(f"🛡️ Content blocked: {categories_text}. Please rephrase your question appropriately. ({remaining_seconds}s)", icon="🚫")
+        else:
+            # Clean up expired moderation message
+            del st.session_state.moderation_flagged
+
+    # Enhanced context error display with toast  
+    if 'context_flagged' in st.session_state:
+        context_info = st.session_state.context_flagged
+        if current_time < context_info['expires_at']:
+            category = context_info.get('category', 'off-topic')
+            confidence = context_info.get('confidence', 0.0)
+            
+            # Calculate remaining display time
+            remaining_seconds = int((context_info['expires_at'] - current_time).total_seconds())
+            
+            if category == "unrelated_industry":
+                toast_message = f"🏭 Question not food industry related. I specialize in food & beverage ingredients. ({remaining_seconds}s)"
+            elif category in ["personal_cooking", "off_topic"]:
+                toast_message = f"👨‍🍳 Please ask professional food ingredient questions. I'm designed for B2B food industry. ({remaining_seconds}s)"
+            else:
+                toast_message = f"🎯 Question seems off-topic for food ingredients industry. Please refocus on professional food topics. ({remaining_seconds}s)"
+                
+            st.toast(toast_message, icon="ℹ️")
+        else:
+            # Clean up expired context message
+            del st.session_state.context_flagged
 
     # NEW: Show fingerprint waiting status
     if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
@@ -4584,18 +4644,19 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         wait_start = st.session_state.get('fingerprint_wait_start')
         elapsed = current_time - wait_start
         remaining = max(0, 10 - elapsed)
-
+        
         if remaining > 0:
             st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
             st.caption("FiFi is setting up device recognition for security and session management.")
         else:
             st.info("🔒 **Finalizing setup...** Almost ready!")
-
+        
         # Add a subtle progress bar
         progress_value = min(elapsed / 10, 1.0)
         st.progress(progress_value, text="Session Security Setup")
         st.markdown("---")
 
+    # Rest of the existing function continues unchanged...
     # Simple activity tracking
     if activity_result:
         js_last_activity_timestamp = activity_result.get('last_activity')
