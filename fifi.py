@@ -2537,6 +2537,20 @@ class SessionManager:
                 else:
                     logger.error(f"All session save attempts failed for {session.session_id[:8]}")
                     raise
+    
+    def _clear_error_notifications(self):
+        """Clear all error notification states when a successful question is processed."""
+        error_keys = ['rate_limit_hit', 'moderation_flagged', 'context_flagged']
+        cleared_errors = []
+    
+        for key in error_keys:
+            if key in st.session_state:
+                del st.session_state[key]
+                cleared_errors.append(key)
+    
+        if cleared_errors:
+            logger.debug(f"Auto-cleared error notifications on successful question: {cleared_errors}")
+                    
 
     def _create_new_session(self) -> UserSession:
         """Creates a new user session with temporary fingerprint until JS fingerprinting completes."""
@@ -3250,13 +3264,12 @@ class SessionManager:
                 max_requests = rate_limit_result.get('max_requests', 2)
                 window_seconds = rate_limit_result.get('window_seconds', 60)
                 
-                # Store detailed rate limit info in session state
+                # Store rate limit info (NO expiry timer - stays until dismissed or success)
                 st.session_state.rate_limit_hit = {
                     'timestamp': datetime.now(),
                     'time_until_next': time_until_next,
                     'max_requests': max_requests,
-                    'window_seconds': window_seconds,
-                    'expires_at': datetime.now() + timedelta(seconds=15)  # Show for 15 seconds
+                    'window_seconds': window_seconds
                 }
                 
                 return {
@@ -3277,7 +3290,7 @@ class SessionManager:
                     'timestamp': datetime.now(),
                     'categories': categories,
                     'message': moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
-                    'expires_at': datetime.now() + timedelta(seconds=12)  # Show for 12 seconds
+                    
                 }
                 
                 return {
@@ -3315,7 +3328,7 @@ class SessionManager:
                     'confidence': confidence,
                     'reason': reason,
                     'message': context_message,
-                    'expires_at': datetime.now() + timedelta(seconds=10)  # Show for 10 seconds
+                    
                 }
                 
                 return {
@@ -3348,6 +3361,8 @@ class SessionManager:
                     # Do NOT set session.question_limit_reached here, it's set on the next rerurn in display_email_prompt_if_needed
                     return {'requires_email': True, 'content': 'Email verification required.'}
 
+            self._clear_error_notifications()
+            
             # Sanitize input
             sanitized_prompt = sanitize_input(prompt, 4000)
             if not sanitized_prompt:
@@ -4578,66 +4593,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # NEW: Enhanced error notifications with toast messages
-    current_time = datetime.now()
-    
-    # Enhanced rate limit display with toast
-    if 'rate_limit_hit' in st.session_state:
-        rate_limit_info = st.session_state.rate_limit_hit
-        if current_time < rate_limit_info['expires_at']:
-            time_until_next = rate_limit_info.get('time_until_next', 0)
-            max_requests = rate_limit_info.get('max_requests', 2)
-            window_seconds = rate_limit_info.get('window_seconds', 60)
-            
-            # Calculate remaining time dynamically
-            elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
-            remaining_time = max(0, int(time_until_next - elapsed))
-            
-            if remaining_time > 0:
-                st.toast(f"⏱️ Rate limit exceeded. Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds}s)", icon="⚠️")
-            else:
-                st.toast(f"⏱️ Rate limit exceeded. Please wait a moment before asking another question.", icon="⚠️")
-        else:
-            # Clean up expired rate limit message
-            del st.session_state.rate_limit_hit
-
-    # Enhanced moderation error display with toast
-    if 'moderation_flagged' in st.session_state:
-        moderation_info = st.session_state.moderation_flagged
-        if current_time < moderation_info['expires_at']:
-            categories = moderation_info.get('categories', [])
-            categories_text = ', '.join(categories) if categories else 'policy violation'
-            
-            # Calculate remaining display time
-            remaining_seconds = int((moderation_info['expires_at'] - current_time).total_seconds())
-            
-            st.toast(f"🛡️ Content blocked: {categories_text}. Please rephrase your question appropriately. ({remaining_seconds}s)", icon="🚫")
-        else:
-            # Clean up expired moderation message
-            del st.session_state.moderation_flagged
-
-    # Enhanced context error display with toast  
-    if 'context_flagged' in st.session_state:
-        context_info = st.session_state.context_flagged
-        if current_time < context_info['expires_at']:
-            category = context_info.get('category', 'off-topic')
-            confidence = context_info.get('confidence', 0.0)
-            
-            # Calculate remaining display time
-            remaining_seconds = int((context_info['expires_at'] - current_time).total_seconds())
-            
-            if category == "unrelated_industry":
-                toast_message = f"🏭 Question not food industry related. I specialize in food & beverage ingredients. ({remaining_seconds}s)"
-            elif category in ["personal_cooking", "off_topic"]:
-                toast_message = f"👨‍🍳 Please ask professional food ingredient questions. I'm designed for B2B food industry. ({remaining_seconds}s)"
-            else:
-                toast_message = f"🎯 Question seems off-topic for food ingredients industry. Please refocus on professional food topics. ({remaining_seconds}s)"
-                
-            st.toast(toast_message, icon="ℹ️")
-        else:
-            # Clean up expired context message
-            del st.session_state.context_flagged
-
     # NEW: Show fingerprint waiting status
     if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
         current_time_float = time.time() # Use float for direct comparison with time.time()
@@ -4726,7 +4681,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
                     st.markdown("---") # Visual separator
 
-    # Chat input
+    # Chat input section with inline error notifications + manual dismiss
     # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
     # And combine with other disabled conditions
     overall_chat_disabled = (
@@ -4734,6 +4689,68 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         should_disable_chat_input_by_dialog or 
         session.ban_status.value != BanStatus.NONE.value
     )
+
+    # Rate limit notification with manual dismiss
+    if 'rate_limit_hit' in st.session_state:
+        rate_limit_info = st.session_state.rate_limit_hit
+        time_until_next = rate_limit_info.get('time_until_next', 0)
+        max_requests = rate_limit_info.get('max_requests', 2)
+        window_seconds = rate_limit_info.get('window_seconds', 60)
+        
+        # Calculate remaining time dynamically
+        current_time = datetime.now()
+        elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
+        remaining_time = max(0, int(time_until_next - elapsed))
+        
+        col1, col2 = st.columns([5, 1])
+        with col1:
+            if remaining_time > 0:
+                st.error(f"⏱️ **Rate limit exceeded** - Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
+            else:
+                st.error(f"⏱️ **Rate limit exceeded** - Please wait a moment before asking another question.")
+        with col2:
+            if st.button("✕", key="dismiss_rate_limit", help="Dismiss this message", use_container_width=True):
+                del st.session_state.rate_limit_hit
+                st.rerun()
+
+    # Content moderation notification with manual dismiss
+    if 'moderation_flagged' in st.session_state:
+        moderation_info = st.session_state.moderation_flagged
+        categories = moderation_info.get('categories', [])
+        categories_text = ', '.join(categories) if categories else 'policy violation'
+        message = moderation_info.get('message', 'Your message violates our content policy.')
+        
+        col1, col2 = st.columns([5, 1])
+        with col1:
+            st.error(f"🛡️ **Content Policy Violation** - {categories_text}")
+            st.info(f"💡 **Guidance**: {message}")
+        with col2:
+            if st.button("✕", key="dismiss_moderation", help="Dismiss this message", use_container_width=True):
+                del st.session_state.moderation_flagged
+                st.rerun()
+
+    # Context error notification with manual dismiss
+    if 'context_flagged' in st.session_state:
+        context_info = st.session_state.context_flagged
+        category = context_info.get('category', 'off-topic')
+        confidence = context_info.get('confidence', 0.0)
+        message = context_info.get('message', '')
+        
+        col1, col2 = st.columns([5, 1])
+        with col1:
+            if category == "unrelated_industry":
+                st.warning(f"🏭 **Outside Food Industry** - This question doesn't relate to food & beverage ingredients.")
+            elif category in ["personal_cooking", "off_topic"]:
+                st.warning(f"👨‍🍳 **Personal vs Professional** - I'm designed for B2B food industry questions.")
+            else:
+                st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or formulation.")
+            
+            st.info(f"💡 **Guidance**: {message}")
+            st.caption(f"Confidence: {confidence:.1%} | Category: {category}")
+        with col2:
+            if st.button("✕", key="dismiss_context", help="Dismiss this message", use_container_width=True):
+                del st.session_state.context_flagged
+                st.rerun()
 
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
@@ -4786,7 +4803,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.error("⚠️ I encountered an error. Please try again.")
         
         st.rerun()
-
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from prompt)
 def ensure_initialization_fixed():
     """Fixed version without duplicate spinner since we have loading overlay"""
