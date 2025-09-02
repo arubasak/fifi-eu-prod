@@ -1671,35 +1671,16 @@ class RateLimiter:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
 
-    def is_allowed(self, identifier: str) -> Dict[str, Any]:
-        """Returns detailed rate limit information including timer."""
+    def is_allowed(self, identifier: str) -> bool:
         with self._lock:
             now = time.time()
             self.requests[identifier] = [t for t in self.requests[identifier] if t > now - self.window_seconds]
-            
             if len(self.requests[identifier]) < self.max_requests:
                 self.requests[identifier].append(now)
                 logger.debug(f"Rate limit allowed for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-                return {
-                    'allowed': True,
-                    'current_count': len(self.requests[identifier]),
-                    'max_requests': self.max_requests,
-                    'window_seconds': self.window_seconds,
-                    'time_until_next': 0
-                }
-            else:
-                # Calculate time until next request is allowed
-                oldest_request = min(self.requests[identifier])
-                time_until_next = max(0, int((oldest_request + self.window_seconds) - now))
-                
-                logger.warning(f"Rate limit exceeded for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
-                return {
-                    'allowed': False,
-                    'current_count': len(self.requests[identifier]),
-                    'max_requests': self.max_requests,
-                    'window_seconds': self.window_seconds,
-                    'time_until_next': time_until_next
-                }
+                return True
+            logger.warning(f"Rate limit exceeded for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
+            return False
 
 def sanitize_input(text: str, max_length: int = 4000) -> str:
     """Sanitizes user input to prevent XSS and limit length."""
@@ -1935,85 +1916,26 @@ class TavilyFallbackAgent:
         # Fallback for unknown formats
         return "I couldn't find any relevant information for your query."
 
-    # NEW: Determine search strategy based on question and Pinecone error type
-    def determine_search_strategy(self, question: str, pinecone_error_type: str = None) -> Dict[str, Any]:
-        """Determine whether to use domain-restricted or worldwide search."""
-        question_lower = question.lower()
-        
-        # Check for current information indicators in question
-        current_info_indicators = [
-            "today", "yesterday", "this week", "this month", "this year", "2025", "2024",
-            "current", "latest", "recent", "now", "currently", "updated",
-            "news", "weather", "stock", "price", "event", "happening"
-        ]
-        
-        has_time_sensitive_keywords = any(indicator in question_lower for indicator in current_info_indicators)
-        
-        # For major Pinecone errors, use two-tier approach
-        if pinecone_error_type in ["rate_limit", "authentication_error", "payment_required", "server_error"]:
-            if has_time_sensitive_keywords:
-                # Tier 2: Worldwide search with competitor exclusions
-                return {
-                    "strategy": "worldwide_with_exclusions",
-                    "include_domains": None,
-                    "exclude_domains": DEFAULT_EXCLUDED_DOMAINS,
-                    "reason": f"Time-sensitive question with Pinecone {pinecone_error_type}"
-                }
-            else:
-                # Tier 1: Domain-restricted to 12taste.com
-                return {
-                    "strategy": "domain_restricted", 
-                    "include_domains": ["12taste.com"],
-                    "exclude_domains": None,
-                    "reason": f"Domain-restricted fallback for Pinecone {pinecone_error_type}"
-                }
-        else:
-            # Normal fallback - worldwide with exclusions
-            return {
-                "strategy": "worldwide_with_exclusions",
-                "include_domains": None, 
-                "exclude_domains": DEFAULT_EXCLUDED_DOMAINS,
-                "reason": "Standard safety fallback"
-            }
-
-    def query(self, message: str, chat_history: List[BaseMessage], pinecone_error_type: str = None) -> Dict[str, Any]:
+    def query(self, message: str, chat_history: List[BaseMessage]) -> Dict[str, Any]:
         try:
-            # Determine search strategy
-            strategy = self.determine_search_strategy(message, pinecone_error_type)
-            
-            # Build Tavily query parameters
-            search_params = {"query": message}
-            
-            if strategy["include_domains"]:
-                # Domain-restricted search
-                domain_query = f"{message} site:{strategy['include_domains'][0]}"
-                search_params["query"] = domain_query
-                logger.info(f"🔍 Tavily domain-restricted search: {strategy['include_domains'][0]}")
-            elif strategy["exclude_domains"]:
-                # Worldwide with exclusions
-                exclusions = " ".join([f"-site:{domain}" for domain in strategy["exclude_domains"]])
-                search_params["query"] = f"{message} {exclusions}"
-                logger.info(f"🌐 Tavily worldwide search excluding {len(strategy['exclude_domains'])} competitor domains")
-            
-            search_results = self.tavily_tool.invoke(search_params)
+            search_results = self.tavily_tool.invoke({"query": message})
             synthesized_content = self.synthesize_search_results(search_results, message)
             final_content = self.add_utm_to_links(synthesized_content)
             
             return {
                 "content": final_content,
                 "success": True,
-                "source": f"FiFi Web Search ({strategy['strategy']})",
+                "source": "FiFi Web Search",
                 "used_pinecone": False,
                 "used_search": True,
                 "has_citations": True,
                 "has_inline_citations": True,
-                "safety_override": False,
-                "search_strategy": strategy["strategy"],
-                "search_reason": strategy["reason"]
+                "safety_override": False
             }
         except Exception as e:
-            logger.error(f"Tavily search error: {str(e)}")
-            return None    
+            logger.error(f"Pinecone Assistant error: {str(e)}")
+            return None
+    
 class EnhancedAI:
     """Enhanced AI system with improved error handling and bidirectional fallback."""
     
@@ -2081,39 +2003,33 @@ class EnhancedAI:
             return "unknown_error"
 
     def _should_use_pinecone_first(self) -> bool:
-        """Enhanced routing based on component health status."""
+        """NEW: Intelligent routing based on component health status."""
         pinecone_status = error_handler.component_status.get("Pinecone", "healthy")
         tavily_status = error_handler.component_status.get("Tavily", "healthy")
-    
-        # If Pinecone is healthy, use it first
-        if pinecone_status in ["healthy"]:
+        
+        # If Pinecone is healthy or has minor issues, use it first
+        if pinecone_status in ["healthy", "rate_limit"]:
             return True
-    
-        # If Pinecone has issues (including rate limits) but Tavily is healthy, use Tavily first
-        if pinecone_status in ["authentication_error", "payment_required", "server_error", "rate_limit"] and tavily_status == "healthy":
+        
+        # If Pinecone has major issues but Tavily is healthy, use Tavily first
+        if pinecone_status in ["authentication_error", "payment_required", "server_error"] and tavily_status == "healthy":
             return False
-    
+        
         # Default to Pinecone first for other scenarios
         return True
 
-    def _get_current_pinecone_error_type(self) -> str:
-        """Get current Pinecone error type for Tavily strategy determination."""
-        return error_handler.component_status.get("Pinecone", "healthy")
-
-    def should_use_web_fallback(self, pinecone_response: Dict[str, Any], original_question: str) -> bool:
+    def should_use_web_fallback(self, pinecone_response: Dict[str, Any]) -> bool:
         """EXTREMELY aggressive fallback detection to prevent any hallucination."""
         content = pinecone_response.get("content", "").lower()
         content_raw = pinecone_response.get("content", "")
-        question_lower = original_question.lower()  # NEW: Check question instead of response
         
-        # PRIORITY 1: Always fallback for current/recent information requests IN QUESTION
+        # PRIORITY 1: Always fallback for current/recent information requests
         current_info_indicators = [
             "today", "yesterday", "this week", "this month", "this year", "2025", "2024",
             "current", "latest", "recent", "now", "currently", "updated",
             "news", "weather", "stock", "price", "event", "happening"
         ]
-        # FIXED: Check original question instead of response content
-        if any(indicator in question_lower for indicator in current_info_indicators):
+        if any(indicator in content for indicator in current_info_indicators):
             return True
         
         # PRIORITY 2: Explicit "don't know" statements (allow these to pass)
@@ -2185,7 +2101,7 @@ class EnhancedAI:
             return True
         
         return False
-    
+
     @handle_api_errors("AI System", "Get Response", show_to_user=True)
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """Enhanced AI response with bidirectional fallback and intelligent routing."""
@@ -2204,7 +2120,6 @@ class EnhancedAI:
         
         # Intelligent routing based on component health
         use_pinecone_first = self._should_use_pinecone_first()
-        current_pinecone_error = self._get_current_pinecone_error_type()
         
         if use_pinecone_first:
             # Try Pinecone first
@@ -2214,8 +2129,8 @@ class EnhancedAI:
                     pinecone_response = self.pinecone_tool.query(langchain_history)
                     
                     if pinecone_response and pinecone_response.get("success"):
-                        # Check if we should fallback to web search (FIXED: pass original question)
-                        should_fallback = self.should_use_web_fallback(pinecone_response, prompt)
+                        # Check if we should fallback to web search
+                        should_fallback = self.should_use_web_fallback(pinecone_response)
                         
                         if not should_fallback:
                             logger.info("✅ Using Pinecone response (passed safety checks)")
@@ -2227,17 +2142,15 @@ class EnhancedAI:
                 except Exception as e:
                     error_type = self._detect_pinecone_error_type(e)
                     logger.error(f"Pinecone query failed ({error_type}): {e}")
-                    current_pinecone_error = error_type  # Update error type for Tavily strategy
             
-            # Fallback to web search with enhanced strategy
+            # Fallback to web search
             if self.tavily_agent:
                 try:
                     logger.info("🌐 Falling back to web search...")
-                    # Pass the error type for strategy determination
-                    web_response = self.tavily_agent.query(prompt, langchain_history[:-1], current_pinecone_error)
+                    web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
                     
                     if web_response and web_response.get("success"):
-                        logger.info(f"✅ Using web search response: {web_response.get('search_strategy', 'unknown strategy')}")
+                        logger.info("✅ Using web search response")
                         error_handler.mark_component_healthy("Tavily")
                         return web_response
                         
@@ -2245,15 +2158,16 @@ class EnhancedAI:
                     logger.error(f"Web search failed: {e}")
                     error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
             
-            # Final Pinecone fallback if Tavily failed
-            if not self.tavily_agent:
+            # If Pinecone was supposed to be primary but failed/forced fallback, and Tavily also failed/was not configured,
+            # now we try Pinecone again as a last resort if it's available, even with its known issues.
+            if not self.tavily_agent: # This condition is critical after the above attempt to use Tavily.
                 if self.pinecone_tool:
                     try:
                         logger.info("🔍 Falling back to Pinecone knowledge base (re-attempt after web search failure/absence)...")
                         pinecone_response = self.pinecone_tool.query(langchain_history)
                         
                         if pinecone_response and pinecone_response.get("success"):
-                            should_fallback = self.should_use_web_fallback(pinecone_response, prompt)
+                            should_fallback = self.should_use_web_fallback(pinecone_response)
                             
                             if not should_fallback:
                                 logger.info("✅ Using Pinecone response (fallback)")
@@ -2262,16 +2176,16 @@ class EnhancedAI:
                     except Exception as e:
                         error_type = self._detect_pinecone_error_type(e)
                         logger.error(f"Pinecone fallback also failed ({error_type}): {e}")
-        else:
-            # Try Tavily first due to Pinecone issues
+        else: # This path is taken if _should_use_pinecone_first() returned False initially
+              # (e.g., Pinecone had critical errors, but Tavily was healthy)
+            # Try Tavily first
             if self.tavily_agent:
                 try:
                     logger.info("🌐 Querying web search (primary due to Pinecone issues)...")
-                    # Pass the error type for strategy determination
-                    web_response = self.tavily_agent.query(prompt, langchain_history[:-1], current_pinecone_error)
+                    web_response = self.tavily_agent.query(prompt, langchain_history[:-1])
                     
                     if web_response and web_response.get("success"):
-                        logger.info(f"✅ Using web search response (primary): {web_response.get('search_strategy', 'unknown strategy')}")
+                        logger.info("✅ Using web search response (primary)")
                         error_handler.mark_component_healthy("Tavily")
                         return web_response
                                 
@@ -2286,7 +2200,7 @@ class EnhancedAI:
                     pinecone_response = self.pinecone_tool.query(langchain_history)
                     
                     if pinecone_response and pinecone_response.get("success"):
-                        should_fallback = self.should_use_web_fallback(pinecone_response, prompt)
+                        should_fallback = self.should_use_web_fallback(pinecone_response)
                         
                         if not should_fallback:
                             logger.info("✅ Using Pinecone response (fallback)")
@@ -2308,6 +2222,7 @@ class EnhancedAI:
             "has_inline_citations": False,
             "safety_override": False
         }
+
 @handle_api_errors("Content Moderation", "Check Prompt", show_to_user=False)
 def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
     """Checks user prompt against content moderation guidelines using OpenAI's moderation API."""
@@ -2333,91 +2248,6 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     return {"flagged": False}
 
-@handle_api_errors("Industry Context Check", "Validate Question Context", show_to_user=False)
-def check_industry_context(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
-    """Checks if user question is relevant to food & beverage ingredients industry using GPT-4o-mini."""
-    if not client or not hasattr(client, 'chat'):
-        logger.debug("OpenAI client not available for industry context check. Allowing question.")
-        return {"relevant": True, "reason": "context_check_unavailable"}
-    
-    try:
-        context_check_prompt = f"""You are an industry context validator for 1-2-Taste (12taste.com), a B2B digital marketplace for food ingredients.
-
-**COMPANY CONTEXT:**
-- B2B marketplace serving food & beverage manufacturers, processors, and producers
-- Focus on ingredient sourcing, product development, and technical support
-- Industries served: bakery, confectionery, beverage, dairy, ice cream, meat processing, snacks, etc.
-- Product categories: flavors, colors, sweeteners, proteins, emulsifiers, starches, texturizers, fibers, nutraceuticals, etc.
-- Target customers: legitimate businesses in food/beverage industry
-
-**TASK:** Determine if the following user question is relevant to the food & beverage ingredients industry.
-
-**ALLOW questions about:**
-- Food ingredients (flavors, colors, sweeteners, proteins, emulsifiers, etc.)
-- Beverage ingredients and formulation
-- Supplier sourcing and procurement in food industry
-- Food safety, regulations, and compliance
-- Product development and R&D for food/beverages
-- Market trends in food/beverage industry
-- Technical formulation and processing questions
-- Food manufacturing and production
-- Ingredient specifications and applications
-- Professional food business operations
-
-**FLAG questions about:**
-- Completely unrelated industries (automotive, finance, technology not food-related, etc.)
-- Personal consumer cooking advice (unless related to professional manufacturing)
-- Non-professional food questions (home recipes, diet advice, etc.)
-- Off-topic subjects (politics, sports, entertainment, etc.)
-- Medical advice or health claims
-- General knowledge unrelated to food industry
-
-**USER QUESTION:** "{prompt}"
-
-**INSTRUCTIONS:**
-Respond with ONLY a JSON object in this exact format:
-{{
-    "relevant": true/false,
-    "confidence": 0.0-1.0,
-    "category": "food_ingredients" | "beverage_formulation" | "supplier_sourcing" | "technical_support" | "market_trends" | "off_topic" | "personal_cooking" | "unrelated_industry",
-    "reason": "brief explanation why relevant or not relevant"
-}}
-
-Do NOT include any text outside the JSON object."""
-
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are an industry context validator. Respond only with valid JSON."},
-                {"role": "user", "content": context_check_prompt}
-            ],
-            max_tokens=150,
-            temperature=0.1
-        )
-        
-        response_content = response.choices[0].message.content.strip()
-        
-        # Clean up response (remove any markdown formatting)
-        response_content = response_content.replace('```json', '').replace('```', '').strip()
-        
-        try:
-            result = json.loads(response_content)
-            
-            # Validate required fields
-            if not all(key in result for key in ['relevant', 'confidence', 'category', 'reason']):
-                logger.warning("Industry context check returned incomplete JSON structure")
-                return {"relevant": True, "reason": "context_check_invalid_response"}
-                
-            logger.info(f"Industry context check: relevant={result['relevant']}, category={result['category']}, confidence={result['confidence']:.2f}")
-            return result
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Industry context check returned invalid JSON: {response_content[:100]}... Error: {e}")
-            return {"relevant": True, "reason": "context_check_json_error"}
-            
-    except Exception as e:
-        logger.error(f"Industry context check failed: {e}", exc_info=True)
-        return {"relevant": True, "reason": "context_check_error"}
 # =============================================================================
 # SESSION MANAGER - MAIN ORCHESTRATOR CLASS
 # =============================================================================
@@ -3244,42 +3074,17 @@ class SessionManager:
                 logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
 
             # Check rate limiting using fingerprint_id (or fallback session_id)
-            rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
-            if not rate_limit_result['allowed']:
-                time_until_next = rate_limit_result.get('time_until_next', 0)
-                max_requests = rate_limit_result.get('max_requests', 2)
-                window_seconds = rate_limit_result.get('window_seconds', 60)
-                
-                # Store detailed rate limit info in session state
-                st.session_state.rate_limit_hit = {
-                    'timestamp': datetime.now(),
-                    'time_until_next': time_until_next,
-                    'max_requests': max_requests,
-                    'window_seconds': window_seconds,
-                    'expires_at': datetime.now() + timedelta(seconds=15)  # Show for 15 seconds
-                }
-                
+            if not self.rate_limiter.is_allowed(rate_limiter_id): # MODIFIED: Use rate_limiter_id
                 return {
-                    'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
+                    'content': 'Too many requests. Please wait a moment before asking another question.',
                     'success': False,
-                    'source': 'Rate Limiter',
-                    'time_until_next': time_until_next
+                    'source': 'Rate Limiter'
                 }
             
-            # Content moderation check
-            moderation_result = check_content_moderation(prompt, self.ai.openai_client)
+            # Content moderation check (MOVED HERE)
+            moderation_result = check_content_moderation(prompt, self.ai.openai_client) # Correctly pass self.ai.openai_client
             if moderation_result and moderation_result.get("flagged"):
-                categories = moderation_result.get('categories', [])
-                logger.warning(f"Content moderation flagged input: {categories}")
-                
-                # Store moderation error info in session state
-                st.session_state.moderation_flagged = {
-                    'timestamp': datetime.now(),
-                    'categories': categories,
-                    'message': moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
-                    'expires_at': datetime.now() + timedelta(seconds=12)  # Show for 12 seconds
-                }
-                
+                logger.warning(f"Content moderation flagged input: {moderation_result.get('categories', [])}")
                 return {
                     "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
                     "success": False,
@@ -3291,48 +3096,7 @@ class SessionManager:
                     "safety_override": False
                 }
 
-            # Industry context validation check
-            context_result = check_industry_context(prompt, self.ai.openai_client)
-            if context_result and not context_result.get("relevant", True):
-                confidence = context_result.get("confidence", 0.0)
-                category = context_result.get("category", "unknown")
-                reason = context_result.get("reason", "Not relevant to food & beverage ingredients industry")
-                
-                logger.warning(f"Industry context check flagged input: category={category}, confidence={confidence:.2f}, reason={reason}")
-                
-                # Customize response based on category
-                if category in ["personal_cooking", "off_topic"]:
-                    context_message = "I'm specialized in helping food & beverage industry professionals with ingredient sourcing, formulation, and technical questions. Could you please rephrase your question to focus on professional food ingredient needs?"
-                elif category == "unrelated_industry":
-                    context_message = "I'm designed to assist with food & beverage ingredients and related industry topics. For questions outside the food industry, please try a general-purpose AI assistant."
-                else:
-                    context_message = "Your question doesn't seem to be related to food & beverage ingredients. I specialize in helping with ingredient sourcing, formulation, suppliers, and food industry technical questions."
-                
-                # Store context error info in session state
-                st.session_state.context_flagged = {
-                    'timestamp': datetime.now(),
-                    'category': category,
-                    'confidence': confidence,
-                    'reason': reason,
-                    'message': context_message,
-                    'expires_at': datetime.now() + timedelta(seconds=10)  # Show for 10 seconds
-                }
-                
-                return {
-                    "content": context_message,
-                    "success": False,
-                    "source": "Industry Context Filter",
-                    "used_search": False,
-                    "used_pinecone": False,
-                    "has_citations": False,
-                    "has_inline_citations": False,
-                    "safety_override": False,
-                    "context_category": category,
-                    "context_confidence": confidence
-                }
-
-            # Rest of the existing function remains the same...
-                # Check question limits
+            # Check question limits
             limit_check = self.question_limits.is_within_limits(session)
             # This check for 'allowed' is crucial and must be placed here before recording question
             if not limit_check['allowed']:
@@ -3616,10 +3380,6 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         for key in list(st.session_state.keys()):
             del st.session_state[key]
 
-        # NEW: Force welcome page state before any reload attempts
-        st.session_state['page'] = None
-        st.session_state['session_expired'] = True
-
         if JS_EVAL_AVAILABLE:
             try:
                 streamlit_js_eval(js_expressions="parent.window.location.reload()")
@@ -3628,6 +3388,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
                 logger.error(f"Browser reload failed during inactive session handling: {e}")
         
         st.info("🏠 Redirecting to home page...")
+        # Removed time.sleep(5)
         st.rerun()
         st.stop()
         return True
@@ -3699,10 +3460,6 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         
-        # NEW: Force welcome page state and timeout flag
-        st.session_state['page'] = None
-        st.session_state['session_expired'] = True
-        
         # Show timeout message
         st.error("⏰ **Session Timeout**")
         st.info("Your session has expired due to 5 minutes of inactivity.")
@@ -3711,17 +3468,20 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         if JS_EVAL_AVAILABLE:
             try:
                 logger.info(f"🔄 Triggering browser reload for timeout")
+                # Removed time.sleep(5)
                 streamlit_js_eval(js_expressions="parent.window.location.reload()")
                 st.stop()
             except Exception as e:
                 logger.error(f"Browser reload failed during inactive session handling: {e}")
         
         st.info("🏠 Redirecting to home page...")
+        # Removed time.sleep(5)
         st.rerun()
         st.stop()
         return True
     
     return False
+
 def render_simplified_browser_close_detection(session_id: str):
     """Enhanced browser close detection with eligibility check."""
     if not session_id:
@@ -4082,8 +3842,29 @@ def render_welcome_page(session_manager: 'SessionManager'):
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
     
     st.markdown("---")
+    st.subheader("🎯 Usage Tiers")
     
-    # MOVED UP: Sign In/Start as Guest tabs (was previously below tiers)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.success("👤 **Guest Users**")
+        st.markdown("• **4 questions** to try FiFi AI")
+        st.markdown("• Email verification required to continue")
+        st.markdown("• Quick start, no registration needed")
+    
+    with col2:
+        st.info("📧 **Email Verified Guest**")
+        st.markdown("• **10 questions per day** (rolling 24-hour period)")
+        st.markdown("• Email verification for access")
+        st.markdown("• No full registration required")
+    
+    with col3:
+        st.warning("🔐 **Registered Users**")
+        st.markdown("• **20 questions per day** with tier system:")
+        st.markdown("  - **Tier 1**: Questions 1-10 → 1-hour break")
+        st.markdown("  - **Tier 2**: Questions 11-20 → 24-hour reset")
+        st.markdown("• Cross-device tracking & chat saving")
+        st.markdown("• Priority access during high usage")
+    
     tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
     
     with tab1:
@@ -4135,31 +3916,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 set_loading_state(True, "Setting up your session and initializing AI assistant...")
                 st.rerun()  # Immediately show loading state (NEW)
 
-    # MOVED DOWN: Usage tiers explanation (was previously above tabs)
-    st.markdown("---")
-    st.subheader("🎯 Usage Tiers")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.success("👤 **Guest Users**")
-        st.markdown("• **4 questions** to try FiFi AI")
-        st.markdown("• Email verification required to continue")
-        st.markdown("• Quick start, no registration needed")
-    
-    with col2:
-        st.info("📧 **Email Verified Guest**")
-        st.markdown("• **10 questions per day** (rolling 24-hour period)")
-        st.markdown("• Email verification for access")
-        st.markdown("• No full registration required")
-    
-    with col3:
-        st.warning("🔐 **Registered Users**")
-        st.markdown("• **20 questions per day** with tier system:")
-        st.markdown("  - **Tier 1**: Questions 1-10 → 1-hour break")
-        st.markdown("  - **Tier 2**: Questions 11-20 → 24-hour reset")
-        st.markdown("• Cross-device tracking & chat saving")
-        st.markdown("• Priority access during high usage")
-        
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display."""
     with st.sidebar:
@@ -4578,84 +4334,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # NEW: Enhanced error notifications with toast messages
-    current_time = datetime.now()
-    
-    # Enhanced rate limit display with toast
-    if 'rate_limit_hit' in st.session_state:
-        rate_limit_info = st.session_state.rate_limit_hit
-        if current_time < rate_limit_info['expires_at']:
-            time_until_next = rate_limit_info.get('time_until_next', 0)
-            max_requests = rate_limit_info.get('max_requests', 2)
-            window_seconds = rate_limit_info.get('window_seconds', 60)
-            
-            # Calculate remaining time dynamically
-            elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
-            remaining_time = max(0, int(time_until_next - elapsed))
-            
-            if remaining_time > 0:
-                st.toast(f"⏱️ Rate limit exceeded. Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds}s)", icon="⚠️")
-            else:
-                st.toast(f"⏱️ Rate limit exceeded. Please wait a moment before asking another question.", icon="⚠️")
-        else:
-            # Clean up expired rate limit message
-            del st.session_state.rate_limit_hit
-
-    # Enhanced moderation error display with toast
-    if 'moderation_flagged' in st.session_state:
-        moderation_info = st.session_state.moderation_flagged
-        if current_time < moderation_info['expires_at']:
-            categories = moderation_info.get('categories', [])
-            categories_text = ', '.join(categories) if categories else 'policy violation'
-            
-            # Calculate remaining display time
-            remaining_seconds = int((moderation_info['expires_at'] - current_time).total_seconds())
-            
-            st.toast(f"🛡️ Content blocked: {categories_text}. Please rephrase your question appropriately. ({remaining_seconds}s)", icon="🚫")
-        else:
-            # Clean up expired moderation message
-            del st.session_state.moderation_flagged
-
-    # Enhanced context error display with toast  
-    if 'context_flagged' in st.session_state:
-        context_info = st.session_state.context_flagged
-        if current_time < context_info['expires_at']:
-            category = context_info.get('category', 'off-topic')
-            confidence = context_info.get('confidence', 0.0)
-            
-            # Calculate remaining display time
-            remaining_seconds = int((context_info['expires_at'] - current_time).total_seconds())
-            
-            if category == "unrelated_industry":
-                toast_message = f"🏭 Question not food industry related. I specialize in food & beverage ingredients. ({remaining_seconds}s)"
-            elif category in ["personal_cooking", "off_topic"]:
-                toast_message = f"👨‍🍳 Please ask professional food ingredient questions. I'm designed for B2B food industry. ({remaining_seconds}s)"
-            else:
-                toast_message = f"🎯 Question seems off-topic for food ingredients industry. Please refocus on professional food topics. ({remaining_seconds}s)"
-                
-            st.toast(toast_message, icon="ℹ️")
-        else:
-            # Clean up expired context message
-            del st.session_state.context_flagged
-
-    # NEW: Show fingerprint waiting status
-    if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
-        current_time_float = time.time() # Use float for direct comparison with time.time()
-        wait_start = st.session_state.get('fingerprint_wait_start')
-        elapsed = current_time_float - wait_start
-        remaining = max(0, 10 - elapsed)
-        
-        if remaining > 0:
-            st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
-            st.caption("FiFi is setting up device recognition for security and session management.")
-        else:
-            st.info("🔒 **Finalizing setup...** Almost ready!")
-        
-        # Add a subtle progress bar
-        progress_value = min(elapsed / 10, 1.0)
-        st.progress(progress_value, text="Session Security Setup")
-        st.markdown("---")
-
     # Simple activity tracking
     if activity_result:
         js_last_activity_timestamp = activity_result.get('last_activity')
@@ -4892,14 +4570,6 @@ def main_fixed():
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
 
-    # NEW: Check for expired session flag and force welcome page
-    if st.session_state.get('session_expired', False):
-        logger.info("Session expired flag detected - forcing welcome page")
-        st.session_state['page'] = None
-        if 'session_expired' in st.session_state:
-            del st.session_state['session_expired']
-        st.info("⏰ Your session expired. Please start a new session.")
-
     # Initialize loading state if not already set (for first run)
     if 'is_loading' not in st.session_state:
         st.session_state.is_loading = False
@@ -5073,32 +4743,29 @@ def main_fixed():
                         del st.session_state['fingerprint_wait_start']  # Clear timeout
                 else:
                     # Still waiting for JS fingerprinting
-                    current_time_float = time.time() # Use float for direct comparison with time.time()
+                    current_time = time.time()
                     wait_start = st.session_state.get('fingerprint_wait_start')
                     
                     if wait_start is None:
                         # First time seeing temp fingerprint, start timeout
-                        st.session_state.fingerprint_wait_start = current_time_float
+                        st.session_state.fingerprint_wait_start = current_time
                         st.session_state.is_chat_ready = False
                         logger.info(f"Starting fingerprint wait timer for session {session.session_id[:8]}")
-                    elif current_time_float - wait_start > 10:  # ✅ 10 seconds is reasonable
+                    elif current_time - wait_start > 10:  # ✅ 10 seconds is reasonable
                         # Timeout reached, enable chat with fallback fingerprint
                         st.session_state.is_chat_ready = True
                         logger.warning(f"Fingerprint timeout (10s) - enabling chat with fallback for session {session.session_id[:8]}")
                     else:
                         # Still waiting within timeout period
                         st.session_state.is_chat_ready = False
-                        # remaining = 5 - (current_time_float - wait_start) # Original value, if needed
-                        # logger.debug(f"Fingerprint wait continues: {remaining:.1f}s remaining for session {session.session_id[:8]}")
-
+                        remaining = 5 - (current_time - wait_start)
+                        logger.debug(f"Fingerprint wait continues: {remaining:.1f}s remaining for session {session.session_id[:8]}")
             else:
                 st.session_state.is_chat_ready = False
 
             # Right after your timeout logic
             if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
-                # Removed the `remaining` calculation, as it's now handled in the toast message or info box directly.
-                # Just rerun to keep the UI updating
-                st.rerun() 
+                st.rerun() # Keep checking until timeout reached
                 return # Stop execution to allow rerun
             
             # Render activity tracker and check for timeout
