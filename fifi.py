@@ -1928,8 +1928,9 @@ class TavilyFallbackAgent:
             sdk_params = {
                 "query": message,
                 "max_results": 5,
-                "include_answer": True,
-                "search_depth": "basic"
+                "include_answer": "advanced",      # ✅ Changed from True to "advanced"
+                "search_depth": "advanced",        # ✅ Changed from "basic" to "advanced"  
+                "include_raw_content": "text"      # ✅ Added for better content
             }
 
             # Add domain restrictions
