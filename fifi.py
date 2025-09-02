@@ -1848,65 +1848,41 @@ class TavilyFallbackAgent:
             logger.error(f"🔍 UTM processing failed: {e}")
             return content  # Always return original content if processing fails
 
-    def synthesize_search_results(self, results, query: str) -> str:
-        """Synthesize search results from direct Tavily SDK."""
+def synthesize_search_results(self, results, query: str) -> str:
+    """Simple synthesis: combine Tavily answer + sources, then apply UTM."""
     
-        logger.info(f"🔍 SYNTHESIS: Processing SDK results type = {type(results)}")
+    if not isinstance(results, dict):
+        return "I couldn't process the search results properly."
     
-        if not isinstance(results, dict):
-            logger.warning("🔍 SYNTHESIS: Results not a dictionary")
-            return "I couldn't process the search results properly."
+    # Get Tavily's pre-synthesized answer (remove arbitrary > 20 check)
+    answer = results.get('answer', '')
+    search_results = results.get('results', [])
     
-        # Direct SDK provides a pre-synthesized answer
-        answer = results.get('answer')
-        if answer and len(answer.strip()) > 20:
-            logger.info(f"🔍 SYNTHESIS: Using Tavily's pre-synthesized answer ({len(answer)} chars)")
-            return answer  # Return the answer directly, no "Based on my search:" prefix
+    if not answer and not search_results:
+        return "I couldn't find any relevant information for your query."
     
-        # Fallback to manual synthesis if no answer provided
-        search_results = results.get('results', [])
-        logger.info(f"🔍 SYNTHESIS: Fallback synthesis with {len(search_results)} results")
+    # Start with Tavily's answer
+    response_parts = []
+    if answer:  # Removed the > 20 check - use any answer Tavily provides
+        response_parts.append(answer)
     
-        if not search_results:
-            return "I couldn't find any relevant information for your query."
-    
-        # Process individual results
-        relevant_info = []
-        sources = []
-    
-        for i, result in enumerate(search_results[:3], 1):
+    # Add sources in Pinecone format
+    sources = []
+    if search_results:
+        for result in search_results[:5]:
             if isinstance(result, dict):
-                title = result.get('title', f'Result {i}')
-                content = result.get('content', '')
+                title = result.get('title', '')
                 url = result.get('url', '')
-            
-                if content:
-                    if len(content) > 400:
-                        content = content[:400] + "..."
-                    relevant_info.append(content)
-                
                 if url and title:
                     sources.append(f"[{title}]({url})")
     
-        if not relevant_info:
-            return "I found search results but couldn't extract readable content."
-    
-        # Build synthesized response
-        response_parts = []
-        if len(relevant_info) == 1:
-            response_parts.append(f"Based on my search: {relevant_info[0]}")
-        else:
-            response_parts.append("Based on my search:")
-            for i, info in enumerate(relevant_info, 1):
-                response_parts.append(f"\n\n**{i}.** {info}")
-    
-        # Add sources
-        if sources:
-            response_parts.append(f"\n\n**Sources:**")
+    # Append sources using Pinecone standard format
+    if sources:
+        response_parts.append(f"\n\n**Sources:**")
         for i, source in enumerate(sources, 1):
             response_parts.append(f"\n{i}. {source}")
     
-        return "".join(response_parts)
+    return "".join(response_parts)
         
         # Fallback for unknown formats
         return "I couldn't find any relevant information for your query."
@@ -1987,6 +1963,7 @@ class TavilyFallbackAgent:
             logger.info(f"🔍 Direct Tavily SDK call with params: {list(sdk_params.keys())}")
             search_results = self.tavily_client.search(**sdk_params)
             synthesized_content = self.synthesize_search_results(search_results, message)
+            final_content = self.add_utm_to_links(synthesized_content)
             # ADD THESE DEBUG LINES:
             logger.info(f"🔍 DEBUG: synthesized_content type = {type(synthesized_content)}")
             logger.info(f"🔍 DEBUG: synthesized_content value = {repr(synthesized_content)}")
