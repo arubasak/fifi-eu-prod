@@ -1823,22 +1823,30 @@ class TavilyFallbackAgent:
         self.tavily_client = TavilyClient(api_key=tavily_api_key)
 
     def add_utm_to_links(self, content: str) -> str:
-        """Finds all Markdown links in a string and appends the UTM parameters."""
-        # ADD DEBUG LOGGING:
-        logger.info(f"🔍 UTM DEBUG: Input content = {repr(content)}")
+    """Finds all Markdown links in a string and appends the UTM parameters."""
     
-        if not content:  # ADD THIS CHECK
-            logger.warning("🔍 UTM DEBUG: Content is None or empty!")
-            return content or ""
-    def replacer(match):
-        url = match.group(1)
-        utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
-        if '?' in url:
-            new_url = f"{url}&{utm_params}"
-        else:
+    if not content:
+        return ""
+    
+    try:
+        def replacer(match):
+            url = match.group(1)
+            utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
+            if '?' in url:
+                new_url = f"{url}&{utm_params}"
+            else:
                 new_url = f"{url}?{utm_params}"
-        return f"({new_url})"
-        return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
+            return f"({new_url})"
+        
+        # Use simpler regex pattern without negative lookbehind
+        result = re.sub(r'\]\(([^)]+)\)', r'](' + r'\1' + ')', content)
+        result = re.sub(r'\]\(([^)]+)\)', lambda m: f']({m.group(1)}{"&" if "?" in m.group(1) else "?"}utm_source=12taste.com&utm_medium=fifi-chat)', content)
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"🔍 UTM processing failed: {e}")
+        return content  # Always return original content if processing fails
 
     def synthesize_search_results(self, results, query: str) -> str:
         """Synthesize search results from direct Tavily SDK."""
