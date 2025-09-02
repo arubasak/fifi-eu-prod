@@ -1823,7 +1823,7 @@ class TavilyFallbackAgent:
         self.tavily_client = TavilyClient(api_key=tavily_api_key)
 
     def add_utm_to_links(self, content: str) -> str:
-    """Finds all Markdown links in a string and appends the UTM parameters."""
+        """Finds all Markdown links in a string and appends the UTM parameters."""
     
     if not content:
         return ""
