@@ -3231,72 +3231,107 @@ class SessionManager:
             st.error("An unexpected error occurred during authentication. Please try again later.")
             return None
 
-    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-        """Gets AI response and manages session state."""
-        try:
-            # Handle cases where fingerprint_id might still be temporary or None during early load.
-            # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
-            rate_limiter_id = session.fingerprint_id
-            if rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                # Fallback to session_id for truly un-fingerprinted or temporary cases,
-                # to still apply some level of protection, albeit less robust.
-                rate_limiter_id = session.session_id
-                logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
+def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+    """Gets AI response and manages session state."""
+    try:
+        # Handle cases where fingerprint_id might still be temporary or None during early load.
+        # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
+        rate_limiter_id = session.fingerprint_id
+        if rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+            # Fallback to session_id for truly un-fingerprinted or temporary cases,
+            # to still apply some level of protection, albeit less robust.
+            rate_limiter_id = session.session_id
+            logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
 
-            # Check rate limiting using fingerprint_id (or fallback session_id)
-            if not self.rate_limiter.is_allowed(rate_limiter_id): # MODIFIED: Use rate_limiter_id
-                return {
-                    'content': 'Too many requests. Please wait a moment before asking another question.',
-                    'success': False,
-                    'source': 'Rate Limiter'
-                }
+        # Check rate limiting using fingerprint_id (or fallback session_id)
+        rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
+        if not rate_limit_result['allowed']:
+            time_until_next = rate_limit_result.get('time_until_next', 0)
+            max_requests = rate_limit_result.get('max_requests', 2)
+            window_seconds = rate_limit_result.get('window_seconds', 60)
+            
+            # Store detailed rate limit info in session state
+            st.session_state.rate_limit_hit = {
+                'timestamp': datetime.now(),
+                'time_until_next': time_until_next,
+                'max_requests': max_requests,
+                'window_seconds': window_seconds,
+                'expires_at': datetime.now() + timedelta(seconds=15)  # Show for 15 seconds
+            }
+            
+            return {
+                'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
+                'success': False,
+                'source': 'Rate Limiter',
+                'time_until_next': time_until_next
+            }
+        
+        # Content moderation check
+        moderation_result = check_content_moderation(prompt, self.ai.openai_client)
+        if moderation_result and moderation_result.get("flagged"):
+            categories = moderation_result.get('categories', [])
+            logger.warning(f"Content moderation flagged input: {categories}")
+            
+            # Store moderation error info in session state
+            st.session_state.moderation_flagged = {
+                'timestamp': datetime.now(),
+                'categories': categories,
+                'message': moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
+                'expires_at': datetime.now() + timedelta(seconds=12)  # Show for 12 seconds
+            }
+            
+            return {
+                "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
+                "success": False,
+                "source": "Content Moderation",
+                "used_search": False,
+                "used_pinecone": False,
+                "has_citations": False,
+                "has_inline_citations": False,
+                "safety_override": False
+            }
 
-            # Content moderation check
-            moderation_result = check_content_moderation(prompt, self.ai.openai_client)
-            if moderation_result and moderation_result.get("flagged"):
-                logger.warning(f"Content moderation flagged input: {moderation_result.get('categories', [])}")
-                return {
-                    "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
-                    "success": False,
-                    "source": "Content Moderation",
-                    "used_search": False,
-                    "used_pinecone": False,
-                    "has_citations": False,
-                    "has_inline_citations": False,
-                    "safety_override": False
-                }
+        # Industry context validation check
+        context_result = check_industry_context(prompt, self.ai.openai_client)
+        if context_result and not context_result.get("relevant", True):
+            confidence = context_result.get("confidence", 0.0)
+            category = context_result.get("category", "unknown")
+            reason = context_result.get("reason", "Not relevant to food & beverage ingredients industry")
+            
+            logger.warning(f"Industry context check flagged input: category={category}, confidence={confidence:.2f}, reason={reason}")
+            
+            # Customize response based on category
+            if category in ["personal_cooking", "off_topic"]:
+                context_message = "I'm specialized in helping food & beverage industry professionals with ingredient sourcing, formulation, and technical questions. Could you please rephrase your question to focus on professional food ingredient needs?"
+            elif category == "unrelated_industry":
+                context_message = "I'm designed to assist with food & beverage ingredients and related industry topics. For questions outside the food industry, please try a general-purpose AI assistant."
+            else:
+                context_message = "Your question doesn't seem to be related to food & beverage ingredients. I specialize in helping with ingredient sourcing, formulation, suppliers, and food industry technical questions."
+            
+            # Store context error info in session state
+            st.session_state.context_flagged = {
+                'timestamp': datetime.now(),
+                'category': category,
+                'confidence': confidence,
+                'reason': reason,
+                'message': context_message,
+                'expires_at': datetime.now() + timedelta(seconds=10)  # Show for 10 seconds
+            }
+            
+            return {
+                "content": context_message,
+                "success": False,
+                "source": "Industry Context Filter",
+                "used_search": False,
+                "used_pinecone": False,
+                "has_citations": False,
+                "has_inline_citations": False,
+                "safety_override": False,
+                "context_category": category,
+                "context_confidence": confidence
+            }
 
-            # NEW: Industry context validation check
-            context_result = check_industry_context(prompt, self.ai.openai_client)
-            if context_result and not context_result.get("relevant", True):
-                confidence = context_result.get("confidence", 0.0)
-                category = context_result.get("category", "unknown")
-                reason = context_result.get("reason", "Not relevant to food & beverage ingredients industry")
-
-                logger.warning(f"Industry context check flagged input: category={category}, confidence={confidence:.2f}, reason={reason}")
-
-                # Customize response based on category
-                if category in ["personal_cooking", "off_topic"]:
-                    context_message = "I'm specialized in helping food & beverage industry professionals with ingredient sourcing, formulation, and technical questions. Could you please rephrase your question to focus on professional food ingredient needs?"
-                elif category == "unrelated_industry":
-                    context_message = "I'm designed to assist with food & beverage ingredients and related industry topics. For questions outside the food industry, please try a general-purpose AI assistant."
-                else:
-                    context_message = "Your question doesn't seem to be related to food & beverage ingredients. I specialize in helping with ingredient sourcing, formulation, suppliers, and food industry technical questions."
-
-                return {
-                    "content": context_message,
-                    "success": False,
-                    "source": "Industry Context Filter",
-                    "used_search": False,
-                    "used_pinecone": False,
-                    "has_citations": False,
-                    "has_inline_citations": False,
-                    "safety_override": False,
-                    "context_category": category,
-                    "context_confidence": confidence
-                }
-
-            # Rest of the existing function remains the same...
+        # Rest of the existing function remains the same...
                 # Check question limits
             limit_check = self.question_limits.is_within_limits(session)
             # This check for 'allowed' is crucial and must be placed here before recording question
