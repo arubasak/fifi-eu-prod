@@ -5045,10 +5045,10 @@ def main_fixed():
                         st.session_state.fingerprint_wait_start = current_time_float
                         st.session_state.is_chat_ready = False
                         logger.info(f"Starting fingerprint wait timer for session {session.session_id[:8]}")
-                    elif current_time_float - wait_start > 10:  # ✅ 10 seconds is reasonable
+                    elif current_time_float - wait_start > 15:  # ✅ 15 seconds is reasonable
                         # Timeout reached, enable chat with fallback fingerprint
                         st.session_state.is_chat_ready = True
-                        logger.warning(f"Fingerprint timeout (10s) - enabling chat with fallback for session {session.session_id[:8]}")
+                        logger.warning(f"Fingerprint timeout (15s) - enabling chat with fallback for session {session.session_id[:8]}")
                     else:
                         # Still waiting within timeout period
                         st.session_state.is_chat_ready = False
