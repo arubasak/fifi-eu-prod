@@ -4546,7 +4546,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         current_time_float = time.time() # Use float for direct comparison with time.time()
         wait_start = st.session_state.get('fingerprint_wait_start')
         elapsed = current_time_float - wait_start
-        remaining = max(0, 10 - elapsed)
+        remaining = max(0, 15 - elapsed)
         
         if remaining > 0:
             st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
@@ -4555,7 +4555,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             st.info("🔒 **Finalizing setup...** Almost ready!")
         
         # Add a subtle progress bar
-        progress_value = min(elapsed / 10, 1.0)
+        progress_value = min(elapsed / 15, 1.0)
         st.progress(progress_value, text="Session Security Setup")
         st.markdown("---")
 
