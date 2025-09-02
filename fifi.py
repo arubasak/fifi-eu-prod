@@ -1825,10 +1825,10 @@ class TavilyFallbackAgent:
     def add_utm_to_links(self, content: str) -> str:
         """Finds all Markdown links in a string and appends the UTM parameters."""
     
-    if not content:
-        return ""
+        if not content:
+            return ""
     
-    try:
+        try:
         def replacer(match):
             url = match.group(1)
             utm_params = "utm_source=12taste.com&utm_medium=fifi-chat"
