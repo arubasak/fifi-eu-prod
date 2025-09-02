@@ -1832,7 +1832,7 @@ class TavilyFallbackAgent:
         else:
                 new_url = f"{url}?{utm_params}"
         return f"({new_url})"
-    return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
+        return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
 
     def synthesize_search_results(self, results, query: str) -> str:
         """Synthesize search results from direct Tavily SDK."""
