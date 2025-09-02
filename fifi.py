@@ -1835,7 +1835,7 @@ class TavilyFallbackAgent:
         return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
 
     def synthesize_search_results(self, results, query: str) -> str:
-    """Synthesize search results from direct Tavily SDK."""
+        """Synthesize search results from direct Tavily SDK."""
     
     logger.info(f"🔍 SYNTHESIS: Processing SDK results type = {type(results)}")
     
