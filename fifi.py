@@ -4710,7 +4710,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             st.markdown(prompt)
         
         with st.chat_message("assistant"):
-            with st.spinner("🔍 Processing your question..."):
+            with st.spinner("🔍 FiFi is processing your question and we request your patience..."):
                 try:
                     response = session_manager.get_ai_response(session, prompt)
                     
