@@ -1840,8 +1840,8 @@ class TavilyFallbackAgent:
         logger.info(f"🔍 SYNTHESIS: Processing SDK results type = {type(results)}")
     
         if not isinstance(results, dict):
-        logger.warning("🔍 SYNTHESIS: Results not a dictionary")
-        return "I couldn't process the search results properly."
+            logger.warning("🔍 SYNTHESIS: Results not a dictionary")
+            return "I couldn't process the search results properly."
     
         # Direct SDK provides a pre-synthesized answer
         answer = results.get('answer')
