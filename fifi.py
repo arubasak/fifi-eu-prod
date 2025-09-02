@@ -76,7 +76,7 @@ except ImportError:
     pass
 
 try:
-    from langchain_tavily import TavilySearch
+    from tavily import TavilyClient
     TAVILY_AVAILABLE = True
 except ImportError:
     pass
@@ -1819,7 +1819,8 @@ class PineconeAssistantTool:
 
 class TavilyFallbackAgent:
     def __init__(self, tavily_api_key: str):
-        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
+        from tavily import TavilyClient
+        self.tavily_client = TavilyClient(api_key=tavily_api_key)
 
     def add_utm_to_links(self, content: str) -> str:
         """Finds all Markdown links in a string and appends the UTM parameters."""
@@ -1834,103 +1835,64 @@ class TavilyFallbackAgent:
         return re.sub(r'(?<=\])\(([^)]+)\)', replacer, content)
 
     def synthesize_search_results(self, results, query: str) -> str:
-        """Synthesize search results into a coherent response similar to LLM output."""
-        
-        # Handle string response from Tavily
-        if isinstance(results, str):
-            return f"Based on my search: {results}"
-        
-        # Handle dictionary response from Tavily (most common format)
-        if isinstance(results, dict):
-            # Check if there's a pre-made answer
-            if results.get('answer'):
-                return f"Based on my search: {results['answer']}"
+    """Synthesize search results from direct Tavily SDK."""
+    
+    logger.info(f"🔍 SYNTHESIS: Processing SDK results type = {type(results)}")
+    
+    if not isinstance(results, dict):
+        logger.warning("🔍 SYNTHESIS: Results not a dictionary")
+        return "I couldn't process the search results properly."
+    
+    # Direct SDK provides a pre-synthesized answer
+    answer = results.get('answer')
+    if answer and len(answer.strip()) > 20:
+        logger.info(f"🔍 SYNTHESIS: Using Tavily's pre-synthesized answer ({len(answer)} chars)")
+        return answer  # Return the answer directly, no "Based on my search:" prefix
+    
+    # Fallback to manual synthesis if no answer provided
+    search_results = results.get('results', [])
+    logger.info(f"🔍 SYNTHESIS: Fallback synthesis with {len(search_results)} results")
+    
+    if not search_results:
+        return "I couldn't find any relevant information for your query."
+    
+    # Process individual results
+    relevant_info = []
+    sources = []
+    
+    for i, result in enumerate(search_results[:3], 1):
+        if isinstance(result, dict):
+            title = result.get('title', f'Result {i}')
+            content = result.get('content', '')
+            url = result.get('url', '')
             
-            # Extract the results array
-            search_results = results.get('results', [])
-            if not search_results:
-                return "I couldn't find any relevant information for your query."
-            
-            # Process the results
-            relevant_info = []
-            sources = []
-            
-            for i, result in enumerate(search_results[:3], 1):  # Use top 3 results
-                if isinstance(result, dict):
-                    title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
-                             result.get('description') or 
-                             result.get('summary', ''))
-                    url = result.get('url', '')
-                    
-                    if content:
-                        # Clean up content
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                        relevant_info.append(content)
-                        
-                        if url and title:
-                            sources.append(f"[{title}]({url})")
-            
-            if not relevant_info:
-                return "I found search results but couldn't extract readable content. Please try rephrasing your query."
-            
-            # Build synthesized response
-            response_parts = []
-            
-            if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info[0]}")
-            else:
-                response_parts.append("Based on my search, here's what I found:")
-                for i, info in enumerate(relevant_info, 1):
-                    response_parts.append(f"\n\n**{i}.** {info}")
-            
-            # Add sources
-            if sources:
-                response_parts.append(f"\n\n**Sources:**")
-                for i, source in enumerate(sources, 1):
-                    response_parts.append(f"\n{i}. {source}")
-            
-            return "".join(response_parts)
-        
-        # Handle direct list (fallback)
-        if isinstance(results, list):
-            relevant_info = []
-            sources = []
-            
-            for i, result in enumerate(results[:3], 1):
-                if isinstance(result, dict):
-                    title = result.get('title', f'Result {i}')
-                    content = (result.get('content') or 
-                             result.get('snippet') or 
-                             result.get('description', ''))
-                    url = result.get('url', '')
-                    
-                    if content:
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                        relevant_info.append(content)
-                        if url:
-                            sources.append(f"[{title}]({url})")
-            
-            if not relevant_info:
-                return "I couldn't find relevant information for your query."
-            
-            response_parts = []
-            if len(relevant_info) == 1:
-                response_parts.append(f"Based on my search: {relevant_info[0]}")
-            else:
-                response_parts.append("Based on my search:")
-                for info in relevant_info:
-                    response_parts.append(f"\n{info}")
-            
-            if sources:
-                response_parts.append(f"\n\n**Sources:**")
-                for i, source in enumerate(sources, 1):
-                    response_parts.append(f"{i}. {source}")
-            
-            return "".join(response_parts)
+            if content:
+                if len(content) > 400:
+                    content = content[:400] + "..."
+                relevant_info.append(content)
+                
+                if url and title:
+                    sources.append(f"[{title}]({url})")
+    
+    if not relevant_info:
+        return "I found search results but couldn't extract readable content."
+    
+    # Build synthesized response
+    response_parts = []
+    if len(relevant_info) == 1:
+        response_parts.append(f"Based on my search: {relevant_info[0]}")
+    else:
+        response_parts.append("Based on my search:")
+        for i, info in enumerate(relevant_info, 1):
+            response_parts.append(f"\n\n**{i}.** {info}")
+    
+    # Add sources
+    if sources:
+        response_parts.append(f"\n\n**Sources:**")
+        for i, source in enumerate(sources, 1):
+            response_parts.append(f"\n{i}. {source}")
+    
+    return "".join(response_parts)
         
         # Fallback for unknown formats
         return "I couldn't find any relevant information for your query."
@@ -1991,11 +1953,25 @@ class TavilyFallbackAgent:
                 logger.info(f"🔍 Tavily domain-restricted search: {strategy['include_domains'][0]}")
             elif strategy["exclude_domains"]:
                 # Worldwide with exclusions
-                exclusions = " ".join([f"-site:{domain}" for domain in strategy["exclude_domains"]])
-                search_params["query"] = f"{message} {exclusions}"
+                search_params["query"] = message
                 logger.info(f"🌐 Tavily worldwide search excluding {len(strategy['exclude_domains'])} competitor domains")
             
-            search_results = self.tavily_tool.invoke(search_params)
+            # Build search parameters for direct SDK
+            sdk_params = {
+                "query": search_params["query"],
+                "max_results": 5,
+                "include_answer": True,  # This is the key parameter!
+                "search_depth": "basic"
+            }
+
+            # Add domain restrictions if using include/exclude strategy
+            if strategy.get("include_domains"):
+                sdk_params["include_domains"] = strategy["include_domains"]
+            elif strategy.get("exclude_domains"):
+                sdk_params["exclude_domains"] = strategy["exclude_domains"]
+
+            logger.info(f"🔍 Direct Tavily SDK call with params: {list(sdk_params.keys())}")
+            search_results = self.tavily_client.search(**sdk_params)
             synthesized_content = self.synthesize_search_results(search_results, message)
             final_content = self.add_utm_to_links(synthesized_content)
             
