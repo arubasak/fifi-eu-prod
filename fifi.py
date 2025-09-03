@@ -1976,15 +1976,29 @@ OUTPUT: Only the optimized search query, nothing else."""
 
     def synthesize_search_results(self, results, query: str) -> str:
         """Simple synthesis: combine Tavily answer + sources."""
+    
+        # Handle dict response from TavilySearch tool
+        if isinstance(results, dict):
+            # Extract the actual results array from the dict response
+            if 'results' in results:
+                results = results['results']
+            elif 'answer' in results:
+                # Sometimes Tavily returns direct answer format
+                return f"Based on web search for '{query}':\n\n{results['answer']}"
+            else:
+                logger.warning(f"Unexpected dict format from Tavily: {results.keys()}")
+                return f"I found some information but couldn't format it properly. Please try rephrasing your question."
+    
         if not isinstance(results, list):
-            logger.warning(f"Tavily returned non-list results: {type(results)}")
+            logger.warning(f"Tavily returned unexpected results type: {type(results)}")
             return "I couldn't process the search results properly."
         
         if not results:
             return f"I couldn't find any relevant information online for: '{query}'"
 
+        # Rest of existing code stays the same...
         response_parts = [f"Here is a summary of web search results for '{query}':\n"]
-        for res in results[:3]: # Summarize top 3
+        for res in results[:3]:
             if isinstance(res, dict) and 'content' in res:
                 response_parts.append(f"- {res['content']}")
 
@@ -1992,7 +2006,7 @@ OUTPUT: Only the optimized search query, nothing else."""
         for i, res in enumerate(results, 1):
             if isinstance(res, dict) and 'url' in res and 'title' in res:
                 response_parts.append(f"\n{i}. [{res['title']}]({res['url']})")
-        
+    
         return "\n".join(response_parts)
 
     def determine_search_strategy(self, question: str, pinecone_error_type: str = None) -> Dict[str, Any]:
