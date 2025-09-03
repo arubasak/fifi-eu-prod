@@ -1828,79 +1828,166 @@ class PineconeAssistantTool:
             logger.error(f"Pinecone Assistant error: {str(e)}")
             return None
 
-# CHANGE 4: Enhanced TavilyFallbackAgent with Query Reformulation
+# CHANGE: LLM-Powered Query Reformulation (Replaces old TavilyFallbackAgent entirely)
 class TavilyFallbackAgent:
-    def __init__(self, tavily_api_key: str):
-        if not TAVILY_AVAILABLE:
-            raise ImportError("Tavily client not available.")
-        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
-        # ADD: OpenAI client for query reformulation
-        self.openai_client = openai.OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
-
-    def reformulate_query_with_context(self, current_question: str, chat_history: List[BaseMessage]) -> str:
-        """Reformulates follow-up questions into standalone search queries using GPT-4o-mini."""
+    def __init__(self, tavily_api_key: str, openai_api_key: str = None):
+        from tavily import TavilyClient
+        self.tavily_client = TavilyClient(api_key=tavily_api_key)
+        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key) # Keep both for now to avoid breaking existing calls
         
-        if not self.openai_client or not chat_history or len(chat_history) <= 1:
-            return current_question  # No reformulation needed
+        # NEW: Store OpenAI API key for query reformulation
+        self.openai_api_key = openai_api_key
+        self.openai_client = None
         
-        # Build conversation context (last 6 messages)
-        recent_context = []
-        for msg in chat_history[-6:]:
-            role = "User" if isinstance(msg, HumanMessage) else "Assistant"
-            content = msg.content[:300]  # Limit to 300 chars per message
-            recent_context.append(f"{role}: {content}")
-        
-        context_text = "\n".join(recent_context)
-        
-        reformulation_prompt = f"""You are a search query reformulator for food & beverage industry queries.
+        if openai_api_key:
+            try:
+                import openai
+                self.openai_client = openai.OpenAI(api_key=openai_api_key)
+                logger.info("✅ OpenAI client initialized for query reformulation")
+            except Exception as e:
+                logger.error(f"Failed to initialize OpenAI client for reformulation: {e}")
+                self.openai_client = None
 
-**CONVERSATION CONTEXT:**
-{context_text}
-
-**CURRENT FOLLOW-UP QUESTION:** "{current_question}"
-
-**TASK:** Convert this follow-up question into a complete, standalone search query that includes all necessary context from the conversation.
-
-**EXAMPLES:**
-- If conversation was about "vanilla extract suppliers" and follow-up is "What about pricing?"
-  → Reformulated: "vanilla extract suppliers pricing bulk wholesale costs"
-
-- If conversation was about "emulsifiers for ice cream" and follow-up is "What are the specifications?"  
-  → Reformulated: "emulsifiers for ice cream technical specifications properties requirements"
-
-**RULES:**
-1. Include the main topic from conversation context
-2. Make the query specific and searchable
-3. Keep it concise (under 100 characters)
-4. Focus on food industry terminology
-5. If the current question is already standalone, return it unchanged
-
-**REFORMULATED QUERY:**"""
-
+    def reformulate_query_for_search(self, current_question: str, conversation_history: List[BaseMessage]) -> str:
+        """LLM-powered query reformulation for better search results."""
         try:
+            # For very complete, specific queries, minimal reformulation needed
+            if len(current_question.split()) > 10 and not any(indicator in current_question.lower() 
+                for indicator in ["what about", "how about", "any", "tell me", "more about"]):
+                logger.debug(f"Query is detailed enough, using as-is: {current_question}")
+                return current_question
+            
+            # If no OpenAI client available, fallback to code-based
+            if not self.openai_client:
+                logger.warning("OpenAI client not available, using code-based reformulation fallback")
+                return self._fallback_reformulation(current_question, conversation_history)
+            
+            # Build conversation context efficiently
+            context_parts = []
+            if conversation_history:
+                # Get last 3 exchanges (6 messages max) for context efficiency
+                recent_messages = conversation_history[-6:] if len(conversation_history) > 6 else conversation_history
+                for msg in recent_messages:
+                    if hasattr(msg, 'content') and msg.content:
+                        # Truncate long messages to save tokens
+                        content = msg.content[:120] + "..." if len(msg.content) > 120 else msg.content
+                        role = "User" if isinstance(msg, HumanMessage) else "Assistant"
+                        context_parts.append(f"{role}: {content}")
+            
+            conversation_context = "\n".join(context_parts) if context_parts else "No prior conversation"
+            
+            # Optimized LLM prompt for query reformulation
+            reformulation_prompt = f"""Transform this question into an optimized web search query for food ingredient information.
+
+CONVERSATION CONTEXT:
+{conversation_context}
+
+CURRENT QUESTION: "{current_question}"
+
+RULES:
+1. If follow-up question, incorporate context from conversation
+2. Make vague questions specific using context
+3. Keep query concise but searchable (3-8 words ideal)
+4. Always include "food ingredients" or related terms for industry focus
+5. For pricing questions: add "market pricing" not specific prices
+6. For supplier questions: include "suppliers" or "sourcing"
+7. For availability: include "availability" or "stock"
+
+EXAMPLES:
+- After vanilla extract discussion, "What about pricing?" → "vanilla extract market pricing food ingredients"
+- Following citric acid talk, "Any suppliers?" → "citric acid suppliers food ingredients sourcing"
+- Standalone "new suppliers 2025" → "emerging food ingredient suppliers 2025"
+- "Tell me more" after stevia discussion → "stevia properties applications food ingredients"
+
+OUTPUT: Only the optimized search query, nothing else."""
+
+            # Make LLM call with token limits
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You reformulate follow-up questions into standalone search queries. Respond with only the reformulated query, no explanation."},
+                    {"role": "system", "content": "You are a search query optimizer. Respond only with the optimized search query."},
                     {"role": "user", "content": reformulation_prompt}
                 ],
-                max_tokens=50,
-                temperature=0.1
+                max_tokens=30,  # Keep very low for cost efficiency
+                temperature=0.1  # Low temperature for consistent results
             )
             
             reformulated = response.choices[0].message.content.strip()
             
-            # Validation: ensure reformulated query is reasonable
-            if len(reformulated) > 200 or len(reformulated) < 3:
-                logger.warning(f"Query reformulation produced unreasonable result: '{reformulated}', using original")
-                return current_question
+            # Validation: Ensure reformulated query is reasonable
+            if not reformulated or len(reformulated) < 3:
+                logger.warning(f"LLM returned invalid reformulation: '{reformulated}', using fallback")
+                return self._fallback_reformulation(current_question, conversation_history)
             
-            logger.info(f"Query reformulated: '{current_question}' → '{reformulated}'")
+            # Ensure query isn't too long (waste of tokens/poor search results)
+            if len(reformulated.split()) > 15 or len(reformulated) > 120:
+                logger.warning(f"LLM reformulation too long: '{reformulated}', using fallback")
+                return self._fallback_reformulation(current_question, conversation_history)
+            
+            # Success case
+            logger.info(f"✅ LLM reformulated: '{current_question}' → '{reformulated}'")
             return reformulated
             
         except Exception as e:
-            logger.error(f"Query reformulation failed: {e}")
+            logger.error(f"LLM reformulation failed: {e}, using code fallback")
+            return self._fallback_reformulation(current_question, conversation_history)
+
+    def _fallback_reformulation(self, current_question: str, conversation_history: List[BaseMessage]) -> str:
+        """Fallback to code-based reformulation if LLM fails."""
+        logger.debug("Using code-based reformulation fallback")
+        
+        # Simple follow-up detection
+        follow_up_indicators = [
+            "what about", "how about", "what are", "any", "tell me about",
+            "pricing", "cost", "price", "suppliers", "where", "who", "availability"
+        ]
+        
+        current_question_lower = current_question.lower()
+        is_likely_followup = (
+            len(current_question.split()) <= 4 or
+            any(indicator in current_question_lower for indicator in follow_up_indicators)
+        )
+        
+        if not is_likely_followup or not conversation_history:
+            # Standalone query - add food ingredients context if missing
+            if "food" not in current_question_lower and "ingredient" not in current_question_lower:
+                return f"{current_question} food ingredients"
             return current_question
+        
+        # Extract context keywords from recent messages
+        context_keywords = []
+        if conversation_history:
+            for msg in conversation_history[-3:]:
+                if hasattr(msg, 'content'):
+                    # Simple keyword extraction
+                    words = re.findall(r'\b[A-Z][a-z]+\b', msg.content)
+                    context_keywords.extend(words[:2])  # Limit to avoid over-expansion
+        
+        # Apply context-based reformulation
+        if any(word in current_question_lower for word in ["pricing", "cost", "price"]):
+            if context_keywords:
+                return f"{' '.join(context_keywords[:2])} pricing costs food ingredients"
+            else:
+                return f"{current_question} food ingredients pricing market"
+        
+        elif any(word in current_question_lower for word in ["suppliers", "supplier", "source", "where"]):
+            if context_keywords:
+                return f"{' '.join(context_keywords[:2])} suppliers food ingredients sourcing"
+            else:
+                return f"{current_question} food ingredients suppliers"
+        
+        elif any(word in current_question_lower for word in ["availability", "stock", "available"]):
+            if context_keywords:
+                return f"{' '.join(context_keywords[:2])} availability food ingredients market"
+            else:
+                return f"{current_question} food ingredients availability"
+        
+        else:
+            # General follow-up
+            if context_keywords:
+                return f"{current_question} {' '.join(context_keywords[:2])} food ingredients"
+            else:
+                return f"{current_question} food ingredients"
 
     def add_utm_to_links(self, content: str) -> str:
         """Finds all Markdown links in a string and appends the UTM parameters."""
@@ -1955,7 +2042,8 @@ class TavilyFallbackAgent:
     def query(self, message: str, chat_history: List[BaseMessage], pinecone_error_type: str = None) -> Dict[str, Any]:
         try:
             # STEP 1: Reformulate query with conversation context
-            standalone_query = self.reformulate_query_with_context(message, chat_history)
+            # Use the new LLM-powered reformulation
+            standalone_query = self.reformulate_query_for_search(message, chat_history)
             
             # STEP 2: Determine search strategy
             strategy = self.determine_search_strategy(standalone_query, pinecone_error_type)
@@ -2027,11 +2115,14 @@ class EnhancedAI:
                 self.pinecone_tool = None
                 error_handler.log_error(error_handler.handle_api_error("Pinecone", "Initialize", e))
         
-        # Initialize Tavily agent
+        # Initialize Tavily agent WITH OpenAI key for reformulation (UPDATED)
         if TAVILY_AVAILABLE and self.config.TAVILY_API_KEY:
             try:
-                self.tavily_agent = TavilyFallbackAgent(self.config.TAVILY_API_KEY)
-                logger.info("✅ Tavily Web Search initialized successfully")
+                self.tavily_agent = TavilyFallbackAgent(
+                    self.config.TAVILY_API_KEY, 
+                    self.config.OPENAI_API_KEY  # NEW: Pass OpenAI key
+                )
+                logger.info("✅ Tavily Web Search initialized successfully with LLM reformulation")
                 error_handler.mark_component_healthy("Tavily")
             except Exception as e:
                 logger.error(f"Tavily agent initialization failed: {e}")
@@ -2397,7 +2488,7 @@ class SessionManager:
     
     def _clear_error_notifications(self):
         """Clear all error notification states when a successful question is processed."""
-        error_keys = ['rate_limit_hit', 'moderation_flagged', 'context_flagged']
+        error_keys = ['rate_limit_hit', 'moderation_flagged', 'context_flagged', 'pricing_stock_notice'] # Added 'pricing_stock_notice'
         cleared_errors = []
     
         for key in error_keys:
@@ -3102,6 +3193,269 @@ class SessionManager:
             st.error("An unexpected error occurred during authentication. Please try again later.")
             return None
 
+    # CHANGE 10: Pricing/Stock Question Handler
+    def detect_pricing_stock_question(self, prompt: str) -> bool:
+        """Detect if question is about pricing or stock availability."""
+        prompt_lower = prompt.lower()
+        
+        pricing_indicators = [
+            "price", "pricing", "cost", "costs", "expensive", "cheap", "rate", "rates",
+            "quote", "quotation", "budget", "fee", "charge", "tariff"
+        ]
+        
+        stock_indicators = [
+            "stock", "stocks", "availability", "available", "in stock", "out of stock",
+            "inventory", "supply", "supplies", "quantity", "quantities", "lead time",
+            "delivery time", "MOQ", "minimum order"
+        ]
+        
+        has_pricing = any(indicator in prompt_lower for indicator in pricing_indicators)
+        has_stock = any(indicator in prompt_lower for indicator in stock_indicators)
+        
+        return has_pricing or has_stock
+
+    # CHANGE 11: Solution 1 - Meta-Question Detection (Token-Free)
+    def detect_meta_conversation_query(self, prompt: str) -> Dict[str, Any]:
+        """Detect if user is asking about their conversation history."""
+        
+        prompt_lower = prompt.lower().strip()
+        
+        # Summary patterns
+        summary_patterns = [
+            "summarize", "summary of", "give me a summary", "can you summarize",
+            "overview of", "recap of", "sum up"
+        ]
+        
+        # Question listing patterns  
+        question_patterns = [
+            "what did i ask", "what all did i ask", "what have i asked",
+            "all my questions", "my previous questions", "my questions",
+            "list my questions", "show my questions", "questions i asked"
+        ]
+        
+        # Count/stats patterns
+        count_patterns = [
+            "how many questions", "count my questions", "number of questions",
+            "how many times", "total questions"
+        ]
+        
+        # Topic analysis patterns
+        topic_patterns = [
+            "what topics", "what have we discussed", "topics we covered",
+            "what did we talk about", "conversation topics", "discussion topics"
+        ]
+        
+        # General conversation patterns
+        conversation_patterns = [
+            "conversation history", "chat history", "our conversation", 
+            "this conversation", "our chat", "this chat", "my session"
+        ]
+        
+        # Check each pattern type
+        if any(pattern in prompt_lower for pattern in summary_patterns):
+            return {"is_meta": True, "type": "summarize", "scope": "all"}
+        elif any(pattern in prompt_lower for pattern in question_patterns):
+            return {"is_meta": True, "type": "list", "scope": "questions"}  
+        elif any(pattern in prompt_lower for pattern in count_patterns):
+            return {"is_meta": True, "type": "count", "scope": "questions"}
+        elif any(pattern in prompt_lower for pattern in topic_patterns):
+            return {"is_meta": True, "type": "analyze", "scope": "topics"}
+        elif any(pattern in prompt_lower for pattern in conversation_patterns):
+            return {"is_meta": True, "type": "general", "scope": "conversation"}
+        
+        return {"is_meta": False}
+
+    def handle_meta_conversation_query(self, session: UserSession, query_type: str, scope: str) -> Dict[str, Any]:
+        """Handle meta-conversation queries with code-based analysis (zero token cost)."""
+        
+        # Get all visible messages (respecting soft clear offset)
+        visible_messages = session.messages[session.display_message_offset:]
+        user_questions = [msg['content'] for msg in visible_messages if msg.get('role') == 'user']
+        # assistant_responses = [msg['content'] for msg in visible_messages if msg.get('role') == 'assistant'] # Not used here, removed
+        
+        if query_type == "count":
+            return {
+                "content": f"""📊 **Session Statistics:**
+
+• **Questions Asked**: {len(user_questions)}
+• **Total Messages**: {len(visible_messages)}
+• **Session Started**: {session.created_at.strftime('%B %d, %Y at %H:%M')}
+• **User Type**: {session.user_type.value.replace('_', ' ').title()}
+• **Daily Usage**: {session.daily_question_count} questions today""",
+                "success": True,
+                "source": "Session Analytics"
+            }
+        
+        elif query_type == "list":
+            if not user_questions:
+                return {
+                    "content": "You haven't asked any questions yet in this session.",
+                    "success": True,
+                    "source": "Session History"
+                }
+            
+            # Limit to last 20 questions to avoid very long responses
+            questions_to_show = user_questions[-20:] if len(user_questions) > 20 else user_questions
+            start_number = len(user_questions) - len(questions_to_show) + 1 if len(user_questions) > 20 else 1
+            
+            questions_list = []
+            for i, q in enumerate(questions_to_show):
+                # Truncate very long questions for readability
+                display_q = q[:100] + "..." if len(q) > 100 else q
+                questions_list.append(f"{start_number + i}. {display_q}")
+            
+            response_content = f"📋 **Your Questions in This Session:**\n\n" + "\n".join(questions_list)
+            
+            if len(user_questions) > 20:
+                response_content += f"\n\n*Showing last 20 questions out of {len(user_questions)} total.*"
+            
+            return {
+                "content": response_content,
+                "success": True,
+                "source": "Session History"
+            }
+        
+        elif query_type in ["summarize", "general"]:
+            return self._generate_conversation_summary(user_questions, session)
+        
+        elif query_type == "analyze":
+            return self._analyze_conversation_topics(user_questions, session)
+        
+        return {"content": "I couldn't process that conversation query.", "success": False}
+
+    def _generate_conversation_summary(self, user_questions: List[str], session: UserSession) -> Dict[str, Any]:
+        """Generate conversation summary using code-based analysis."""
+        
+        if not user_questions:
+            return {
+                "content": "No questions have been asked in this session yet.",
+                "success": True,
+                "source": "Session Summary"
+            }
+        
+        # Extract key topics using simple word analysis
+        topic_words = set()
+        question_categories = {
+            'pricing': 0, 'suppliers': 0, 'technical': 0, 'regulatory': 0, 'applications': 0
+        }
+        
+        for question in user_questions:
+            q_lower = question.lower()
+            words = [w for w in q_lower.split() if len(w) > 4 and w not in ['what', 'where', 'when', 'which', 'about', 'would', 'could', 'should']]
+            topic_words.update(words[:3])  # Top 3 meaningful words per question
+            
+            # Categorize questions
+            if any(word in q_lower for word in ['price', 'pricing', 'cost', 'expensive']):
+                question_categories['pricing'] += 1
+            elif any(word in q_lower for word in ['supplier', 'source', 'vendor', 'manufacturer']):
+                question_categories['suppliers'] += 1
+            elif any(word in q_lower for word in ['regulation', 'compliance', 'standard', 'certification']):
+                question_categories['regulatory'] += 1
+            elif any(word in q_lower for word in ['application', 'use', 'formulation', 'recipe']):
+                question_categories['applications'] += 1
+            else:
+                question_categories['technical'] += 1
+        
+        # Get top topics
+        key_topics = list(topic_words)[:8]
+        active_categories = {k: v for k, v in question_categories.items() if v > 0}
+        
+        # Build summary
+        summary_parts = [
+            f"📈 **Conversation Summary:**\n",
+            f"• **Total Questions**: {len(user_questions)}",
+            f"• **Session Duration**: Started {session.created_at.strftime('%B %d at %H:%M')}",
+            f"• **Key Topics Discussed**: {', '.join(key_topics) if key_topics else 'General inquiries'}"
+        ]
+        
+        if active_categories:
+            summary_parts.append("\n**Question Breakdown:**")
+            for category, count in active_categories.items():
+                summary_parts.append(f"• **{category.title()}**: {count} question{'s' if count > 1 else ''}")
+        
+        summary_parts.append(f"\n• **User Status**: {session.user_type.value.replace('_', ' ').title()}")
+        
+        return {
+            "content": "\n".join(summary_parts),
+            "success": True,
+            "source": "Conversation Summary",
+            "analyzed_questions": len(user_questions)
+        }
+
+    def _analyze_conversation_topics(self, user_questions: List[str], session: UserSession) -> Dict[str, Any]:
+        """Analyze conversation topics using code-based extraction."""
+        
+        if not user_questions:
+            return {
+                "content": "No topics to analyze - no questions asked yet.",
+                "success": True,
+                "source": "Topic Analysis"
+            }
+        
+        # Topic extraction and categorization
+        ingredients_mentioned = set()
+        business_aspects = set()
+        technical_terms = set()
+        
+        # Common ingredient patterns
+        ingredient_indicators = ['extract', 'powder', 'oil', 'acid', 'syrup', 'sweetener', 'flavor', 'color']
+        
+        for question in user_questions:
+            words = question.split()
+            for i, word in enumerate(words):
+                word_lower = word.lower().strip('.,!?')
+                
+                # Look for ingredients (capitalized words near ingredient indicators)
+                if any(indicator in question.lower() for indicator in ingredient_indicators):
+                    if word.istitle() and len(word) > 3:
+                        ingredients_mentioned.add(word)
+                
+                # Business terms
+                if word_lower in ['supplier', 'vendor', 'sourcing', 'pricing', 'cost', 'availability', 'stock']:
+                    business_aspects.add(word_lower)
+                
+                # Technical terms  
+                if word_lower in ['formulation', 'application', 'specification', 'grade', 'purity', 'concentration']:
+                    technical_terms.add(word_lower)
+        
+        # Build analysis
+        analysis_parts = [
+            f"🔍 **Topic Analysis:**\n",
+            f"• **Questions Analyzed**: {len(user_questions)}"
+        ]
+        
+        if ingredients_mentioned:
+            analysis_parts.append(f"• **Ingredients Discussed**: {', '.join(list(ingredients_mentioned)[:6])}")
+        
+        if business_aspects:
+            analysis_parts.append(f"• **Business Aspects**: {', '.join(list(business_aspects))}")
+        
+        if technical_terms:
+            analysis_parts.append(f"• **Technical Focus**: {', '.join(list(technical_terms))}")
+        
+        # Industry focus
+        focus_areas = []
+        combined_text = ' '.join(user_questions).lower()
+        
+        if any(term in combined_text for term in ['bakery', 'bread', 'cake', 'pastry']):
+            focus_areas.append('Bakery')
+        if any(term in combined_text for term in ['beverage', 'drink', 'juice', 'soda']):
+            focus_areas.append('Beverages')
+        if any(term in combined_text for term in ['dairy', 'milk', 'cheese', 'yogurt']):
+            focus_areas.append('Dairy')
+        if any(term in combined_text for term in ['confection', 'candy', 'chocolate', 'sweet']):
+            focus_areas.append('Confectionery')
+        
+        if focus_areas:
+            analysis_parts.append(f"• **Industry Focus**: {', '.join(focus_areas)}")
+        
+        return {
+            "content": "\n".join(analysis_parts),
+            "success": True,
+            "source": "Topic Analysis"
+        }
+
+
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
         """Gets AI response and manages session state."""
         try:
@@ -3201,8 +3555,59 @@ class SessionManager:
                     "context_confidence": confidence
                 }
 
-            # Rest of the existing function remains the same...
-                # Check question limits
+            # NEW: Check for pricing/stock questions
+            is_pricing_stock_query = self.detect_pricing_stock_question(prompt)
+            if is_pricing_stock_query:
+                # Store pricing notification info (similar to rate_limit_hit)
+                st.session_state.pricing_stock_notice = {
+                    'timestamp': datetime.now(),
+                    'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost', 'expensive', 'cheap']) else 'stock',
+                    'message': """**Important Notice About Pricing & Stock Information:**
+
+Pricing and stock availability are dynamic in nature and subject to market conditions, supplier availability, and other factors that can change at any point in time. The information provided is for general reference only and may not reflect current market conditions unless confirmed through a formal order process.
+
+**For Current Information:**
+• Visit the specific product page on our marketplace at **12taste.com** for real-time pricing and availability
+• Contact our sales team at **sales-eu@12taste.com** for precise, up-to-date pricing and stock information
+• Request formal quotes for confirmed pricing based on your specific requirements
+
+Please proceed with your question, keeping in mind that any pricing or stock information provided should be verified through official channels."""
+                }
+            
+            # NEW: Check if it's a meta-conversation query (Solution 1)
+            meta_detection = self.detect_meta_conversation_query(prompt)
+            if meta_detection["is_meta"]:
+                logger.info(f"Meta-conversation query detected: {meta_detection['type']}")
+                
+                # Record the question for usage tracking (even meta-questions count)
+                self.question_limits.record_question(session)
+                
+                # Add user message to session history
+                user_message = {'role': 'user', 'content': prompt}
+                session.messages.append(user_message)
+                
+                # Handle meta-query (zero tokens used)
+                meta_response = self.handle_meta_conversation_query(
+                    session, meta_detection["type"], meta_detection["scope"]
+                )
+                
+                # Add assistant response to history
+                assistant_message = {
+                    'role': 'assistant',
+                    'content': meta_response.get('content', 'Analysis complete.'),
+                    'source': meta_response.get('source', 'Conversation Analytics'),
+                    'is_meta_response': True
+                }
+                session.messages.append(assistant_message)
+                
+                # Update activity and save session
+                self._update_activity(session)
+                
+                return meta_response
+            
+            # Continue with regular processing for non-meta queries
+            
+            # Check question limits
             limit_check = self.question_limits.is_within_limits(session)
             # This check for 'allowed' is crucial and must be placed here before recording question
             if not limit_check['allowed']:
@@ -3229,7 +3634,7 @@ class SessionManager:
                     'source': 'Input Validation'
                 }
             
-            # Record question (only if allowed to ask)
+            # Record question (only if allowed to ask) - This is for non-meta questions now.
             self.question_limits.record_question(session)
             
             # Get AI response (now simple call to EnhancedAI's core function)
@@ -4525,6 +4930,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 indicators = []
                 if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
                 if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
+                if msg.get("is_meta_response"): indicators.append("📈 Session Analytics") # For meta-questions
                 if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                 
                 if msg.get("safety_override"):
@@ -4607,6 +5013,25 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         with col2:
             if st.button("✕", key="dismiss_context", help="Dismiss this message", use_container_width=True):
                 del st.session_state.context_flagged
+                st.rerun()
+
+    # NEW: Pricing/Stock notice with manual dismiss (add after context notification)
+    if 'pricing_stock_notice' in st.session_state:
+        notice_info = st.session_state.pricing_stock_notice
+        query_type = notice_info.get('query_type', 'pricing')
+        message = notice_info.get('message', '')
+        
+        col1, col2 = st.columns([5, 1])
+		with col1:
+            if query_type == 'pricing':
+                st.info("💰 **Pricing Information Notice**")
+            else:
+                st.info("📦 **Stock Availability Notice**") 
+            
+            st.markdown(message)
+        with col2:
+            if st.button("✕", key="dismiss_pricing_notice", help="Dismiss this message", use_container_width=True):
+                del st.session_state.pricing_stock_notice
                 st.rerun()
 
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
