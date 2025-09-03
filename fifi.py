@@ -1798,8 +1798,8 @@ class TavilyFallbackAgent:
     def __init__(self, tavily_api_key: str, openai_api_key: str = None):
         from tavily import TavilyClient
         self.tavily_client = TavilyClient(api_key=tavily_api_key)
-        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key) # Keep both for now to avoid breaking existing calls
-        
+        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key, include_answer=True) # Keep both for now to avoid breaking existing calls
+              
         # NEW: Store OpenAI API key for query reformulation
         self.openai_api_key = openai_api_key
         self.openai_client = None
@@ -2045,8 +2045,8 @@ OUTPUT: Only the optimized search query, nothing else."""
             search_params = {
                 "query": standalone_query,
                 "max_results": 5,
-                "search_depth": "advanced",
-                "include_answer": "basic"
+                "search_depth": "advanced"
+            
             }
             
             if strategy.get("exclude_domains"):
