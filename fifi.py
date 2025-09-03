@@ -2846,51 +2846,52 @@ class SessionManager:
                     
                         return session
                     else:
-                        logger.warning(f"Session {session_id[:8]} not found or inactive. Will redirect to welcome page.")
-                        if 'current_session_id' in st.session_state:
-	                        del st.session_state['current_session_id']
-                        st.session_state['session_expired'] = True
-                        st.session_state['page'] = None
-                        return None
+            		logger.warning(f"Session {session_id[:8]} not found or inactive.")
+            		if 'current_session_id' in st.session_state:
+                		del st.session_state['current_session_id']
 
-                # Check if we should create a new session or redirect to welcome page
-                current_page = st.session_state.get('page')
-                if current_page == "chat":
-                    # We're on chat page but no valid session - force welcome page
-                    logger.info(f"No valid session for chat page, forcing welcome page")
-                    st.session_state['page'] = None
-                    st.session_state['session_expired'] = True
-                    return None
-                logger.info(f"Creating new session (current page: {current_page})")
-                new_session = self._create_new_session()
-                # Immediately attempt fingerprint inheritance for the *newly created* session
-                # This is critical if a user starts a new session but has an existing fingerprint
-                self._attempt_fingerprint_inheritance(new_session) # <--- This call will now also correctly set visitor_type
-                st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
+        			# Handle session creation based on current page
+        			current_page = st.session_state.get('page')
         
-                self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
-                logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
-                return new_session
-            st.session_state.current_session_id = new_session.session_id
+        			if current_page == "chat":
+            			# We're on chat page but no valid session - force welcome page
+            			logger.info(f"No valid session for chat page, forcing welcome page")
+            			st.session_state['page'] = None
+            			st.session_state['session_expired'] = True
+            			return None
+        
+        			# Create new session for welcome page or initial load
+        			logger.info(f"Creating new session (current page: {current_page})")
+    				new_session = self._create_new_session()
+       				st.session_state.current_session_id = new_session.session_id
+        
+        			# Immediately attempt fingerprint inheritance for the newly created session
+        			self._attempt_fingerprint_inheritance(new_session)
+        			st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
+        
+        			self.db.save_session(new_session)
+        			logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
+        			return new_session
+        
+    			except Exception as e:
+        			logger.error(f"Failed to get/create session: {e}", exc_info=True)
+        
+        			# Only create fallback session if not on chat page
+        			current_page = st.session_state.get('page')
+        			if current_page == "chat":
+            			logger.error("Critical error on chat page - forcing welcome page")
+            			st.session_state['page'] = None
+            			st.session_state['session_expired'] = True
+            			return None
             
-            # Immediately attempt fingerprint inheritance for the *newly created* session
-            # This is critical if a user starts a new session but has an existing fingerprint
-            self._attempt_fingerprint_inheritance(new_session) # <--- This call will now also correctly set visitor_type
-            st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
-            
-            self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
-            logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
-            return new_session
-            
-        except Exception as e:
-            logger.error(f"Failed to get/create session: {e}", exc_info=True)
-            fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None)
-            fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
-            fallback_session.fingerprint_method = "emergency_fallback"
-            st.session_state.current_session_id = fallback_session.session_id
-            st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
-            logger.error(f"Emergency fallback session created {fallback_session.session_id[:8]}")
-            return fallback_session
+        			# Create emergency fallback session for welcome page
+        			fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None)
+        			fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
+        			fallback_session.fingerprint_method = "emergency_fallback"
+        			st.session_state.current_session_id = fallback_session.session_id
+        			st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
+        			logger.error(f"Emergency fallback session created {fallback_session.session_id[:8]}")
+        			return fallback_session
 
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]) -> bool:
         """Applies fingerprinting data from custom component to the session with better validation."""
