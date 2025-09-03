@@ -2162,6 +2162,13 @@ class EnhancedAI:
         Determines if a fallback to web search is needed based on strict business rules.
         """
         content = pinecone_response.get("content", "").lower()
+        original_lower = original_question.lower()
+    
+        # NEW: Check original question for recency indicators
+        recency_indicators = ["latest", "newest", "recent", "current", "2024", "2025"]
+        if any(indicator in original_lower for indicator in recency_indicators):
+            logger.warning("🔄 Fallback TRIGGERED: User requested latest/current information.")
+            return True
 
         # RULE 1: NEVER fallback if Pinecone provides the business redirect for pricing/stock.
         # This is the desired final answer for these questions.
@@ -2198,7 +2205,15 @@ class EnhancedAI:
             if not pinecone_response.get("has_citations", False):
                 logger.warning("🚨 SAFETY OVERRIDE: Detected fake citations. Switching to web search.")
                 return True
-
+        
+        # RULE 4: Force web search for regulatory topics without citations
+        regulatory_indicators = ["regulation", "vorschriften", "directive", "compliance", "legal"]
+        is_regulatory = any(indicator in original_lower for indicator in regulatory_indicators)
+    
+        if is_regulatory and not pinecone_response.get("has_citations", False):
+            logger.warning("🔄 Fallback TRIGGERED: Regulatory topic without citations.")
+        return True
+        
         # DEFAULT: Do not fallback. Assume Pinecone's answer is correct if it's not a "not found" response
         # and doesn't violate business rules.
         logger.info("✅ Fallback SKIPPED: Pinecone provided a valid response from its knowledge base.")
