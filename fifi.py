@@ -3894,11 +3894,11 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         # Also update re-verification flags
         session.reverification_pending = fresh_session_from_db.reverification_pending
         session.pending_user_type = fresh_session_from_db.pending_user_type
-        session.pending_email = fresh_session_from_db.pending_email # Corrected variable name from fresh_session_from_rb
+        session.pending_email = fresh_session_from_db.pending_email
         session.pending_full_name = fresh_session_from_db.pending_full_name
         session.pending_zoho_contact_id = fresh_session_from_db.pending_zoho_contact_id
         session.pending_wp_token = fresh_session_from_db.pending_wp_token
-        session.declined_recognized_email_at = fresh_session_from_db.declined_recognized_email_at # NEW
+        session.declined_recognized_email_at = fresh_session_from_db.declined_recognized_email_at
     else:
         logger.warning(f"Session {session.session_id[:8]} from st.session_state not found in database. Forcing reset.")
         session.active = False
@@ -3906,83 +3906,112 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
     # If the session is already inactive, force a reload
     if not session.active:
         logger.info(f"Session {session.session_id[:8]} is inactive. Triggering reload to welcome page.")
+        
+        # FIXED: Show message with wait period
         st.error("⏰ **Session Expired**")
         st.info("Your previous session has ended. Please start a new session.")
         
-        # Clear Streamlit session state fully
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-
-        # NEW: Force welcome page state before any reload attempts
-        st.session_state['page'] = None
-        st.session_state['session_expired'] = True
-
-        if JS_EVAL_AVAILABLE:
-            try:
-                streamlit_js_eval(js_expressions="parent.window.location.reload()")
-                st.stop()
-            except Exception as e:
-                logger.error(f"Browser reload failed during inactive session handling: {e}")
+        # Add countdown timer
+        with st.spinner("Redirecting to welcome page in 3 seconds..."):
+            time.sleep(3)  # Give user time to read the message
         
-        st.info("🏠 Redirecting to home page...")
-        st.rerun()
-        st.stop()
-        return True
+        # FIXED: Safer state clearing - preserve essential keys
+        essential_keys = ['initialized', 'session_manager', 'db_manager', 'pdf_exporter']
+        keys_to_clear = [key for key in st.session_state.keys() if key not in essential_keys]
+        
+        for key in keys_to_clear:
+            try:
+                del st.session_state[key]
+            except KeyError:
+                pass  # Key might have been deleted already
+        
+        # Set welcome page state AFTER clearing
+        st.session_state['page'] = 'welcome'
+        st.session_state['session_expired'] = True
+        
+        # FIXED: Single, simple reload method
+        try:
+            if JS_EVAL_AVAILABLE:
+                logger.info("🔄 Triggering browser reload via JS eval")
+                streamlit_js_eval(js_expressions="parent.window.location.reload()")
+            else:
+                logger.info("🔄 Triggering page refresh via rerun")
+                st.rerun()
+        except Exception as e:
+            logger.error(f"Reload failed: {e}, using fallback rerun")
+            st.rerun()
+        
+        return True  # Don't call st.stop() multiple times
 
     # Check if last_activity is None (timer hasn't started)
     if session.last_activity is None:
         logger.debug(f"Session {session.session_id[:8]}: last_activity is None, timer has not started.")
         return False
         
-    # Update activity from JS component
+    # Update activity from JS component with better error handling
     if activity_result:
         try:
             js_last_activity_timestamp = activity_result.get('last_activity')
-            if js_last_activity_timestamp:
+            if js_last_activity_timestamp and isinstance(js_last_activity_timestamp, (int, float)):
                 new_activity_dt = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
                 
-                if new_activity_dt > session.last_activity:
+                # Only update if the new timestamp is more recent and reasonable
+                if new_activity_dt > session.last_activity and new_activity_dt <= datetime.now():
                     logger.debug(f"Updating last_activity for {session.session_id[:8]} from JS: {session.last_activity.strftime('%H:%M:%S')} -> {new_activity_dt.strftime('%H:%M:%S')}")
                     session.last_activity = new_activity_dt
-                    session_manager._save_session_with_retry(session) 
+                    try:
+                        session_manager._save_session_with_retry(session)
+                    except Exception as save_e:
+                        logger.error(f"Failed to save updated activity: {save_e}")
         except Exception as e:
             logger.error(f"Error processing client JS activity timestamp for session {session.session_id[:8]}: {e}")
 
     # Calculate time since last activity
-    time_since_activity = datetime.now() - session.last_activity
-    minutes_inactive = time_since_activity.total_seconds() / 60
+    try:
+        time_since_activity = datetime.now() - session.last_activity
+        minutes_inactive = time_since_activity.total_seconds() / 60
+    except Exception as e:
+        logger.error(f"Error calculating timeout for {session.session_id[:8]}: {e}")
+        return False
     
     logger.info(f"TIMEOUT CHECK: Session {session.session_id[:8]} | Inactive: {minutes_inactive:.1f}m | last_activity: {session.last_activity.strftime('%H:%M:%S')}")
     
     # Check if timeout duration has passed
-    if minutes_inactive >= session_manager.get_session_timeout_minutes():
+    timeout_minutes = session_manager.get_session_timeout_minutes()
+    if minutes_inactive >= timeout_minutes:
         logger.info(f"⏰ TIMEOUT DETECTED: {session.session_id[:8]} inactive for {minutes_inactive:.1f} minutes")
         
         # Perform CRM save if eligible
         if session_manager._is_crm_save_eligible(session, "timeout_auto_reload"):
             logger.info(f"💾 Performing emergency save before auto-reload for {session.session_id[:8]}")
-            try:
-                emergency_data = {
-                    "session_id": session.session_id,
-                    "reason": "timeout_auto_reload",
-                    "timestamp": int(time.time() * 1000)
-                }
-                fastapi_url = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save'
-                response = requests.post(fastapi_url, json=emergency_data, timeout=5)
-                if response.status_code == 200:
-                    logger.info(f"✅ Emergency save sent to FastAPI successfully")
-                else:
-                    logger.warning(f"⚠️ FastAPI returned status {response.status_code}, using local fallback")
-                    session_manager.zoho.save_chat_transcript_sync(session, "timeout_auto_reload_fallback")
-                    session.timeout_saved_to_crm = True
-            except Exception as e:
-                logger.error(f"❌ Failed to send emergency save to FastAPI: {e}")
+            
+            # Show saving message
+            with st.spinner("Saving your conversation before timeout..."):
                 try:
-                    logger.info(f"🔄 Using local CRM save as fallback for timeout")
-                    session_manager.zoho.save_chat_transcript_sync(session, "timeout_auto_reload_fallback")
-                    session.timeout_saved_to_crm = True
-                except Exception as save_e:
-                    logger.error(f"❌ Local CRM save also failed: {save_e}")
+                    emergency_data = {
+                        "session_id": session.session_id,
+                        "reason": "timeout_auto_reload",
+                        "timestamp": int(time.time() * 1000)
+                    }
+                    fastapi_url = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save'
+                    response = requests.post(fastapi_url, json=emergency_data, timeout=5)
+                    if response.status_code == 200:
+                        logger.info(f"✅ Emergency save sent to FastAPI successfully")
+                        time.sleep(1)  # Brief pause to show save completion
+                    else:
+                        logger.warning(f"⚠️ FastAPI returned status {response.status_code}, using local fallback")
+                        session_manager.zoho.save_chat_transcript_sync(session, "timeout_auto_reload_fallback")
+                        session.timeout_saved_to_crm = True
+                        time.sleep(1)  # Brief pause for local save
+                except Exception as e:
+                    logger.error(f"❌ Failed to send emergency save to FastAPI: {e}")
+                    try:
+                        logger.info(f"🔄 Using local CRM save as fallback for timeout")
+                        session_manager.zoho.save_chat_transcript_sync(session, "timeout_auto_reload_fallback")
+                        session.timeout_saved_to_crm = True
+                        time.sleep(1)  # Brief pause for fallback save
+                    except Exception as save_e:
+                        logger.error(f"❌ Local CRM save also failed: {save_e}")
 
         # Mark session as inactive
         session.active = False
@@ -3992,33 +4021,47 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         except Exception as e:
             logger.error(f"Failed to save session during timeout: {e}")
         
-        # Clear Streamlit session state fully
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+        # Show timeout message with countdown
+        st.error("⏰ **Session Timeout**")
+        st.info(f"Your session has expired due to {timeout_minutes} minutes of inactivity.")
         
-        # NEW: Force welcome page state and timeout flag
-        st.session_state['page'] = None
+        # FIXED: Countdown with progress bar
+        progress_bar = st.progress(0, text="Redirecting in 5 seconds...")
+        for i in range(5, 0, -1):
+            progress_bar.progress((5-i+1)/5, text=f"Redirecting in {i} seconds...")
+            time.sleep(1)
+        progress_bar.progress(1.0, text="Redirecting now...")
+        
+        # FIXED: Safer state clearing - preserve essential keys
+        essential_keys = ['initialized', 'session_manager', 'db_manager', 'pdf_exporter']
+        keys_to_clear = [key for key in st.session_state.keys() if key not in essential_keys]
+        
+        for key in keys_to_clear:
+            try:
+                del st.session_state[key]
+            except KeyError:
+                pass
+        
+        # Set welcome page state AFTER clearing
+        st.session_state['page'] = 'welcome'
         st.session_state['session_expired'] = True
         
-        # Show timeout message
-        st.error("⏰ **Session Timeout**")
-        st.info("Your session has expired due to 5 minutes of inactivity.")
-        
-        # TRIGGER BROWSER RELOAD using streamlit_js_eval
-        if JS_EVAL_AVAILABLE:
-            try:
+        # FIXED: Single reload method
+        try:
+            if JS_EVAL_AVAILABLE:
                 logger.info(f"🔄 Triggering browser reload for timeout")
                 streamlit_js_eval(js_expressions="parent.window.location.reload()")
-                st.stop()
-            except Exception as e:
-                logger.error(f"Browser reload failed during inactive session handling: {e}")
+            else:
+                logger.info("🔄 Using rerun for timeout redirect")
+                st.rerun()
+        except Exception as e:
+            logger.error(f"Timeout reload failed: {e}, using fallback")
+            st.rerun()
         
-        st.info("🏠 Redirecting to home page...")
-        st.rerun()
-        st.stop()
-        return True
+        return True  # Return without multiple st.stop() calls
     
     return False
+
 def render_simplified_browser_close_detection(session_id: str):
     """Enhanced browser close detection with eligibility check."""
     if not session_id:
