@@ -2846,9 +2846,9 @@ class SessionManager:
                     
                         return session
                     else:
-            		logger.warning(f"Session {session_id[:8]} not found or inactive.")
-            		if 'current_session_id' in st.session_state:
-                		del st.session_state['current_session_id']
+            		    logger.warning(f"Session {session_id[:8]} not found or inactive.")
+            		    if 'current_session_id' in st.session_state:
+                		    del st.session_state['current_session_id']
 
         			# Handle session creation based on current page
         			current_page = st.session_state.get('page')
