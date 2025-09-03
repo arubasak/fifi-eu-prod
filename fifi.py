@@ -5222,10 +5222,12 @@ def main_fixed():
             loading_reason = st.session_state.get('loading_reason', 'unknown')
             
             if loading_reason == 'start_guest':
+                # FIXED: Create session and immediately transition to chat
                 session = session_manager.get_session()
                 if session and session.last_activity is None:
                     session.last_activity = datetime.now()
                     session_manager.db.save_session(session)
+                # Set page to chat - this will trigger session creation on next rerun
                 st.session_state.page = "chat"
                 
             elif loading_reason == 'authenticate':
@@ -5236,13 +5238,17 @@ def main_fixed():
                     authenticated_session = session_manager.authenticate_with_wordpress(username, password)
                     if authenticated_session:
                         st.session_state.current_session_id = authenticated_session.session_id
-                        st.session_state.page = "chat"
+                        st.session_state.page = "chat"  # This triggers chat page load with session
                         st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
                         st.balloons()
                     else:
+                        # Authentication failed - stay on welcome page
+                        st.session_state.page = "welcome"
                         set_loading_state(False)
                         return
                 else:
+                    # Missing credentials - stay on welcome page
+                    st.session_state.page = "welcome"
                     set_loading_state(False)
                     st.error("Authentication failed: Missing username or password.")
                     return
