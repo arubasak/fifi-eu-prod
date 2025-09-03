@@ -5022,7 +5022,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         message = notice_info.get('message', '')
         
         col1, col2 = st.columns([5, 1])
-		with col1: # This is line 5025, now with corrected indentation
+	with col1: # This is line 5025, now with corrected indentation
             if query_type == 'pricing':
                 st.info("💰 **Pricing Information Notice**")
             else:
