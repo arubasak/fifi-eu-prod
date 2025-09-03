@@ -2778,13 +2778,38 @@ class SessionManager:
                 session = self.db.load_session(session_id)
                 st.session_state[f'loading_{session_id}'] = False  # Clear the flag
                 
-                if session and session.active:
-                    # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
-                    # And this check hasn't been performed for this session yet in the current rerun cycle.
-                    fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
-                    if (session.fingerprint_id and 
-                        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
-                        not st.session_state.get(fingerprint_checked_key, False)):
+                if session:
+                # NEW: Check if session should be expired due to timeout BEFORE checking active status
+                if session.last_activity:
+                    time_since_activity = datetime.now() - session.last_activity
+                    minutes_inactive = time_since_activity.total_seconds() / 60
+        
+                    if minutes_inactive >= self.get_session_timeout_minutes():
+                        logger.info(f"⏰ Session {session_id[:8]} expired ({minutes_inactive:.1f}m > {self.get_session_timeout_minutes()}m). Forcing welcome page.")
+                        # Mark session as inactive
+                        session.active = False
+                        try:
+                            self.db.save_session(session)
+                        except Exception as e:
+                            logger.error(f"Failed to save expired session: {e}")
+            
+                        # Clear session ID from state to force welcome page
+                        if 'current_session_id' in st.session_state:
+                            del st.session_state['current_session_id']
+            
+            # Set expired flag for main function to handle
+            st.session_state['session_expired'] = True
+            st.session_state['page'] = None
+            
+            return None  # Return None to force welcome page
+
+            if session.active:
+                # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
+                # And this check hasn't been performed for this session yet in the current rerun cycle.
+                fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
+                if (session.fingerprint_id and 
+                    session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
+                    not st.session_state.get(fingerprint_checked_key, False)):
                         
                         self._attempt_fingerprint_inheritance(session)
                         # Save session after potential inheritance to persist updated user type/counts
@@ -2821,12 +2846,24 @@ class SessionManager:
                     
                     return session
                 else:
-                    logger.warning(f"Session {session_id[:8]} not found or inactive. Creating new session.")
+                    logger.warning(f"Session {session_id[:8]} not found or inactive. Will redirect to welcome page.")
                     if 'current_session_id' in st.session_state:
                         del st.session_state['current_session_id']
+                    st.session_state['session_expired'] = True
+                    st.session_state['page'] = None
+                    return None
 
-            logger.info(f"Creating new session")
-            new_session = self._create_new_session()
+                # Only create new session if we're not on chat page
+                current_page = st.session_state.get('page')
+                if current_page == "chat":
+                    # We're on chat page but no valid session - force welcome page
+                    logger.info(f"No valid session for chat page, forcing welcome page")
+                    st.session_state['page'] = None
+                    st.session_state['session_expired'] = True
+                    return None
+                logger.info(f"Creating new session for welcome page")
+                new_session = self._create_new_session()
+           
             st.session_state.current_session_id = new_session.session_id
             
             # Immediately attempt fingerprint inheritance for the *newly created* session
@@ -3571,28 +3608,20 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
 
     # If the session is already inactive, force a reload
     if not session.active:
-        logger.info(f"Session {session.session_id[:8]} is inactive. Triggering reload to welcome page.")
+        logger.info(f"Session {session.session_id[:8]} is inactive. Forcing welcome page.")
         st.error("⏰ **Session Expired**")
         st.info("Your previous session has ended. Please start a new session.")
-        
+    
         # Clear Streamlit session state fully
         for key in list(st.session_state.keys()):
             del st.session_state[key]
 
-        # NEW: Force welcome page state before any reload attempts
+        # Force welcome page state
         st.session_state['page'] = None
         st.session_state['session_expired'] = True
 
-        if JS_EVAL_AVAILABLE:
-            try:
-                streamlit_js_eval(js_expressions="parent.window.location.reload()")
-                st.stop()
-            except Exception as e:
-                logger.error(f"Browser reload failed during inactive session handling: {e}")
-        
-        st.info("🏠 Redirecting to home page...")
+        st.info("🏠 Redirecting to welcome page...")
         st.rerun()
-        st.stop()
         return True
 
     # Check if last_activity is None (timer hasn't started)
@@ -3666,22 +3695,20 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         st.session_state['page'] = None
         st.session_state['session_expired'] = True
         
+        # Clear Streamlit session state and force welcome page
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+
+        st.session_state['page'] = None
+        st.session_state['session_expired'] = True
+
         # Show timeout message
         st.error("⏰ **Session Timeout**")
         st.info("Your session has expired due to 5 minutes of inactivity.")
-        
-        # TRIGGER BROWSER RELOAD using streamlit_js_eval
-        if JS_EVAL_AVAILABLE:
-            try:
-                logger.info(f"🔄 Triggering browser reload for timeout")
-                streamlit_js_eval(js_expressions="parent.window.location.reload()")
-                st.stop()
-            except Exception as e:
-                logger.error(f"Browser reload failed during inactive session handling: {e}")
-        
-        st.info("🏠 Redirecting to home page...")
+
+        # Simple rerun - don't rely on browser reload
+        st.info("🏠 Redirecting to welcome page...")
         st.rerun()
-        st.stop()
         return True
     
     return False
@@ -4862,6 +4889,8 @@ def main_fixed():
         st.session_state['page'] = None
         if 'session_expired' in st.session_state:
             del st.session_state['session_expired']
+        if 'current_session_id' in st.session_state:
+            del st.session_state['current_session_id']  # Important: clear session ID
         st.info("⏰ Your session expired. Please start a new session.")
 
     # Initialize loading state if not already set (for first run)
@@ -5000,16 +5029,25 @@ def main_fixed():
         if current_page != "chat":
             render_welcome_page(session_manager)
         else:
-            # Get existing session (should already exist from loading state or prior direct creation)
+            # Get existing session - this will now properly handle expired sessions
             session = session_manager.get_session()
             
-            if session is None or not session.active:
-                logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
+            if session is None:
+                # Session was expired or invalid - redirect to welcome
+                logger.warning(f"No valid session for chat page. Redirecting to welcome.")
                 st.session_state['page'] = None
+                st.session_state['session_expired'] = True
                 st.rerun()
                 return
+
+            if not session.active:
+                logger.warning(f"Session {session.session_id[:8]} is inactive. Redirecting to welcome.")
+            st.session_state['page'] = None  
+            st.session_state['session_expired'] = True
+            if 'current_session_id' in st.session_state:
+                del st.session_state['current_session_id']
+            st.rerun()
+            return
             
             # 🔥 RENDER FINGERPRINTING FIRST, BEFORE TIMEOUT LOGIC
             fingerprint_needed = (
