@@ -5193,10 +5193,13 @@ def main_fixed():
         st.session_state.is_loading = False
         st.session_state.loading_message = ""
         st.session_state.is_chat_ready = False
-        st.session_state.fingerprint_status = 'pending' # 'pending', 'pending_js', 'done', 'timeout'
-        st.session_state.page = 'welcome'
+        st.session_state.fingerprint_status = 'pending'  # Will be set properly on chat page
+        st.session_state.page = 'welcome'  # Always start on welcome page
         
-        # Perform one-time full initialization
+        # CRITICAL: Don't create any sessions during initialization
+        # Sessions should only be created when user clicks buttons
+        
+        # Perform one-time full initialization (managers only, no sessions)
         with st.spinner("Initializing application..."):
             init_success = ensure_initialization_fixed()
         if not init_success:
