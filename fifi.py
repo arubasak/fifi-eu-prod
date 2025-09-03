@@ -3519,6 +3519,37 @@ class SessionManager:
                     "safety_override": False
                 }
 
+            # NEW: Check if it's a meta-conversation query (Solution 1)
+            meta_detection = self.detect_meta_conversation_query(prompt)
+            if meta_detection["is_meta"]:
+                logger.info(f"Meta-conversation query detected: {meta_detection['type']}")
+                
+                # Record the question for usage tracking (even meta-questions count)
+                self.question_limits.record_question(session)
+                
+                # Add user message to session history
+                user_message = {'role': 'user', 'content': prompt}
+                session.messages.append(user_message)
+                
+                # Handle meta-query (zero tokens used)
+                meta_response = self.handle_meta_conversation_query(
+                    session, meta_detection["type"], meta_detection["scope"]
+                )
+                
+                # Add assistant response to history
+                assistant_message = {
+                    'role': 'assistant',
+                    'content': meta_response.get('content', 'Analysis complete.'),
+                    'source': meta_response.get('source', 'Conversation Analytics'),
+                    'is_meta_response': True
+                }
+                session.messages.append(assistant_message)
+                
+                # Update activity and save session
+                self._update_activity(session)
+                
+                return meta_response
+                
             # CHANGE 2: Update the function call to pass conversation history
             context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
             if context_result and not context_result.get("relevant", True):
@@ -3578,37 +3609,7 @@ Pricing and stock availability are dynamic in nature and subject to market condi
 Please proceed with your question, keeping in mind that any pricing or stock information provided should be verified through official channels."""
                 }
             
-            # NEW: Check if it's a meta-conversation query (Solution 1)
-            meta_detection = self.detect_meta_conversation_query(prompt)
-            if meta_detection["is_meta"]:
-                logger.info(f"Meta-conversation query detected: {meta_detection['type']}")
-                
-                # Record the question for usage tracking (even meta-questions count)
-                self.question_limits.record_question(session)
-                
-                # Add user message to session history
-                user_message = {'role': 'user', 'content': prompt}
-                session.messages.append(user_message)
-                
-                # Handle meta-query (zero tokens used)
-                meta_response = self.handle_meta_conversation_query(
-                    session, meta_detection["type"], meta_detection["scope"]
-                )
-                
-                # Add assistant response to history
-                assistant_message = {
-                    'role': 'assistant',
-                    'content': meta_response.get('content', 'Analysis complete.'),
-                    'source': meta_response.get('source', 'Conversation Analytics'),
-                    'is_meta_response': True
-                }
-                session.messages.append(assistant_message)
-                
-                # Update activity and save session
-                self._update_activity(session)
-                
-                return meta_response
-            
+                     
             # Continue with regular processing for non-meta queries
             
             # Check question limits
