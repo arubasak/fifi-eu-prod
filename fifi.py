@@ -76,7 +76,8 @@ except ImportError:
     pass
 
 try:
-    from tavily import TavilyClient
+    # MODIFIED: Import TavilySearch instead of TavilyClient for Langchain integration
+    from langchain_tavily import TavilySearch
     TAVILY_AVAILABLE = True
 except ImportError:
     pass
@@ -1719,22 +1720,28 @@ class PineconeAssistantTool:
         self.assistant_name = assistant_name
         self.assistant = self.initialize_assistant()
 
+    # CHANGE 3: Pinecone Assistant with Business Rules
     def initialize_assistant(self):
         try:
             instructions = (
-                "You are a document-based AI assistant with STRICT limitations.\n\n"
-                "ABSOLUTE RULES - NO EXCEPTIONS:\n"
-                "1. You can ONLY answer using information that exists in your uploaded documents\n"
-                "2. If you cannot find the answer in your documents, you MUST respond with EXACTLY: 'I don't have specific information about this topic in my knowledge base.'\n"
-                "3. NEVER create fake citations, URLs, or source references\n"
-                "4. NEVER create fake file paths, image references (.jpg, .png, etc.), or document names\n"
-                "5. NEVER use general knowledge or information not in your documents\n"
-                "6. NEVER guess or speculate about anything\n"
-                "7. NEVER make up website links, file paths, or citations\n"
-                "8. If asked about current events, news, recent information, or anything not in your documents, respond with: 'I don't have specific information about this topic in my knowledge base.'\n"
-                "9. Only include citations [1], [2], etc. if they come from your actual uploaded documents\n"
-                "10. NEVER reference images, files, or documents that were not actually uploaded to your knowledge base\n\n"
-                "REMEMBER: It is better to say 'I don't know' than to provide incorrect information, fake sources, or non-existent file references."
+                "You are a document-based AI assistant for 12taste.com with STRICT business rules.\n\n"
+                "**CORE IDENTITY:**\n"
+                "- You are FiFi, an AI assistant for 12taste.com, a B2B food ingredients marketplace.\n"
+                "- Your knowledge is LIMITED to the documents in your knowledge base.\n\n"
+                "**ABSOLUTE BUSINESS RULES - NO EXCEPTIONS:**\n"
+                "1.  **NEVER PROVIDE PRICING OR STOCK INFO:** If asked for prices, costs, stock, or availability, you MUST respond with EXACTLY this template:\n"
+                "    'Thank you for your interest in pricing information. For the most accurate and up-to-date pricing and quotes, please visit the product page directly on our website or contact our sales team at sales-eu@12taste.com for personalized assistance.'\n"
+                "2.  **HANDLE 'NOT FOUND' GRACEFULLY:** If you cannot find information for a specific product or topic in your documents, you MUST respond with EXACTLY: 'I don't have specific information about this topic in my knowledge base.'\n"
+                "3.  **NO FABRICATION:** NEVER invent information, product details, specifications, suppliers, or any data not present in your documents. NEVER create fake citations, URLs, or source references.\n\n"
+                "**RESPONSE GUIDELINES:**\n"
+                "- **BE CONCISE:** Provide direct answers from your documents.\n"
+                "- **CITE SOURCES:** Use citations like [1], [2] when pulling information from documents.\n"
+                "- **STAY ON TOPIC:** Only answer questions related to the food and beverage industry based on your documents.\n"
+                "- **REDIRECT, DON'T REFUSE:** For pricing/stock questions, use the specific redirection message above. For out-of-scope topics, state you specialize in food ingredients.\n\n"
+                "**PRIORITY FLOW:**\n"
+                "1. Does the question ask for price or stock? -> Use the sales redirection message.\n"
+                "2. Is the information in my documents? -> Answer with citations.\n"
+                "3. Is the information NOT in my documents? -> Use the 'I don't have specific information...' message."
             )
             
             assistants_list = self.pc.assistant.list_assistants()
@@ -1746,6 +1753,10 @@ class PineconeAssistantTool:
                 )
             else:
                 logger.info(f"Connected to assistant: '{self.assistant_name}'")
+                # OPTIONAL: Update instructions of existing assistant if needed
+                # assistant_obj = self.pc.assistant.Assistant(assistant_name=self.assistant_name)
+                # assistant_obj.update(instructions=instructions)
+                # return assistant_obj
                 return self.pc.assistant.Assistant(assistant_name=self.assistant_name)
         except Exception as e:
             logger.error(f"Failed to initialize Pinecone Assistant: {e}")
@@ -1817,17 +1828,84 @@ class PineconeAssistantTool:
             logger.error(f"Pinecone Assistant error: {str(e)}")
             return None
 
+# CHANGE 4: Enhanced TavilyFallbackAgent with Query Reformulation
 class TavilyFallbackAgent:
     def __init__(self, tavily_api_key: str):
-        from tavily import TavilyClient
-        self.tavily_client = TavilyClient(api_key=tavily_api_key)
+        if not TAVILY_AVAILABLE:
+            raise ImportError("Tavily client not available.")
+        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key)
+        # ADD: OpenAI client for query reformulation
+        self.openai_client = openai.OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
+
+    def reformulate_query_with_context(self, current_question: str, chat_history: List[BaseMessage]) -> str:
+        """Reformulates follow-up questions into standalone search queries using GPT-4o-mini."""
+        
+        if not self.openai_client or not chat_history or len(chat_history) <= 1:
+            return current_question  # No reformulation needed
+        
+        # Build conversation context (last 6 messages)
+        recent_context = []
+        for msg in chat_history[-6:]:
+            role = "User" if isinstance(msg, HumanMessage) else "Assistant"
+            content = msg.content[:300]  # Limit to 300 chars per message
+            recent_context.append(f"{role}: {content}")
+        
+        context_text = "\n".join(recent_context)
+        
+        reformulation_prompt = f"""You are a search query reformulator for food & beverage industry queries.
+
+**CONVERSATION CONTEXT:**
+{context_text}
+
+**CURRENT FOLLOW-UP QUESTION:** "{current_question}"
+
+**TASK:** Convert this follow-up question into a complete, standalone search query that includes all necessary context from the conversation.
+
+**EXAMPLES:**
+- If conversation was about "vanilla extract suppliers" and follow-up is "What about pricing?"
+  → Reformulated: "vanilla extract suppliers pricing bulk wholesale costs"
+
+- If conversation was about "emulsifiers for ice cream" and follow-up is "What are the specifications?"  
+  → Reformulated: "emulsifiers for ice cream technical specifications properties requirements"
+
+**RULES:**
+1. Include the main topic from conversation context
+2. Make the query specific and searchable
+3. Keep it concise (under 100 characters)
+4. Focus on food industry terminology
+5. If the current question is already standalone, return it unchanged
+
+**REFORMULATED QUERY:**"""
+
+        try:
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You reformulate follow-up questions into standalone search queries. Respond with only the reformulated query, no explanation."},
+                    {"role": "user", "content": reformulation_prompt}
+                ],
+                max_tokens=50,
+                temperature=0.1
+            )
+            
+            reformulated = response.choices[0].message.content.strip()
+            
+            # Validation: ensure reformulated query is reasonable
+            if len(reformulated) > 200 or len(reformulated) < 3:
+                logger.warning(f"Query reformulation produced unreasonable result: '{reformulated}', using original")
+                return current_question
+            
+            logger.info(f"Query reformulated: '{current_question}' → '{reformulated}'")
+            return reformulated
+            
+        except Exception as e:
+            logger.error(f"Query reformulation failed: {e}")
+            return current_question
 
     def add_utm_to_links(self, content: str) -> str:
         """Finds all Markdown links in a string and appends the UTM parameters."""
-        
         if not content:
             return ""
-        
         try:
             def replacer(match):
                 url = match.group(1)
@@ -1838,112 +1916,66 @@ class TavilyFallbackAgent:
                     new_url = f"{url}?{utm_params}"
                 return f"({new_url})"
             
-            # Actually USE the replacer function in the regex substitution
-            result = re.sub(r'\]\(([^)]+)\)', replacer, content)
+            result = re.sub(r'\]\((https?://[^)]+)\)', replacer, content)
             return result
-            
         except Exception as e:
             logger.error(f"🔍 UTM processing failed: {e}")
-            return content  # Always return original content if processing fails
+            return content
 
     def synthesize_search_results(self, results, query: str) -> str:
-        """Simple synthesis: combine Tavily answer + sources, then apply UTM."""
-        
-        if not isinstance(results, dict):
+        """Simple synthesis: combine Tavily answer + sources."""
+        if not isinstance(results, list):
+            logger.warning(f"Tavily returned non-list results: {type(results)}")
             return "I couldn't process the search results properly."
         
-        # Get Tavily's pre-synthesized answer
-        answer = results.get('answer', '')
-        search_results = results.get('results', [])
+        if not results:
+            return f"I couldn't find any relevant information online for: '{query}'"
+
+        response_parts = [f"Here is a summary of web search results for '{query}':\n"]
+        for res in results[:3]: # Summarize top 3
+            if isinstance(res, dict) and 'content' in res:
+                response_parts.append(f"- {res['content']}")
+
+        response_parts.append("\n\n**Sources:**")
+        for i, res in enumerate(results, 1):
+            if isinstance(res, dict) and 'url' in res and 'title' in res:
+                response_parts.append(f"\n{i}. [{res['title']}]({res['url']})")
         
-        if not answer and not search_results:
-            return "I couldn't find any relevant information for your query."
-        
-        # Start with Tavily's answer
-        response_parts = []
-        if answer:
-            response_parts.append(answer)
-        
-        # Add sources in Pinecone format
-        sources = []
-        if search_results:
-            for result in search_results[:5]:
-                if isinstance(result, dict):
-                    title = result.get('title', '')
-                    url = result.get('url', '')
-                    if url and title:
-                        sources.append(f"[{title}]({url})")
-        
-        # Append sources using Pinecone standard format
-        if sources:
-            response_parts.append(f"\n\n**Sources:**")
-            for i, source in enumerate(sources, 1):
-                response_parts.append(f"\n{i}. {source}")
-        
-        return "".join(response_parts)
+        return "\n".join(response_parts)
 
     def determine_search_strategy(self, question: str, pinecone_error_type: str = None) -> Dict[str, Any]:
         """Determine whether to use domain-restricted or worldwide search."""
-        question_lower = question.lower()
-        
-        # Check for current information indicators in question
-        current_info_indicators = [
-            "today", "yesterday", "this week", "this month", "this year", "2025", "2024",
-            "current", "latest", "recent", "now", "currently", "updated",
-            "news", "weather", "stock", "price", "event", "happening"
-        ]
-        
-        has_time_sensitive_keywords = any(indicator in question_lower for indicator in current_info_indicators)
-        
-        # For major Pinecone errors, use two-tier approach
-        if pinecone_error_type in ["rate_limit", "authentication_error", "payment_required", "server_error"]:
-            if has_time_sensitive_keywords:
-                return {
-                    "strategy": "worldwide_with_exclusions",
-                    "include_domains": None,
-                    "exclude_domains": DEFAULT_EXCLUDED_DOMAINS,
-                    "reason": f"Time-sensitive question with Pinecone {pinecone_error_type}"
-                }
-            else:
-                return {
-                    "strategy": "domain_restricted", 
-                    "include_domains": ["12taste.com"],
-                    "exclude_domains": None,
-                    "reason": f"Domain-restricted fallback for Pinecone {pinecone_error_type}"
-                }
-        else:
-            return {
-                "strategy": "worldwide_with_exclusions",
-                "include_domains": None, 
-                "exclude_domains": DEFAULT_EXCLUDED_DOMAINS,
-                "reason": "Standard safety fallback"
-            }
+        return {
+            "strategy": "worldwide_with_exclusions",
+            "include_domains": None, 
+            "exclude_domains": DEFAULT_EXCLUDED_DOMAINS,
+            "reason": "Standard safety fallback"
+        }
 
     def query(self, message: str, chat_history: List[BaseMessage], pinecone_error_type: str = None) -> Dict[str, Any]:
         try:
-            # Determine search strategy
-            strategy = self.determine_search_strategy(message, pinecone_error_type)
+            # STEP 1: Reformulate query with conversation context
+            standalone_query = self.reformulate_query_with_context(message, chat_history)
             
-            # Build search parameters for direct SDK
-            sdk_params = {
-                "query": message,
+            # STEP 2: Determine search strategy
+            strategy = self.determine_search_strategy(standalone_query, pinecone_error_type)
+            
+            # STEP 3: Build Tavily search parameters with reformulated query
+            search_params = {
+                "query": standalone_query,
                 "max_results": 5,
-                "include_answer": "advanced",      # ✅ Changed from True to "advanced"
-                "search_depth": "advanced",        # ✅ Changed from "basic" to "advanced"  
-                "include_raw_content": "text"      # ✅ Added for better content
+                "search_depth": "advanced"
             }
-
-            # Add domain restrictions
-            if strategy.get("include_domains"):
-                sdk_params["include_domains"] = strategy["include_domains"]
-                logger.info(f"🔍 Tavily domain-restricted search: {strategy['include_domains'][0]}")
-            elif strategy.get("exclude_domains"):
-                sdk_params["exclude_domains"] = strategy["exclude_domains"]
+            
+            if strategy.get("exclude_domains"):
+                search_params["exclude_domains"] = strategy["exclude_domains"]
                 logger.info(f"🌐 Tavily worldwide search excluding {len(strategy['exclude_domains'])} competitor domains")
+            else:
+                 logger.info(f"🌐 Tavily worldwide search with reformulated query: {standalone_query}")
 
-            logger.info(f"🔍 Direct Tavily SDK call with params: {list(sdk_params.keys())}")
-            search_results = self.tavily_client.search(**sdk_params)
-            synthesized_content = self.synthesize_search_results(search_results, message)
+            # STEP 4: Execute search with standalone query
+            search_results = self.tavily_tool.invoke(input=search_params)
+            synthesized_content = self.synthesize_search_results(search_results, standalone_query)
             final_content = self.add_utm_to_links(synthesized_content)
             
             return {
@@ -1956,7 +1988,9 @@ class TavilyFallbackAgent:
                 "has_inline_citations": True,
                 "safety_override": False,
                 "search_strategy": strategy["strategy"],
-                "search_reason": strategy["reason"]
+                "search_reason": strategy["reason"],
+                "original_question": message,
+                "reformulated_query": standalone_query
             }
         except Exception as e:
             logger.error(f"Tavily search error: {str(e)}")
@@ -2029,223 +2063,106 @@ class EnhancedAI:
             return "unknown_error"
 
     def _should_use_pinecone_first(self) -> bool:
-        """Enhanced routing based on component health status."""
+        """Routing based on component health. Always prefers Pinecone if healthy."""
         pinecone_status = error_handler.component_status.get("Pinecone", "healthy")
-        tavily_status = error_handler.component_status.get("Tavily", "healthy")
-    
-        # If Pinecone is healthy, use it first
-        if pinecone_status in ["healthy"]:
-            return True
-    
-        # If Pinecone has issues (including rate limits) but Tavily is healthy, use Tavily first
-        if pinecone_status in ["authentication_error", "payment_required", "server_error", "rate_limit"] and tavily_status == "healthy":
-            return False
-    
-        # Default to Pinecone first for other scenarios
-        return True
+        return pinecone_status == "healthy"
 
     def _get_current_pinecone_error_type(self) -> str:
         """Get current Pinecone error type for Tavily strategy determination."""
         return error_handler.component_status.get("Pinecone", "healthy")
 
+    # CHANGE 5: Updated Fallback Logic for Business Rules
     def should_use_web_fallback(self, pinecone_response: Dict[str, Any], original_question: str) -> bool:
-        """EXTREMELY aggressive fallback detection to prevent any hallucination."""
+        """
+        Determines if a fallback to web search is needed based on strict business rules.
+        """
         content = pinecone_response.get("content", "").lower()
-        content_raw = pinecone_response.get("content", "")
-        question_lower = original_question.lower()  # NEW: Check question instead of response
-        
-        # PRIORITY 1: Always fallback for current/recent information requests IN QUESTION
-        current_info_indicators = [
-            "today", "yesterday", "this week", "this month", "this year", "2025", "2024",
-            "current", "latest", "recent", "now", "currently", "updated",
-            "news", "weather", "stock", "price", "event", "happening"
+
+        # RULE 1: NEVER fallback if Pinecone provides the business redirect for pricing/stock.
+        # This is the desired final answer for these questions.
+        if "sales-eu@12taste.com" in content or "contact our sales team" in content:
+            logger.info("✅ Fallback SKIPPED: Pinecone provided the correct business redirect for pricing/stock.")
+            return False
+
+        # RULE 2: ALWAYS fallback if Pinecone explicitly states it doesn't know about a topic.
+        # This indicates a product/topic not found in the knowledge base.
+        product_not_found_phrases = [
+            "i don't have specific information about this topic",
+            "cannot find information about",
+            "no information about",
+            "is not available in my knowledge base"
         ]
-        # FIXED: Check original question instead of response content
-        if any(indicator in question_lower for indicator in current_info_indicators):
+        if any(phrase in content for phrase in product_not_found_phrases):
+            logger.warning("🔄 Fallback TRIGGERED: Pinecone could not find the topic/product in its knowledge base.")
             return True
         
-        # PRIORITY 2: Explicit "don't know" statements (allow these to pass)
-        explicit_unknown = [
-            "i don't have specific information", "i don't know", "i'm not sure",
-            "i cannot help", "i cannot provide", "cannot find specific information",
-            "no specific information", "no information about", "don't have information",
-            "not available in my knowledge", "unable to find", "no data available",
-            "insufficient information", "outside my knowledge", "cannot answer"
-        ]
-        if any(keyword in content for keyword in explicit_unknown):
-            return False # Don't fallback for explicit "don't know" responses
-        
-        # PRIORITY 3: Detect fake files/images/paths (CRITICAL SAFETY)
-        fake_file_patterns = [
-            ".jpg", ".jpeg", ".png", ".html", ".gif", ".doc", ".docx",
-            ".xls", ".xlsx", ".ppt", ".pptx", ".mp4", ".avi", ".mp3",
-            "/uploads/", "/files/", "/images/", "/documents/", "/media/",
-            "file://", "ftp://", "path:", "directory:", "folder:"
-        ]
-        
-        has_real_citations = pinecone_response.get("has_citations", False)
-        if any(pattern in content_raw for pattern in fake_file_patterns):
-            if not has_real_citations:
-                logger.warning("🚨 SAFETY: Detected fake file references without real citations")
-                return True
-        
-        # PRIORITY 4: Detect potential fake citations (CRITICAL)
-        if "[1]" in content_raw or "**Sources:**" in content_raw:
-            suspicious_patterns = [
-                "http://", ".org", ".net",
-                "example.com", "website.com", "source.com", "domain.com"
-            ]
-            if not has_real_citations and any(pattern in content_raw for pattern in suspicious_patterns):
-                logger.warning("🚨 SAFETY: Detected fake citations")
-                return True
-        
-        # PRIORITY 5: NO CITATIONS = MANDATORY FALLBACK (unless very short or explicit "don't know")
-        if not has_real_citations:
-            if "[1]" not in content_raw and "**Sources:**" not in content_raw:
-                if len(content_raw.strip()) > 30:
-                    logger.warning("🚨 SAFETY: Long response without citations")
-                    return True
-        
-        # PRIORITY 6: General knowledge indicators (likely hallucination)
-        general_knowledge_red_flags = [
-            "generally", "typically", "usually", "commonly", "often", "most",
-            "according to", "it is known", "studies show", "research indicates",
-            "experts say", "based on", "in general", "as a rule"
-        ]
-        if any(flag in content for flag in general_knowledge_red_flags):
-            logger.warning("🚨 SAFETY: Detected general knowledge indicators")
-            return True
-        
-        # PRIORITY 7: Question-answering patterns that suggest general knowledge
-        qa_patterns = [
-            "the answer is", "this is because", "the reason", "due to the fact",
-            "this happens when", "the cause of", "this occurs"
-        ]
-        if any(pattern in content for pattern in qa_patterns):
+        # RULE 3: Fallback on critical safety issues like fake citations.
+        # (This logic can be preserved from your original implementation)
+        if "[1]" in content or "**sources:**" in content:
             if not pinecone_response.get("has_citations", False):
-                logger.warning("🚨 SAFETY: QA patterns without citations")
+                logger.warning("🚨 SAFETY OVERRIDE: Detected fake citations. Switching to web search.")
                 return True
-        
-        # PRIORITY 8: Response length suggests substantial answer without sources
-        response_length = pinecone_response.get("response_length", 0)
-        if response_length > 100 and not pinecone_response.get("has_citations", False):
-            logger.warning("🚨 SAFETY: Long response without sources")
-            return True
-        
+
+        # DEFAULT: Do not fallback. Assume Pinecone's answer is correct if it's not a "not found" response
+        # and doesn't violate business rules.
+        logger.info("✅ Fallback SKIPPED: Pinecone provided a valid response from its knowledge base.")
         return False
     
+    # CHANGE 6: Business-First Routing (Always Try Pinecone First)
     @handle_api_errors("AI System", "Get Response", show_to_user=True)
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """Enhanced AI response with bidirectional fallback and intelligent routing."""
-        
+        """
+        AI response flow that prioritizes Pinecone and adheres to strict business rules for fallback.
+        """
         # Convert chat history to LangChain format
+        langchain_history = []
         if chat_history:
-            langchain_history = []
             for msg in chat_history[-10:]: # Limit to last 10 messages
-                if msg.get("role") == "user":
-                    langchain_history.append(HumanMessage(content=msg.get("content", "")))
-                elif msg.get("role") == "assistant":
-                    langchain_history.append(AIMessage(content=msg.get("content", "")))
-            langchain_history.append(HumanMessage(content=prompt))
-        else:
-            langchain_history = [HumanMessage(content=prompt)]
+                role = msg.get("role")
+                content = msg.get("content", "")
+                if role == "user":
+                    langchain_history.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    langchain_history.append(AIMessage(content=content))
+        langchain_history.append(HumanMessage(content=prompt))
         
-        # Intelligent routing based on component health
-        use_pinecone_first = self._should_use_pinecone_first()
-        current_pinecone_error = self._get_current_pinecone_error_type()
-        
-        if use_pinecone_first:
-            # Try Pinecone first
-            if self.pinecone_tool:
-                try:
-                    logger.info("🔍 Querying Pinecone knowledge base (primary)...")
-                    pinecone_response = self.pinecone_tool.query(langchain_history)
-                    
-                    if pinecone_response and pinecone_response.get("success"):
-                        # Check if we should fallback to web search (FIXED: pass original question)
-                        should_fallback = self.should_use_web_fallback(pinecone_response, prompt)
-                        
-                        if not should_fallback:
-                            logger.info("✅ Using Pinecone response (passed safety checks)")
-                            error_handler.mark_component_healthy("Pinecone")
-                            return pinecone_response
-                        else:
-                            logger.warning("🚨 SAFETY OVERRIDE: Detected potentially fabricated information. Switching to verified web sources.")
-                            
-                except Exception as e:
-                    error_type = self._detect_pinecone_error_type(e)
-                    logger.error(f"Pinecone query failed ({error_type}): {e}")
-                    current_pinecone_error = error_type  # Update error type for Tavily strategy
-            
-            # Fallback to web search with enhanced strategy
-            if self.tavily_agent:
-                try:
-                    logger.info("🌐 Falling back to FiFi web search...")
-                    # Pass the error type for strategy determination
-                    web_response = self.tavily_agent.query(prompt, langchain_history[:-1], current_pinecone_error)
-                    
-                    if web_response and web_response.get("success"):
-                        logger.info(f"✅ Using web search response: {web_response.get('search_strategy', 'unknown strategy')}")
-                        error_handler.mark_component_healthy("Tavily")
-                        return web_response
-                        
-                except Exception as e:
-                    logger.error(f"FiFi Web search failed: {e}")
-                    error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
-            
-            # Final Pinecone fallback if Tavily failed
-            if not self.tavily_agent:
-                if self.pinecone_tool:
-                    try:
-                        logger.info("🔍 Falling back to Pinecone knowledge base (re-attempt after web search failure/absence)...")
-                        pinecone_response = self.pinecone_tool.query(langchain_history)
-                        
-                        if pinecone_response and pinecone_response.get("success"):
-                            should_fallback = self.should_use_web_fallback(pinecone_response, prompt)
-                            
-                            if not should_fallback:
-                                logger.info("✅ Using Pinecone response (fallback)")
-                                return pinecone_response
-                                
-                    except Exception as e:
-                        error_type = self._detect_pinecone_error_type(e)
-                        logger.error(f"Pinecone fallback also failed ({error_type}): {e}")
-        else:
-            # Try Tavily first due to Pinecone issues
-            if self.tavily_agent:
-                try:
-                    logger.info("🌐 Querying FiFi web search (primary due to Pinecone issues)...")
-                    # Pass the error type for strategy determination
-                    web_response = self.tavily_agent.query(prompt, langchain_history[:-1], current_pinecone_error)
-                    
-                    if web_response and web_response.get("success"):
-                        logger.info(f"✅ Using FiFi web search response (primary): {web_response.get('search_strategy', 'unknown strategy')}")
-                        error_handler.mark_component_healthy("Tavily")
-                        return web_response
-                                
-                except Exception as e:
-                    logger.error(f"FiFi Web search failed: {e}")
-                    error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
+        # --- Primary Flow: Always try Pinecone first ---
+        if self.pinecone_tool:
+            try:
+                logger.info("🧠 Querying Pinecone knowledge base (primary)...")
+                pinecone_response = self.pinecone_tool.query(langchain_history)
                 
-            # Fallback to Pinecone (despite issues)
-            if self.pinecone_tool:
-                try:
-                    logger.info("🔍 Falling back to Pinecone knowledge base (despite initial issues)...")
-                    pinecone_response = self.pinecone_tool.query(langchain_history)
-                    
-                    if pinecone_response and pinecone_response.get("success"):
-                        should_fallback = self.should_use_web_fallback(pinecone_response, prompt)
-                        
-                        if not should_fallback:
-                            logger.info("✅ Using Pinecone response (fallback)")
-                            return pinecone_response
-                            
-                except Exception as e:
-                    error_type = self._detect_pinecone_error_type(e)
-                    logger.error(f"Pinecone fallback also failed ({error_type}): {e}")
+                if pinecone_response and pinecone_response.get("success"):
+                    # Use the new business-aware logic to decide if a fallback is needed
+                    if not self.should_use_web_fallback(pinecone_response, prompt):
+                        logger.info("✅ Using Pinecone response (passed business logic checks).")
+                        error_handler.mark_component_healthy("Pinecone")
+                        return pinecone_response
+                    else:
+                        logger.warning("⤵️ Pinecone response requires web fallback. Proceeding to Tavily...")
+                
+            except Exception as e:
+                error_type = self._detect_pinecone_error_type(e)
+                logger.error(f"Pinecone query failed ({error_type}): {e}. Proceeding to web fallback.")
         
-        # Final fallback - basic response
-        logger.warning("⚠️ All AI tools unavailable, using basic fallback")
+        # --- Fallback Flow: Use Tavily web search if needed ---
+        if self.tavily_agent:
+            try:
+                logger.info("🌐 Falling back to FiFi web search...")
+                # Pass the full history for context-aware query reformulation
+                web_response = self.tavily_agent.query(prompt, langchain_history)
+                
+                if web_response and web_response.get("success"):
+                    logger.info(f"✅ Using web search response.")
+                    error_handler.mark_component_healthy("Tavily")
+                    return web_response
+                    
+            except Exception as e:
+                logger.error(f"FiFi Web search failed: {e}", exc_info=True)
+                error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
+
+        # --- Final Fallback: If all systems fail ---
+        logger.warning("⚠️ All AI tools failed. Using final system fallback response.")
         return {
             "content": "I apologize, but I'm unable to process your request at the moment due to technical issues. Please try again later.",
             "success": False,
@@ -2256,6 +2173,7 @@ class EnhancedAI:
             "has_inline_citations": False,
             "safety_override": False
         }
+
 @handle_api_errors("Content Moderation", "Check Prompt", show_to_user=False)
 def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
     """Checks user prompt against content moderation guidelines using OpenAI's moderation API."""
@@ -2281,57 +2199,55 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     return {"flagged": False}
 
+# CHANGE 1: Enhanced Validation Function with Context
 @handle_api_errors("Industry Context Check", "Validate Question Context", show_to_user=False)
-def check_industry_context(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
-    """Checks if user question is relevant to food & beverage ingredients industry using GPT-4o-mini."""
+def check_industry_context(prompt: str, chat_history: List[Dict] = None, client: Optional[openai.OpenAI] = None) -> Optional[Dict[str, Any]]:
+    """
+    Checks if user question is relevant to food & beverage industry, now with conversation context.
+    """
     if not client or not hasattr(client, 'chat'):
         logger.debug("OpenAI client not available for industry context check. Allowing question.")
         return {"relevant": True, "reason": "context_check_unavailable"}
-    
+
+    # Build conversation context from the last 6 messages (3 exchanges)
+    conversation_context = ""
+    if chat_history and len(chat_history) > 0:
+        recent_history = chat_history[-6:]
+        context_parts = []
+        for msg in recent_history:
+            role = msg.get('role', 'unknown').capitalize()
+            content = msg.get('content', '')[:200]  # Truncate for brevity
+            context_parts.append(f"{role}: {content}")
+        conversation_context = "\n".join(context_parts)
+
     try:
-        context_check_prompt = f"""You are an industry context validator for 1-2-Taste (12taste.com), a B2B digital marketplace for food ingredients.
+        context_check_prompt = f"""You are an industry context validator for 12taste.com, a B2B marketplace for food ingredients.
 
-**COMPANY CONTEXT:**
-- B2B marketplace serving food & beverage manufacturers, processors, and producers
-- Focus on ingredient sourcing, product development, and technical support
-- Industries served: bakery, confectionery, beverage, dairy, ice cream, meat processing, snacks, etc.
-- Product categories: flavors, colors, sweeteners, proteins, emulsifiers, starches, texturizers, fibers, nutraceuticals, etc.
-- Target customers: legitimate businesses in food/beverage industry
+**CONVERSATION HISTORY (for context):**
+{conversation_context if conversation_context else "No previous conversation."}
 
-**TASK:** Determine if the following user question is relevant to the food & beverage ingredients industry.
+**CURRENT USER QUESTION:** "{prompt}"
 
-**ALLOW questions about:**
-- Food ingredients (flavors, colors, sweeteners, proteins, emulsifiers, etc.)
-- Beverage ingredients and formulation
-- Supplier sourcing and procurement in food industry
-- Food safety, regulations, and compliance
-- Product development and R&D for food/beverages
-- Market trends in food/beverage industry
-- Technical formulation and processing questions
-- Food manufacturing and production
-- Ingredient specifications and applications
-- Professional food business operations
+**TASK:** Analyze the **CURRENT USER QUESTION**. Considering the conversation history, determine if it is a relevant B2B food & beverage industry question. A follow-up like "What about pricing?" IS relevant if the context was about an ingredient.
 
-**FLAG questions about:**
-- Completely unrelated industries (automotive, finance, technology not food-related, etc.)
-- Personal consumer cooking advice (unless related to professional manufacturing)
-- Non-professional food questions (home recipes, diet advice, etc.)
-- Off-topic subjects (politics, sports, entertainment, etc.)
-- Medical advice or health claims
-- General knowledge unrelated to food industry
+**ALLOW:**
+- Food/beverage ingredients, suppliers, formulation, applications.
+- Food safety, regulations, market trends.
+- Follow-up questions that are relevant IN CONTEXT.
 
-**USER QUESTION:** "{prompt}"
+**FLAG:**
+- Unrelated industries (automotive, finance).
+- Personal consumer cooking, diet advice.
+- Off-topic subjects (politics, sports).
 
 **INSTRUCTIONS:**
 Respond with ONLY a JSON object in this exact format:
 {{
     "relevant": true/false,
     "confidence": 0.0-1.0,
-    "category": "food_ingredients" | "beverage_formulation" | "supplier_sourcing" | "technical_support" | "market_trends" | "off_topic" | "personal_cooking" | "unrelated_industry",
-    "reason": "brief explanation why relevant or not relevant"
-}}
-
-Do NOT include any text outside the JSON object."""
+    "category": "food_ingredients" | "supplier_sourcing" | "follow_up" | "off_topic" | "unrelated_industry",
+    "reason": "Brief explanation."
+}}"""
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -2344,28 +2260,21 @@ Do NOT include any text outside the JSON object."""
         )
         
         response_content = response.choices[0].message.content.strip()
-        
-        # Clean up response (remove any markdown formatting)
         response_content = response_content.replace('```json', '').replace('```', '').strip()
         
-        try:
-            result = json.loads(response_content)
+        result = json.loads(response_content)
+        
+        if not all(key in result for key in ['relevant', 'confidence', 'category', 'reason']):
+            logger.warning("Industry context check returned incomplete JSON structure")
+            return {"relevant": True, "reason": "context_check_invalid_response"}
             
-            # Validate required fields
-            if not all(key in result for key in ['relevant', 'confidence', 'category', 'reason']):
-                logger.warning("Industry context check returned incomplete JSON structure")
-                return {"relevant": True, "reason": "context_check_invalid_response"}
-                
-            logger.info(f"Industry context check: relevant={result['relevant']}, category={result['category']}, confidence={result['confidence']:.2f}")
-            return result
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Industry context check returned invalid JSON: {response_content[:100]}... Error: {e}")
-            return {"relevant": True, "reason": "context_check_json_error"}
+        logger.info(f"Context check: relevant={result['relevant']}, category={result['category']}, confidence={result['confidence']:.2f} (Context HELPED validate follow-up: {'yes' if result['category'] == 'follow_up' else 'no'})")
+        return result
             
     except Exception as e:
         logger.error(f"Industry context check failed: {e}", exc_info=True)
         return {"relevant": True, "reason": "context_check_error"}
+
 # =============================================================================
 # SESSION MANAGER - MAIN ORCHESTRATOR CLASS
 # =============================================================================
@@ -2778,120 +2687,75 @@ class SessionManager:
                 session = self.db.load_session(session_id)
                 st.session_state[f'loading_{session_id}'] = False  # Clear the flag
                 
-                if session:
-                    # NEW: Check if session should be expired due to timeout BEFORE checking active status
-                    if session.last_activity:
-                        time_since_activity = datetime.now() - session.last_activity
-                        minutes_inactive = time_since_activity.total_seconds() / 60
-        
-                        if minutes_inactive >= self.get_session_timeout_minutes():
-                            logger.info(f"⏰ Session {session_id[:8]} expired ({minutes_inactive:.1f}m > {self.get_session_timeout_minutes()}m). Forcing welcome page.")
-                            # Mark session as inactive
-                            session.active = False
-                            try:
-                                self.db.save_session(session)
-                            except Exception as e:
-                                logger.error(f"Failed to save expired session: {e}")
-            
-                            # Clear session ID from state to force welcome page
-                            if 'current_session_id' in st.session_state:
-                                del st.session_state['current_session_id']
-            
-                            # Set expired flag for main function to handle
-                            st.session_state['session_expired'] = True
-                            st.session_state['page'] = None
-            
-                            return None  # Return None to force welcome page
-
-                    if session.active:
-                        # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
-                        # And this check hasn't been performed for this session yet in the current rerun cycle.
-                        fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
-                        if (session.fingerprint_id and 
-                            session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
-                            not st.session_state.get(fingerprint_checked_key, False)):
+                if session and session.active:
+                    # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
+                    # And this check hasn't been performed for this session yet in the current rerun cycle.
+                    fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
+                    if (session.fingerprint_id and 
+                        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
+                        not st.session_state.get(fingerprint_checked_key, False)):
                         
-                            self._attempt_fingerprint_inheritance(session)
-                            # Save session after potential inheritance to persist updated user type/counts
-                            self.db.save_session(session) # Crucial to save here
-                            st.session_state[fingerprint_checked_key] = True # Mark as checked for this session
-                            logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
+                        self._attempt_fingerprint_inheritance(session)
+                        # Save session after potential inheritance to persist updated user type/counts
+                        self.db.save_session(session) # Crucial to save here
+                        st.session_state[fingerprint_checked_key] = True # Mark as checked for this session
+                        logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
 
-                        # Check limits and handle bans. This is where the 24-hour reset happens.
-                        limit_check = self.question_limits.is_within_limits(session)
-                        if not limit_check.get('allowed', True):
-                            # If the user is being prompted for re-verification due to higher historical privilege,
-                            # do not show a ban message, but let the dialog handle it.
-                            if session.reverification_pending and limit_check.get('reason') == 'guest_limit': # This condition seems redundant based on the `if not allowed and reason != guest_limit` above
-                                logger.info(f"Session {session.session_id[:8]} is pending re-verification, suppressing ban message and allowing dialog.")
-                            else:
-                                ban_type = limit_check.get('ban_type', 'unknown')
-                                message = limit_check.get('message', 'Access restricted due to usage policy.')
-                                time_remaining = limit_check.get('time_remaining')
+                    # Check limits and handle bans. This is where the 24-hour reset happens.
+                    limit_check = self.question_limits.is_within_limits(session)
+                    if not limit_check.get('allowed', True):
+                        # If the user is being prompted for re-verification due to higher historical privilege,
+                        # do not show a ban message, but let the dialog handle it.
+                        if session.reverification_pending and limit_check.get('reason') == 'guest_limit': # This condition seems redundant based on the `if not allowed and reason != guest_limit` above
+                            logger.info(f"Session {session.session_id[:8]} is pending re-verification, suppressing ban message and allowing dialog.")
+                        else:
+                            ban_type = limit_check.get('ban_type', 'unknown')
+                            message = limit_check.get('message', 'Access restricted due to usage policy.')
+                            time_remaining = limit_check.get('time_remaining')
                             
-                                st.error(f"🚫 **Access Restricted**")
-                                if time_remaining:
-                                    hours = max(0, int(time_remaining.total_seconds() // 3600))
-                                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                                    st.error(f"Time remaining: {hours}h {minutes}m")
-                                st.info(message)
-                                logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
+                            st.error(f"🚫 **Access Restricted**")
+                            if time_remaining:
+                                hours = max(0, int(time_remaining.total_seconds() // 3600))
+                                minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                                st.error(f"Time remaining: {hours}h {minutes}m")
+                            st.info(message)
+                            logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
                         
-                            try:
-                                self.db.save_session(session)
-                            except Exception as e:
-                                logger.error(f"Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
+                        try:
+                            self.db.save_session(session)
+                        except Exception as e:
+                            logger.error(f"Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
                         
-                            return session
-                    
                         return session
-                    else:
-            		    logger.warning(f"Session {session_id[:8]} not found or inactive.")
-            		    if 'current_session_id' in st.session_state:
-                		    del st.session_state['current_session_id']
+                    
+                    return session
+                else:
+                    logger.warning(f"Session {session_id[:8]} not found or inactive. Creating new session.")
+                    if 'current_session_id' in st.session_state:
+                        del st.session_state['current_session_id']
 
-        			# Handle session creation based on current page
-        			current_page = st.session_state.get('page')
-        
-        			if current_page == "chat":
-            			# We're on chat page but no valid session - force welcome page
-            			logger.info(f"No valid session for chat page, forcing welcome page")
-            			st.session_state['page'] = None
-            			st.session_state['session_expired'] = True
-            			return None
-        
-        			# Create new session for welcome page or initial load
-        			logger.info(f"Creating new session (current page: {current_page})")
-    				new_session = self._create_new_session()
-       				st.session_state.current_session_id = new_session.session_id
-        
-        			# Immediately attempt fingerprint inheritance for the newly created session
-        			self._attempt_fingerprint_inheritance(new_session)
-        			st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
-        
-        			self.db.save_session(new_session)
-        			logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
-        			return new_session
-        
-    			except Exception as e:
-        			logger.error(f"Failed to get/create session: {e}", exc_info=True)
-        
-        			# Only create fallback session if not on chat page
-        			current_page = st.session_state.get('page')
-        			if current_page == "chat":
-            			logger.error("Critical error on chat page - forcing welcome page")
-            			st.session_state['page'] = None
-            			st.session_state['session_expired'] = True
-            			return None
+            logger.info(f"Creating new session")
+            new_session = self._create_new_session()
+            st.session_state.current_session_id = new_session.session_id
             
-        			# Create emergency fallback session for welcome page
-        			fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None)
-        			fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
-        			fallback_session.fingerprint_method = "emergency_fallback"
-        			st.session_state.current_session_id = fallback_session.session_id
-        			st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
-        			logger.error(f"Emergency fallback session created {fallback_session.session_id[:8]}")
-        			return fallback_session
+            # Immediately attempt fingerprint inheritance for the *newly created* session
+            # This is critical if a user starts a new session but has an existing fingerprint
+            self._attempt_fingerprint_inheritance(new_session) # <--- This call will now also correctly set visitor_type
+            st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
+            
+            self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
+            logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
+            return new_session
+            
+        except Exception as e:
+            logger.error(f"Failed to get/create session: {e}", exc_info=True)
+            fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None)
+            fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
+            fallback_session.fingerprint_method = "emergency_fallback"
+            st.session_state.current_session_id = fallback_session.session_id
+            st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
+            logger.error(f"Emergency fallback session created {fallback_session.session_id[:8]}")
+            return fallback_session
 
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]) -> bool:
         """Applies fingerprinting data from custom component to the session with better validation."""
@@ -3297,8 +3161,8 @@ class SessionManager:
                     "safety_override": False
                 }
 
-            # Industry context validation check
-            context_result = check_industry_context(prompt, self.ai.openai_client)
+            # CHANGE 2: Update the function call to pass conversation history
+            context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
             if context_result and not context_result.get("relevant", True):
                 confidence = context_result.get("confidence", 0.0)
                 category = context_result.get("category", "unknown")
@@ -3616,20 +3480,28 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
 
     # If the session is already inactive, force a reload
     if not session.active:
-        logger.info(f"Session {session.session_id[:8]} is inactive. Forcing welcome page.")
+        logger.info(f"Session {session.session_id[:8]} is inactive. Triggering reload to welcome page.")
         st.error("⏰ **Session Expired**")
         st.info("Your previous session has ended. Please start a new session.")
-    
+        
         # Clear Streamlit session state fully
         for key in list(st.session_state.keys()):
             del st.session_state[key]
 
-        # Force welcome page state
+        # NEW: Force welcome page state before any reload attempts
         st.session_state['page'] = None
         st.session_state['session_expired'] = True
 
-        st.info("🏠 Redirecting to welcome page...")
+        if JS_EVAL_AVAILABLE:
+            try:
+                streamlit_js_eval(js_expressions="parent.window.location.reload()")
+                st.stop()
+            except Exception as e:
+                logger.error(f"Browser reload failed during inactive session handling: {e}")
+        
+        st.info("🏠 Redirecting to home page...")
         st.rerun()
+        st.stop()
         return True
 
     # Check if last_activity is None (timer hasn't started)
@@ -3703,20 +3575,22 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         st.session_state['page'] = None
         st.session_state['session_expired'] = True
         
-        # Clear Streamlit session state and force welcome page
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-
-        st.session_state['page'] = None
-        st.session_state['session_expired'] = True
-
         # Show timeout message
         st.error("⏰ **Session Timeout**")
         st.info("Your session has expired due to 5 minutes of inactivity.")
-
-        # Simple rerun - don't rely on browser reload
-        st.info("🏠 Redirecting to welcome page...")
+        
+        # TRIGGER BROWSER RELOAD using streamlit_js_eval
+        if JS_EVAL_AVAILABLE:
+            try:
+                logger.info(f"🔄 Triggering browser reload for timeout")
+                streamlit_js_eval(js_expressions="parent.window.location.reload()")
+                st.stop()
+            except Exception as e:
+                logger.error(f"Browser reload failed during inactive session handling: {e}")
+        
+        st.info("🏠 Redirecting to home page...")
         st.rerun()
+        st.stop()
         return True
     
     return False
@@ -4502,7 +4376,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     elif current_stage == 'code_entry':
         verification_email = st.session_state.get('verification_email', session.email)
         st.success(f"📧 A verification code has been sent to **{session_manager._mask_email(verification_email)}**.")
-        st.info("Please check your email, including spam/junk folders. The code is valid for 1 minute only. Resend code if expired.")
+        st.info("Please check your email, including spam/junk folders. The code is valid for 1 minute.")
         
         with st.form("code_verification_form", clear_on_submit=False):
             code = st.text_input("Enter Verification Code", placeholder="e.g., 123456", max_chars=6, key="verification_code_input")
@@ -4897,8 +4771,6 @@ def main_fixed():
         st.session_state['page'] = None
         if 'session_expired' in st.session_state:
             del st.session_state['session_expired']
-        if 'current_session_id' in st.session_state:
-            del st.session_state['current_session_id']  # Important: clear session ID
         st.info("⏰ Your session expired. Please start a new session.")
 
     # Initialize loading state if not already set (for first run)
@@ -5037,25 +4909,16 @@ def main_fixed():
         if current_page != "chat":
             render_welcome_page(session_manager)
         else:
-            # Get existing session - this will now properly handle expired sessions
+            # Get existing session (should already exist from loading state or prior direct creation)
             session = session_manager.get_session()
             
-            if session is None:
-                # Session was expired or invalid - redirect to welcome
-                logger.warning(f"No valid session for chat page. Redirecting to welcome.")
+            if session is None or not session.active:
+                logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
                 st.session_state['page'] = None
-                st.session_state['session_expired'] = True
                 st.rerun()
                 return
-
-            if not session.active:
-                logger.warning(f"Session {session.session_id[:8]} is inactive. Redirecting to welcome.")
-            st.session_state['page'] = None  
-            st.session_state['session_expired'] = True
-            if 'current_session_id' in st.session_state:
-                del st.session_state['current_session_id']
-            st.rerun()
-            return
             
             # 🔥 RENDER FINGERPRINTING FIRST, BEFORE TIMEOUT LOGIC
             fingerprint_needed = (
@@ -5092,6 +4955,9 @@ def main_fixed():
                         st.session_state.is_chat_ready = False
                         logger.info(f"Starting fingerprint wait timer for session {session.session_id[:8]}")
                     elif current_time_float - wait_start > 15:  # ✅ 15 seconds is reasonable
+                        # Timeout reached, enable chat with fallback fingerprint
+                        st.session_state.is_chat_ready = True
+                        elif current_time_float - wait_start > 15:  # ✅ 15 seconds is reasonable
                         # Timeout reached, enable chat with fallback fingerprint
                         st.session_state.is_chat_ready = True
                         logger.warning(f"Fingerprint timeout (15s) - enabling chat with fallback for session {session.session_id[:8]}")
