@@ -2031,7 +2031,8 @@ OUTPUT: Only the optimized search query, nothing else."""
             search_params = {
                 "query": standalone_query,
                 "max_results": 5,
-                "search_depth": "advanced"
+                "search_depth": "advanced",
+                "include_answer": "advanced"
             }
             
             if strategy.get("exclude_domains"):
