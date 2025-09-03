@@ -2263,6 +2263,15 @@ class EnhancedAI:
             try:
                 logger.info("🧠 Querying Pinecone knowledge base (primary)...")
                 pinecone_response = self.pinecone_tool.query(langchain_history)
+
+                # 🔍 ADD THIS DEBUG BLOCK HERE
+                if pinecone_response:
+                    logger.warning("🧠 PINECONE RESPONSE RECEIVED:")
+                    logger.warning(f"   Success: {pinecone_response.get('success', False)}")
+                    logger.warning(f"   Content length: {len(pinecone_response.get('content', ''))}")
+                    logger.warning(f"   Has citations: {pinecone_response.get('has_citations', False)}")
+                else:
+                    logger.error("🚨 PINECONE RETURNED NULL!")
                 
                 if pinecone_response and pinecone_response.get("success"):
                     # Use the new business-aware logic to decide if a fallback is needed
