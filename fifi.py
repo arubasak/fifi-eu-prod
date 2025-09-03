@@ -2162,6 +2162,16 @@ class EnhancedAI:
         Determines if a fallback to web search is needed based on strict business rules.
         """
         content = pinecone_response.get("content", "").lower()
+        # DEBUG: Log the citation detection issue
+        has_citation_markers = "[1]" in content or "**sources:**" in content
+        has_citations_flag = pinecone_response.get("has_citations", False)
+    
+        if has_citation_markers:
+            logger.warning(f"🔍 CITATION DEBUG: Found markers in content, has_citations={has_citations_flag}")
+            logger.warning(f"Content preview: {content[:200]}...")
+
+
+        
         original_lower = original_question.lower()
     
         # NEW: Check original question for recency indicators
