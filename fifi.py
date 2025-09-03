@@ -4807,10 +4807,65 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     return disable_chat_input
 
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
-    """Chat interface with enhanced tier system notifications."""
+    """Chat interface with fingerprinting handled HERE, not on welcome page."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
+
+    # MOVED FROM WELCOME PAGE: Handle fingerprinting on chat page load
+    fingerprint_needed = (
+        session is not None and (
+            not session.fingerprint_id or
+            session.fingerprint_method == "temporary_fallback_python" or
+            session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+        )
+    )
+
+    # Initialize fingerprinting status if needed
+    if 'fingerprint_status' not in st.session_state:
+        st.session_state.fingerprint_status = 'pending'
+        st.session_state.is_chat_ready = False
+
+    # Start fingerprinting process if needed
+    if fingerprint_needed and st.session_state.get('fingerprint_status') == 'pending':
+        st.session_state.fingerprint_status = 'pending_js'
+        st.session_state.fingerprint_wait_start = time.time()
+        st.session_state.is_chat_ready = False
+        logger.info(f"Starting fingerprinting process for session {session.session_id[:8]} on chat page.")
+
+    # Render fingerprinting component if needed
+    if fingerprint_needed and st.session_state.get('fingerprint_status') == 'pending_js':
+        fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+        if not st.session_state.get(fingerprint_key, False):
+            session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+            st.session_state[fingerprint_key] = True
+            logger.info(f"Triggered fingerprint component rendering for session {session.session_id[:8]} on chat page.")
+
+        current_time_float = time.time()
+        wait_start = st.session_state.get('fingerprint_wait_start')
+        elapsed = current_time_float - wait_start
+        remaining = max(0, 15 - elapsed)  # 15 seconds timeout for fingerprint JS
+
+        if remaining > 0:
+            st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
+            st.caption("FiFi is setting up device recognition for security and session management.")
+        else:
+            st.info("🔒 **Finalizing setup...** Almost ready (using fallback fingerprint).")
+
+        progress_value = min(elapsed / 15, 1.0)
+        st.progress(progress_value, text="Session Security Setup")
+        st.markdown("---")
+        
+        # Rerun to update timer, but keep chat_ready as False
+        st.session_state.is_chat_ready = False
+        if remaining > 0:  # Only rerun if still waiting
+            st.rerun()
+        else:
+            # Timeout reached, enable chat input with fallback fingerprint
+            st.session_state.is_chat_ready = True
+            st.session_state.fingerprint_status = 'timeout'
+            logger.warning(f"Fingerprint timeout (15s) for session {session.session_id[:8]} - enabling chat input with fallback.")
+            st.rerun()  # Rerun one last time to enable chat input
 
     # Simple activity tracking
     if activity_result:
@@ -4867,7 +4922,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 indicators = []
                 if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
                 if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
-                if msg.get("is_meta_response"): indicators.append("📈 Session Analytics") # For meta-questions
+                if msg.get("is_meta_response"): indicators.append("📈 Session Analytics")
                 if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                 
                 if msg.get("safety_override"):
@@ -4876,17 +4931,19 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 if msg.get("has_citations") and msg.get("has_inline_citations"):
                     st.caption("📚 Response includes verified citations")
                 
-                # Check for post-response Tier 1 ban notification (for Registered Users only)
+                # Check for post-response Tier 1 ban notification
                 if msg.get('role') == 'assistant' and msg.get('tier1_ban_applied_post_response', False):
                     st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
-                    st.markdown("---") # Visual separator
+                    st.markdown("---")
 
-    # Chat input section with inline error notifications + manual dismiss
+    # FIXED: Chat input disabled by fingerprinting OR dialog OR bans
     overall_chat_disabled = (
-        not st.session_state.get('is_chat_ready', False) or 
-        should_disable_chat_input_by_dialog or 
-        session.ban_status.value != BanStatus.NONE.value
+        not st.session_state.get('is_chat_ready', False) or  # Fingerprinting not complete
+        should_disable_chat_input_by_dialog or               # Email dialog active
+        session.ban_status.value != BanStatus.NONE.value     # User is banned
     )
+
+    # [Rest of your error notifications and chat input code remains the same...]
 
     # Rate limit notification with manual dismiss
     if 'rate_limit_hit' in st.session_state:
