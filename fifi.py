@@ -2150,6 +2150,10 @@ class EnhancedAI:
             "not available in my knowledge base",
             "don't have information about",
             "couldn't find information"
+            "do not provide specific information",
+            "does not provide specific information", 
+            "search results do not provide",
+            "results do not provide"
         ]
         if any(phrase in content for phrase in not_found_indicators):
             logger.warning("🔄 Fallback TRIGGERED: Pinecone could not find the topic/product in its knowledge base.")
