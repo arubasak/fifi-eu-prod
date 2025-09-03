@@ -2142,13 +2142,16 @@ class EnhancedAI:
 
         # RULE 2: ALWAYS fallback if Pinecone explicitly states it doesn't know about a topic.
         # This indicates a product/topic not found in the knowledge base.
-        product_not_found_phrases = [
-            "i don't have specific information about this topic",
-            "cannot find information about",
+        not_found_indicators = [
+            "don't have specific information",
+            "could not find specific information", 
+            "cannot find information",
             "no information about",
-            "is not available in my knowledge base"
+            "not available in my knowledge base",
+            "don't have information about",
+            "couldn't find information"
         ]
-        if any(phrase in content for phrase in product_not_found_phrases):
+        if any(phrase in content for phrase in not_found_indicators):
             logger.warning("🔄 Fallback TRIGGERED: Pinecone could not find the topic/product in its knowledge base.")
             return True
         
