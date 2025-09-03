@@ -2779,79 +2779,79 @@ class SessionManager:
                 st.session_state[f'loading_{session_id}'] = False  # Clear the flag
                 
                 if session:
-                # NEW: Check if session should be expired due to timeout BEFORE checking active status
-                if session.last_activity:
-                    time_since_activity = datetime.now() - session.last_activity
-                    minutes_inactive = time_since_activity.total_seconds() / 60
+                    # NEW: Check if session should be expired due to timeout BEFORE checking active status
+                    if session.last_activity:
+                        time_since_activity = datetime.now() - session.last_activity
+                        minutes_inactive = time_since_activity.total_seconds() / 60
         
-                    if minutes_inactive >= self.get_session_timeout_minutes():
-                        logger.info(f"⏰ Session {session_id[:8]} expired ({minutes_inactive:.1f}m > {self.get_session_timeout_minutes()}m). Forcing welcome page.")
-                        # Mark session as inactive
-                        session.active = False
-                        try:
-                            self.db.save_session(session)
-                        except Exception as e:
-                            logger.error(f"Failed to save expired session: {e}")
+                        if minutes_inactive >= self.get_session_timeout_minutes():
+                            logger.info(f"⏰ Session {session_id[:8]} expired ({minutes_inactive:.1f}m > {self.get_session_timeout_minutes()}m). Forcing welcome page.")
+                            # Mark session as inactive
+                            session.active = False
+                            try:
+                                self.db.save_session(session)
+                            except Exception as e:
+                                logger.error(f"Failed to save expired session: {e}")
             
-                        # Clear session ID from state to force welcome page
+                            # Clear session ID from state to force welcome page
+                            if 'current_session_id' in st.session_state:
+                                del st.session_state['current_session_id']
+            
+                            # Set expired flag for main function to handle
+                            st.session_state['session_expired'] = True
+                            st.session_state['page'] = None
+            
+                            return None  # Return None to force welcome page
+
+                    if session.active:
+                        # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
+                        # And this check hasn't been performed for this session yet in the current rerun cycle.
+                        fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
+                        if (session.fingerprint_id and 
+                            session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
+                            not st.session_state.get(fingerprint_checked_key, False)):
+                        
+                            self._attempt_fingerprint_inheritance(session)
+                            # Save session after potential inheritance to persist updated user type/counts
+                            self.db.save_session(session) # Crucial to save here
+                            st.session_state[fingerprint_checked_key] = True # Mark as checked for this session
+                            logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
+
+                        # Check limits and handle bans. This is where the 24-hour reset happens.
+                        limit_check = self.question_limits.is_within_limits(session)
+                        if not limit_check.get('allowed', True):
+                            # If the user is being prompted for re-verification due to higher historical privilege,
+                            # do not show a ban message, but let the dialog handle it.
+                            if session.reverification_pending and limit_check.get('reason') == 'guest_limit': # This condition seems redundant based on the `if not allowed and reason != guest_limit` above
+                                logger.info(f"Session {session.session_id[:8]} is pending re-verification, suppressing ban message and allowing dialog.")
+                            else:
+                                ban_type = limit_check.get('ban_type', 'unknown')
+                                message = limit_check.get('message', 'Access restricted due to usage policy.')
+                                time_remaining = limit_check.get('time_remaining')
+                            
+                                st.error(f"🚫 **Access Restricted**")
+                                if time_remaining:
+                                    hours = max(0, int(time_remaining.total_seconds() // 3600))
+                                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                                    st.error(f"Time remaining: {hours}h {minutes}m")
+                                st.info(message)
+                                logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
+                        
+                            try:
+                                self.db.save_session(session)
+                            except Exception as e:
+                                logger.error(f"Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
+                        
+                            return session
+                    
+                        return session
+                    else:
+                        logger.warning(f"Session {session_id[:8]} not found or inactive. Will redirect to welcome page.")
                         if 'current_session_id' in st.session_state:
                             del st.session_state['current_session_id']
-            
-            # Set expired flag for main function to handle
-            st.session_state['session_expired'] = True
-            st.session_state['page'] = None
-            
-            return None  # Return None to force welcome page
-
-            if session.active:
-                # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
-                # And this check hasn't been performed for this session yet in the current rerun cycle.
-                fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
-                if (session.fingerprint_id and 
-                    session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
-                    not st.session_state.get(fingerprint_checked_key, False)):
-                        
-                        self._attempt_fingerprint_inheritance(session)
-                        # Save session after potential inheritance to persist updated user type/counts
-                        self.db.save_session(session) # Crucial to save here
-                        st.session_state[fingerprint_checked_key] = True # Mark as checked for this session
-                        logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
-
-                    # Check limits and handle bans. This is where the 24-hour reset happens.
-                    limit_check = self.question_limits.is_within_limits(session)
-                    if not limit_check.get('allowed', True):
-                        # If the user is being prompted for re-verification due to higher historical privilege,
-                        # do not show a ban message, but let the dialog handle it.
-                        if session.reverification_pending and limit_check.get('reason') == 'guest_limit': # This condition seems redundant based on the `if not allowed and reason != guest_limit` above
-                            logger.info(f"Session {session.session_id[:8]} is pending re-verification, suppressing ban message and allowing dialog.")
-                        else:
-                            ban_type = limit_check.get('ban_type', 'unknown')
-                            message = limit_check.get('message', 'Access restricted due to usage policy.')
-                            time_remaining = limit_check.get('time_remaining')
-                            
-                            st.error(f"🚫 **Access Restricted**")
-                            if time_remaining:
-                                hours = max(0, int(time_remaining.total_seconds() // 3600))
-                                minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                                st.error(f"Time remaining: {hours}h {minutes}m")
-                            st.info(message)
-                            logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
-                        
-                        try:
-                            self.db.save_session(session)
-                        except Exception as e:
-                            logger.error(f"Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
-                        
-                        return session
-                    
-                    return session
-                else:
-                    logger.warning(f"Session {session_id[:8]} not found or inactive. Will redirect to welcome page.")
-                    if 'current_session_id' in st.session_state:
-                        del st.session_state['current_session_id']
-                    st.session_state['session_expired'] = True
-                    st.session_state['page'] = None
-                    return None
+                        st.session_state['session_expired'] = True
+                        st.session_state['page'] = None
+                        return None
 
                 # Only create new session if we're not on chat page
                 current_page = st.session_state.get('page')
