@@ -5265,14 +5265,11 @@ def main_fixed():
     current_page = st.session_state.get('page', 'welcome')
 
     if current_page == 'welcome':
-        # Get or create a temporary session for fingerprinting
-        session = session_manager.get_session()
-        if session:
-            render_welcome_page(session_manager, session)
-        else:
-            st.error("Could not create a session. Please refresh.")
+        # FIXED: Don't create session on welcome page - just show the UI
+        render_welcome_page(session_manager)  # No session parameter
 
     elif current_page == 'chat':
+        # FIXED: Create session HERE after user clicked a button
         session = session_manager.get_session()
             
         if session is None or not session.active:
@@ -5283,6 +5280,7 @@ def main_fixed():
             st.rerun()
             return
 
+        # Set up activity tracking
         activity_data_from_js = None
         if session and session.session_id: 
             activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
@@ -5297,10 +5295,12 @@ def main_fixed():
             else:
                 activity_data_from_js = st.session_state.latest_activity_data_from_js
         
+        # Check for timeout
         timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
         if timeout_triggered:
             return
 
+        # Render UI components
         render_sidebar(session_manager, session, st.session_state.pdf_exporter)
         render_chat_interface_simplified(session_manager, session, activity_data_from_js)
 
