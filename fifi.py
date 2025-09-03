@@ -2190,12 +2190,14 @@ class EnhancedAI:
         if any(indicator in original_lower for indicator in recency_indicators):
             logger.warning("🔄 Fallback TRIGGERED: User requested latest/current information.")
             return True
+        logger.warning("✅ Recency check PASSED")
 
         # RULE 1: NEVER fallback if Pinecone provides the business redirect for pricing/stock.
         # This is the desired final answer for these questions.
         if "sales-eu@12taste.com" in content or "contact our sales team" in content:
-            logger.info("✅ Fallback SKIPPED: Pinecone provided the correct business redirect for pricing/stock.")
+            logger.warning("✅ Fallback SKIPPED: Pinecone provided the correct business redirect for pricing/stock.")
             return False
+        logger.warning("✅ Business redirect check PASSED (no sales redirect found)")
 
         # RULE 2: ALWAYS fallback if Pinecone explicitly states it doesn't know about a topic.
         # This indicates a product/topic not found in the knowledge base.
@@ -2216,9 +2218,11 @@ class EnhancedAI:
             "search results do not contain",
             "results do not contain"
         ]
-        if any(phrase in content for phrase in not_found_indicators):
-            logger.warning("🔄 Fallback TRIGGERED: Pinecone could not find the topic/product in its knowledge base.")
-            return True
+        for phrase in not_found_indicators:
+            if phrase in content:
+                logger.warning(f"🔄 Fallback TRIGGERED: Found 'not found' indicator: '{phrase}'")
+                return True
+        logger.warning("✅ Not found indicators check PASSED")
         
         # RULE 3: Fallback on critical safety issues like fake citations.
         # (This logic can be preserved from your original implementation)
@@ -2226,6 +2230,7 @@ class EnhancedAI:
             if not pinecone_response.get("has_citations", False):
                 logger.warning("🚨 SAFETY OVERRIDE: Detected fake citations. Switching to web search.")
                 return True
+        logger.warning("✅ Citation safety check PASSED")
         
         # RULE 4: Force web search for regulatory topics without citations
         regulatory_indicators = ["regulation", "directive", "compliance", "legal"]
@@ -2234,10 +2239,12 @@ class EnhancedAI:
         if is_regulatory and not pinecone_response.get("has_citations", False):
             logger.warning("🔄 Fallback TRIGGERED: Regulatory topic without citations.")
         return True
-        
+        logger.warning(f"✅ Regulatory check PASSED (is_regulatory={is_regulatory})")
+
         # DEFAULT: Do not fallback. Assume Pinecone's answer is correct if it's not a "not found" response
         # and doesn't violate business rules.
-        logger.info("✅ Fallback SKIPPED: Pinecone provided a valid response from its knowledge base.")
+        logger.warning("✅ ALL CHECKS PASSED - Should NOT fallback, but something is wrong!")
+        logger.warning("✅ Fallback SKIPPED: Pinecone provided a valid response from its knowledge base.")
         return False
     
     # CHANGE 6: Business-First Routing (Always Try Pinecone First)
