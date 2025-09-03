@@ -1975,20 +1975,34 @@ OUTPUT: Only the optimized search query, nothing else."""
             return content
 
     def synthesize_search_results(self, results, query: str) -> str:
-        """Simple synthesis: combine Tavily answer + sources."""
+        """Enhanced synthesis using Tavily's answer + sources."""
     
         # Handle dict response from TavilySearch tool
         if isinstance(results, dict):
-            # Extract the actual results array from the dict response
-            if 'results' in results:
-                results = results['results']
-            elif 'answer' in results:
-                # Sometimes Tavily returns direct answer format
-                return f"Based on web search for '{query}':\n\n{results['answer']}"
+            tavily_answer = results.get('answer', '')
+            tavily_results = results.get('results', [])
+        
+            # If we have Tavily's synthesized answer, use it + add sources
+            if tavily_answer and tavily_results:
+                response_parts = [tavily_answer]
+                response_parts.append("\n\n**Sources:**")
+            
+                for i, res in enumerate(tavily_results, 1):
+                    if isinstance(res, dict) and 'url' in res and 'title' in res:
+                        response_parts.append(f"\n{i}. [{res['title']}]({res['url']})")
+            
+                return "\n".join(response_parts)
+        
+            # Fallback: extract results array if no answer
+            elif tavily_results:
+                results = tavily_results
+            elif tavily_answer:
+                return f"Based on web search for '{query}':\n\n{tavily_answer}"
             else:
                 logger.warning(f"Unexpected dict format from Tavily: {results.keys()}")
-                return f"I found some information but couldn't format it properly. Please try rephrasing your question."
+                return f"I found some information but couldn't format it properly."
     
+        # Rest of existing list handling code stays the same...
         if not isinstance(results, list):
             logger.warning(f"Tavily returned unexpected results type: {type(results)}")
             return "I couldn't process the search results properly."
@@ -1996,7 +2010,6 @@ OUTPUT: Only the optimized search query, nothing else."""
         if not results:
             return f"I couldn't find any relevant information online for: '{query}'"
 
-        # Rest of existing code stays the same...
         response_parts = [f"Here is a summary of web search results for '{query}':\n"]
         for res in results[:3]:
             if isinstance(res, dict) and 'content' in res:
@@ -2007,7 +2020,8 @@ OUTPUT: Only the optimized search query, nothing else."""
             if isinstance(res, dict) and 'url' in res and 'title' in res:
                 response_parts.append(f"\n{i}. [{res['title']}]({res['url']})")
     
-        return "\n".join(response_parts)
+        return "\n".join(response_parts)   
+        
 
     def determine_search_strategy(self, question: str, pinecone_error_type: str = None) -> Dict[str, Any]:
         """Determine whether to use domain-restricted or worldwide search."""
