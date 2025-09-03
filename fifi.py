@@ -2046,7 +2046,7 @@ OUTPUT: Only the optimized search query, nothing else."""
                 "query": standalone_query,
                 "max_results": 5,
                 "search_depth": "advanced",
-                "include_answer": "advanced"
+                "include_answer": "basic"
             }
             
             if strategy.get("exclude_domains"):
