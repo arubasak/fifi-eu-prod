@@ -2161,8 +2161,6 @@ class EnhancedAI:
         """
         Determines if a fallback to web search is needed based on strict business rules.
         """
-        logger.warning("🔧 DEBUG: Forcing Pinecone response (temporarily disabled fallback)")
-        return False  # Force no fallback
         content = pinecone_response.get("content", "").lower()
         original_lower = original_question.lower()
 
