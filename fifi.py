@@ -2207,7 +2207,7 @@ class EnhancedAI:
                 return True
         
         # RULE 4: Force web search for regulatory topics without citations
-        regulatory_indicators = ["regulation", "vorschriften", "directive", "compliance", "legal"]
+        regulatory_indicators = ["regulation", "directive", "compliance", "legal"]
         is_regulatory = any(indicator in original_lower for indicator in regulatory_indicators)
     
         if is_regulatory and not pinecone_response.get("has_citations", False):
@@ -4794,7 +4794,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     elif current_stage == 'code_entry':
         verification_email = st.session_state.get('verification_email', session.email)
         st.success(f"📧 A verification code has been sent to **{session_manager._mask_email(verification_email)}**.")
-        st.info("Please check your email, including spam/junk folders. The code is valid for 1 minute.")
+        st.info("Please check your email, including spam/junk folders. The code is valid for 1 minute. Need quick action!")
         
         with st.form("code_verification_form", clear_on_submit=False):
             code = st.text_input("Enter Verification Code", placeholder="e.g., 123456", max_chars=6, key="verification_code_input")
