@@ -4307,8 +4307,8 @@ def handle_fingerprint_requests_from_query():
 # UI COMPONENTS
 # =============================================================================
 
-def render_welcome_page(session_manager: 'SessionManager', current_session: UserSession):
-    """Enhanced welcome page with loading lock and fingerprint rendering."""
+def render_welcome_page(session_manager: 'SessionManager'):
+    """Enhanced welcome page with NO session creation and NO fingerprinting - buttons always enabled."""
     
     # Show loading overlay if in loading state
     if show_loading_overlay():
@@ -4319,50 +4319,8 @@ def render_welcome_page(session_manager: 'SessionManager', current_session: User
     
     st.markdown("---")
 
-    # 🔥 NEW: Fingerprint rendering and status display on the welcome page
-    fingerprint_needed = (
-        current_session is not None and (
-            not current_session.fingerprint_id or
-            current_session.fingerprint_method == "temporary_fallback_python" or
-            current_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-        )
-    )
-
-    if fingerprint_needed and st.session_state.get('fingerprint_status') == 'pending_js':
-        fingerprint_key = f"fingerprint_rendered_{current_session.session_id}"
-        if not st.session_state.get(fingerprint_key, False):
-            session_manager.fingerprinting.render_fingerprint_component(current_session.session_id)
-            st.session_state[fingerprint_key] = True
-            logger.info(f"Triggered fingerprint component rendering for session {current_session.session_id[:8]} on welcome page.")
-
-        current_time_float = time.time()
-        wait_start = st.session_state.get('fingerprint_wait_start')
-        elapsed = current_time_float - wait_start
-        remaining = max(0, 15 - elapsed) # 15 seconds timeout for fingerprint JS
-
-        if remaining > 0:
-            st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
-            st.caption("FiFi is setting up device recognition for security and session management.")
-        else:
-            st.info("🔒 **Finalizing setup...** Almost ready (using fallback fingerprint).")
-
-        progress_value = min(elapsed / 15, 1.0)
-        st.progress(progress_value, text="Session Security Setup")
-        st.markdown("---")
-        
-        # Rerun to update timer, but keep chat_ready as False
-        st.session_state.is_chat_ready = False
-        if remaining > 0: # Only rerun if still waiting, otherwise allow buttons to be enabled
-            st.rerun()
-        else:
-            # Timeout reached, enable buttons with fallback fingerprint
-            st.session_state.is_chat_ready = True
-            st.session_state.fingerprint_status = 'timeout'
-            logger.warning(f"Fingerprint timeout (15s) for session {current_session.session_id[:8]} - enabling buttons with fallback.")
-            st.rerun() # Rerun one last time to enable buttons
-
-    # Determine if buttons should be disabled
-    buttons_disabled = not st.session_state.get('is_chat_ready', False)
+    # REMOVED: All fingerprinting logic - this happens on chat page after button click
+    # REMOVED: buttons_disabled logic - welcome buttons are ALWAYS enabled
 
     tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
     
@@ -4379,7 +4337,8 @@ def render_welcome_page(session_manager: 'SessionManager', current_session: User
                 
                 col1, col2, col3 = st.columns(3)
                 with col2:
-                    submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True, disabled=buttons_disabled)
+                    # FIXED: Button is NEVER disabled on welcome page
+                    submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
                 
                 if submit_button:
                     if not username or not password:
@@ -4408,7 +4367,8 @@ def render_welcome_page(session_manager: 'SessionManager', current_session: User
         st.markdown("")
         col1, col2, col3 = st.columns(3)
         with col2:
-            if st.button("👤 Start as Guest", use_container_width=True, disabled=buttons_disabled):
+            # FIXED: Button is NEVER disabled on welcome page
+            if st.button("👤 Start as Guest", use_container_width=True):
                 st.session_state.loading_reason = 'start_guest'
                 set_loading_state(True, "Setting up your session and initializing AI assistant...")
                 st.rerun()  
