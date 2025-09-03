@@ -2240,7 +2240,7 @@ class EnhancedAI:
     
         if is_regulatory and not pinecone_response.get("has_citations", False):
             logger.warning("🔄 Fallback TRIGGERED: Regulatory topic without citations.")
-        return True
+            return True
         logger.warning(f"✅ Regulatory check PASSED (is_regulatory={is_regulatory})")
 
         # DEFAULT: Do not fallback. Assume Pinecone's answer is correct if it's not a "not found" response
