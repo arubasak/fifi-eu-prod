@@ -4444,32 +4444,19 @@ def handle_fingerprint_requests_from_query():
 # =============================================================================
 
 def render_welcome_page(session_manager: 'SessionManager'):
-    """Enhanced welcome page with NO session creation and NO fingerprinting - buttons always enabled."""
+    """Simplified welcome page that prevents infinite spinner loops."""
     
-    # Show loading overlay if in loading state
-    if show_loading_overlay():
-        return
+    # CRITICAL: Never show loading overlay on welcome page
+    # Clear any stuck loading states immediately
+    if st.session_state.get('is_loading', False):
+        st.session_state.is_loading = False
+        st.session_state.loading_message = ""
+        logger.warning("Cleared stuck loading state on welcome page")
     
-    # ✅ ADD THIS MISSING SECTION BACK:
-    # CHECK: Do we have a session that needs fingerprinting?
-    current_session_id = st.session_state.get('current_session_id')
-    if current_session_id:
-        session = session_manager.db.load_session(current_session_id)
-        if session and session.fingerprint_id and session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-            # Show fingerprinting UI (this opens the window with 3 dots)
-            st.title("🤖 Welcome to FiFi AI Assistant")
-            st.info("🔒 **Securing your session...** Setting up device recognition.")
-            session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-            st.progress(0.5, text="Fingerprinting window opening...")
-            return  # Don't show normal welcome page during fingerprinting
-        
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
     
     st.markdown("---")
-
-    # REMOVED: All fingerprinting logic - this happens on chat page after button click
-    # REMOVED: buttons_disabled logic - welcome buttons are ALWAYS enabled
 
     tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
     
@@ -4486,18 +4473,23 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 
                 col1, col2, col3 = st.columns(3)
                 with col2:
-                    # FIXED: Button is NEVER disabled on welcome page
                     submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
                 
                 if submit_button:
                     if not username or not password:
                         st.error("Please enter both username and password to sign in.")
                     else:
-                        st.session_state.temp_username = username
-                        st.session_state.temp_password = password
-                        st.session_state.loading_reason = 'authenticate'
-                        set_loading_state(True, "Authenticating and preparing your session...")
-                        st.rerun()  
+                        # FIXED: Direct authentication without complex loading states
+                        with st.spinner("Signing in..."):
+                            authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                            
+                        if authenticated_session:
+                            st.session_state.current_session_id = authenticated_session.session_id
+                            st.session_state.page = "chat"  # Go directly to chat
+                            st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
+                            st.balloons()
+                            st.rerun()
+                        # If authentication fails, error is already shown by authenticate_with_wordpress
             
             st.markdown("---")
             st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
@@ -4516,17 +4508,23 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.markdown("")
         col1, col2, col3 = st.columns(3)
         with col2:
-            # FIXED: Button is NEVER disabled on welcome page
             if st.button("👤 Start as Guest", use_container_width=True):
-                # Create session immediately (original working method)
-                session = session_manager.get_session()
-                if session:
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
-                    st.session_state.current_session_id = session.session_id
-            st.rerun()  
+                # FIXED: Simple direct transition without complex loading states
+                with st.spinner("Setting up your session..."):
+                    session = session_manager.get_session()  # This creates/gets session
+                    if session:
+                        if session.last_activity is None:
+                            session.last_activity = datetime.now()
+                            session_manager.db.save_session(session)
+                        st.session_state.current_session_id = session.session_id
+                        st.session_state.page = "chat"  # FIXED: Go to chat page immediately
+                        st.success("Session created! Starting FiFi AI...")
+                        st.rerun()
+                    else:
+                        st.error("Failed to create session. Please try again.")
 
     st.markdown("---")
+    # Keep the rest of your usage tiers display code as-is
     st.subheader("🎯 Usage Tiers")
     
     col1, col2, col3 = st.columns(3)
@@ -5312,9 +5310,8 @@ def ensure_initialization_fixed():
             return False
     
     return True
-
 def main_fixed():
-    """Main entry point with loading state management and early fingerprinting."""
+    """Main entry point with simplified loading state management."""
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
@@ -5323,6 +5320,12 @@ def main_fixed():
         )
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
+
+    # CRITICAL FIX: Clear any stuck loading states immediately on startup
+    if st.session_state.get('is_loading', False):
+        logger.warning("Clearing stuck loading state on app startup")
+        st.session_state.is_loading = False
+        st.session_state.loading_message = ""
 
     # Check for expired session flag and force welcome page
     if st.session_state.get('session_expired', False):
@@ -5334,128 +5337,104 @@ def main_fixed():
 
     # Initialize states if not already set
     if 'initialized' not in st.session_state:
-        st.session_state.is_loading = False
+        st.session_state.is_loading = False  # CRITICAL: Ensure this is False
         st.session_state.loading_message = ""
         st.session_state.is_chat_ready = False
-        st.session_state.fingerprint_status = 'pending'  # Will be set properly on chat page
+        st.session_state.fingerprint_status = 'pending'
         st.session_state.page = 'welcome'  # Always start on welcome page
         
-        # CRITICAL: Don't create any sessions during initialization
-        # Sessions should only be created when user clicks buttons
-        
         # Perform one-time full initialization (managers only, no sessions)
-        with st.spinner("Initializing application..."):
-            init_success = ensure_initialization_fixed()
-        if not init_success:
-            st.error("⚠️ Application failed to initialize properly.")
+        try:
+            with st.spinner("Initializing application..."):
+                init_success = ensure_initialization_fixed()
+            if not init_success:
+                st.error("⚠️ Application failed to initialize properly.")
+                st.info("Please refresh the page to try again.")
+                return
+        except Exception as e:
+            logger.error(f"Initialization failed: {e}")
+            st.error(f"⚠️ Initialization error: {str(e)}")
             st.info("Please refresh the page to try again.")
             return
 
     # Process any incoming fingerprint/emergency data from URL parameters
-    handle_emergency_save_requests_from_query()
-    handle_fingerprint_requests_from_query()
+    try:
+        handle_emergency_save_requests_from_query()
+        handle_fingerprint_requests_from_query()
+    except Exception as e:
+        logger.error(f"Query parameter handling failed: {e}")
 
     session_manager = st.session_state.get('session_manager')
     if not session_manager:
         st.error("❌ Session Manager not available. Please refresh the page.")
         return
 
-    # Handle loading states triggered by user actions (buttons)
-    if st.session_state.get('is_loading', False):
-        if show_loading_overlay():
-            pass
-        
-        try:
-            loading_reason = st.session_state.get('loading_reason', 'unknown')
-            
-            if loading_reason == 'start_guest':
-                # FIXED: Create session and immediately transition to chat
-                session = session_manager.get_session()
-                if session and session.last_activity is None:
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
-                # Set page to chat - this will trigger session creation on next rerun
-                st.session_state.page = "welcome"
-                
-            elif loading_reason == 'authenticate':
-                username = st.session_state.get('temp_username', '')
-                password = st.session_state.get('temp_password', '')
-                
-                if username and password:
-                    authenticated_session = session_manager.authenticate_with_wordpress(username, password)
-                    if authenticated_session:
-                        st.session_state.current_session_id = authenticated_session.session_id
-                        st.session_state.page = "chat"  # This triggers chat page load with session
-                        st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
-                        st.balloons()
-                    else:
-                        # Authentication failed - stay on welcome page
-                        st.session_state.page = "welcome"
-                        set_loading_state(False)
-                        return
-                else:
-                    # Missing credentials - stay on welcome page
-                    st.session_state.page = "welcome"
-                    set_loading_state(False)
-                    st.error("Authentication failed: Missing username or password.")
-                    return
-
-            # Cleanup and rerun
-            if 'loading_reason' in st.session_state: del st.session_state['loading_reason']
-            if 'temp_username' in st.session_state: del st.session_state['temp_username']
-            if 'temp_password' in st.session_state: del st.session_state['temp_password']
-            set_loading_state(False)
-            st.rerun()
-            return
-            
-        except Exception as e:
-            set_loading_state(False)
-            st.error(f"⚠️ Error during loading: {str(e)}")
-            logger.error(f"Loading state error: {e}", exc_info=True)
-            return
+    # REMOVED: Complex loading state handling that was causing infinite loops
+    # The welcome page now handles authentication directly with simple spinners
 
     # Main application logic
     current_page = st.session_state.get('page', 'welcome')
 
     if current_page == 'welcome':
-        # FIXED: Don't create session on welcome page - just show the UI
-        render_welcome_page(session_manager)  # No session parameter
+        # Show welcome page (no session needed)
+        render_welcome_page(session_manager)
 
     elif current_page == 'chat':
-        # FIXED: Create session HERE after user clicked a button
-        session = session_manager.get_session()
+        # Get or create session for chat
+        try:
+            session = session_manager.get_session()
             
-        if session is None or not session.active:
-            logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            st.session_state['page'] = 'welcome'
-            st.rerun()
-            return
+            if session is None or not session.active:
+                logger.warning("Expected active session for 'chat' page but got None or inactive. Returning to welcome.")
+                st.session_state['page'] = 'welcome'
+                st.error("⚠️ Session issue detected. Please start a new session.")
+                st.rerun()
+                return
 
-        # Set up activity tracking
-        activity_data_from_js = None
-        if session and session.session_id: 
-            activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
-            if not st.session_state.get(activity_tracker_key_state_flag, False) or \
-               st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
+            # Set up activity tracking
+            activity_data_from_js = None
+            if session and session.session_id: 
+                activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
+                if not st.session_state.get(activity_tracker_key_state_flag, False):
+                    logger.info(f"Rendering activity tracker component for session {session.session_id[:8]}")
+                    try:
+                        activity_data_from_js = render_simple_activity_tracker(session.session_id)
+                        st.session_state[activity_tracker_key_state_flag] = True
+                        st.session_state.latest_activity_data_from_js = activity_data_from_js
+                    except Exception as e:
+                        logger.error(f"Activity tracker failed: {e}")
+                else:
+                    activity_data_from_js = st.session_state.get('latest_activity_data_from_js')
+            
+            # Check for timeout
+            try:
+                timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+                if timeout_triggered:
+                    return
+            except Exception as e:
+                logger.error(f"Timeout check failed: {e}")
+
+            # Render UI components
+            try:
+                render_sidebar(session_manager, session, st.session_state.pdf_exporter)
+                render_chat_interface_simplified(session_manager, session, activity_data_from_js)
+            except Exception as e:
+                logger.error(f"UI rendering failed: {e}")
+                st.error(f"⚠️ UI error: {str(e)}")
                 
-                logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
-                activity_data_from_js = render_simple_activity_tracker(session.session_id)
-                st.session_state[activity_tracker_key_state_flag] = True
-                st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
-                st.session_state.latest_activity_data_from_js = activity_data_from_js
-            else:
-                activity_data_from_js = st.session_state.latest_activity_data_from_js
-        
-        # Check for timeout
-        timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
-        if timeout_triggered:
-            return
-
-        # Render UI components
-        render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-        render_chat_interface_simplified(session_manager, session, activity_data_from_js)
+        except Exception as e:
+            logger.error(f"Chat page error: {e}")
+            st.session_state['page'] = 'welcome'
+            st.error("⚠️ An error occurred. Returning to welcome page.")
+            st.rerun()
 
 if __name__ == "__main__":
-    main_fixed()
+    try:
+        main_fixed()
+    except Exception as e:
+        logger.critical(f"Critical application error: {e}", exc_info=True)
+        st.error("💥 Critical application error occurred.")
+        st.info("Please refresh the page to restart the application.")
+        # Clear all session state to force clean restart
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
