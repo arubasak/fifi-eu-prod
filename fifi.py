@@ -4450,6 +4450,19 @@ def render_welcome_page(session_manager: 'SessionManager'):
     if show_loading_overlay():
         return
     
+    # ✅ ADD THIS MISSING SECTION BACK:
+    # CHECK: Do we have a session that needs fingerprinting?
+    current_session_id = st.session_state.get('current_session_id')
+    if current_session_id:
+        session = session_manager.db.load_session(current_session_id)
+        if session and session.fingerprint_id and session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+            # Show fingerprinting UI (this opens the window with 3 dots)
+            st.title("🤖 Welcome to FiFi AI Assistant")
+            st.info("🔒 **Securing your session...** Setting up device recognition.")
+            session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+            st.progress(0.5, text="Fingerprinting window opening...")
+            return  # Don't show normal welcome page during fingerprinting
+        
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
     
@@ -4505,9 +4518,13 @@ def render_welcome_page(session_manager: 'SessionManager'):
         with col2:
             # FIXED: Button is NEVER disabled on welcome page
             if st.button("👤 Start as Guest", use_container_width=True):
-                st.session_state.loading_reason = 'start_guest'
-                set_loading_state(True, "Setting up your session and initializing AI assistant...")
-                st.rerun()  
+                # Create session immediately (original working method)
+                session = session_manager.get_session()
+                if session:
+                    session.last_activity = datetime.now()
+                    session_manager.db.save_session(session)
+                    st.session_state.current_session_id = session.session_id
+            st.rerun()  
 
     st.markdown("---")
     st.subheader("🎯 Usage Tiers")
@@ -4948,15 +4965,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
-    # MOVED FROM WELCOME PAGE: Handle fingerprinting on chat page load
-    fingerprint_needed = (
-        session is not None and (
-            not session.fingerprint_id or
-            session.fingerprint_method == "temporary_fallback_python" or
-            session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-        )
-    )
-
     # Initialize fingerprinting status if needed
     if 'fingerprint_status' not in st.session_state:
         st.session_state.fingerprint_status = 'pending'
@@ -5360,16 +5368,16 @@ def main_fixed():
         try:
             loading_reason = st.session_state.get('loading_reason', 'unknown')
             
-            if loading_reason == 'start_guest':
-                # FIXED: Create session and immediately transition to chat
-                session = session_manager.get_session()
-                if session and session.last_activity is None:
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
-                # Set page to chat - this will trigger session creation on next rerun
-                st.session_state.page = "chat"
+            # if loading_reason == 'start_guest':
+            # FIXED: Create session and immediately transition to chat
+            # session= session_manager.get_session()
+            # if session and session.last_activity is None:
+            # session.last_activity = datetime.now()
+            # session_manager.db.save_session(session)
+            # Set page to chat - this will trigger session creation on next rerun
+            # st.session_state.page = "chat"
                 
-            elif loading_reason == 'authenticate':
+            if loading_reason == 'authenticate':
                 username = st.session_state.get('temp_username', '')
                 password = st.session_state.get('temp_password', '')
                 
