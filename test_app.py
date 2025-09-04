@@ -5056,7 +5056,8 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.markdown(f"**Email:** {session.email}")
 
             # ENHANCED: Show tier progression
-            st.markdown(f"**Daily Questions:** {session.daily_question_count}/20")
+            st.markdown(
+                f"**Daily Questions:** {session.daily_question_count}/20")
 
             if session.daily_question_count <= 10:
                 st.progress(min(session.daily_question_count / 10, 1.0),
@@ -5077,7 +5078,8 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     st.caption(
                         f"⏰ {remaining_tier2} questions until 24-hour reset")
                 else:
-                    st.caption("🚫 Daily limit reached - 24 hour reset required")
+                    st.caption(
+                        "🚫 Daily limit reached - 24 hour reset required")
 
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             st.info("📧 **Email Verified Guest**")
@@ -5093,7 +5095,8 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 time_to_reset = next_reset - datetime.now()
                 if time_to_reset.total_seconds() > 0:
                     hours = int(time_to_reset.total_seconds() // 3600)
-                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
+                    minutes = int(
+                        (time_to_reset.total_seconds() % 3600) // 60)
                     st.caption(f"Resets in: {hours}h {minutes}m")
                 else:
                     st.caption("Daily questions have reset!")
@@ -5117,7 +5120,8 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.markdown("**Device ID:** Identifying...")
                 st.caption("Fingerprinting in progress...")
             else:
-                st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
+                st.markdown(
+                    f"**Device ID:** `{session.fingerprint_id[:12]}...`")
                 st.caption(
                     f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
         else:
@@ -5197,9 +5201,10 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             if session.timeout_saved_to_crm:
                 st.caption("💾 Auto-saved to CRM (after inactivity)")
             else:
-                st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
+                st.caption(
+                    "💾 Auto-save enabled (on sign out or browser/tab close)")
         else:
-			st.caption("🚫 CRM Integration: Registered users & verified guests only")
+            st.caption("🚫 CRM Integration: Registered users & verified guests only")
 
         st.divider()
 
@@ -5244,7 +5249,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
 
         with col2:
             signout_help = "Ends your current session and returns to the welcome page."
-            if (session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and  # FIXED: Corrected to .value
+            if (session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and
                     session.email and session.messages and session.daily_question_count >= 1):
                 signout_help += " Your conversation will be automatically saved to CRM before signing out."
 
