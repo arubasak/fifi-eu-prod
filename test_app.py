@@ -5082,10 +5082,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 if msg.get("has_citations") and msg.get("has_inline_citations"):
                     st.caption("📚 Response includes verified citations")
                 
-                # Check for post-response Tier 1 ban notification
-                if msg.get('role') == 'assistant' and msg.get('tier1_ban_applied_post_response', False):
-                    st.warning("⚠️ **Tier 1 Limit Reached:** You've asked 10 questions. A 1-hour break is now required. You can resume chatting after this period.")
-                    st.markdown("---")
+                
 
     # FIXED: Chat input disabled by fingerprinting OR dialog OR bans (from B, integrating A's fingerprint_ready)
     overall_chat_disabled = (
@@ -5217,10 +5214,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         
                         logger.info(f"✅ Question processed successfully")
                         
-                        # Only re-run if a ban was just applied post-response to update UI (disable input, show message)
-                        if response.get('tier1_ban_applied_post_response', False):
-                            logger.info(f"Rerunning to show Tier 1 ban for session {session.session_id[:8]}")
-                            st.rerun()
+                        
                         
                 except Exception as e:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
