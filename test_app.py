@@ -3598,6 +3598,7 @@ class SessionManager:
                 'timestamp': datetime.now(),
                 'categories': categories,
                 'message': moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
+                
             }
             
             return {
@@ -3666,6 +3667,7 @@ class SessionManager:
                 'confidence': confidence,
                 'reason': reason,
                 'message': context_message,
+                
             }
             
             return {
@@ -3700,19 +3702,43 @@ Pricing and stock availability are dynamic in nature and subject to market condi
 Please proceed with your question, keeping in mind that any pricing or stock information provided should be verified through official channels."""
             }
         
-        # Check question limits BEFORE processing the question
+                 
+        # Continue with regular processing for non-meta queries
+        # Check question limits (THIS IS THE PRE-QUESTION LIMIT CHECK)
         limit_check = self.question_limits.is_within_limits(session)
+        
         if not limit_check['allowed']:
-            # If it's a hard ban, just return, the message has been rendered by is_within_limits
-            if limit_check.get('reason') != 'guest_limit': 
-                return {
-                    'banned': True,
-                    'content': limit_check.get("message", 'Access restricted.'),
-                    'time_remaining': limit_check.get('time_remaining')
-                }
-            # If it's 'guest_limit', it means they've hit 4 questions and need to verify
-            else: # limit_check.get('reason') == 'guest_limit'
+            ban_message = limit_check.get("message", 'Access restricted.')
+            
+            # Apply the ban here, right when the user tries to ask the 'next' question that crosses the limit
+            if limit_check.get('reason') == 'registered_user_tier1_limit':
+                self.question_limits._apply_ban(session, BanStatus.ONE_HOUR, "Tier 1 limit reached (10 questions)")
+                # Important: Update activity and save immediately after applying ban
+                self._update_activity(session) 
+                logger.info(f"Registered User Tier 1 (10 questions) ban applied for session {session.session_id[:8]} at question attempt.")
+            elif limit_check.get('reason') == 'registered_user_tier2_limit':
+                self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user daily limit reached (20 questions)")
+                self._update_activity(session)
+                logger.info(f"Registered User Tier 2 (20 questions) ban applied for session {session.session_id[:8]} at question attempt.")
+            elif limit_check.get('reason') == 'email_verified_guest_limit':
+                self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached (10 questions)")
+                self._update_activity(session)
+                logger.info(f"Email Verified Guest (10 questions) ban applied for session {session.session_id[:8]} at question attempt.")
+            elif limit_check.get('reason') == 'guest_limit':
+                # Guest limit (4 questions) still requires email verification, not a hard ban here.
+                # The prompt for email verification is handled by display_email_prompt_if_needed.
+                # No explicit _apply_ban here as guest_limit leads to the email prompt, not a ban status.
                 return {'requires_email': True, 'content': 'Email verification required.'}
+            
+            # For any other ban reason (like evasion or active ban from `is_within_limits`), just return the ban message.
+            # If a ban was just applied above, the `session.ban_status` will be updated, and the next `is_within_limits` call
+            # will return the appropriate message.
+            
+            return {
+                'banned': True,
+                'content': ban_message,
+                'time_remaining': limit_check.get('time_remaining') # This will be populated from is_within_limits
+            }
 
         self._clear_error_notifications()
         
@@ -3725,20 +3751,15 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                 'source': 'Input Validation'
             }
         
-        # Record question (only if allowed to ask) - This is for non-meta questions now.
+        # Record question (only if allowed to ask) - MOVED HERE AFTER ALL LIMIT CHECKS PASS
         self.question_limits.record_question(session)
+        logger.info(f"Question recorded for session {session.session_id[:8]} AFTER all pre-checks.")
         
-        # Get AI response (now simple call to EnhancedAI's core function)
+        # Get AI response
         ai_response = self.ai.get_response(sanitized_prompt, session.messages)
         
-        # Handle if ai.get_response() returned None due to its internal errors
-        if ai_response is None:
-            logger.error(f"EnhancedAI.get_response returned None for session {session.session_id[:8]}")
-            return {
-                'content': 'I encountered an internal error while generating a response. Please try again later.',
-                'success': False,
-                'source': 'AI System Internal Error'
-            }
+        # The previous 'tier1_ban_applied_post_response' logic is removed here
+        # because the ban is now applied BEFORE the AI responds to the limit-exceeding question.
 
         # Add messages to session
         user_message = {'role': 'user', 'content': sanitized_prompt}
@@ -3754,11 +3775,11 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
         }
         
         session.messages.extend([user_message, assistant_message])
-        
+
         # Update activity and save session
         self._update_activity(session)
         
-        return ai_response
+        return ai_response # Return the AI response directly now
         
     except Exception as e:
         logger.error(f"AI response generation failed: {e}", exc_info=True)
@@ -3767,7 +3788,8 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
             'success': False,
             'source': 'Error Handler'
         }
-
+    
+       
     def clear_chat_history(self, session: UserSession): # From A
         """Clears chat history using soft clear mechanism."""
         try:
