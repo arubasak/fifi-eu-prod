@@ -1155,52 +1155,57 @@ class DatabaseManager: # From A
                     logger.info(f"Daily question count reset for session {session.session_id[:8]} due to 24-hour window expiration.")
                     session.daily_question_count = 0
                     session.question_limit_reached = False
-            
+
             # ENHANCED: Tier-based logic for registered users
-            if session.user_type.value == UserType.REGISTERED_USER.value:
-                if session.daily_question_count >= user_limit:  # 20 questions
-                    self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user daily limit reached")
-                    return {
-                        'allowed': False,
-                        'reason': 'daily_limit',
-                        'message': "Daily limit of 20 questions reached. Please retry in 24 hours."
-                    }
-                # Tier 1 (Questions 1-10) is handled separately now for the ban delay
-                # This only checks if they are _about_ to hit tier 1 ban on the *next* question
-                elif session.daily_question_count >= 10:  # Tier 2: Questions 11-20
-                    # Still allowed, but close to limit
-                    remaining = user_limit - session.daily_question_count
-                    return {
-                        'allowed': True,
-                        'tier': 2,
-                        'remaining': remaining,
-                        'warning': f"Tier 2: {remaining} questions remaining until 24-hour limit."
-                    }
-                else:  # Tier 1: Questions 1-10
+                if session.user_type.value == UserType.REGISTERED_USER.value:
+                    if session.daily_question_count >= user_limit:  # For registered, user_limit is 20
+                        return {
+                            'allowed': False,
+                            'reason': 'registered_user_tier2_limit', # New specific reason
+                            'message': "Daily limit of 20 questions reached. Please retry in 24 hours."
+                        }
+                    elif session.daily_question_count >= 10: # If at 10 or more, but less than 20 (user_limit)
+                        # Tier 2: Questions 11-20
+                        # If daily_question_count is exactly 10, this is the trigger for the Tier 1 ban.
+                        if session.daily_question_count == 10:
+                            return {
+                                'allowed': False,
+                                'reason': 'registered_user_tier1_limit', # New specific reason
+                                'message': "You've reached the Tier 1 limit (10 questions). Please wait 1 hour before continuing."
+                        }
+                    else: # Questions 11-19
+                        remaining = user_limit - session.daily_question_count
+                        return {
+                            'allowed': True,
+                            'tier': 2,
+                            'remaining': remaining,
+                            'warning': f"Tier 2: {remaining} questions remaining until 24-hour limit."
+                        }
+                else:  # Tier 1: Questions 1-9
                     remaining = 10 - session.daily_question_count
                     return {
                         'allowed': True,
                         'tier': 1,
                         'remaining': remaining
                     }
-            
+    
             # Original logic for other user types
             if session.user_type.value == UserType.GUEST.value:
-                if session.daily_question_count >= user_limit:
+                if session.daily_question_count >= user_limit: # user_limit is 4 for GUEST
                     return {
                         'allowed': False,
                         'reason': 'guest_limit',
-                        'message': 'Please provide your email address to continue.'
+                '        message': 'Please provide your email address to continue.'
                     }
-            
+    
             elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
                 if session.daily_question_count >= user_limit: # user_limit is 10 for EMAIL_VERIFIED_GUEST
-                    self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
                     return {
                         'allowed': False,
-                        'reason': 'daily_limit',
+                        'reason': 'email_verified_guest_limit', # New specific reason
                         'message': self._get_email_verified_limit_message()
                     }
+
             
             return {'allowed': True}
         
