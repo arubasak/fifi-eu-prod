@@ -5368,14 +5368,14 @@ def main_fixed():
         try:
             loading_reason = st.session_state.get('loading_reason', 'unknown')
             
-            # if loading_reason == 'start_guest':
-            # FIXED: Create session and immediately transition to chat
-            # session= session_manager.get_session()
-            # if session and session.last_activity is None:
-            # session.last_activity = datetime.now()
-            # session_manager.db.save_session(session)
-            # Set page to chat - this will trigger session creation on next rerun
-            # st.session_state.page = "chat"
+            if loading_reason == 'start_guest':
+                # FIXED: Create session and immediately transition to chat
+                session= session_manager.get_session()
+                if session and session.last_activity is None:
+                    session.last_activity = datetime.now()
+                    session_manager.db.save_session(session)
+                # Set page to chat - this will trigger session creation on next rerun
+                st.session_state.page = "chat"
                 
             if loading_reason == 'authenticate':
                 username = st.session_state.get('temp_username', '')
