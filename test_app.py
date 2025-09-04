@@ -5197,8 +5197,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             if session.timeout_saved_to_crm:
                 st.caption("💾 Auto-saved to CRM (after inactivity)")
             else:
-                st.caption(
-                    "💾 Auto-save enabled (on sign out or browser/tab close)")
+                st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
         else:
 			st.caption("🚫 CRM Integration: Registered users & verified guests only")
 
