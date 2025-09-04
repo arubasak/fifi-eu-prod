@@ -5375,9 +5375,9 @@ def main_fixed():
                     session.last_activity = datetime.now()
                     session_manager.db.save_session(session)
                 # Set page to chat - this will trigger session creation on next rerun
-                st.session_state.page = "chat"
+                st.session_state.page = "welcome"
                 
-            if loading_reason == 'authenticate':
+            elif loading_reason == 'authenticate':
                 username = st.session_state.get('temp_username', '')
                 password = st.session_state.get('temp_password', '')
                 
