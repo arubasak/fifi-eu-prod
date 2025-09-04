@@ -4963,12 +4963,18 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
+    # CRITICAL FIX: Check if fingerprinting is actually needed
+    fingerprint_needed = (
+        session.fingerprint_id and 
+        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+    )
+
     # Initialize fingerprinting status if needed
     if 'fingerprint_status' not in st.session_state:
-        st.session_state.fingerprint_status = 'pending'
-        st.session_state.is_chat_ready = False
+        st.session_state.fingerprint_status = 'done' if not fingerprint_needed else 'pending'
+        st.session_state.is_chat_ready = not fingerprint_needed  # CRITICAL: Enable chat if no fingerprinting needed
 
-    # Start fingerprinting process if needed
+    # CRITICAL FIX: Don't start fingerprinting process if already done or not needed
     if fingerprint_needed and st.session_state.get('fingerprint_status') == 'pending':
         st.session_state.fingerprint_status = 'pending_js'
         st.session_state.fingerprint_wait_start = time.time()
@@ -4979,35 +4985,46 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     if fingerprint_needed and st.session_state.get('fingerprint_status') == 'pending_js':
         fingerprint_key = f"fingerprint_rendered_{session.session_id}"
         if not st.session_state.get(fingerprint_key, False):
-            session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-            st.session_state[fingerprint_key] = True
-            logger.info(f"Triggered fingerprint component rendering for session {session.session_id[:8]} on chat page.")
+            try:
+                session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                st.session_state[fingerprint_key] = True
+                logger.info(f"Triggered fingerprint component rendering for session {session.session_id[:8]} on chat page.")
+            except Exception as e:
+                logger.error(f"Fingerprinting component failed: {e}")
+                # CRITICAL: Enable chat even if fingerprinting fails
+                st.session_state.is_chat_ready = True
+                st.session_state.fingerprint_status = 'failed'
 
         current_time_float = time.time()
-        wait_start = st.session_state.get('fingerprint_wait_start')
+        wait_start = st.session_state.get('fingerprint_wait_start', current_time_float)
         elapsed = current_time_float - wait_start
-        remaining = max(0, 15 - elapsed)  # 15 seconds timeout for fingerprint JS
+        remaining = max(0, 10 - elapsed)  # REDUCED: 10 seconds timeout instead of 15
 
         if remaining > 0:
             st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
             st.caption("FiFi is setting up device recognition for security and session management.")
-        else:
-            st.info("🔒 **Finalizing setup...** Almost ready (using fallback fingerprint).")
-
-        progress_value = min(elapsed / 15, 1.0)
-        st.progress(progress_value, text="Session Security Setup")
-        st.markdown("---")
-        
-        # Rerun to update timer, but keep chat_ready as False
-        st.session_state.is_chat_ready = False
-        if remaining > 0:  # Only rerun if still waiting
-            st.rerun()
+            progress_value = min(elapsed / 10, 1.0)
+            st.progress(progress_value, text="Session Security Setup")
+            st.markdown("---")
+            
+            # CRITICAL: Don't rerun too frequently
+            if remaining > 0:
+                time.sleep(1)  # Add small delay to prevent excessive reruns
+                st.rerun()
         else:
             # Timeout reached, enable chat input with fallback fingerprint
             st.session_state.is_chat_ready = True
             st.session_state.fingerprint_status = 'timeout'
-            logger.warning(f"Fingerprint timeout (15s) for session {session.session_id[:8]} - enabling chat input with fallback.")
-            st.rerun()  # Rerun one last time to enable chat input
+            logger.warning(f"Fingerprint timeout (10s) for session {session.session_id[:8]} - enabling chat input with fallback.")
+            st.rerun()
+            
+        return  # CRITICAL: Don't render rest of chat interface during fingerprinting
+
+    # CRITICAL: If we reach here, fingerprinting is done or not needed
+    if not st.session_state.get('is_chat_ready', False):
+        st.session_state.is_chat_ready = True
+        logger.info(f"Chat ready for session {session.session_id[:8]}")
+
 
     # Simple activity tracking
     if activity_result:
@@ -5312,6 +5329,9 @@ def ensure_initialization_fixed():
     return True
 def main_fixed():
     """Main entry point with simplified loading state management."""
+    st.session_state.is_loading = False
+    st.session_state.loading_message = ""
+    
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
