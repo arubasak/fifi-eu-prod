@@ -4847,7 +4847,8 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.session_state.verification_stage = "code_entry"
                 else:
                     st.error(result['message'])
-                    if "unusual activity" in result['message'].lower(): st.stop()
+                    if "unusual activity" in result['message'].lower(): 
+                        st.stop()
                     st.session_state.verification_stage = "email_entry" # Fallback to manual entry if send fails
             st.rerun()
 
@@ -4868,7 +4869,8 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                         st.rerun()
                     else:
                         st.error(result['message'])
-                        if "unusual activity" in result['message'].lower(): st.stop()
+                        if "unusual activity" in result['message'].lower(): 
+                            st.stop()
                 else:
                     st.error("Please enter an email address to receive the code.")
         
@@ -4893,55 +4895,55 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                             st.success("Verification code resent successfully!")
                             st.session_state.verification_stage = "code_entry"
                         else: # From A
-                                    st.error("Failed to resend code. Please try again later.")
-                        else: # From A
-                            st.error("Error: No email address found to resend the code. Please go back and enter your email.")
-                            st.session_state.verification_stage = "email_entry"
-                        st.rerun()
+                            st.error("Failed to resend code. Please try again later.")
+                else: # From A
+                    st.error("Error: No email address found to resend the code. Please go back and enter your email.")
+                    st.session_state.verification_stage = "email_entry"
+                st.rerun()
 
-                    if submit_code: # From A
-                        if code:
-                            with st.spinner("Verifying code..."):
-                                result = session_manager.verify_email_code(session, code)
-                            if result['success']:
-                                st.success(result['message'])
-                                st.balloons()
-                                # Clean up verification state on success
-                                st.session_state.chat_blocked_by_dialog = False # UNBLOCK CHAT
-                                st.session_state.verification_stage = None
-                                st.session_state.guest_continue_active = False # Clear this flag too
-                                st.rerun()
-                            else:
-                                st.error(result['message'])
-                        else:
-                            st.error("Please enter the verification code you received.")
+            if submit_code: # From A
+                if code:
+                    with st.spinner("Verifying code..."):
+                        result = session_manager.verify_email_code(session, code)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.balloons()
+                        # Clean up verification state on success
+                        st.session_state.chat_blocked_by_dialog = False # UNBLOCK CHAT
+                        st.session_state.verification_stage = None
+                        st.session_state.guest_continue_active = False # Clear this flag too
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter the verification code you received.")
             
-            elif current_stage == 'declined_recognized_email_prompt_only': # From A
-                # This state happens when a user declines a recognized email but still has guest questions left.
-                # It's a non-blocking prompt, meaning chat input should remain active.
-                disable_chat_input = False # ALLOW CHAT INPUT
-                st.session_state.chat_blocked_by_dialog = False # UNBLOCK CHAT (as it's non-blocking visual prompt)
+    elif current_stage == 'declined_recognized_email_prompt_only': # From A
+        # This state happens when a user declines a recognized email but still has guest questions left.
+        # It's a non-blocking prompt, meaning chat input should remain active.
+        disable_chat_input = False # ALLOW CHAT INPUT
+        st.session_state.chat_blocked_by_dialog = False # UNBLOCK CHAT (as it's non-blocking visual prompt)
 
-                remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
-                st.info(f"You chose not to verify the recognized email. You can still use your remaining **{remaining_questions} guest questions**.")
-                st.info("To ask more questions after this, or to save chat history, please verify your email.")
+        remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
+        st.info(f"You chose not to verify the recognized email. You can still use your remaining **{remaining_questions} guest questions**.")
+        st.info("To ask more questions after this, or to save chat history, please verify your email.")
 
-                col_opts1, col_opts2 = st.columns(2)
-                with col_opts1:
-                    if st.button("📧 Enter a New Email for Verification", use_container_width=True, key="new_email_opt_btn"):
-                        st.session_state.verification_email = "" # Clear pre-filled email
-                        st.session_state.verification_stage = "email_entry"
-                        st.session_state.guest_continue_active = False # Reset if they change mind and go for new email
-                        st.rerun()
-                with col_opts2:
-                    if st.button("Continue as Guest for Now", use_container_width=True, key="continue_guest_btn"):
-                        st.session_state.guest_continue_active = True
-                        st.session_state.chat_blocked_by_dialog = False # Ensure UNBLOCKING
-                        st.session_state.verification_stage = None # Clear stage to dismiss dialog
-                        st.success("You can now continue as a Guest. The email prompt will reappear when your guest questions run out.")
-                        st.rerun()
+        col_opts1, col_opts2 = st.columns(2)
+        with col_opts1:
+            if st.button("📧 Enter a New Email for Verification", use_container_width=True, key="new_email_opt_btn"):
+                st.session_state.verification_email = "" # Clear pre-filled email
+                st.session_state.verification_stage = "email_entry"
+                st.session_state.guest_continue_active = False # Reset if they change mind and go for new email
+                st.rerun()
+        with col_opts2:
+            if st.button("Continue as Guest for Now", use_container_width=True, key="continue_guest_btn"):
+                st.session_state.guest_continue_active = True
+                st.session_state.chat_blocked_by_dialog = False # Ensure UNBLOCKING
+                st.session_state.verification_stage = None # Clear stage to dismiss dialog
+                st.success("You can now continue as a Guest. The email prompt will reappear when your guest questions run out.")
+                st.rerun()
 
-            return disable_chat_input # From A
+    return disable_chat_input # From A
 
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]): # Merged from A and B
     """Chat interface with fingerprinting handled HERE, not on welcome page."""
@@ -5010,7 +5012,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     if not st.session_state.get('is_chat_ready', False):
         st.session_state.is_chat_ready = True
         logger.info(f"Chat ready for session {session.session_id[:8]}")
-
 
     # Simple activity tracking (from A)
     if activity_result:
@@ -5222,6 +5223,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.error("⚠️ I encountered an error. Please try again.")
         
         st.rerun()
+
 # Modified ensure_initialization_fixed to not show spinner (since we have overlay) (from A)
 def ensure_initialization_fixed():
     """Fixed version without duplicate spinner since we have loading overlay"""
@@ -5343,7 +5345,6 @@ def main_fixed():
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
 
-
     # Handle loading states first
     loading_state = st.session_state.get('is_loading', False)
     current_page = st.session_state.get('page')
@@ -5434,7 +5435,6 @@ def main_fixed():
             else:
                 st.session_state.is_chat_ready = False # Ensure locked if no session obtained
 
-
             # Clear loading state and rerun to show the actual page
             set_loading_state(False)
             st.rerun()
@@ -5452,7 +5452,7 @@ def main_fixed():
         if not st.session_state.get('initialized', False):
             # This path handles initial load when no button was pressed, or if initialization failed.
             with st.spinner("Initializing application..."): # Keep a fallback spinner here for initial page load if loading_state was false but init wasn't complete.
-                 init_success = ensure_initialization_fixed()
+                init_success = ensure_initialization_fixed()
             if not init_success:
                 st.error("⚠️ Application failed to initialize properly.")
                 st.info("Please refresh the page to try again.")
@@ -5525,7 +5525,6 @@ def main_fixed():
                         st.session_state.is_chat_ready = False
                         # remaining = 5 - (current_time_float - wait_start) # Original value, if needed
                         # logger.debug(f"Fingerprint wait continues: {remaining:.1f}s remaining for session {session.session_id[:8]}")
-
             else:
                 st.session_state.is_chat_ready = False
 
