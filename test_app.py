@@ -5270,7 +5270,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     # --- END FIX ---
     guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
     daily_q_value = session.daily_question_count
-    daily_q_ge_limit = (daily_q_value >= guest_limit_value)
+    daily_q_ge_limit = (daily_q_value > guest_limit_value)
 
     logger.debug(
         f"DEBUG_PROMPT_EVAL_COMPONENTS: SessionID={session.session_id[:8]} | IsGuest={user_is_guest} | DailyQ={daily_q_value} | GuestLimit={guest_limit_value} | DailyQ>=Limit={daily_q_ge_limit}")
