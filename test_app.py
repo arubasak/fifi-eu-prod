@@ -3217,41 +3217,7 @@ class SessionManager:
                         logger.info(
                             f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
 
-                    # Check limits and handle bans. This is where the 24-hour reset happens.
-                    limit_check = self.question_limits.is_within_limits(
-                        session)
-                    if not limit_check.get('allowed', True):
-                        # If the user is being prompted for re-verification due to higher historical privilege,
-                        # do not show a ban message, but let the dialog handle it.
-                        # This condition seems redundant based on the `if not allowed and reason != guest_limit` above
-                        if session.reverification_pending and limit_check.get('reason') == 'guest_limit':
-                            logger.info(
-                                f"Session {session.session_id[:8]} is pending re-verification, suppressing ban message and allowing dialog.")
-                        else:
-                            ban_type = limit_check.get('ban_type', 'unknown')
-                            message = limit_check.get(
-                                'message', 'Access restricted due to usage policy.')
-                            time_remaining = limit_check.get('time_remaining')
-
-                            st.error(f"🚫 **Access Restricted**")
-                            if time_remaining:
-                                hours = max(
-                                    0, int(time_remaining.total_seconds() // 3600))
-                                minutes = int(
-                                    (time_remaining.total_seconds() % 3600) // 60)
-                                st.error(
-                                    f"Time remaining: {hours}h {minutes}m")
-                            st.info(message)
-                            logger.info(
-                                f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
-
-                        try:
-                            self.db.save_session(session)
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
-
-                        return session
+                    
 
                     return session
                 else:
@@ -5293,8 +5259,8 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.session_state.guest_continue_active = False
 
     # Check if a hard block is in place first (non-email-verification related bans)
-    limit_check = session_manager.question_limits.is_within_limits(session)
-    if not limit_check['allowed'] and limit_check.get('reason') != 'guest_limit':
+    
+    if session.ban_status.value != BanStatus.NONE.value:
         st.session_state.chat_blocked_by_dialog = True  # Hard ban, block everything
         return True  # Disable chat input
 
