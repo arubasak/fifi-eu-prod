@@ -3454,7 +3454,7 @@ class SessionManager:
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.session_state['page'] = None
-def check_if_attempting_to_exceed_limits(self, session: UserSession) -> bool:
+    def check_if_attempting_to_exceed_limits(self, session: UserSession) -> bool:
         """Check if user is attempting to ask a question beyond their limits."""
         limit_check = self.question_limits.is_within_limits(session)
         
