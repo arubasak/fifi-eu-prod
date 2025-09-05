@@ -1345,7 +1345,7 @@ class DatabaseManager:  # From A
 
             elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
                 # user_limit is 10 for EMAIL_VERIFIED_GUEST
-                if session.daily_question_count >= user_limit:
+                if session.daily_question_count > user_limit:
                     return {
                         'allowed': False,
                         # New specific reason
