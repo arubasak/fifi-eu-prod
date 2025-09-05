@@ -4428,7 +4428,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         should_block_chat = False  # DON'T block immediately - let them read their answer
         
         st.success("🎯 **You've explored FiFi AI with your 4 guest questions!**")
-        st.info("When you're ready, verify your email to unlock 10 questions per day!")
+        st.info("Take your time to read this answer. When you're ready, verify your email to unlock 10 questions per day + chat history saving!")
         
         # Show a friendly expandable section instead of aggressive blocking
         with st.expander("📧 Ready to Unlock More Questions?", expanded=False):
