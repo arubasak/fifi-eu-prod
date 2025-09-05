@@ -3,7 +3,7 @@
 <head>
     <style>
         body { margin: 0; padding: 0; }
-        #creep { display: none; } /* Hide CreepJS UI elements */
+        #creep, .creep-browser, .fingerprint { display: none !important; } /* Hide CreepJS UI */
     </style>
 </head>
 <body>
@@ -28,139 +28,163 @@
         script.src = 'https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js';
         
         script.onload = function() {
-            console.log('🔍 CreepJS library loaded successfully');
+            console.log('🔍 CreepJS library loaded, waiting for fingerprint generation...');
             
-            // CreepJS automatically starts when loaded, we need to wait for it to complete
-            // Check for completion by monitoring DOM changes or using intervals
             let attempts = 0;
-            const maxAttempts = 50; // 25 seconds max wait
+            const maxAttempts = 60; // 30 seconds max wait
             
-            const checkCreepCompletion = setInterval(function() {
+            const extractCreepFingerprint = setInterval(function() {
                 attempts++;
                 
                 try {
-                    // Check if CreepJS has populated the DOM with results
-                    const creepContainer = document.getElementById('creep');
-                    
-                    // Look for CreepJS fingerprint data in various ways
-                    let fingerprintData = null;
+                    let actualFingerprintId = null;
                     let workingMethods = [];
-                    let privacyScore = 0;
+                    let privacy = 'standard';
                     
-                    // Method 1: Check if global creep object exists
-                    if (typeof window.creep !== 'undefined') {
-                        console.log('🔍 CreepJS global object found');
-                        fingerprintData = window.creep;
+                    // Method 1: Check for global creep object with fingerprint ID
+                    if (window.creep && window.creep.fingerprint) {
+                        actualFingerprintId = window.creep.fingerprint;
+                        console.log('🔍 Found CreepJS fingerprint via global object:', actualFingerprintId);
                     }
                     
-                    // Method 2: Check if CreepJS populated DOM elements
-                    else if (creepContainer && creepContainer.innerHTML.length > 100) {
-                        console.log('🔍 CreepJS DOM populated, extracting data');
+                    // Method 2: Check for fingerprint in DOM elements
+                    if (!actualFingerprintId) {
+                        // Look for common CreepJS fingerprint selectors
+                        const fingerprintSelectors = [
+                            '.fingerprint',
+                            '#fingerprint', 
+                            '.hash',
+                            '[data-fingerprint]',
+                            '.creep-fingerprint',
+                            '.visitor-fingerprint'
+                        ];
                         
-                        // Extract fingerprint components from DOM
-                        const components = [];
-                        
-                        // Look for common CreepJS data patterns in DOM
-                        const dataElements = creepContainer.querySelectorAll('[data-*], .hash, .lies, .trash');
-                        dataElements.forEach(element => {
-                            if (element.textContent && element.textContent.trim().length > 5) {
-                                components.push(element.textContent.trim());
-                                workingMethods.push(element.className || 'dom_element');
+                        for (const selector of fingerprintSelectors) {
+                            const element = document.querySelector(selector);
+                            if (element) {
+                                const text = element.textContent || element.innerText || element.value;
+                                if (text && text.length >= 32 && /^[a-f0-9]+$/i.test(text)) {
+                                    actualFingerprintId = text.trim();
+                                    console.log(`🔍 Found CreepJS fingerprint via ${selector}:`, actualFingerprintId);
+                                    break;
+                                }
                             }
-                        });
-                        
-                        // Look for hash values specifically
-                        const hashElements = creepContainer.querySelectorAll('.hash, [class*="hash"]');
-                        hashElements.forEach(element => {
-                            if (element.textContent && element.textContent.length > 10) {
-                                components.push(element.textContent);
-                                workingMethods.push('hash_element');
+                        }
+                    }
+                    
+                    // Method 3: Look for hex patterns in the entire document
+                    if (!actualFingerprintId) {
+                        const bodyText = document.body.textContent || document.body.innerText || '';
+                        // Look for 32+ character hex strings (typical fingerprint format)
+                        const hexMatches = bodyText.match(/\b[a-f0-9]{32,}\b/gi);
+                        if (hexMatches && hexMatches.length > 0) {
+                            // Take the longest hex string (most likely to be the fingerprint)
+                            actualFingerprintId = hexMatches.reduce((a, b) => a.length > b.length ? a : b);
+                            console.log('🔍 Found CreepJS fingerprint via text extraction:', actualFingerprintId);
+                        }
+                    }
+                    
+                    // Method 4: Check all elements with text content for fingerprint patterns
+                    if (!actualFingerprintId) {
+                        const allElements = document.querySelectorAll('*');
+                        for (const element of allElements) {
+                            if (element.textContent) {
+                                const text = element.textContent.trim();
+                                // Look for 32-64 character hex strings
+                                if (text.length >= 32 && text.length <= 64 && /^[a-f0-9]+$/i.test(text)) {
+                                    actualFingerprintId = text;
+                                    console.log('🔍 Found CreepJS fingerprint via element scan:', actualFingerprintId);
+                                    break;
+                                }
                             }
-                        });
-                        
-                        if (components.length > 0) {
-                            fingerprintData = components.join('|');
                         }
                     }
                     
-                    // Method 3: Check for specific CreepJS completion indicators
-                    else if (window.caniuse || window.creepWorker || document.querySelector('.creep-browser')) {
-                        console.log('🔍 CreepJS indicators found, using basic detection');
-                        
-                        // Collect what we can from CreepJS environment
-                        const basicComponents = [];
-                        
-                        if (window.caniuse) {
-                            basicComponents.push(JSON.stringify(window.caniuse).substring(0, 200));
-                            workingMethods.push('caniuse');
-                        }
-                        
-                        // Get any visible hash or fingerprint values from the page
-                        const allText = document.body.textContent || '';
-                        const hashMatches = allText.match(/[a-f0-9]{16,}/g); // Look for hex hashes
-                        if (hashMatches && hashMatches.length > 0) {
-                            basicComponents.push(...hashMatches.slice(0, 5)); // Take first 5 hashes
-                            workingMethods.push('extracted_hashes');
-                        }
-                        
-                        if (basicComponents.length > 0) {
-                            fingerprintData = basicComponents.join('|');
+                    // Method 5: Check window properties for CreepJS data
+                    if (!actualFingerprintId) {
+                        for (const prop in window) {
+                            if (prop.toLowerCase().includes('creep') || prop.toLowerCase().includes('fingerprint')) {
+                                try {
+                                    const value = window[prop];
+                                    if (typeof value === 'string' && value.length >= 32 && /^[a-f0-9]+$/i.test(value)) {
+                                        actualFingerprintId = value;
+                                        console.log(`🔍 Found CreepJS fingerprint via window.${prop}:`, actualFingerprintId);
+                                        break;
+                                    } else if (typeof value === 'object' && value && value.fingerprint) {
+                                        actualFingerprintId = value.fingerprint;
+                                        console.log(`🔍 Found CreepJS fingerprint via window.${prop}.fingerprint:`, actualFingerprintId);
+                                        break;
+                                    }
+                                } catch (e) {
+                                    // Skip properties that throw errors
+                                }
+                            }
                         }
                     }
                     
-                    // If we have fingerprint data, process it
-                    if (fingerprintData) {
-                        clearInterval(checkCreepCompletion);
+                    // If we found a valid fingerprint ID
+                    if (actualFingerprintId && actualFingerprintId.length >= 32) {
+                        clearInterval(extractCreepFingerprint);
                         
-                        // Generate fingerprint ID
-                        const fingerprintId = 'creepjs_' + hashString(fingerprintData.toString());
-                        
-                        // Analyze privacy level based on working methods and content
-                        let privacy = 'standard';
-                        if (workingMethods.length < 3) {
-                            privacy = 'high_privacy'; // Few working methods = high privacy
-                        } else if (workingMethods.length < 6) {
-                            privacy = 'medium_privacy';
+                        // Analyze what CreepJS components are working
+                        const creepContainer = document.getElementById('creep');
+                        if (creepContainer) {
+                            // Count working components based on DOM content
+                            const componentElements = creepContainer.querySelectorAll('*');
+                            workingMethods = Array.from(componentElements).map((el, index) => 
+                                el.className || el.id || `component_${index}`
+                            ).filter(name => name && name !== '');
+                            
+                            // Check for privacy indicators
+                            const containerText = creepContainer.textContent.toLowerCase();
+                            if (containerText.includes('lie') || containerText.includes('blocked') || containerText.includes('error')) {
+                                privacy = 'high_privacy';
+                            } else if (containerText.includes('unknown') || workingMethods.length < 10) {
+                                privacy = 'medium_privacy';
+                            }
                         }
                         
-                        // Check for privacy indicators in the content
-                        const contentStr = fingerprintData.toString().toLowerCase();
-                        if (contentStr.includes('lie') || contentStr.includes('trash') || contentStr.includes('blocked')) {
-                            privacy = 'high_privacy';
+                        // Ensure we have some working methods data
+                        if (workingMethods.length === 0) {
+                            workingMethods = ['creepjs_core']; // At minimum, CreepJS core worked
                         }
                         
-                        console.log("🔍 FiFi Fingerprinting (CreepJS) complete:", {
-                            fingerprint_id: fingerprintId, 
+                        console.log("🔍 FiFi Fingerprinting (CreepJS) SUCCESS:", {
+                            fingerprint_id: actualFingerprintId, 
                             method: 'creepjs', 
                             privacy: privacy, 
                             working_methods: workingMethods.length,
-                            components: workingMethods.slice(0, 5), // Log first 5 for debugging
-                            data_length: fingerprintData.toString().length
+                            id_length: actualFingerprintId.length,
+                            extraction_attempt: attempts
                         });
                         
-                        redirectWithFingerprint(sessionId, fingerprintId, 'creepjs', privacy, workingMethods);
+                        redirectWithFingerprint(sessionId, actualFingerprintId, 'creepjs', privacy, workingMethods);
                         return;
                     }
                     
-                    // If max attempts reached, use fallback
+                    // If max attempts reached without finding fingerprint, use fallback
                     if (attempts >= maxAttempts) {
-                        clearInterval(checkCreepCompletion);
-                        console.warn('🕒 CreepJS completion timeout, using fallback');
-                        handleFallback(sessionId, 'creepjs_timeout');
+                        clearInterval(extractCreepFingerprint);
+                        console.warn('🕒 CreepJS fingerprint extraction timeout after', attempts, 'attempts');
+                        console.log('🔍 Available window properties:', Object.keys(window).filter(k => k.includes('creep') || k.includes('fingerprint')));
+                        console.log('🔍 DOM content sample:', document.body.textContent.substring(0, 500));
+                        handleFallback(sessionId, 'creepjs_extraction_timeout');
+                    } else if (attempts % 10 === 0) {
+                        console.log(`🔍 CreepJS extraction attempt ${attempts}/${maxAttempts}, still waiting...`);
                     }
                     
-                } catch (checkError) {
-                    console.warn('🚨 Error checking CreepJS completion:', checkError);
+                } catch (extractError) {
+                    console.warn('🚨 Error during CreepJS fingerprint extraction:', extractError);
                     if (attempts >= maxAttempts) {
-                        clearInterval(checkCreepCompletion);
-                        handleFallback(sessionId, 'creepjs_check_error');
+                        clearInterval(extractCreepFingerprint);
+                        handleFallback(sessionId, 'creepjs_extraction_error');
                     }
                 }
             }, 500); // Check every 500ms
         };
         
         script.onerror = function() {
-            console.error('🚨 Failed to load CreepJS library');
+            console.error('🚨 Failed to load CreepJS library from CDN');
             handleFallback(sessionId, 'creepjs_load_failed');
         };
         
@@ -170,10 +194,10 @@
         // Global timeout fallback
         setTimeout(function() {
             if (!window.fifi_fp_completed) {
-                console.warn('🕒 Global CreepJS timeout, using fallback');
+                console.warn('🕒 Global CreepJS timeout (45s), using comprehensive fallback');
                 handleFallback(sessionId, 'creepjs_global_timeout');
             }
-        }, 30000); // 30 second global timeout
+        }, 45000); // 45 second global timeout
         
     } catch (error) {
         console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
@@ -196,14 +220,14 @@
     function handleFallback(sessionId, reason) {
         if (window.fifi_fp_completed) return; // Prevent double execution
         
-        console.log('🔄 Using fallback fingerprinting due to:', reason);
+        console.log('🔄 Using comprehensive fallback fingerprinting due to:', reason);
         
         // Generate fallback fingerprint using basic browser data
         const fallbackComponents = [];
         const workingMethods = ['fallback'];
         
         try {
-            // Collect basic browser information
+            // Collect comprehensive browser information
             fallbackComponents.push(navigator.userAgent || 'unknown');
             fallbackComponents.push(screen.width + 'x' + screen.height + 'x' + screen.colorDepth);
             fallbackComponents.push(navigator.language || 'unknown');
@@ -213,8 +237,9 @@
             fallbackComponents.push(navigator.hardwareConcurrency || 'unknown');
             fallbackComponents.push(navigator.deviceMemory || 'unknown');
             fallbackComponents.push(window.innerWidth + 'x' + window.innerHeight);
+            fallbackComponents.push(window.devicePixelRatio || 'unknown');
             
-            // Add canvas fingerprint if available
+            // Enhanced canvas fingerprint
             try {
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d');
@@ -223,49 +248,73 @@
                 ctx.fillStyle = '#f60';
                 ctx.fillRect(125, 1, 62, 20);
                 ctx.fillStyle = '#069';
-                ctx.fillText('FiFi fingerprint 🔍', 2, 15);
+                ctx.fillText('FiFi fingerprint test 🔍🤖', 2, 15);
                 ctx.fillStyle = 'rgba(102, 204, 0, 0.7)';
-                ctx.fillText('FiFi fingerprint 🔍', 4, 17);
+                ctx.fillText('FiFi fingerprint test 🔍🤖', 4, 17);
+                
+                // Add more canvas operations for better uniqueness
+                ctx.globalCompositeOperation = 'multiply';
+                ctx.fillStyle = 'rgb(255,0,255)';
+                ctx.beginPath();
+                ctx.arc(50, 50, 50, 0, Math.PI * 2, true);
+                ctx.closePath();
+                ctx.fill();
+                
                 const canvasData = canvas.toDataURL();
-                fallbackComponents.push(canvasData.substring(canvasData.length - 100)); // Last 100 chars
-                workingMethods.push('canvas');
+                fallbackComponents.push(canvasData);
+                workingMethods.push('enhanced_canvas');
             } catch (e) {
-                console.warn('Canvas fingerprinting failed:', e.message);
+                console.warn('Enhanced canvas fingerprinting failed:', e.message);
                 workingMethods.push('canvas_blocked');
             }
             
-            // Try WebGL fingerprint
+            // WebGL fingerprint with more details
             try {
                 const canvas = document.createElement('canvas');
                 const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
                 if (gl) {
                     const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
-                    const vendor = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL);
-                    const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
-                    fallbackComponents.push(vendor + '|' + renderer);
-                    workingMethods.push('webgl');
+                    if (debugInfo) {
+                        const vendor = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL);
+                        const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+                        fallbackComponents.push(vendor + '|' + renderer);
+                    }
+                    
+                    // Get WebGL parameters
+                    const webglData = [
+                        gl.getParameter(gl.VERSION),
+                        gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+                        gl.getParameter(gl.VENDOR),
+                        gl.getParameter(gl.RENDERER)
+                    ].join('|');
+                    fallbackComponents.push(webglData);
+                    workingMethods.push('webgl_extended');
                 }
             } catch (e) {
                 console.warn('WebGL fingerprinting failed:', e.message);
                 workingMethods.push('webgl_blocked');
             }
             
-            // Try audio context fingerprint
+            // Audio context fingerprint
             try {
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const oscillator = audioContext.createOscillator();
                 const analyser = audioContext.createAnalyser();
                 const gainNode = audioContext.createGain();
+                
                 oscillator.connect(analyser);
                 analyser.connect(gainNode);
                 gainNode.connect(audioContext.destination);
+                
                 oscillator.frequency.value = 10000;
                 oscillator.start();
+                
                 const freqData = new Uint8Array(analyser.frequencyBinCount);
                 analyser.getByteFrequencyData(freqData);
-                const audioFingerprint = Array.from(freqData.slice(0, 10)).join(',');
+                const audioFingerprint = Array.from(freqData.slice(0, 30)).join(',');
                 fallbackComponents.push(audioFingerprint);
-                workingMethods.push('audio');
+                workingMethods.push('audio_context');
+                
                 oscillator.stop();
                 audioContext.close();
             } catch (e) {
@@ -273,33 +322,68 @@
                 workingMethods.push('audio_blocked');
             }
             
-            const combinedFallback = fallbackComponents.join('|');
-            const fingerprintId = 'fallback_' + hashString(combinedFallback);
-            const method = 'fallback';
+            // Font detection
+            try {
+                const fonts = ['Arial', 'Helvetica', 'Times', 'Courier', 'Verdana', 'Georgia', 'Palatino', 'Garamond', 'Bookman', 'Comic Sans MS', 'Trebuchet MS', 'Arial Black', 'Impact'];
+                const detectedFonts = [];
+                
+                const baseFontSize = '72px';
+                const testString = 'mmmmmmmmmmlli';
+                const testDiv = document.createElement('div');
+                testDiv.style.position = 'absolute';
+                testDiv.style.left = '-9999px';
+                testDiv.innerHTML = testString;
+                document.body.appendChild(testDiv);
+                
+                fonts.forEach(font => {
+                    testDiv.style.fontFamily = font;
+                    testDiv.style.fontSize = baseFontSize;
+                    const dimensions = testDiv.offsetWidth + 'x' + testDiv.offsetHeight;
+                    detectedFonts.push(font + ':' + dimensions);
+                });
+                
+                document.body.removeChild(testDiv);
+                fallbackComponents.push(detectedFonts.join(','));
+                workingMethods.push('font_detection');
+            } catch (e) {
+                console.warn('Font detection failed:', e.message);
+                workingMethods.push('font_blocked');
+            }
             
-            // Determine privacy level based on what worked
+            const combinedFallback = fallbackComponents.join('|');
+            // Create a longer, more fingerprint-like hash
+            const hash1 = hashString(combinedFallback);
+            const hash2 = hashString(combinedFallback.split('').reverse().join(''));
+            const fingerprintId = 'fallback_' + hash1 + hash2 + '_' + Date.now().toString(36);
+            
+            const method = 'comprehensive_fallback';
+            
+            // Determine privacy level based on what worked vs blocked
             let privacy = 'standard';
             const blockedMethods = workingMethods.filter(m => m.includes('blocked')).length;
-            if (blockedMethods > 2) {
+            const totalAttempted = workingMethods.length;
+            
+            if (blockedMethods > totalAttempted * 0.6) {
                 privacy = 'high_privacy';
-            } else if (blockedMethods > 0) {
+            } else if (blockedMethods > totalAttempted * 0.3) {
                 privacy = 'medium_privacy';
             }
             
-            console.log("🔍 FiFi Fingerprinting (Fallback) complete:", {
+            console.log("🔍 FiFi Fingerprinting (Comprehensive Fallback) complete:", {
                 fingerprint_id: fingerprintId, 
                 method: method, 
                 privacy: privacy, 
                 reason: reason,
                 working_methods: workingMethods.length,
                 blocked_methods: blockedMethods,
-                components: workingMethods
+                privacy_ratio: (blockedMethods / totalAttempted * 100).toFixed(1) + '%',
+                components_collected: fallbackComponents.length
             });
             
             redirectWithFingerprint(sessionId, fingerprintId, method, privacy, workingMethods);
             
         } catch (fallbackError) {
-            console.error('🚨 Even fallback fingerprinting failed:', fallbackError);
+            console.error('🚨 Even comprehensive fallback fingerprinting failed:', fallbackError);
             
             // Emergency fallback
             const emergencyId = 'emergency_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -328,6 +412,7 @@
         const fingerprintUrl = `${appUrl}?event=fingerprint_complete&session_id=${sessionId}&fingerprint_id=${encodeURIComponent(fingerprintId)}&method=${encodeURIComponent(method)}&privacy=${encodeURIComponent(privacy)}&working_methods=${encodeURIComponent(methodsString)}&timestamp=${Date.now()}`;
         
         console.log("🔍 FiFi Fingerprinting: Redirecting with data...");
+        console.log("🔍 Final fingerprint ID:", fingerprintId);
         
         try {
             if (window.parent && window.parent.location.origin === window.location.origin) {
