@@ -3294,20 +3294,20 @@ class SessionManager:
 
             # Rest of the existing function remains the same...
                 # Check question limits
-            limit_check = self.question_limits.is_within_limits(session)
+            #limit_check = self.question_limits.is_within_limits(session)
             # This check for 'allowed' is crucial and must be placed here before recording question
-            if not limit_check['allowed']:
+            #if not limit_check['allowed']:
                 # If it's a hard ban, just return, the message has been rendered by is_within_limits
-                if limit_check.get('reason') != 'guest_limit': 
-                    return {
-                        'banned': True,
-                        'content': limit_check.get("message", 'Access restricted.'), # Use 'message' from limit_check
-                        'time_remaining': limit_check.get('time_remaining')
-                    }
+                #if limit_check.get('reason') != 'guest_limit': 
+                    #return {
+                        #'banned': True,
+                        #'content': limit_check.get("message", 'Access restricted.'), # Use 'message' from limit_check
+                        #'time_remaining': limit_check.get('time_remaining')
+                    #}
                 # If it's 'guest_limit', it means they've hit 4 questions and need to verify
-                else: # limit_check.get('reason') == 'guest_limit'
+                #else: # limit_check.get('reason') == 'guest_limit'
                     # Do NOT set session.question_limit_reached here, it's set on the next rerurn in display_email_prompt_if_needed
-                    return {'requires_email': True, 'content': 'Email verification required.'}
+                    #return {'requires_email': True, 'content': 'Email verification required.'}
 
             self._clear_error_notifications()
             
