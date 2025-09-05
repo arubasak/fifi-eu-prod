@@ -3454,7 +3454,41 @@ class SessionManager:
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.session_state['page'] = None
-
+def check_if_attempting_to_exceed_limits(self, session: UserSession) -> bool:
+        """Check if user is attempting to ask a question beyond their limits."""
+        limit_check = self.question_limits.is_within_limits(session)
+        
+        if not limit_check.get('allowed', True):
+            reason = limit_check.get('reason')
+            
+            if reason == 'guest_limit':
+                st.error("🛑 **Guest Limit Reached**")
+                st.info("You've used your 4 guest questions. Please verify your email to unlock 10 more questions per day!")
+                return True
+                
+            elif reason == 'daily_limit':
+                if session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
+                    st.error("🛑 **Daily Limit Reached**")
+                    st.info("You've used your 10 questions for today. Consider registering for 20 questions/day or wait 24 hours.")
+                else:  # Registered user
+                    st.error("🛑 **Daily Limit Reached**")
+                    st.info("You've used your 20 questions for today. Please wait 24 hours for the limit to reset.")
+                return True
+                
+            else:  # Other ban types (one_hour, twenty_four_hour, evasion_block)
+                ban_type = limit_check.get('ban_type', 'unknown')
+                message = limit_check.get('message', 'Access restricted due to usage policy.')
+                time_remaining = limit_check.get('time_remaining')
+                
+                st.error("🚫 **Access Restricted**")
+                if time_remaining:
+                    hours = max(0, int(time_remaining.total_seconds() // 3600))
+                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                    st.error(f"Time remaining: {hours}h {minutes}m")
+                st.info(message)
+                return True
+        
+        return False
 def render_simple_activity_tracker(session_id: str):
     """Renders a simple activity tracker that monitors user interactions."""
     if not session_id:
