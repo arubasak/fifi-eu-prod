@@ -11,7 +11,7 @@
     try {
         const sessionId = "{SESSION_ID}"; 
         
-        console.log('🔍 FiFi Fingerprinting (FingerprintJS v4): Starting for session', sessionId.substring(0, 8));
+        console.log('🔍 FiFi Fingerprinting (CreepJS): Starting for session', sessionId.substring(0, 8));
         
         // Prevent multiple executions
         if (window.fifi_fp_executed_for_session === sessionId) {
@@ -20,109 +20,215 @@
         }
         window.fifi_fp_executed_for_session = sessionId;
 
-        // Load FingerprintJS v4 from CDN
-        import('https://openfpcdn.io/fingerprintjs/v4')
-            .then(FingerprintJS => FingerprintJS.load())
-            .then(fp => fp.get())
-            .then(result => {
-                // Map FingerprintJS result to existing structure
-                const fingerprintId = result.visitorId;
-                const method = 'fingerprintjs';
-                const workingMethods = ['fingerprintjs'];
-                
-                // Determine privacy level based on confidence
-                let privacy = 'standard';
-                if (result.confidence && result.confidence.score < 0.7) {
-                    privacy = 'high_privacy';  // Lower confidence suggests privacy measures
-                } else if (result.confidence && result.confidence.score < 0.9) {
-                    privacy = 'medium_privacy';
-                }
-                
-                console.log("🔍 FiFi Fingerprinting (FingerprintJS v4) complete:", {
-                    fingerprint_id: fingerprintId, 
-                    method: method, 
-                    privacy: privacy, 
-                    confidence: result.confidence?.score,
-                    working: workingMethods.length
-                });
-                
-                // REDIRECT METHOD: Send data via URL parameters (same as original)
-                function getAppUrl() {
-                    try {
-                        if (window.parent && window.parent.location.origin === window.location.origin) {
-                            return window.parent.location.origin + window.parent.location.pathname;
-                        }
-                    } catch (e) {
-                        console.warn("Using current window location as fallback");
-                    }
-                    return window.location.origin + window.location.pathname;
-                }
-                
-                // Build fingerprint URL with parameters
-                const appUrl = getAppUrl();
-                const fingerprintUrl = `${appUrl}?event=fingerprint_complete&session_id=${sessionId}&fingerprint_id=${encodeURIComponent(fingerprintId)}&method=${encodeURIComponent(method)}&privacy=${encodeURIComponent(privacy)}&working_methods=${encodeURIComponent(workingMethods.join(','))}&timestamp=${Date.now()}`;
-                
-                console.log("🔍 FiFi Fingerprinting: Redirecting with data...");
-                
-                // Redirect to pass data to Python
+        // Load CreepJS from GitHub
+        const script = document.createElement('script');
+        script.src = 'https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js';
+        script.onload = function() {
+            console.log('🔍 CreepJS library loaded successfully');
+            
+            // Wait for CreepJS to initialize and gather fingerprint data
+            setTimeout(function() {
                 try {
-                    if (window.parent && window.parent.location.origin === window.location.origin) {
-                        window.parent.location.href = fingerprintUrl;
-                    } else {
-                        window.location.href = fingerprintUrl;
+                    if (typeof creep === 'undefined') {
+                        throw new Error('CreepJS not available after loading');
                     }
-                } catch (e) {
-                    console.error('Fingerprint redirect failed:', e);
-                }
-            })
-            .catch(fingerprintError => {
-                console.error("🚨 FingerprintJS failed, using fallback:", fingerprintError);
-                
-                // Fallback fingerprint generation (same logic as original)
-                const fingerprintId = 'fingerprintjs_failed_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-                const method = 'fallback';
-                const privacy = 'high_privacy';
-                const workingMethods = [];
-                
-                console.log("🔍 FiFi Fingerprinting: Using fallback fingerprint:", {
-                    fingerprint_id: fingerprintId, 
-                    method: method, 
-                    privacy: privacy, 
-                    working: workingMethods.length
-                });
-                
-                // Same redirect mechanism for fallback
-                function getAppUrl() {
-                    try {
-                        if (window.parent && window.parent.location.origin === window.location.origin) {
-                            return window.parent.location.origin + window.parent.location.pathname;
+                    
+                    console.log('🔍 CreepJS object available:', typeof creep);
+                    
+                    // Wait a bit more for CreepJS to fully initialize
+                    setTimeout(function() {
+                        try {
+                            // Gather CreepJS fingerprint components
+                            const fingerprintComponents = [];
+                            const workingMethods = [];
+                            let privacyScore = 0; // Higher score = more privacy/blocking
+                            
+                            // Check what CreepJS components are available and working
+                            if (creep && typeof creep === 'object') {
+                                console.log('🔍 CreepJS components available:', Object.keys(creep));
+                                
+                                // Try to get various CreepJS fingerprint components
+                                const components = [
+                                    'canvas', 'webgl', 'audio', 'fonts', 'screen', 
+                                    'timezone', 'locale', 'platform', 'hardware',
+                                    'navigator', 'lies', 'trash', 'capturedErrors'
+                                ];
+                                
+                                components.forEach(component => {
+                                    try {
+                                        if (creep[component] && creep[component].fingerprint) {
+                                            fingerprintComponents.push(creep[component].fingerprint);
+                                            workingMethods.push(component);
+                                            console.log(`✅ CreepJS ${component} component working`);
+                                        } else if (creep[component]) {
+                                            // Try to extract some identifying data
+                                            const componentData = JSON.stringify(creep[component]).substring(0, 100);
+                                            if (componentData && componentData.length > 10) {
+                                                fingerprintComponents.push(componentData);
+                                                workingMethods.push(component);
+                                                console.log(`✅ CreepJS ${component} data extracted`);
+                                            }
+                                        }
+                                    } catch (e) {
+                                        console.warn(`⚠️ CreepJS ${component} component failed:`, e.message);
+                                        privacyScore += 1; // Blocked component indicates privacy measures
+                                    }
+                                });
+                                
+                                // Check for lies and inconsistencies (CreepJS specialty)
+                                if (creep.lies && Array.isArray(creep.lies)) {
+                                    privacyScore += creep.lies.length; // More lies = more privacy tools
+                                    console.log(`🔍 CreepJS detected ${creep.lies.length} lies/inconsistencies`);
+                                }
+                                
+                                // Check for trash (noise injection)
+                                if (creep.trash) {
+                                    privacyScore += 2; // Trash indicates advanced privacy tools
+                                    console.log('🔍 CreepJS detected trash/noise injection');
+                                }
+                            }
+                            
+                            // Generate fingerprint ID from collected components
+                            let fingerprintId;
+                            if (fingerprintComponents.length > 0) {
+                                // Create hash from all components
+                                const combinedData = fingerprintComponents.join('|');
+                                fingerprintId = 'creepjs_' + hashString(combinedData);
+                            } else {
+                                // Fallback if no components available
+                                fingerprintId = 'creepjs_minimal_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+                                workingMethods.push('minimal_fallback');
+                            }
+                            
+                            // Determine privacy level based on what we found
+                            let privacy = 'standard';
+                            if (privacyScore > 5) {
+                                privacy = 'high_privacy';
+                            } else if (privacyScore > 2) {
+                                privacy = 'medium_privacy';
+                            }
+                            
+                            const method = 'creepjs';
+                            
+                            console.log("🔍 FiFi Fingerprinting (CreepJS) complete:", {
+                                fingerprint_id: fingerprintId, 
+                                method: method, 
+                                privacy: privacy, 
+                                privacy_score: privacyScore,
+                                working_methods: workingMethods.length,
+                                components: workingMethods
+                            });
+                            
+                            // Redirect with fingerprint data (same mechanism as original)
+                            redirectWithFingerprint(sessionId, fingerprintId, method, privacy, workingMethods);
+                            
+                        } catch (processingError) {
+                            console.error('🚨 CreepJS processing failed:', processingError);
+                            handleFallback(sessionId, 'creepjs_processing_failed');
                         }
-                    } catch (e) {
-                        console.warn("Using current window location as fallback");
-                    }
-                    return window.location.origin + window.location.pathname;
+                    }, 2000); // Wait 2 seconds for CreepJS to fully process
+                    
+                } catch (initError) {
+                    console.error('🚨 CreepJS initialization failed:', initError);
+                    handleFallback(sessionId, 'creepjs_init_failed');
                 }
-                
-                const appUrl = getAppUrl();
-                const fallbackUrl = `${appUrl}?event=fingerprint_complete&session_id=${sessionId}&fingerprint_id=${encodeURIComponent(fingerprintId)}&method=${encodeURIComponent(method)}&privacy=${encodeURIComponent(privacy)}&working_methods=${encodeURIComponent(workingMethods.join(','))}&timestamp=${Date.now()}`;
-                
-                console.log("🔍 FiFi Fingerprinting: Redirecting with fallback data...");
-                
-                try {
-                    if (window.parent && window.parent.location.origin === window.location.origin) {
-                        window.parent.location.href = fallbackUrl;
-                    } else {
-                        window.location.href = fallbackUrl;
-                    }
-                } catch (e) {
-                    console.error('Fallback redirect failed:', e);
-                }
-            });
+            }, 1000); // Wait 1 second for initial load
+        };
+        
+        script.onerror = function() {
+            console.error('🚨 Failed to load CreepJS library');
+            handleFallback(sessionId, 'creepjs_load_failed');
+        };
+        
+        // Add script to document
+        document.head.appendChild(script);
+        
+        // Timeout fallback in case CreepJS takes too long
+        setTimeout(function() {
+            if (!window.fifi_fp_completed) {
+                console.warn('🕒 CreepJS timeout, using fallback');
+                handleFallback(sessionId, 'creepjs_timeout');
+            }
+        }, 10000); // 10 second timeout
         
     } catch (error) {
         console.error("🚨 FiFi Fingerprinting component caught a critical error:", error);
+        handleFallback(sessionId, 'critical_error');
+    }
+    
+    // Helper function to create a simple hash
+    function hashString(str) {
+        let hash = 0;
+        if (str.length === 0) return hash.toString(36);
+        for (let i = 0; i < str.length; i++) {
+            const char = str.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash; // Convert to 32-bit integer
+        }
+        return Math.abs(hash).toString(36);
+    }
+    
+    // Helper function to handle fallback fingerprinting
+    function handleFallback(sessionId, reason) {
+        if (window.fifi_fp_completed) return; // Prevent double execution
         
-        // Complete error handling - redirect with error information
+        console.log('🔄 Using fallback fingerprinting due to:', reason);
+        
+        // Generate fallback fingerprint using basic browser data
+        const fallbackComponents = [];
+        const workingMethods = ['fallback'];
+        
+        try {
+            // Collect basic browser information
+            fallbackComponents.push(navigator.userAgent || 'unknown');
+            fallbackComponents.push(screen.width + 'x' + screen.height);
+            fallbackComponents.push(navigator.language || 'unknown');
+            fallbackComponents.push(Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown');
+            fallbackComponents.push(navigator.platform || 'unknown');
+            fallbackComponents.push(navigator.hardwareConcurrency || 'unknown');
+            
+            // Add canvas fingerprint if available
+            try {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                ctx.textBaseline = 'top';
+                ctx.font = '14px Arial';
+                ctx.fillText('FiFi fingerprint test', 2, 2);
+                fallbackComponents.push(canvas.toDataURL());
+                workingMethods.push('canvas');
+            } catch (e) {
+                console.warn('Canvas fingerprinting failed');
+            }
+            
+            const combinedFallback = fallbackComponents.join('|');
+            const fingerprintId = 'fallback_' + hashString(combinedFallback);
+            const method = 'fallback';
+            const privacy = 'medium_privacy'; // Assume some privacy if CreepJS failed
+            
+            console.log("🔍 FiFi Fingerprinting (Fallback) complete:", {
+                fingerprint_id: fingerprintId, 
+                method: method, 
+                privacy: privacy, 
+                reason: reason,
+                working_methods: workingMethods
+            });
+            
+            redirectWithFingerprint(sessionId, fingerprintId, method, privacy, workingMethods);
+            
+        } catch (fallbackError) {
+            console.error('🚨 Even fallback fingerprinting failed:', fallbackError);
+            
+            // Emergency fallback
+            const emergencyId = 'emergency_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            redirectWithFingerprint(sessionId, emergencyId, 'emergency', 'high_privacy', ['emergency']);
+        }
+    }
+    
+    // Helper function to redirect with fingerprint data
+    function redirectWithFingerprint(sessionId, fingerprintId, method, privacy, workingMethods) {
+        if (window.fifi_fp_completed) return; // Prevent double execution
+        window.fifi_fp_completed = true;
+        
         function getAppUrl() {
             try {
                 if (window.parent && window.parent.location.origin === window.location.origin) {
@@ -134,30 +240,21 @@
             return window.location.origin + window.location.pathname;
         }
         
-        // Create emergency fallback fingerprint for critical errors
-        const emergencyFingerprintId = 'emergency_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-        const emergencyMethod = 'emergency_fallback';
-        const emergencyPrivacy = 'high_privacy';
-        const emergencyWorkingMethods = [];
-        
-        console.log("🚨 FiFi Fingerprinting: Using emergency fallback due to critical error");
-        
         const appUrl = getAppUrl();
-        const errorUrl = `${appUrl}?event=fingerprint_complete&session_id=${sessionId}&fingerprint_id=${encodeURIComponent(emergencyFingerprintId)}&method=${encodeURIComponent(emergencyMethod)}&privacy=${encodeURIComponent(emergencyPrivacy)}&working_methods=${encodeURIComponent(emergencyWorkingMethods.join(','))}&error=${encodeURIComponent(error.message)}&timestamp=${Date.now()}`;
+        const fingerprintUrl = `${appUrl}?event=fingerprint_complete&session_id=${sessionId}&fingerprint_id=${encodeURIComponent(fingerprintId)}&method=${encodeURIComponent(method)}&privacy=${encodeURIComponent(privacy)}&working_methods=${encodeURIComponent(workingMethods.join(','))}&timestamp=${Date.now()}`;
+        
+        console.log("🔍 FiFi Fingerprinting: Redirecting with data...");
         
         try {
             if (window.parent && window.parent.location.origin === window.location.origin) {
-                window.parent.location.href = errorUrl;
+                window.parent.location.href = fingerprintUrl;
             } else {
-                window.location.href = errorUrl;
+                window.location.href = fingerprintUrl;
             }
         } catch (e) {
-            console.error('❌ Emergency error redirect also failed:', e);
+            console.error('❌ Fingerprint redirect failed:', e);
             
-            // Last resort: try to at least log the session ID for debugging
-            console.error('🆘 CRITICAL: All fingerprinting and redirect methods failed for session:', sessionId);
-            
-            // If even the redirect fails, try a simple reload as absolute last resort
+            // Last resort: try reload
             try {
                 if (window.parent && window.parent !== window) {
                     window.parent.location.reload();
@@ -169,6 +266,7 @@
             }
         }
     }
+    
 })();
 </script>
 </body>
