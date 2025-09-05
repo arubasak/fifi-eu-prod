@@ -4661,7 +4661,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     return should_block_chat
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
-    """Chat interface with enhanced tier system notifications."""
+    """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
@@ -4709,8 +4709,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Render chat content ONLY if not blocked by a dialog
     if not st.session_state.get('chat_blocked_by_dialog', False):
         # ENHANCED: Show tier warnings for registered users
-        # Note: I've also updated the `is_within_limits` calls to use `.get('allowed')` properly
-        # and added `.value` for Enum comparisons for consistency and robustness.
         limit_check_for_display = session_manager.question_limits.is_within_limits(session)
         if (session.user_type.value == UserType.REGISTERED_USER.value and 
             limit_check_for_display.get('allowed') and 
@@ -4825,12 +4823,42 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 del st.session_state.context_flagged
                 st.rerun()
 
+    # Show approaching limit warnings (Option 2 enhancement)
+    if not overall_chat_disabled:
+        user_type = session.user_type.value
+        current_count = session.daily_question_count
+        
+        if user_type == UserType.GUEST.value and current_count == 3:
+            st.warning("⚠️ **Final Guest Question Coming Up!** Your next question will be your last before email verification is required.")
+            
+        elif user_type == UserType.EMAIL_VERIFIED_GUEST.value and current_count == 9:
+            st.warning("⚠️ **Final Question Today!** Your next question will be your last for the next 24 hours.")
+            
+        elif user_type == UserType.REGISTERED_USER.value:
+            if current_count == 9:
+                st.warning("⚠️ **Tier 1 Final Question Coming Up!** After your next question, you'll need a 1-hour break.")
+            elif current_count == 19:
+                st.warning("⚠️ **Final Question Today!** Your next question will be your last for 24 hours.")
+
     prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
                             disabled=overall_chat_disabled)
     
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
+        # OPTION A: Use the function call to check limits before any processing
+        if session_manager.check_if_attempting_to_exceed_limits(session):
+            # User hit a limit - appropriate error messages already shown by the function
+            if session.user_type.value == UserType.GUEST.value:
+                # For guests hitting limit, trigger email verification flow
+                st.session_state.verification_stage = 'email_entry'
+                st.session_state.chat_blocked_by_dialog = True
+                st.session_state.final_answer_acknowledged = True  # Skip gentle prompt since they're trying to exceed
+            # For other limits (daily limits, bans), error messages are already shown by the function
+            st.rerun()
+            return  # Stop processing and rerun to show the dialog/errors
+        
+        # If we reach here, user is within limits - proceed with normal processing
         with st.chat_message("user"):
             st.markdown(prompt)
         
@@ -4839,11 +4867,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 try:
                     response = session_manager.get_ai_response(session, prompt)
                     
+                    # Handle special response cases (these shouldn't happen with pre-checking, but kept for safety)
                     if response.get('requires_email'):
                         st.error("📧 Please verify your email to continue.")
-                        # This should be handled by display_email_prompt_if_needed on next rerun
                         st.session_state.verification_stage = 'email_entry' 
-                        st.session_state.chat_blocked_by_dialog = True # Force block chat
+                        st.session_state.chat_blocked_by_dialog = True
                         st.rerun()
                     elif response.get('banned'):
                         st.error(response.get("content", 'Access restricted.'))
@@ -4854,6 +4882,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             st.error(f"Time remaining: {hours}h {minutes}m")
                         st.rerun()
                     else:
+                        # Show the AI response
                         st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         
                         if response.get("source"):
@@ -4864,35 +4893,58 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             }.get(response['source'], "🤖")
                             st.caption(f"{source_color} Source: {response['source']}")
                         
+                        # Show additional response metadata
+                        indicators = []
+                        if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
+                        if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
+                        if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                        
+                        if response.get("safety_override"):
+                            st.warning("🛡️ Safety Override: Switched to verified sources")
+                        
+                        if response.get("has_citations") and response.get("has_inline_citations"):
+                            st.caption("📚 Response includes verified citations")
+                        
                         logger.info(f"✅ Question processed successfully")
                         
-                        # MODIFIED: Check if user has hit their limit AFTER showing the response
-                        # Don't immediately rerun - let them read their final answer
+                        # OPTION 2 MODIFICATION: Show gentle notifications for final answers but DON'T rerun immediately
                         limit_check_after_response = session_manager.question_limits.is_within_limits(session)
                         user_hit_final_limit = not limit_check_after_response.get('allowed', True)
                         
                         if user_hit_final_limit and limit_check_after_response.get('reason') == 'guest_limit':
-                            # Guest hit their 4th question limit - show a gentle notification
-                            st.info("🎯 **You've used your 4 guest questions!** Please verify your email above to unlock 10 more questions per day.")
+                            # Guest hit their 4th question limit - show gentle notification
+                            st.success("🎯 **Congratulations! You've explored FiFi AI with your 4 guest questions!**")
+                            st.info("📖 **Take your time to read this answer.** When you're ready, the email verification option is available above to unlock 10 questions per day + chat history saving.")
+                            
+                            # Show reading time estimate
+                            content_length = len(response.get("content", ""))
+                            if content_length > 500:
+                                estimated_seconds = max(30, (content_length / 5 / 200) * 60)
+                                if estimated_seconds > 60:
+                                    minutes = int(estimated_seconds // 60)
+                                    st.caption(f"📖 Estimated reading time: ~{minutes} minute{'s' if minutes > 1 else ''}")
+                                else:
+                                    st.caption(f"📖 Estimated reading time: ~{int(estimated_seconds)} seconds")
+                            
                             # DON'T rerun immediately - let them read their answer
                             
                         elif response.get('tier1_ban_applied_post_response', False):
-                            # Registered user hit Tier 1 (10th question) - show notification but don't rerun
-                            st.warning("⚠️ **Tier 1 Complete:** You've asked 10 questions. Please take a 1-hour break before continuing.")
-                            st.info("💡 **Take your time to review this answer** - you can return after the break period.")
-                            # DON'T rerun immediately
+                            # Registered user hit Tier 1 (10th question)
+                            st.success("🎯 **Tier 1 Complete!** You've successfully asked 10 questions.")
+                            st.warning("⏰ **1-Hour Break Required** - Please take a break before continuing with your remaining 10 questions.")
+                            st.info("📖 **Take your time to review this answer** - you can return after the break period to continue your research.")
                             
                         elif session.user_type.value == UserType.REGISTERED_USER.value and session.daily_question_count >= 20:
                             # Registered user hit final limit (20th question)
-                            st.warning("⚠️ **Daily Limit Reached:** You've completed your 20 questions for today.")
-                            st.info("💡 **Take your time to review this answer** - you can return in 24 hours.")
-                            # DON'T rerun immediately
+                            st.success("🎯 **Daily Research Complete!** You've used all 20 of your daily questions.")
+                            st.warning("⏰ **Daily Limit Reached** - Your questions will reset in 24 hours.")
+                            st.info("📖 **Take your time to review this final answer** - consider downloading your chat history from the sidebar.")
                             
                         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value and session.daily_question_count >= 10:
                             # Email verified guest hit their limit (10th question)
-                            st.warning("⚠️ **Daily Limit Reached:** You've used your 10 questions for today.")
-                            st.info("💡 **Take your time to review this answer** - consider registering for 20 questions/day!")
-                            # DON'T rerun immediately
+                            st.success("🎯 **Daily Questions Complete!** You've used all 10 of your questions for today.")
+                            st.warning("⏰ **Daily Limit Reached** - Your questions reset in 24 hours.")
+                            st.info("📖 **Take your time to review this answer** - consider [registering](https://www.12taste.com/in/my-account/) for 20 questions/day!")
                         
                         # REMOVED: The automatic st.rerun() that was preventing users from reading their final answer
                         # Users will naturally trigger a rerun when they try to ask another question or interact with the UI
@@ -4900,7 +4952,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 except Exception as e:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
-
+        
+        # REMOVED: The st.rerun() at the end that was causing immediate dialog appearance
 def ensure_initialization_fixed():
     """Fixed version without duplicate spinner since we have loading overlay"""
     if 'initialized' not in st.session_state or not st.session_state.initialized:
