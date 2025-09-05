@@ -4548,18 +4548,8 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                 help="We'll send you a 6-digit verification code that's valid for 1 minute."
             )
             
-            col_submit, col_back = st.columns([3, 1])
-            with col_submit:
-                submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
-            with col_back:
-                if st.session_state.final_answer_acknowledged:
-                    back_to_reading = st.form_submit_button("👀 Back to Reading", use_container_width=True)
-                    if back_to_reading:
-                        st.session_state.verification_stage = None
-                        st.session_state.chat_blocked_by_dialog = False
-                        st.info("You can continue reading. The verification option remains available above.")
-                        st.rerun()
-            
+            submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+                       
             if submit_email:
                 if current_email_input:
                     result = session_manager.handle_guest_email_verification(session, current_email_input)
