@@ -4896,6 +4896,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             st.caption("📚 Response includes verified citations")
                         
                         logger.info(f"✅ Question processed successfully")
+                        st.rerun()
                         
                         # OPTION 2 MODIFICATION: Show gentle notifications for final answers but DON'T rerun immediately
                         limit_check_after_response = session_manager.question_limits.is_within_limits(session)
