@@ -172,7 +172,7 @@
                         handleFallback(sessionId, 'creepjs_check_error');
                     }
                 }
-            }, 500); // Check every 500ms
+            }, 100); // Check every 100ms since CreepJS completes very fast
         };
         
         script.onerror = function() {
