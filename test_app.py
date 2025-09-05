@@ -4382,6 +4382,9 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.session_state.final_answer_acknowledged = False
     if 'gentle_prompt_shown' not in st.session_state:
         st.session_state.gentle_prompt_shown = False
+    # NEW: Track email verified guest final answer acknowledgment
+    if 'email_verified_final_answer_acknowledged' not in st.session_state:
+        st.session_state.email_verified_final_answer_acknowledged = False
 
     # Check if a hard block is in place first (non-email-verification related bans)
     limit_check = session_manager.question_limits.is_within_limits(session)
@@ -4391,16 +4394,21 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     # Determine current user status
     user_is_guest = (session.user_type.value == UserType.GUEST.value)
+    user_is_email_verified = (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value)
     guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
+    email_verified_limit_value = session_manager.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]
     daily_q_value = session.daily_question_count
-    daily_q_ge_limit = (daily_q_value >= guest_limit_value)
+    daily_q_ge_guest_limit = (daily_q_value >= guest_limit_value)
+    daily_q_ge_email_verified_limit = (daily_q_value >= email_verified_limit_value)
 
-    logger.debug(f"DEBUG_PROMPT_EVAL_COMPONENTS: SessionID={session.session_id[:8]} | IsGuest={user_is_guest} | DailyQ={daily_q_value} | GuestLimit={guest_limit_value} | DailyQ>=Limit={daily_q_ge_limit}")
+    logger.debug(f"DEBUG_PROMPT_EVAL_COMPONENTS: SessionID={session.session_id[:8]} | IsGuest={user_is_guest} | IsEmailVerified={user_is_email_verified} | DailyQ={daily_q_value} | GuestLimit={guest_limit_value} | EmailVerifiedLimit={email_verified_limit_value}")
 
-    is_guest_limit_hit = (user_is_guest and daily_q_ge_limit)
+    is_guest_limit_hit = (user_is_guest and daily_q_ge_guest_limit)
+    is_email_verified_limit_hit = (user_is_email_verified and daily_q_ge_email_verified_limit)
     user_just_hit_guest_limit = is_guest_limit_hit and not st.session_state.final_answer_acknowledged
+    user_just_hit_email_verified_limit = is_email_verified_limit_hit and not st.session_state.email_verified_final_answer_acknowledged
 
-    logger.debug(f"DEBUG: display_email_prompt_if_needed: session_id={session.session_id[:8]} | user_type={session.user_type.value} | daily_q={session.daily_question_count} | is_guest_limit_hit={is_guest_limit_hit} | just_hit={user_just_hit_guest_limit}")
+    logger.debug(f"DEBUG: display_email_prompt_if_needed: session_id={session.session_id[:8]} | user_type={session.user_type.value} | daily_q={session.daily_question_count} | is_guest_limit_hit={is_guest_limit_hit} | is_email_verified_limit_hit={is_email_verified_limit_hit} | just_hit_guest={user_just_hit_guest_limit} | just_hit_email_verified={user_just_hit_email_verified_limit}")
 
     should_show_prompt = False
     should_block_chat = True  # Default to blocking when prompt is shown
@@ -4430,7 +4438,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             st.markdown("• **Cross-device sync** - access your chats from any device")
             st.markdown("• **Priority support** during high usage periods")
             
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns(2)
             with col1:
                 if st.button("📧 Yes, Let's Verify My Email!", use_container_width=True, key="gentle_verify_btn"):
                     st.session_state.verification_stage = 'email_entry'
@@ -4444,12 +4452,40 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.session_state.gentle_prompt_shown = True
                     st.success("Perfect! Take your time. The verification option will remain available above.")
                     st.rerun()
-            with col3:
-                if st.button("ℹ️ Tell Me More About Benefits", use_container_width=True, key="learn_more_btn"):
-                    st.session_state.show_benefits_modal = True
-                    st.rerun()
         
         # If they try to ask another question, THEN we'll block them
+        st.session_state.chat_blocked_by_dialog = False
+        return False  # Don't disable chat input yet
+
+    # PRIORITY 2B: Handle email verified guest who just hit their limit (GENTLE approach)
+    elif user_just_hit_email_verified_limit:
+        # Show gentle, non-blocking prompt for users who just used their final question
+        should_show_prompt = True
+        should_block_chat = False  # DON'T block immediately - let them read their answer
+        
+        st.success("🎯 **You've completed your 10 daily questions!**")
+        st.info("Take your time to read this answer. Your questions will reset in 24 hours, or consider registering for 20 questions/day!")
+        
+        # Show a friendly expandable section instead of aggressive blocking
+        with st.expander("🚀 Want More Questions Daily?", expanded=False):
+            st.markdown("### 📈 Upgrade Benefits:")
+            st.markdown("• **20 questions per day** (instead of 10)")
+            st.markdown("• **Tier system** with breaks instead of hard stops")
+            st.markdown("• **Priority support** during high usage")
+            st.markdown("• **Enhanced chat history** and cross-device sync")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
+                    st.markdown("[Register Here](https://www.12taste.com/in/my-account/)")
+                    st.session_state.email_verified_final_answer_acknowledged = True
+                    st.rerun()
+            with col2:
+                if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="email_verified_continue_reading"):
+                    st.session_state.email_verified_final_answer_acknowledged = True
+                    st.success("Perfect! Take your time reading.")
+                    st.rerun()
+        
         st.session_state.chat_blocked_by_dialog = False
         return False  # Don't disable chat input yet
 
@@ -4460,6 +4496,16 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         if st.session_state.verification_stage is None:
             st.session_state.verification_stage = 'email_entry'
             st.session_state.guest_continue_active = False
+
+    # PRIORITY 3B: Handle email verified guest who acknowledged their limit but is trying to ask more
+    elif is_email_verified_limit_hit and st.session_state.email_verified_final_answer_acknowledged:
+        should_show_prompt = True
+        should_block_chat = True  # NOW we block because they're trying to exceed
+        st.error("🛑 **Daily Limit Reached**")
+        st.info("You've used your 10 questions for today. Your questions reset in 24 hours, or consider registering for 20 questions/day!")
+        st.markdown("[Register for 20 questions/day](https://www.12taste.com/in/my-account/)")
+        st.session_state.chat_blocked_by_dialog = True
+        return True
 
     # PRIORITY 4: Handle declined recognized email scenario
     elif session.declined_recognized_email_at and not st.session_state.guest_continue_active:
@@ -4549,7 +4595,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             )
             
             submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
-                       
+            
             if submit_email:
                 if current_email_input:
                     result = session_manager.handle_guest_email_verification(session, current_email_input)
@@ -4579,16 +4625,11 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                 help="Enter the 6-digit code from your email"
             )
             
-            col_verify, col_resend, col_back = st.columns([2, 2, 1])
+            col_verify, col_resend = st.columns(2)
             with col_verify:
                 submit_code = st.form_submit_button("✅ Verify Code", use_container_width=True)
             with col_resend:
                 resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
-            with col_back:
-                change_email = st.form_submit_button("📧 Change Email", use_container_width=True)
-                if change_email:
-                    st.session_state.verification_stage = "email_entry"
-                    st.rerun()
             
             if resend_code:
                 if verification_email:
@@ -4617,6 +4658,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                         st.session_state.guest_continue_active = False
                         st.session_state.final_answer_acknowledged = False
                         st.session_state.gentle_prompt_shown = False
+                        st.session_state.email_verified_final_answer_acknowledged = False
                         st.rerun()
                     else:
                         st.error(result['message'])
@@ -4650,6 +4692,8 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.rerun()
 
     return should_block_chat
+
+
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
     
