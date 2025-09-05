@@ -5234,9 +5234,10 @@ def main_fixed():
             return
 
         # Route to appropriate page
-        if current_page != "chat":
-            render_welcome_page(session_manager)
-        else:
+        if not loading_state:
+            if current_page != "chat":
+                render_welcome_page(session_manager)
+            else:
             # Get existing session (should already exist from loading state or prior direct creation)
             session = session_manager.get_session()
             
