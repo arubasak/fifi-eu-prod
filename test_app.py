@@ -5109,7 +5109,6 @@ def main_fixed():
     if 'is_chat_ready' not in st.session_state:
         st.session_state.is_chat_ready = False
 
-
     # Handle loading states first
     loading_state = st.session_state.get('is_loading', False)
     current_page = st.session_state.get('page')
@@ -5200,7 +5199,6 @@ def main_fixed():
             else:
                 st.session_state.is_chat_ready = False # Ensure locked if no session obtained
 
-
             # Clear loading state and rerun to show the actual page
             set_loading_state(False)
             st.rerun()
@@ -5233,97 +5231,95 @@ def main_fixed():
             st.error("❌ Session Manager not available. Please refresh the page.")
             return
 
-        # Route to appropriate page
+        # Route to appropriate page - FIXED: Only render when not loading
         if not loading_state:  # Only render pages when not loading
             if current_page != "chat":
-            render_welcome_page(session_manager)
-        else:
-            # Get existing session (should already exist from loading state or prior direct creation)
-            session = session_manager.get_session()
-            
-            if session is None or not session.active:
-                logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
-                st.session_state['page'] = None
-                st.rerun()
-                return
-            
-            # 🔥 RENDER FINGERPRINTING FIRST, BEFORE TIMEOUT LOGIC
-            fingerprint_needed = (
-                session is not None and (
-                    not session.fingerprint_id or
-                    session.fingerprint_method == "temporary_fallback_python" or
-                    session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-                )
-            )
-            
-            if fingerprint_needed:
-                fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-                if not st.session_state.get(fingerprint_key, False):
-                    session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-                    st.session_state[fingerprint_key] = True
-
-            # 🔥 NOW DO TIMEOUT LOGIC AFTER JAVASCRIPT IS RENDERED
-            if session:
-                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-                
-                if fingerprint_is_stable:
-                    # Real fingerprint already obtained, enable chat immediately
-                    st.session_state.is_chat_ready = True
-                    if 'fingerprint_wait_start' in st.session_state:
-                        del st.session_state['fingerprint_wait_start']  # Clear timeout
-                else:
-                    # Still waiting for JS fingerprinting
-                    current_time_float = time.time() # Use float for direct comparison with time.time()
-                    wait_start = st.session_state.get('fingerprint_wait_start')
-                    
-                    if wait_start is None:
-                        # First time seeing temp fingerprint, start timeout
-                        st.session_state.fingerprint_wait_start = current_time_float
-                        st.session_state.is_chat_ready = False
-                        logger.info(f"Starting fingerprint wait timer for session {session.session_id[:8]}")
-                    elif current_time_float - wait_start > 15:  # ✅ 15 seconds is reasonable
-                        # Timeout reached, enable chat with fallback fingerprint
-                        st.session_state.is_chat_ready = True
-                        logger.warning(f"Fingerprint timeout (15s) - enabling chat with fallback for session {session.session_id[:8]}")
-                    else:
-                        # Still waiting within timeout period
-                        st.session_state.is_chat_ready = False
-                        # remaining = 5 - (current_time_float - wait_start) # Original value, if needed
-                        # logger.debug(f"Fingerprint wait continues: {remaining:.1f}s remaining for session {session.session_id[:8]}")
-
+                render_welcome_page(session_manager)
             else:
-                st.session_state.is_chat_ready = False
+                # Get existing session (should already exist from loading state or prior direct creation)
+                session = session_manager.get_session()
+                
+                if session is None or not session.active:
+                    logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
+                    for key in list(st.session_state.keys()):
+                        del st.session_state[key]
+                    st.session_state['page'] = None
+                    st.rerun()
+                    return
+                
+                # 🔥 RENDER FINGERPRINTING FIRST, BEFORE TIMEOUT LOGIC
+                fingerprint_needed = (
+                    session is not None and (
+                        not session.fingerprint_id or
+                        session.fingerprint_method == "temporary_fallback_python" or
+                        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                    )
+                )
+                
+                if fingerprint_needed:
+                    fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+                    if not st.session_state.get(fingerprint_key, False):
+                        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                        st.session_state[fingerprint_key] = True
 
-            # Right after your timeout logic
-            if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
-                # Removed the `remaining` calculation, as it's now handled in the toast message or info box directly.
-                # Just rerun to keep the UI updating
-                st.rerun() 
-                return # Stop execution to allow rerun
-            
-            # Render activity tracker and check for timeout
-            activity_data_from_js = None
-            if session and session.session_id: 
-                activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
-                if activity_tracker_key_state_flag not in st.session_state or \
-                   st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
+                # 🔥 NOW DO TIMEOUT LOGIC AFTER JAVASCRIPT IS RENDERED
+                if session:
+                    fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
                     
-                    logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
-                    activity_data_from_js = render_simple_activity_tracker(session.session_id)
-                    st.session_state[activity_tracker_key_state_flag] = True
-                    st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
-                    st.session_state.latest_activity_data_from_js = activity_data_from_js
-                else:
-                    activity_data_from_js = st.session_state.latest_activity_data_from_js
-            
-            timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
-            if timeout_triggered:
-                return
+                    if fingerprint_is_stable:
+                        # Real fingerprint already obtained, enable chat immediately
+                        st.session_state.is_chat_ready = True
+                        if 'fingerprint_wait_start' in st.session_state:
+                            del st.session_state['fingerprint_wait_start']  # Clear timeout
+                    else:
+                        # Still waiting for JS fingerprinting
+                        current_time_float = time.time() # Use float for direct comparison with time.time()
+                        wait_start = st.session_state.get('fingerprint_wait_start')
+                        
+                        if wait_start is None:
+                            # First time seeing temp fingerprint, start timeout
+                            st.session_state.fingerprint_wait_start = current_time_float
+                            st.session_state.is_chat_ready = False
+                            logger.info(f"Starting fingerprint wait timer for session {session.session_id[:8]}")
+                        elif current_time_float - wait_start > 15:  # ✅ 15 seconds is reasonable
+                            # Timeout reached, enable chat with fallback fingerprint
+                            st.session_state.is_chat_ready = True
+                            logger.warning(f"Fingerprint timeout (15s) - enabling chat with fallback for session {session.session_id[:8]}")
+                        else:
+                            # Still waiting within timeout period
+                            st.session_state.is_chat_ready = False
 
-            render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-            render_chat_interface_simplified(session_manager, session, activity_data_from_js)
+                else:
+                    st.session_state.is_chat_ready = False
+
+                # Right after your timeout logic
+                if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
+                    # Removed the `remaining` calculation, as it's now handled in the toast message or info box directly.
+                    # Just rerun to keep the UI updating
+                    st.rerun() 
+                    return # Stop execution to allow rerun
+                
+                # Render activity tracker and check for timeout
+                activity_data_from_js = None
+                if session and session.session_id: 
+                    activity_tracker_key_state_flag = f'activity_tracker_component_rendered_{session.session_id.replace("-", "_")}'
+                    if activity_tracker_key_state_flag not in st.session_state or \
+                       st.session_state.get(f'{activity_tracker_key_state_flag}_session_id_check') != session.session_id:
+                        
+                        logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
+                        activity_data_from_js = render_simple_activity_tracker(session.session_id)
+                        st.session_state[activity_tracker_key_state_flag] = True
+                        st.session_state[f'{activity_tracker_key_state_flag}_session_id_check'] = session.session_id
+                        st.session_state.latest_activity_data_from_js = activity_data_from_js
+                    else:
+                        activity_data_from_js = st.session_state.latest_activity_data_from_js
+                
+                timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+                if timeout_triggered:
+                    return
+
+                render_sidebar(session_manager, session, st.session_state.pdf_exporter)
+                render_chat_interface_simplified(session_manager, session, activity_data_from_js)
 
     except Exception as e:
         logger.error(f"Main application error: {e}", exc_info=True)
