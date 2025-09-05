@@ -4659,6 +4659,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                         st.session_state.final_answer_acknowledged = False
                         st.session_state.gentle_prompt_shown = False
                         st.session_state.email_verified_final_answer_acknowledged = False
+                        st.session_state.registered_final_answer_acknowledged = False
                         st.rerun()
                     else:
                         st.error(result['message'])
@@ -4692,7 +4693,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.rerun()
 
     return should_block_chat
-
 
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
