@@ -4,19 +4,13 @@
   <meta charset="utf-8" />
   <title>FiFi Fingerprinting</title>
   <style>
-    body { margin: 0; padding: 0; }
-    /* Ensure CreepJS elements are visible but off-screen */
-    #fp-app { 
-      position: absolute; 
-      left: -9999px; 
-      width: 1px; 
-      height: 1px; 
-      overflow: hidden; 
-    }
+    body { margin: 0; padding: 10px; font-family: Arial, sans-serif; }
+    #status { margin-top: 10px; font-size: 12px; color: #666; }
   </style>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
 </head>
 <body>
-<!-- CreepJS DOM structure - MUST be visible for CreepJS to work -->
+<!-- CreepJS DOM structure -->
 <div id="fp-app">
   <fingerprint>
     <div id="fingerprint-data">
@@ -35,66 +29,49 @@
   </fingerprint>
 </div>
 
-<!-- Load CreepJS from CDN (jsdelivr is more reliable than GitHub Pages) -->
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
+<div id="status">Initializing fingerprint detection...</div>
+
+<!-- Load CreepJS -->
 <script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
 
 <script>
 (function () {
   const sessionId = "{SESSION_ID}";
+  const statusEl = document.getElementById('status');
+  
   console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
   
-  // Prevent multiple executions
-  const PROCESSED_KEY = `fifi_creep_processed_${sessionId}`;
-  if (window[PROCESSED_KEY]) {
-    console.log('✅ Already processed for this session');
-    return;
-  }
-
-  let fingerprintSent = false;
-
-  function sendFingerprint(payload) {
-    if (fingerprintSent) return;
-    fingerprintSent = true;
-    window[PROCESSED_KEY] = true;
+  let fingerprintStored = false;
+  
+  function storeFingerprint(payload) {
+    if (fingerprintStored) return;
+    fingerprintStored = true;
     
-    console.log('🔍 Sending fingerprint:', payload);
+    console.log('🔍 Storing fingerprint:', payload);
+    statusEl.textContent = 'Fingerprint generated: ' + (payload.fingerprint_id || 'unknown').substring(0, 12) + '...';
     
-    // Store in sessionStorage
+    // Store in sessionStorage for Python to read
     try {
-      sessionStorage.setItem(`fifi_fp_${sessionId}`, JSON.stringify({
+      const storageKey = `fifi_fp_${sessionId}`;
+      sessionStorage.setItem(storageKey, JSON.stringify({
         ...payload,
         timestamp: Date.now()
       }));
-      console.log('✅ Stored in sessionStorage');
+      console.log('✅ Fingerprint stored in sessionStorage with key:', storageKey);
+      
+      // Also expose globally for debugging
+      window.fifi_last_fingerprint = payload;
+      
     } catch (e) {
-      console.warn('SessionStorage failed:', e);
+      console.error('❌ Failed to store fingerprint:', e);
+      statusEl.textContent = 'Error storing fingerprint';
     }
-    
-    // Redirect (most reliable for Streamlit)
-    setTimeout(() => {
-      try {
-        const base = window.location.origin + window.location.pathname;
-        const url = `${base}?event=fingerprint_complete`
-          + `&session_id=${encodeURIComponent(sessionId)}`
-          + `&fingerprint_id=${encodeURIComponent(payload.fingerprint_id || '')}`
-          + `&method=${encodeURIComponent(payload.method || '')}`
-          + `&privacy=${encodeURIComponent(payload.privacy || '')}`
-          + `&fuzzy=${encodeURIComponent(payload.fuzzy || '')}`
-          + `&timestamp=${Date.now()}`;
-        
-        console.log('🔍 Redirecting to:', url);
-        window.location.replace(url);
-      } catch (e) {
-        console.error('Redirect failed:', e);
-      }
-    }, 100);
   }
-
+  
   function asHex(s, min = 32, max = 64) {
     return (typeof s === 'string' && new RegExp(`^[a-f0-9]{${min},${max}}$`, 'i').test(s)) ? s : null;
   }
-
+  
   // DOM scraping function
   function tryDomScrape() {
     const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
@@ -109,7 +86,6 @@
     const fuzzyTxt = fuzzyEl?.textContent || '';
     
     console.log('📝 Header text:', fpText);
-    console.log('📝 Fuzzy text:', fuzzyTxt);
     
     const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
     const fuzzyMatch = fuzzyTxt.match(/Fuzzy:\s*([a-f0-9]{32,64})/i);
@@ -119,7 +95,7 @@
     
     if (stable) {
       console.log('✅ Found fingerprint via DOM scrape:', stable);
-      sendFingerprint({
+      storeFingerprint({
         fingerprint_id: stable,
         fuzzy: fuzzy || '',
         method: 'creepjs_dom',
@@ -131,10 +107,11 @@
     
     return false;
   }
-
+  
   // Fallback fingerprint
   function createFallback(reason) {
     console.warn('⚠️ Using fallback fingerprint, reason:', reason);
+    statusEl.textContent = 'Using fallback fingerprint (' + reason + ')';
     
     const parts = [];
     parts.push(navigator.userAgent || 'unknown');
@@ -143,18 +120,6 @@
     parts.push(navigator.language || 'en');
     parts.push((navigator.languages || []).join(','));
     parts.push(navigator.platform || 'unknown');
-    parts.push(String(navigator.hardwareConcurrency || 0));
-    parts.push(String(navigator.deviceMemory || 0));
-    
-    try {
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      ctx.font = '14px Arial';
-      ctx.fillText('fifi-fp', 2, 15);
-      parts.push(canvas.toDataURL().slice(-50));
-    } catch {
-      parts.push('canvas_blocked');
-    }
     
     const combined = parts.join('|');
     let hash = 0;
@@ -165,7 +130,7 @@
     
     const fallbackId = `fallback_${Math.abs(hash).toString(16)}_${Date.now().toString(36)}`;
     
-    sendFingerprint({
+    storeFingerprint({
       fingerprint_id: fallbackId,
       fuzzy: '',
       method: 'fallback',
@@ -173,39 +138,36 @@
       working_methods: []
     });
   }
-
-  // Wait for CreepJS to initialize and render
+  
+  // Start detection
   let attempts = 0;
-  const maxAttempts = 30;
+  const maxAttempts = 20;
   
   function attemptFingerprint() {
     attempts++;
-    console.log(`🔄 Attempt ${attempts}/${maxAttempts} to get fingerprint...`);
+    statusEl.textContent = `Detecting fingerprint... (attempt ${attempts}/${maxAttempts})`;
     
     if (tryDomScrape()) {
       return;
     }
     
     if (attempts < maxAttempts) {
-      setTimeout(attemptFingerprint, 300);
+      setTimeout(attemptFingerprint, 500);
     } else {
       createFallback('max_attempts_reached');
     }
   }
-
-  // Start after a delay to ensure CreepJS has time to load
-  setTimeout(() => {
-    console.log('🚀 Starting fingerprint detection...');
-    attemptFingerprint();
-  }, 1000);
-
-  // Absolute timeout fallback
-  setTimeout(() => {
-    if (!fingerprintSent) {
-      console.error('⏰ Absolute timeout reached');
-      createFallback('absolute_timeout');
-    }
-  }, 10000);
+  
+  // Start after CreepJS loads
+  window.addEventListener('load', () => {
+    setTimeout(() => {
+      console.log('🚀 Starting fingerprint detection...');
+      attemptFingerprint();
+    }, 1500); // Give CreepJS more time to initialize
+  });
+  
+  // Also try immediately
+  setTimeout(attemptFingerprint, 2000);
 })();
 </script>
 </body>
