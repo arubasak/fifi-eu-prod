@@ -2722,6 +2722,7 @@ class SessionManager:
             else:
                 # Current session is already at the highest or equal privilege level found for this fingerprint.
                 # Or no higher privilege found. Apply identity fields directly.
+                old_user_type = session.user_type  # ADD THIS LINE HERE
                 session.user_type = source_for_identity_and_base_data.user_type # This ensures GUEST remains GUEST if no higher is found
                 session.email = source_for_identity_and_base_data.email
                 session.full_name = source_for_identity_and_base_data.full_name
@@ -2734,6 +2735,34 @@ class SessionManager:
                 session.pending_full_name = None
                 session.pending_zoho_contact_id = None
                 session.pending_wp_token = None
+                if (old_user_type.value == UserType.EMAIL_VERIFIED_GUEST.value and 
+                    session.user_type.value == UserType.REGISTERED_USER.value and 
+                    session.ban_status.value != BanStatus.NONE.value):
+        
+                    logger.info(f"Recalculating ban for inherited user {session.session_id[:8]} from {old_user_type.value} to {session.user_type.value}")
+                    logger.info(f"Current ban: status={session.ban_status.value}, reason='{session.ban_reason}', end_time={session.ban_end_time}")
+
+                    if session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value:
+                        logger.info(f"Found 24-hour ban, checking if it needs conversion...")
+
+                        if session.daily_question_count >= 20:
+                            logger.info(f"Keeping 24-hour ban as user hit Tier 2 limit (20 questions)")
+                            session.ban_reason = "Daily limit of 20 questions reached"
+                        elif session.daily_question_count >= 10:
+                            logger.info(f"Converting 24-hour ban to 1-hour Tier 1 ban for {session.session_id[:8]}")
+                            session.ban_status = BanStatus.ONE_HOUR
+                            session.ban_start_time = datetime.now()
+                            session.ban_end_time = session.ban_start_time + timedelta(hours=1)
+                            session.ban_reason = "Tier 1 limit reached (10 questions)"
+                            logger.info(f"New ban: status={session.ban_status.value}, end_time={session.ban_end_time}")
+                        else:
+                            logger.info(f"Removing ban for inherited user {session.session_id[:8]} as they haven't hit Registered User limits")
+                            session.ban_status = BanStatus.NONE
+                            session.ban_start_time = None
+                            session.ban_end_time = None
+                            session.ban_reason = None
+                            session.question_limit_reached = False
+
                 # Importantly, do NOT clear declined_recognized_email_at here if it was just set.
                 # It will be managed by QuestionLimitManager.detect_guest_email_evasion
                 logger.info(f"No re-verification needed for {session.session_id[:8]}. User type set to {session.user_type.value}.")
@@ -3040,6 +3069,7 @@ class SessionManager:
                 logger.info(f"   - Total Questions: {session.total_question_count}")
                 logger.info(f"   - Has Messages: {len(session.messages)}")
                 logger.info(f"   - Reverification Pending: {session.reverification_pending}")
+                old_user_type = session.user_type
                 
                 if session.reverification_pending:
                     # Reclaim pending user type and identity
@@ -3061,6 +3091,36 @@ class SessionManager:
                     # Email already set in handle_guest_email_verification
                     logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST (first time): {session.email}")
 
+                # Recalculate ban status if upgrading from EMAIL_VERIFIED_GUEST to REGISTERED_USER
+                if (old_user_type.value == UserType.EMAIL_VERIFIED_GUEST.value and 
+                    session.user_type.value == UserType.REGISTERED_USER.value and 
+                    session.ban_status.value != BanStatus.NONE.value):
+                    
+                    logger.info(f"Recalculating ban for upgraded user {session.session_id[:8]} from {old_user_type.value} to {session.user_type.value}")
+                    logger.info(f"Current ban: status={session.ban_status.value}, reason='{session.ban_reason}', end_time={session.ban_end_time}")
+
+                    if session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value:
+                        logger.info(f"Found 24-hour ban, checking if it needs conversion...")
+
+                        if session.daily_question_count >= 20:
+                            logger.info(f"Keeping 24-hour ban as user hit Tier 2 limit (20 questions)")
+                            session.ban_reason = "Daily limit of 20 questions reached"
+                        elif session.daily_question_count >= 10:
+                            logger.info(f"Converting 24-hour ban to 1-hour Tier 1 ban for {session.session_id[:8]}")
+                            session.ban_status = BanStatus.ONE_HOUR
+                            session.ban_start_time = datetime.now()
+                            session.ban_end_time = session.ban_start_time + timedelta(hours=1)
+                            session.ban_reason = "Tier 1 limit reached (10 questions)"
+                            logger.info(f"New ban: status={session.ban_status.value}, end_time={session.ban_end_time}")
+                        else:
+                            logger.info(f"Removing ban for upgraded user {session.session_id[:8]} as they haven't hit Registered User limits")
+                            session.ban_status = BanStatus.NONE
+                            session.ban_start_time = None
+                            session.ban_end_time = None
+                            session.ban_reason = None
+                            session.question_limit_reached = False
+
+                session.question_limit_reached = False  # Reset limit flag
                 session.question_limit_reached = False  # Reset limit flag
                 # Clear declined_recognized_email_at on successful verification
                 session.declined_recognized_email_at = None 
