@@ -3196,7 +3196,7 @@ class SessionManager:
                     try:
                         self.db.save_session(current_session)
                         logger.info(f"User authenticated and upgraded to REGISTERED_USER: {user_email}, daily_q={current_session.daily_question_count}")
-                        st.rerun()
+                        
                     except Exception as e:
                         logger.error(f"Failed to save authenticated session: {e}")
                         st.error("Authentication succeeded but session could not be saved. Please try again or contact support.")
