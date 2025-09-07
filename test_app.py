@@ -3129,6 +3129,8 @@ class SessionManager:
                 
                 if wp_token and user_email:
                     current_session = self.get_session()
+
+                    old_user_type = current_session.user_type
                     
                     # --- SIMPLIFIED LOGIC FOR daily_question_count ON REGISTERED_USER LOGIN ---
                     # Per user clarification: the 24-hour reset rule for daily_question_count
