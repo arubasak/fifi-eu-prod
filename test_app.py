@@ -184,7 +184,7 @@ def show_loading_overlay():
             }}
         </style>
         """
-        st.components.v1.html(overlay_html, height=0)
+        st.components.v1.html(overlay_html, height=1)
         return True
     return False
 
