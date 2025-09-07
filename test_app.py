@@ -904,106 +904,41 @@ class DatabaseManager:
         def render_fingerprint_component(self, session_id: str):
             """Renders fingerprinting component using external fingerprint_component.html file."""
             try:
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
-            
-                logger.debug(f"🔍 Looking for fingerprint component at: {html_file_path}")
-            
-                if not os.path.exists(html_file_path):
-                    logger.error(f"❌ Fingerprint component file NOT FOUND at {html_file_path}")
-                    logger.info(f"📁 Current directory contents: {os.listdir(current_dir)}")
-                    return self._generate_fallback_fingerprint()
-            
-                logger.debug(f"✅ Fingerprint component file found, reading content...")
-            
-                with open(html_file_path, 'r', encoding='utf-8') as f:
-                    html_content = f.read()
-            
-                logger.debug(f"📄 Read {len(html_content)} characters from fingerprint component file")
-            
-                # Replace session ID placeholder in the HTML
-                original_content = html_content
-                html_content = html_content.replace('{SESSION_ID}', session_id)
-            
-                if original_content == html_content:
-                    logger.warning(f"⚠️ No {{SESSION_ID}} placeholder found in HTML content!")
-                else:
-                    logger.debug(f"✅ Replaced {{SESSION_ID}} placeholder with {session_id[:8]}...")
-            
-                # Render with proper height for CreepJS to work
-                logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-                st.components.v1.html(html_content, height=100, scrolling=False)
-            
-                logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
-            
-                # Add a delay to let CreepJS generate the fingerprint
-                time.sleep(3)  # Give CreepJS time to generate fingerprint
-            
-                # Try to read the fingerprint from sessionStorage using st_javascript
-                read_fingerprint_js = f"""
-                (() => {{
-                    // First try sessionStorage
-                    const storageKey = 'fifi_fp_{session_id}';
-                    const stored = sessionStorage.getItem(storageKey);
-                    if (stored) {{
-                        try {{
-                            return JSON.parse(stored);
-                        }} catch {{
-                        console.error('Failed to parse stored fingerprint');
-                        }}
-                    }}
-                
-                    // If not in storage, try to scrape directly from DOM
-                    const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
-                    const fuzzyEl = document.querySelector('#fuzzy-fingerprint .fuzzy-fp');
-                
-                    if (header) {{
-                        const fpText = header.textContent || '';
-                        const fuzzyTxt = fuzzyEl?.textContent || '';
-                    
-                        const fpMatch = fpText.match(/FP\\s*ID:\\s*([a-f0-9]{{32,64}})/i);
-                        const fuzzyMatch = fuzzyTxt.match(/Fuzzy:\\s*([a-f0-9]{{32,64}})/i);
-                    
-                        if (fpMatch && fpMatch[1]) {{
-                            return {{
-                                fingerprint_id: fpMatch[1],
-                                fuzzy: fuzzyMatch ? fuzzyMatch[1] : '',
-                                method: 'creepjs_dom_direct',
-                                privacy: 'standard',
-                                working_methods: ['creepjs']
-                            }};
-                        }}
-                    }}
-                
-                    return null;
-                }})()
-                """
-            
-                # Try multiple times to read the fingerprint
-                for attempt in range(5):
-                    try:
-                        result = st_javascript(
-                            js_code=read_fingerprint_js, 
-                            key=f"fp_read_{session_id[:8]}_{attempt}_{int(time.time())}"
-                        )
-                    
-                        if result and isinstance(result, dict) and result.get('fingerprint_id'):
-                            logger.info(f"✅ Successfully retrieved fingerprint on attempt {attempt + 1}: {result.get('fingerprint_id')[:8]}...")
-                            return self.process_fingerprint_data(result)
-                        else:
-                            logger.debug(f"Attempt {attempt + 1}: No fingerprint found yet")
-                            time.sleep(1)  # Wait before next attempt
-                        
-                    except Exception as e:
-                        logger.debug(f"Attempt {attempt + 1} failed: {e}")
-                        time.sleep(1)
-            
-                logger.warning(f"Failed to retrieve fingerprint after all attempts, using fallback")
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
+        
+            logger.debug(f"🔍 Looking for fingerprint component at: {html_file_path}")
+        
+            if not os.path.exists(html_file_path):
+                logger.error(f"❌ Fingerprint component file NOT FOUND at {html_file_path}")
+                logger.info(f"📁 Current directory contents: {os.listdir(current_dir)}")
                 return self._generate_fallback_fingerprint()
-            
-            except Exception as e:
-                logger.error(f"❌ Failed to render external fingerprint component: {e}", exc_info=True)
-                return self._generate_fallback_fingerprint()
+        
+            logger.debug(f"✅ Fingerprint component file found, reading content...")
+        
+            with open(html_file_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        
+            logger.debug(f"📄 Read {len(html_content)} characters from fingerprint component file")
+        
+            # Replace session ID placeholder in the HTML
+            original_content = html_content
+            html_content = html_content.replace('{SESSION_ID}', session_id)
+        
+            if original_content == html_content:
+                logger.warning(f"⚠️ No {{SESSION_ID}} placeholder found in HTML content!")
+            else:
+                logger.debug(f"✅ Replaced {{SESSION_ID}} placeholder with {session_id[:8]}...")
+        
+            # Render with proper height for CreepJS to work
+            logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
+            st.components.v1.html(html_content, height=100, scrolling=False)
+        
+            logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
+        
+        except Exception as e:
+            logger.error(f"❌ Failed to render external fingerprint component: {e}", exc_info=True)
+            return self._generate_fallback_fingerprint()
         
 
         def process_fingerprint_data(self, fingerprint_data: Dict[str, Any]) -> Dict[str, Any]:
