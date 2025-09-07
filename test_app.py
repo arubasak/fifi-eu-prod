@@ -1251,7 +1251,7 @@ class DatabaseManager:
                     # This should only happen for Tier 2 (questions 11-20)
                     return "Daily limit of 20 questions reached. Please retry in 24 hours."
                 else:
-                return self._get_email_verified_limit_message()
+                    return self._get_email_verified_limit_message()
             else:
                 return "Access restricted. Please try again later."
         
