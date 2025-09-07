@@ -2,26 +2,22 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>FiFi (CreepJS, one-shot, dual-CDN)</title>
-  <link rel="stylesheet" href="style.min.css">
-
-  <!-- CSP: allow jsDelivr + GitHub Pages (tighten in prod if you self-host) -->
-  <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self' https:;
-                 script-src  'self' https: 'unsafe-inline';
-                 connect-src 'self' https:;
-                 img-src     'self' data: https:;
-                 style-src   'self' 'unsafe-inline';">
-
-  <!-- (Hidden) CreepJS markup target so the page can render the "FP ID: ..." header -->
-  <style>body{margin:0;padding:0}</style>
-  <link rel="stylesheet"
-        href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
+  <title>FiFi Fingerprinting</title>
+  <style>
+    body { margin: 0; padding: 0; }
+    /* Ensure CreepJS elements are visible but off-screen */
+    #fp-app { 
+      position: absolute; 
+      left: -9999px; 
+      width: 1px; 
+      height: 1px; 
+      overflow: hidden; 
+    }
+  </style>
 </head>
 <body>
-
-<!-- Minimal CreepJS layout so it prints the header we can scrape -->
-<div id="fp-app" style="display:none">
+<!-- CreepJS DOM structure - MUST be visible for CreepJS to work -->
+<div id="fp-app">
   <fingerprint>
     <div id="fingerprint-data">
       <div class="fingerprint-header-container">
@@ -39,164 +35,177 @@
   </fingerprint>
 </div>
 
-<!-- Primary: the GitHub Pages build (this has been reliable in your environment) -->
-<script src="https://abrahamjuliot.github.io/creepjs/creep.js"></script>
+<!-- Load CreepJS from CDN (jsdelivr is more reliable than GitHub Pages) -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
+<script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
 
 <script>
 (function () {
   const sessionId = "{SESSION_ID}";
-  const PROCESSED_KEY = `fifi_creep_done_${sessionId}`;
-  if (window[PROCESSED_KEY]) return;
-
-  const asHex = (s, min=32, max=64) =>
-    (typeof s === 'string' && new RegExp(`^[a-f0-9]{${min},${max}}$`,`i`).test(s) ? s : null);
-
-  function postAll(payload){
-    // 1) Persist for Streamlit/host to read (optional)
-    try { sessionStorage.setItem(`fifi_fp_${sessionId}`, JSON.stringify({...payload, ts: Date.now()})); } catch {}
-    // 2) If embedded, tell parent
-    try {
-      if (window.parent && window.parent !== window) {
-        window.parent.postMessage({ type: 'fifi:fingerprint_complete', payload }, '*');
-      }
-    } catch {}
-    // 3) Fallback redirect (one-shot is the caller’s job)
-    try {
-      const base = location.origin + location.pathname;
-      const url = `${base}?event=fingerprint_complete`
-        + `&session_id=${encodeURIComponent(sessionId)}`
-        + `&fingerprint_id=${encodeURIComponent(payload.fingerprint_id||'')}`
-        + `&method=${encodeURIComponent(payload.method||'')}`
-        + `&privacy=${encodeURIComponent(payload.privacy||'')}`
-        + `&fuzzy=${encodeURIComponent(payload.fuzzy||'')}`
-        + `&timestamp=${Date.now()}`;
-      setTimeout(() => location.replace(url), 50);
-    } catch {}
+  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
+  
+  // Prevent multiple executions
+  const PROCESSED_KEY = `fifi_creep_processed_${sessionId}`;
+  if (window[PROCESSED_KEY]) {
+    console.log('✅ Already processed for this session');
+    return;
   }
 
-  function deliver(stable, fuzzy, method, privacy='standard'){
-    if (window[PROCESSED_KEY]) return;
+  let fingerprintSent = false;
+
+  function sendFingerprint(payload) {
+    if (fingerprintSent) return;
+    fingerprintSent = true;
     window[PROCESSED_KEY] = true;
-    postAll({
-      fingerprint_id: stable,
-      fuzzy: fuzzy || '',
-      method,
-      privacy,
-      working_methods: [method]
-    });
+    
+    console.log('🔍 Sending fingerprint:', payload);
+    
+    // Store in sessionStorage
+    try {
+      sessionStorage.setItem(`fifi_fp_${sessionId}`, JSON.stringify({
+        ...payload,
+        timestamp: Date.now()
+      }));
+      console.log('✅ Stored in sessionStorage');
+    } catch (e) {
+      console.warn('SessionStorage failed:', e);
+    }
+    
+    // Redirect (most reliable for Streamlit)
+    setTimeout(() => {
+      try {
+        const base = window.location.origin + window.location.pathname;
+        const url = `${base}?event=fingerprint_complete`
+          + `&session_id=${encodeURIComponent(sessionId)}`
+          + `&fingerprint_id=${encodeURIComponent(payload.fingerprint_id || '')}`
+          + `&method=${encodeURIComponent(payload.method || '')}`
+          + `&privacy=${encodeURIComponent(payload.privacy || '')}`
+          + `&fuzzy=${encodeURIComponent(payload.fuzzy || '')}`
+          + `&timestamp=${Date.now()}`;
+        
+        console.log('🔍 Redirecting to:', url);
+        window.location.replace(url);
+      } catch (e) {
+        console.error('Redirect failed:', e);
+      }
+    }, 100);
   }
 
-  // ---- 1) DOM scrape (the same “FP ID: …” header you see on the site) ----
-  function tryDomScrape(){
+  function asHex(s, min = 32, max = 64) {
+    return (typeof s === 'string' && new RegExp(`^[a-f0-9]{${min},${max}}$`, 'i').test(s)) ? s : null;
+  }
+
+  // DOM scraping function
+  function tryDomScrape() {
     const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
     const fuzzyEl = document.querySelector('#fuzzy-fingerprint .fuzzy-fp');
-
-    const fpText   = header?.textContent || '';
+    
+    if (!header) {
+      console.log('❌ Header element not found');
+      return false;
+    }
+    
+    const fpText = header.textContent || '';
     const fuzzyTxt = fuzzyEl?.textContent || '';
-
-    const stable = asHex((fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i) || [])[1] || '', 64, 64);
-    const fuzzy  = asHex((fuzzyTxt.match(/Fuzzy:\s*([a-f0-9]{32,64})/i) || [])[1] || '', 32, 64);
-
-    if (stable) { deliver(stable, fuzzy, 'creepjs_dom'); return true; }
+    
+    console.log('📝 Header text:', fpText);
+    console.log('📝 Fuzzy text:', fuzzyTxt);
+    
+    const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
+    const fuzzyMatch = fuzzyTxt.match(/Fuzzy:\s*([a-f0-9]{32,64})/i);
+    
+    const stable = fpMatch ? asHex(fpMatch[1], 32, 64) : null;
+    const fuzzy = fuzzyMatch ? asHex(fuzzyMatch[1], 32, 64) : null;
+    
+    if (stable) {
+      console.log('✅ Found fingerprint via DOM scrape:', stable);
+      sendFingerprint({
+        fingerprint_id: stable,
+        fuzzy: fuzzy || '',
+        method: 'creepjs_dom',
+        privacy: 'standard',
+        working_methods: ['creepjs']
+      });
+      return true;
+    }
+    
     return false;
   }
 
-  // ---- 2) Programmatic access if available on this build ----
-  async function tryProgrammatic(){
+  // Fallback fingerprint
+  function createFallback(reason) {
+    console.warn('⚠️ Using fallback fingerprint, reason:', reason);
+    
+    const parts = [];
+    parts.push(navigator.userAgent || 'unknown');
+    parts.push(`${screen.width}x${screen.height}x${screen.colorDepth}`);
+    parts.push(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+    parts.push(navigator.language || 'en');
+    parts.push((navigator.languages || []).join(','));
+    parts.push(navigator.platform || 'unknown');
+    parts.push(String(navigator.hardwareConcurrency || 0));
+    parts.push(String(navigator.deviceMemory || 0));
+    
     try {
-      if (window.creep && typeof window.creep.getEntropy === 'function') {
-        const data = await window.creep.getEntropy();
-        const stable = asHex(data?.fingerprint || data?.hash || '', 64, 64);
-        const fuzzy  = asHex(data?.fuzzy || data?.fuzzyHash || '', 32, 64);
-        if (stable) { deliver(stable, fuzzy, 'creepjs_api'); return true; }
-      }
-      if (window.creep && (window.creep.fingerprint || window.creep.hash)) {
-        const stable = asHex(window.creep.fingerprint || window.creep.hash || '', 64, 64);
-        const fuzzy  = asHex(window.creep.fuzzy || window.creep.fuzzyHash || '', 32, 64);
-        if (stable) { deliver(stable, fuzzy, 'creepjs_global'); return true; }
-      }
-    } catch(e){}
-    return false;
-  }
-
-  // ---- 3) Optional secondary source: npm UMD (if available) ----
-  // NOTE: some environments have reported this not loading; we guard it.
-  function loadCreepNpmUmD(){
-    return new Promise((resolve) => {
-      const s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/creepjs-fingerprint@1.1.27/dist/veille-sdk.umd.js';
-      s.async = true;
-      s.onload = async () => {
-        try {
-          // Depending on the UMD, the global may be exposed as "VeilleSDK" or similar.
-          // We try a few obvious candidates and look for a function that returns a result with { fingerprint/ hash / fuzzy }.
-          const candidates = [window.VeilleSDK, window.CreepFingerprint, window.CreepJS, window.creep];
-          for (const c of candidates) {
-            if (!c) continue;
-            // try function returning a promise/object
-            try {
-              const maybe = (typeof c === 'function') ? await c() :
-                            (typeof c.getEntropy === 'function') ? await c.getEntropy() : null;
-              const stable = asHex(maybe?.fingerprint || maybe?.hash || '', 64, 64);
-              const fuzzy  = asHex(maybe?.fuzzy || maybe?.fuzzyHash || '', 32, 64);
-              if (stable) { deliver(stable, fuzzy, 'creepjs_npm'); resolve(true); return; }
-            } catch(_) {}
-            // try object with properties
-            const stable2 = asHex(c?.fingerprint || c?.hash || '', 64, 64);
-            const fuzzy2  = asHex(c?.fuzzy || c?.fuzzyHash || '', 32, 64);
-            if (stable2) { deliver(stable2, fuzzy2, 'creepjs_npm_global'); resolve(true); return; }
-          }
-        } catch {}
-        resolve(false);
-      };
-      s.onerror = () => resolve(false);
-      document.head.appendChild(s);
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      ctx.font = '14px Arial';
+      ctx.fillText('fifi-fp', 2, 15);
+      parts.push(canvas.toDataURL().slice(-50));
+    } catch {
+      parts.push('canvas_blocked');
+    }
+    
+    const combined = parts.join('|');
+    let hash = 0;
+    for (let i = 0; i < combined.length; i++) {
+      hash = ((hash << 5) - hash) + combined.charCodeAt(i);
+      hash = hash & hash;
+    }
+    
+    const fallbackId = `fallback_${Math.abs(hash).toString(16)}_${Date.now().toString(36)}`;
+    
+    sendFingerprint({
+      fingerprint_id: fallbackId,
+      fuzzy: '',
+      method: 'fallback',
+      privacy: 'high_privacy',
+      working_methods: []
     });
   }
 
-  // ---- 4) Last resort fallback (short/hashed) ----
-  function fallback(reason){
-    const parts = [];
-    const push = v => parts.push(String(v ?? ''));
-    try {
-      push(navigator.userAgent||'');
-      push((screen?.width||0)+'x'+(screen?.height||0)+'x'+(screen?.colorDepth||0));
-      push(Intl.DateTimeFormat().resolvedOptions().timeZone||'');
-      push(navigator.language||'');
-      push((navigator.languages||[]).join(',')||'');
-      push(navigator.platform||'');
-      push(navigator.hardwareConcurrency||'');
-      push(navigator.deviceMemory||'');
-      const c = document.createElement('canvas');
-      const ctx = c.getContext('2d'); ctx.font='14px Arial'; ctx.fillText('fifi-fp',2,15);
-      push(c.toDataURL().slice(-50));
-    } catch {}
-    const s = parts.join('|');
-    let h=0; for (let i=0;i<s.length;i++){ h=((h<<5)-h)+s.charCodeAt(i); h|=0; }
-    const id = 'fallback_' + (h>>>0).toString(16) + '_' + Date.now().toString(36);
-    deliver(id, '', 'fallback', 'high_privacy');
+  // Wait for CreepJS to initialize and render
+  let attempts = 0;
+  const maxAttempts = 30;
+  
+  function attemptFingerprint() {
+    attempts++;
+    console.log(`🔄 Attempt ${attempts}/${maxAttempts} to get fingerprint...`);
+    
+    if (tryDomScrape()) {
+      return;
+    }
+    
+    if (attempts < maxAttempts) {
+      setTimeout(attemptFingerprint, 300);
+    } else {
+      createFallback('max_attempts_reached');
+    }
   }
 
-  // ---- Run: give CreepJS a moment to render, then scrape; back-off to APIs; then UMD; then fallback ----
-  window.addEventListener('load', async () => {
-    const started = performance.now();
-    const deadline = started + 12000; // 12s total budget
+  // Start after a delay to ensure CreepJS has time to load
+  setTimeout(() => {
+    console.log('🚀 Starting fingerprint detection...');
+    attemptFingerprint();
+  }, 1000);
 
-    // retry DOM a few times first (since your env shows the header reliably)
-    for (let i=0;i<25;i++){
-      if (tryDomScrape()) return;
-      await new Promise(r => setTimeout(r, 200));
-      if (performance.now() > deadline) break;
+  // Absolute timeout fallback
+  setTimeout(() => {
+    if (!fingerprintSent) {
+      console.error('⏰ Absolute timeout reached');
+      createFallback('absolute_timeout');
     }
-
-    if (await tryProgrammatic()) return;
-    if (performance.now() <= deadline) {
-      const gotNpm = await loadCreepNpmUmD();
-      if (gotNpm) return;
-    }
-
-    fallback('timeout_or_unavailable');
-  });
+  }, 10000);
 })();
 </script>
 </body>
