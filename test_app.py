@@ -1245,10 +1245,15 @@ class DatabaseManager:
                 return "Access restricted due to policy violation. Please try again later."
             elif session.ban_status.value == BanStatus.ONE_HOUR.value:
                 return "You've reached the Tier 1 limit (10 questions). Please wait 1 hour before continuing."
-            elif session.user_type.value == UserType.REGISTERED_USER.value:
-                return "Daily limit reached. Please retry in 24 hours."
-            else:
+            elif session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value:
+                # Check user type for appropriate message
+                if session.user_type.value == UserType.REGISTERED_USER.value:
+                    # This should only happen for Tier 2 (questions 11-20)
+                    return "Daily limit of 20 questions reached. Please retry in 24 hours."
+                else:
                 return self._get_email_verified_limit_message()
+            else:
+                return "Access restricted. Please try again later."
         
         def _get_email_verified_limit_message(self) -> str:
             """Specific message for email-verified guests hitting their daily limit."""
@@ -3191,6 +3196,7 @@ class SessionManager:
                     try:
                         self.db.save_session(current_session)
                         logger.info(f"User authenticated and upgraded to REGISTERED_USER: {user_email}, daily_q={current_session.daily_question_count}")
+                        st.rerun()
                     except Exception as e:
                         logger.error(f"Failed to save authenticated session: {e}")
                         st.error("Authentication succeeded but session could not be saved. Please try again or contact support.")
@@ -5235,6 +5241,7 @@ def main_fixed():
                             del st.session_state['loading_reason']
                         st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
                         st.balloons()
+                        st.rerun()
                     else:
                         set_loading_state(False)
                         return
