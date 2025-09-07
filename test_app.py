@@ -5278,7 +5278,7 @@ def main_fixed():
         # Render activity tracker
         activity_data = None
         if session.session_id:
-            tracker_flag_key = f'activity_tracker_{session.session_id.replace("-", "_")}'
+            tracker_flag_key = f'activity_tracker_rendered_{session.session_id.replace("-", "_")}'
             if tracker_flag_key not in st.session_state:
                 activity_data = render_simple_activity_tracker(session.session_id)
                 st.session_state[tracker_flag_key] = True
