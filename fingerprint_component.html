@@ -29,7 +29,7 @@
   </fingerprint>
 </div>
 
-<div id="status">Initializing CreepJS... Please wait up to 20 seconds...</div>
+<div id="status">Initializing CreepJS...</div>
 
 <!-- Load CreepJS -->
 <script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
@@ -58,9 +58,9 @@
     
     const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`🔍 Fingerprint obtained after ${elapsedSeconds} seconds:`, payload);
-    statusEl.textContent = `Fingerprint detected after ${elapsedSeconds}s: ${(payload.fingerprint_id || 'unknown').substring(0, 12)}...`;
+    statusEl.textContent = `Fingerprint detected: ${(payload.fingerprint_id || 'unknown').substring(0, 12)}...`;
     
-    // Perform redirect to send data to Python
+    // OPTIMIZATION: Reduced delay from 500ms to 100ms
     setTimeout(() => {
       try {
         // Get the parent window URL if in iframe, otherwise use current
@@ -87,7 +87,6 @@
           + `&timestamp=${Date.now()}`;
         
         console.log('🔍 Redirecting to:', url);
-        statusEl.textContent = 'Sending fingerprint to server...';
         
         // Use parent location if available, otherwise current window
         if (window.parent && window.parent !== window) {
@@ -104,7 +103,7 @@
         console.error('❌ Redirect failed:', e);
         statusEl.textContent = 'Error: Could not send fingerprint to server';
       }
-    }, 500); // Small delay to ensure status update is visible
+    }, 100); // REDUCED from 500ms
   }
   
   function asHex(s, min = 32, max = 64) {
@@ -193,41 +192,40 @@
     });
   }
   
-  // Start detection with adjusted timing
+  // OPTIMIZED: Start detection with adjusted timing
   let attempts = 0;
-  const maxAttempts = 50; // Increased from 30 to 50
+  const maxAttempts = 30; // REDUCED from 50 to 30
   
   function attemptFingerprint() {
     attempts++;
     const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
-    statusEl.textContent = `Detecting fingerprint... (attempt ${attempts}/${maxAttempts}, ${elapsedSeconds}s elapsed)`;
     
     if (tryDomScrape()) {
       return;
     }
     
     if (attempts < maxAttempts) {
-      // Slower attempts after the first 10 to give CreepJS more time
-      const delay = attempts < 10 ? 300 : 500;
+      // OPTIMIZED: Faster attempts
+      const delay = attempts < 5 ? 200 : attempts < 15 ? 300 : 500;
       setTimeout(attemptFingerprint, delay);
     } else {
       createFallback('max_attempts_reached');
     }
   }
   
-  // Start after longer delay to ensure CreepJS loads (increased from 2s to 3s)
+  // OPTIMIZED: Start after shorter delay (reduced from 3000ms to 1000ms)
   setTimeout(() => {
     console.log('🚀 Starting fingerprint detection...');
     attemptFingerprint();
-  }, 3000);
+  }, 1000);
   
-  // Extended absolute timeout (increased from 15s to 30s)
+  // OPTIMIZED: Reduced absolute timeout from 30s to 20s
   setTimeout(() => {
     if (!fingerprintSent) {
-      console.error('⏰ Absolute timeout reached after 30 seconds');
-      createFallback('absolute_timeout_30s');
+      console.error('⏰ Absolute timeout reached after 20 seconds');
+      createFallback('absolute_timeout_20s');
     }
-  }, 30000);
+  }, 20000);
 })();
 </script>
 </body>
