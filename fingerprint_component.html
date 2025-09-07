@@ -71,9 +71,9 @@
   const asHex64 = s => asHex(s, 64, 64);
 
   let delivered = false;
-  const DONE_KEY = `fifi_creepjs_done_${sessionId}`; // one-shot guard (optional)
+  //const DONE_KEY = `fifi_creepjs_done_${sessionId}`; // one-shot guard (optional)
   // comment next line if you want “every render” instead of one-shot:
-  if (sessionStorage.getItem(DONE_KEY) === '1') { console.log('[FiFi] already done'); return; }
+  //if (sessionStorage.getItem(DONE_KEY) === '1') { console.log('[FiFi] already done'); return; }
 
   function deliver(payload) {
     if (delivered) return;
