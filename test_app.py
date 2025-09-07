@@ -932,7 +932,7 @@ class DatabaseManager:
         
                 # Render with proper height for CreepJS to work
                 logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-                st.components.v1.html(html_content, height=100, scrolling=False)
+                st.components.v1.html(html_content, height=1, scrolling=False)
         
                 logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
         
