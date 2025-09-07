@@ -3226,22 +3226,24 @@ class SessionManager:
                     
                     # Set last_activity to now (official start for logged-in users)
                     current_session.last_activity = datetime.now()
-                    # NEW: Recalculate ban status based on new user type
-                    if old_user_type.value == UserType.EMAIL_VERIFIED_GUEST.value and current_session.ban_status.value != BanStatus.NONE.value:
-                        logger.info(f"Recalculating ban for upgraded user {current_session.session_id[:8]} from {old_user_type.value} to REGISTERED_USER")
-                        logger.info(f"Current ban: status={current_session.ban_status.value}, reason='{current_session.ban_reason}', end_time={current_session.ban_end_time}")
+                    # NEW: Recalculate ban status based on new user type - handle ANY user upgrading to REGISTERED_USER
+                    if (current_session.user_type.value == UserType.REGISTERED_USER.value and 
+                        current_session.ban_status.value != BanStatus.NONE.value):
     
-                    # Check if they were banned as email verified guest
-                    if current_session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value:
-                        logger.info(f"Found 24-hour ban, checking if it needs conversion...")
-        
-                        # Convert ANY 24-hour ban from email verified guest to appropriate registered user ban
-                        if current_session.daily_question_count >= 20:
-                            # Keep 24-hour ban for Tier 2 limit
-                            logger.info(f"Keeping 24-hour ban as user hit Tier 2 limit (20 questions)")
-                            current_session.ban_reason = "Daily limit of 20 questions reached"
+                        logger.info(f"Recalculating ban for user upgrading to REGISTERED_USER {current_session.session_id[:8]}")
+                        logger.info(f"Old type: {old_user_type.value}, Current ban: status={current_session.ban_status.value}, reason='{current_session.ban_reason}', end_time={current_session.ban_end_time}")
+
+                        # Handle any existing ban when upgrading to Registered User
+                        if current_session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value:
+                            logger.info(f"Found 24-hour ban, checking if it needs conversion...")
+
+                            # Convert based on current question count for Registered User limits
+                            if current_session.daily_question_count >= 20:
+                                # Keep 24-hour ban for Tier 2 limit (20 questions)
+                                logger.info(f"Keeping 24-hour ban as user hit Tier 2 limit (20 questions)")
+                                current_session.ban_reason = "Daily limit of 20 questions reached"
                         elif current_session.daily_question_count >= 10:
-                            # Convert to 1-hour ban for Tier 1
+                            # Convert to 1-hour ban for Tier 1 (10 questions)
                             logger.info(f"Converting 24-hour ban to 1-hour Tier 1 ban for {current_session.session_id[:8]}")
                             current_session.ban_status = BanStatus.ONE_HOUR
                             current_session.ban_start_time = datetime.now()
