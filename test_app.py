@@ -5253,17 +5253,17 @@ def main_fixed():
                 session_manager.fingerprinting.render_fingerprint_component(session.session_id)
                 st.session_state[fingerprint_key] = True
             
-            # Check timeout (reduced to 15 seconds for faster loading)
+            # Check timeout (reduced to 20 seconds for faster loading)
             elapsed = time.time() - st.session_state.fingerprint_wait_start
-            if elapsed > 15:
+            if elapsed > 20:
                 st.session_state.is_chat_ready = True
                 st.session_state.fingerprint_complete = True
-                logger.warning(f"Fingerprint timeout (15s) - using fallback")
+                logger.warning(f"Fingerprint timeout (20s) - using fallback")
             else:
                 # Show progress while waiting
-                remaining = max(0, 15 - elapsed)
+                remaining = max(0, 20 - elapsed)
                 st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
-                progress = min(elapsed / 15, 1.0)
+                progress = min(elapsed / 20, 1.0)
                 st.progress(progress, text="Session Security Setup")
                 st.markdown("---")
                 
