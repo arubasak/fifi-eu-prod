@@ -3159,6 +3159,31 @@ class SessionManager:
                     
                     # Set last_activity to now (official start for logged-in users)
                     current_session.last_activity = datetime.now()
+
+                    # NEW: Recalculate ban status based on new user type
+                    if old_user_type.value == UserType.EMAIL_VERIFIED_GUEST.value and current_session.ban_status.value != BanStatus.NONE.value:
+                        logger.info(f"Recalculating ban for upgraded user {current_session.session_id[:8]} from {old_user_type.value} to REGISTERED_USER")
+                    
+                        # Check if they were banned for hitting email verified guest limit
+                        if (current_session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value and 
+                            current_session.ban_reason and "email-verified" in current_session.ban_reason.lower()):
+                        
+                            # For Registered Users, apply tier-based bans
+                            if current_session.daily_question_count >= 10:
+                                # They've completed Tier 1, apply 1-hour ban
+                                logger.info(f"Converting 24-hour ban to 1-hour Tier 1 ban for {current_session.session_id[:8]}")
+                                current_session.ban_status = BanStatus.ONE_HOUR
+                                current_session.ban_start_time = datetime.now()
+                                current_session.ban_end_time = current_session.ban_start_time + timedelta(hours=1)
+                                current_session.ban_reason = "Tier 1 limit reached (10 questions)"
+                            else:
+                                # They haven't hit Tier 1 limit yet, remove ban
+                                logger.info(f"Removing ban for upgraded user {current_session.session_id[:8]} as they haven't hit Registered User limits")
+                                current_session.ban_status = BanStatus.NONE
+                                current_session.ban_start_time = None
+                                current_session.ban_end_time = None
+                                current_session.ban_reason = None
+                                current_session.question_limit_reached = False
                     
                     # Save authenticated session
                     try:
