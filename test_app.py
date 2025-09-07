@@ -1196,7 +1196,7 @@ class DatabaseManager:
                     self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
                     return {
                         'allowed': False,
-                        'reason': 'daily_limit',
+                        'reason': 'email_verified_limit',
                         'message': self._get_email_verified_limit_message()
                     }
             
@@ -3464,6 +3464,14 @@ class SessionManager:
                 st.error("🛑 **Guest Limit Reached**")
                 st.info("You've used your 4 guest questions. Please verify your email to unlock 10 more questions per day!")
                 return True
+
+            elif reason == 'email_verified_limit':  # NEW handling
+                st.error("🛑 **Daily Limit Reached**")
+                st.info("You've used your 10 questions for today. Consider registering for 20 questions/day or wait 24 hours.")
+                # Apply the ban NOW when they try to ask another question
+                self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
+                self.db.save_session(session)
+                return True
                 
             elif reason == 'daily_limit':
                 if session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
@@ -4387,7 +4395,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     # Check if a hard block is in place first (non-email-verification related bans)
     limit_check = session_manager.question_limits.is_within_limits(session)
-    if not limit_check['allowed'] and limit_check.get('reason') != 'guest_limit':
+    if not limit_check['allowed'] and limit_check.get('reason') not in ['guest_limit', 'email_verified_limit']:
         st.session_state.chat_blocked_by_dialog = True # Hard ban, block everything
         return True # Disable chat input
 
