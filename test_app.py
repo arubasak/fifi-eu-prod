@@ -2978,6 +2978,7 @@ class SessionManager:
             sanitized_email = sanitize_input(email, 100).lower().strip()
             
             if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', sanitized_email):
+                logger.debug(f"handle_guest_email_verification returning FAILURE: Invalid email format for {email}")
                 return {'success': False, 'message': 'Please enter a valid email address.'}
             
             # NEW: Check for evasion before processing
@@ -2985,10 +2986,12 @@ class SessionManager:
                 penalty_hours = self.question_limits.apply_evasion_penalty(session)
                 self.db.save_session(session)  # Save the penalty to database
                 logger.warning(f"🚨 EMAIL EVASION DETECTED: Applied {penalty_hours}h penalty to session {session.session_id[:8]}")
-                return {
+                final_result = {
                     'success': False, 
                     'message': f'Unusual activity detected. Access temporarily restricted for {penalty_hours} hours.'
                 }
+                logger.debug(f"handle_guest_email_verification returning FAILURE (Evasion): {final_result}")
+                return final_result
             
             # Track email usage for this session
             if sanitized_email not in session.email_addresses_used:
@@ -3024,28 +3027,39 @@ class SessionManager:
                 self.db.save_session(session)
             except Exception as e:
                 logger.error(f"Failed to save session before email verification: {e}")
+                final_result = {
+                    'success': False, 
+                    'message': 'An internal error occurred saving your session. Please try again.'
+                }
+                logger.debug(f"handle_guest_email_verification returning FAILURE (DB Save): {final_result}")
+                return final_result
             
             # Send verification code
             code_sent = self.email_verification.send_verification_code(sanitized_email)
             
             if code_sent:
-                return {
+                final_result = {
                     'success': True,
                     'message': f'Verification code sent to {sanitized_email}. Please check your email.'
                 }
+                logger.debug(f"handle_guest_email_verification returning SUCCESS: {final_result}")
+                return final_result
             else:
-                return {
+                final_result = {
                     'success': False, 
                     'message': 'Failed to send verification code. Please try again later.'
                 }
+                logger.debug(f"handle_guest_email_verification returning FAILURE (Code Not Sent): {final_result}")
+                return final_result
                 
         except Exception as e:
-            logger.error(f"Email verification handling failed: {e}")
-            return {
+            logger.error(f"Email verification handling failed with unexpected exception: {e}", exc_info=True)
+            final_result = {
                 'success': False, 
-                'message': 'An error occurred. Please try again.'
+                'message': 'An unexpected error occurred during verification. Please try again.'
             }
-
+            logger.debug(f"handle_guest_email_verification returning FAILURE (Unexpected Exception): {final_result}")
+            return final_result
     def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
         """Verifies the email verification code and upgrades user status."""
         try:
