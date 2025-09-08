@@ -1024,7 +1024,7 @@ class DatabaseManager:
                     # Return True since OTP is likely sent despite timeout
                     st.warning("Verification code is being sent. If you don't receive it within 1 minute, please try again.")
                     return True
-                else
+                else:
                     logger.error(f"Failed to send verification code via Supabase for {email}: {e}")
                     st.error(f"Failed to send verification code: {str(e)}")
                     return False
