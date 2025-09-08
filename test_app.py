@@ -1157,7 +1157,7 @@ class DatabaseManager:
             # ENHANCED: Tier-based logic for registered users
             if session.user_type.value == UserType.REGISTERED_USER.value:
                 if session.daily_question_count >= user_limit:  # 20 questions
-                    self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user daily limit reached")
+                    # self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user daily limit reached")
                     return {
                         'allowed': False,
                         'reason': 'daily_limit',
@@ -1193,7 +1193,7 @@ class DatabaseManager:
             
             elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
                 if session.daily_question_count >= user_limit: # user_limit is 10 for EMAIL_VERIFIED_GUEST
-                    self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
+                    # self._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached")
                     return {
                         'allowed': False,
                         'reason': 'email_verified_limit',
