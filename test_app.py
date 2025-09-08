@@ -1017,9 +1017,17 @@ class DatabaseManager:
                     return False
                     
             except Exception as e:
-                logger.error(f"Failed to send verification code via Supabase for {email}: {e}")
-                st.error(f"Failed to send verification code: {str(e)}")
-                return False
+                error_str = str(e).lower()
+                # Special handling for timeout errors
+                if "timeout" in error_str or "timed out" in error_str:
+                    logger.warning(f"Supabase OTP request timed out for {email}, but email may have been sent: {e}")
+                    # Return True since OTP is likely sent despite timeout
+                    st.warning("Verification code is being sent. If you don't receive it within 1 minute, please try again.")
+                    return True
+                else
+                    logger.error(f"Failed to send verification code via Supabase for {email}: {e}")
+                    st.error(f"Failed to send verification code: {str(e)}")
+                    return False
 
         @handle_api_errors("Supabase Auth", "Verify Code")
         def verify_code(self, email: str, code: str) -> bool:
