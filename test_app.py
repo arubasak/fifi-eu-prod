@@ -4652,7 +4652,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         with col1:
             # BUTTON 1
             if st.button("✅ Verify this email", use_container_width=True, key="reverify_yes_btn"):
-                st.session_state.transitioning_to_send = True  # Add this line
                 session.recognition_response = "yes_reverify"
                 session.declined_recognized_email_at = None
                 st.session_state.verification_email = email_to_reverify
