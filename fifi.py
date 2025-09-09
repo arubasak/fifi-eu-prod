@@ -4364,7 +4364,7 @@ def render_simplified_browser_close_detection(session_id: str):
     """
     
     try:
-        st.components.v1.html(enhanced_close_js, height=0, width=0)
+        st.components.v1.html(enhanced_close_js, height=1, width=0)
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close detection: {e}")
 
