@@ -4397,13 +4397,21 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
-            st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
-            st.session_state.fingerprint_status = 'done' # Mark fingerprinting as done
-            st.session_state.fingerprint_just_completed = True
+            st.session_state.is_chat_ready = True # Explicitly unlock chat input here
+            st.session_state.fingerprint_status = 'done' # Mark fingerprinting as done definitively
+            # --- NEW: Ensure fingerprint_wait_start is cleared on successful completion ---
+            if 'fingerprint_wait_start' in st.session_state:
+                del st.session_state.fingerprint_wait_start
+            st.session_state.fingerprint_just_completed = True # NEW: Flag for a final clean rerun in main_fixed
             logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
             logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
+            # If it failed, ensure we still enable chat, but with 'failed' status
+            st.session_state.is_chat_ready = True
+            st.session_state.fingerprint_status = 'failed'
+            if 'fingerprint_wait_start' in st.session_state: # Clear on failure too
+                del st.session_state.fingerprint_wait_start
             return False
         
     except Exception as e:
@@ -5640,7 +5648,7 @@ def ensure_initialization_fixed():
             st.session_state.fingerprinting_manager = fingerprinting_manager
             st.session_state.email_verification_manager = email_verification_manager
             st.session_state.question_limit_manager = question_limit_manager
-
+            st.session_state.fingerprint_just_completed = False
             st.session_state.chat_blocked_by_dialog = False
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
