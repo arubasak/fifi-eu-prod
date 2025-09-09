@@ -4567,8 +4567,11 @@ def render_welcome_page(session_manager: 'SessionManager'):
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
 
-    # Display fingerprinting progress if needed
-    if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_status') == 'pending_js':
+    # Simple fingerprinting status display (non-blocking)
+    if st.session_state.get('fingerprint_status') == 'pending_js':
+        st.info("🔒 **Setting up device recognition...** (running in background)")
+        st.caption("This helps us track your usage and provide a better experience.")
+        # Don't block the UI - let users interact normally
         current_time_float = time.time()
         wait_start = st.session_state.get('fingerprint_wait_start')
         elapsed = current_time_float - wait_start
@@ -4627,7 +4630,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 
                 col1, col2, col3 = st.columns(3)
                 with col2:
-                    submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True, disabled=not st.session_state.get('is_chat_ready', False))
+                    submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
                 
                 if submit_button:
                     if not username or not password:
@@ -4657,7 +4660,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.markdown("")
         col1, col2, col3 = st.columns(3)
         with col2:
-            if st.button("👤 Start as Guest", use_container_width=True, disabled=not st.session_state.get('is_chat_ready', False)):
+            if st.button("👤 Start as Guest", use_container_width=True):
                 # Set loading state and reason BEFORE any session operations (NEW)
                 st.session_state.loading_reason = 'start_guest'
                 set_loading_state(True, "Setting up your session and initializing AI assistant...")
