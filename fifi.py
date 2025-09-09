@@ -2742,7 +2742,6 @@ class SessionManager:
                     if s.active or (s.last_question_time and (now - s.last_question_time < timedelta(hours=24))):
                         merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
                     else:
-                        # If the session is inactive and its 24-hour window has passed, its daily_question_count is effectively 0 for inheritance.
                         pass # merged_daily_question_count will already be initialized to `session.daily_question_count` so we're good.
                 
                 if s.total_question_count is not None:
@@ -3214,7 +3213,7 @@ class SessionManager:
                             logger.info(f"Converting 24-hour ban to 1-hour Tier 1 ban for {session.session_id[:8]} (Registered User limit)")
                             session.ban_status = BanStatus.ONE_HOUR
                             session.ban_start_time = datetime.now()
-                            session.ban_end_time = session.ban_start_time + timedelta(hours=1)
+                            session.ban_end_time = current_session.ban_start_time + timedelta(hours=1) # Bug fix: used current_session instead of session
                             session.ban_reason = "Registered user Tier 1 limit reached (10 questions)"
                             logger.info(f"New ban: status={session.ban_status.value}, end_time={session.ban_end_time}")
                         else:
@@ -3697,7 +3696,7 @@ class SessionManager:
             moderation_result = check_content_moderation(prompt, self.ai.openai_client)
             if moderation_result and moderation_result.get("flagged"):
                 categories = moderation_result.get('categories', [])
-                logger.warning(f"Content moderation flagged input: {categories}")
+                logger.warning(f"Input flagged by moderation for: {', '.join(categories)}")
                 
                 # Store moderation error info in session state
                 st.session_state.moderation_flagged = {
@@ -4399,7 +4398,7 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         if success:
             logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
             st.session_state.is_chat_ready = True # NEW: Explicitly unlock chat input here
-            st.session_state.fingerprint_status = 'done' # Mark fingerprinting as done (from B)
+            st.session_state.fingerprint_status = 'done' # Mark fingerprinting as done
             logger.info(f"Chat input unlocked for session {session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
@@ -4472,7 +4471,7 @@ def handle_emergency_save_requests_from_query():
         
         # Clear query parameters to prevent re-triggering on rerun
         params_to_clear = ["event", "session_id", "reason", "fallback"]
-        for param in params_to_clear: # Fixed: changed to params_to_clear from params_query_params
+        for param in params_to_clear:
             if param in st.query_params:
                 del st.query_params[param]
         
@@ -4553,16 +4552,63 @@ def handle_fingerprint_requests_from_query():
 
 # Modified render_welcome_page function
 def render_welcome_page(session_manager: 'SessionManager'):
-    """Enhanced welcome page with loading lock."""
+    """Enhanced welcome page with loading lock and fingerprint processing."""
     
-      
-    st.title("🤖 Welcome to FiFi AI Assistant")
-    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
+    # Get session early to check fingerprint status
+    session = session_manager.get_session() 
+    if session is None: # If get_session fails critically, return early
+        st.error("❌ Failed to initialize session. Please refresh the page.")
+        return
 
     # Show loading overlay if in loading state
     if show_loading_overlay():
         return
-    
+
+    st.title("🤖 Welcome to FiFi AI Assistant")
+    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
+
+    # Display fingerprinting progress if needed
+    if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_status') == 'pending_js':
+        current_time_float = time.time()
+        wait_start = st.session_state.get('fingerprint_wait_start')
+        elapsed = current_time_float - wait_start
+        remaining = max(0, 15 - elapsed) # 15 seconds timeout for FP
+
+        # Render fingerprinting component
+        fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+        if not st.session_state.get(fingerprint_key, False):
+            try:
+                session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                st.session_state[fingerprint_key] = True
+                logger.info(f"Triggered fingerprint component rendering for session {session.session_id[:8]} on welcome page.")
+            except Exception as e:
+                logger.error(f"Fingerprinting component failed on welcome page: {e}")
+                st.session_state.is_chat_ready = True # Enable chat even if FP fails
+                st.session_state.fingerprint_status = 'failed'
+
+        if remaining > 0 and st.session_state.fingerprint_status != 'failed':
+            st.info(f"🔒 **Initializing secure session...** ({remaining:.0f}s remaining)")
+            st.caption("Setting up device recognition and security features.")
+            progress_value = min(elapsed / 15, 1.0)
+            st.progress(progress_value, text="Initializing FiFi AI Assistant")
+            time.sleep(1) # Add small delay to prevent excessive reruns
+            st.rerun() # Keep rerunning to update progress
+        else:
+            if st.session_state.fingerprint_status != 'failed': # If not already failed
+                st.session_state.is_chat_ready = True
+                st.session_state.fingerprint_status = 'timeout'
+                logger.warning(f"Fingerprint timeout (15s) - enabling chat with fallback for session {session.session_id[:8]} on welcome page.")
+            
+            # If we're here, fingerprinting is either done, failed, or timed out.
+            # Clear related state to avoid re-entering this block, and allow main flow to proceed.
+            if 'fingerprint_wait_start' in st.session_state:
+                del st.session_state['fingerprint_wait_start']
+            if fingerprint_key in st.session_state:
+                del st.session_state[fingerprint_key] # Remove rendering flag for this session
+
+            st.rerun() # Rerun to remove progress bar and show buttons/navigate
+        return # Block further rendering of welcome page while FP is in progress/waiting
+
     st.markdown("---")
     
     # MOVED UP: Sign In/Start as Guest tabs (was previously below tiers)
@@ -4581,7 +4627,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 
                 col1, col2, col3 = st.columns(3)
                 with col2:
-                    submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
+                    submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True, disabled=not st.session_state.get('is_chat_ready', False))
                 
                 if submit_button:
                     if not username or not password:
@@ -4611,7 +4657,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.markdown("")
         col1, col2, col3 = st.columns(3)
         with col2:
-            if st.button("👤 Start as Guest", use_container_width=True):
+            if st.button("👤 Start as Guest", use_container_width=True, disabled=not st.session_state.get('is_chat_ready', False)):
                 # Set loading state and reason BEFORE any session operations (NEW)
                 st.session_state.loading_reason = 'start_guest'
                 set_loading_state(True, "Setting up your session and initializing AI assistant...")
@@ -4702,16 +4748,23 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.info("💡 You are currently using guest questions. Verify your email to get more.") # Alternative message
                 
         # Show fingerprint status
-        if session.fingerprint_id:
-            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                st.markdown("**Device ID:** Identifying...")
-                st.caption("Fingerprinting in progress...")                
-            else:
+        if st.session_state.get('fingerprint_status') == 'done':
+            if session.fingerprint_id:
                 st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
                 st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
-        else:
+            else: # Should not happen if 'done', but fallback
+                st.markdown("**Device ID:** Unknown")
+                st.caption("Fingerprint acquired, but data missing.")
+        elif st.session_state.get('fingerprint_status') == 'timeout':
+            st.markdown("**Device ID:** Fallback ID used")
+            st.caption("Fingerprinting timed out. Using a temporary ID.")
+        elif st.session_state.get('fingerprint_status') == 'failed':
+            st.markdown("**Device ID:** Fallback ID used")
+            st.caption("Fingerprinting failed. Using a temporary ID.")
+        else: # 'pending' or 'pending_js'
             st.markdown("**Device ID:** Initializing...")
-            st.caption("Starting fingerprinting...")
+            st.caption("Waiting for device recognition...")
+
 
         # Display time since last activity
         if session.last_activity is not None:
@@ -4757,8 +4810,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 if tavily_status == "healthy":
                     st.success("🌐 Web Search: Ready")
                 else:
-                    st.warning(
-                        f"🌐 Web Search: {tavily_status.replace('_', ' ').title()}")
+                    st.warning(f"🌐 Web Search: {tavily_status.replace('_', ' ').title()}")
             elif ai_system.config.TAVILY_API_KEY:
                 st.warning("🌐 Web Search: Error")
             else:
@@ -4905,375 +4957,315 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 
     # Determine current user status
     user_is_guest = (session.user_type.value == UserType.GUEST.value)
-    user_is_email_verified = (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value)
-    guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
-    email_verified_limit_value = session_manager.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]
-    daily_q_value = session.daily_question_count
-    is_guest_limit_hit = (user_is_guest and daily_q_value >= guest_limit_value)
-    is_email_verified_limit_hit = (user_is_email_verified and daily_q_value >= email_verified_limit_value)
-    
-    # NEW LOGIC: Only consider it "just hit limit" if the 'just_answered' flag is true
-    user_just_hit_guest_limit = is_guest_limit_hit and st.session_state.get('just_answered', False)
-    user_just_hit_email_verified_limit = is_email_verified_limit_hit and st.session_state.get('just_answered', False)
-
-    should_show_prompt = False
-    should_block_chat_input = True  # Default to blocking when prompt is shown
-
-    # PRIORITY 1: Handle re-verification for recognized devices
-    if session.reverification_pending:
-        should_show_prompt = True
-        should_block_chat_input = True
-        if st.session_state.verification_stage is None:
-             st.session_state.verification_stage = 'initial_check'
-             st.session_state.guest_continue_active = False
-
-    # PRIORITY 2: Handle guest who JUST hit their limit (GENTLE approach with the reading button)
-    # This only triggers if they JUST answered a question and it put them over the limit.
-    elif user_just_hit_guest_limit:
-        st.session_state.just_answered = False # Consume the flag
-        should_show_prompt = True
-        should_block_chat_input = False  # DON'T block immediately
-        
-        st.success("🎯 **You've explored FiFi AI with your 4 guest questions!**")
-        st.info("Take your time to read this answer. When you're ready, verify your email to unlock 10 questions per day + chat history saving!")
-        
-        with st.expander("📧 Ready to Unlock More Questions?", expanded=False):
-            st.markdown("### 🚀 What You'll Get After Email Verification:")
-            st.markdown("• **10 questions per day** • **Chat history saving** • **Cross-device sync**")
+            user_is_email_verified = (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value)
+            guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
+            email_verified_limit_value = session_manager.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]
+            daily_q_value = session.daily_question_count
+            is_guest_limit_hit = (user_is_guest and daily_q_value >= guest_limit_value)
+            is_email_verified_limit_hit = (user_is_email_verified and daily_q_value >= email_verified_limit_value)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("📧 Yes, Let's Verify My Email!", use_container_width=True, key="gentle_verify_btn"):
-                    st.session_state.verification_stage = 'email_entry'
-                    st.session_state.chat_blocked_by_dialog = True # Block chat when they decide to verify
-                    st.session_state.final_answer_acknowledged = True
-                    st.rerun()
-            with col2:
-                if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="continue_reading_btn"):
-                    st.session_state.final_answer_acknowledged = True
-                    st.success("Perfect! Take your time. The verification option will remain available above.")
-                    st.rerun()
-        
-        st.session_state.chat_blocked_by_dialog = False # Temporarily keep chat unblocked
-        return False
+            # NEW LOGIC: Only consider it "just hit limit" if the 'just_answered' flag is true
+            user_just_hit_guest_limit = is_guest_limit_hit and st.session_state.get('just_answered', False)
+            user_just_hit_email_verified_limit = is_email_verified_limit_hit and st.session_state.get('just_answered', False)
 
-    # PRIORITY 2B: Handle email verified guest who JUST hit their limit (GENTLE approach)
-    # This only triggers if they JUST answered a question and it put them over the limit.
-    elif user_just_hit_email_verified_limit:
-        st.session_state.just_answered = False # Consume the flag
-        should_show_prompt = True
-        should_block_chat_input = False
-        
-        st.success("🎯 **You've completed your 10 daily questions!**")
-        st.info("Take your time to read this answer. Your questions will reset in 24 hours, or consider registering for 20 questions/day!")
-        
-        with st.expander("🚀 Want More Questions Daily?", expanded=False):
-            st.markdown("### 📈 Upgrade Benefits:")
-            st.markdown("• **20 questions per day** • **Tier system with breaks** • **Priority support**")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
-                    # Link to registration page, no need to change chat state
-                    st.link_button("Register Here", "https://www.12taste.com/in/my-account/", use_container_width=True) # Direct link
-                    st.session_state.email_verified_final_answer_acknowledged = True
-                    st.rerun()
-            with col2:
-                if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="email_verified_continue_reading"):
-                    st.session_state.email_verified_final_answer_acknowledged = True
-                    st.success("Perfect! Take your time reading.")
-                    st.rerun()
-        
-        st.session_state.chat_blocked_by_dialog = False
-        return False
+            should_show_prompt = False
+            should_block_chat_input = True  # Default to blocking when prompt is shown
 
-    # PRIORITY 3: Handle guest who is at their limit but DID NOT just ask a question (e.g., new session, page refresh)
-    elif is_guest_limit_hit and not st.session_state.final_answer_acknowledged:
-        should_show_prompt = True
-        should_block_chat_input = True
-        if st.session_state.verification_stage is None:
-            st.session_state.verification_stage = 'email_entry'
-            st.session_state.guest_continue_active = False
-
-    # PRIORITY 3B: Handle email verified guest who is at their limit but DID NOT just ask a question
-    elif is_email_verified_limit_hit and not st.session_state.email_verified_final_answer_acknowledged:
-        should_show_prompt = True
-        should_block_chat_input = True
-        st.error("🛑 **Daily Limit Reached**")
-        st.info("You've used your 10 questions for today. Your questions reset in 24 hours, or consider registering for 20 questions/day!")
-        st.link_button("Register for 20 questions/day", "https://www.12taste.com/in/my-account/")
-        st.session_state.chat_blocked_by_dialog = True
-        return True
-
-    # PRIORITY 4: Handle declined recognized email scenario (non-blocking, unless guest limit hit after decline)
-    elif session.declined_recognized_email_at and not st.session_state.guest_continue_active and not is_guest_limit_hit:
-        should_show_prompt = True
-        should_block_chat_input = False # It's a prompt, but they can still chat if they have questions left
-        if st.session_state.verification_stage is None:
-            st.session_state.verification_stage = 'declined_recognized_email_prompt_only'
-
-    # If no prompt should be shown based on conditions, ensure state is clean
-    if not should_show_prompt:
-        st.session_state.chat_blocked_by_dialog = False
-        st.session_state.verification_stage = None
-        if 'just_answered' in st.session_state: # Clean up the flag if not used
-             del st.session_state.just_answered
-        return False
-
-    # Set chat blocking state based on the type of prompt
-    st.session_state.chat_blocked_by_dialog = should_block_chat_input
-    
-    # Only show error header for blocking prompts
-    if should_block_chat_input:
-        st.error("📧 **Action Required**")
-
-    current_stage = st.session_state.verification_stage
-
-    if current_stage == 'initial_check':
-        # Use a container to ensure clean rendering
-        prompt_container = st.container()
-        
-        with prompt_container:
-            email_to_reverify = session.pending_email
-            masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
-            st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
-            st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
-            
-            # FIXED: Use session ID for stable keys instead of timestamp
-            button_key_suffix = session.session_id[:8]  # First 8 chars of session ID
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("✅ Verify this email", 
-                            use_container_width=True, 
-                            key=f"reverify_yes_{button_key_suffix}"):
-                    
-                    # Add logging to debug
-                    logger.info(f"Verify button clicked in session {session.session_id[:8]}")
-                    
-                    session.recognition_response = "yes_reverify"
-                    session.declined_recognized_email_at = None
-                    st.session_state.verification_email = email_to_reverify
-                    st.session_state.verification_stage = "send_code_recognized"
-                    
-                    # Ensure session ID is preserved
-                    st.session_state.current_session_id = session.session_id
-                    
-                    session_manager.db.save_session(session)
-                    st.rerun()
-            with col2:
-                if st.button("❌ No, I don't recognize the email", 
-                            use_container_width=True, 
-                            key=f"reverify_no_{button_key_suffix}"):
-                    
-                    logger.info(f"Decline button clicked in session {session.session_id[:8]}")
-                    
-                    session.recognition_response = "no_declined_reco"
-                    session.declined_recognized_email_at = datetime.now()
-                    session.user_type = UserType.GUEST 
-                    session.reverification_pending = False
-                    session.pending_user_type = None
-                    session.pending_email = None
-                    session.pending_full_name = None
-                    session.pending_zoho_contact_id = None
-                    session.pending_wp_token = None
-                    
-                    # Ensure session ID is preserved
-                    st.session_state.current_session_id = session.session_id
-                    
-                    session_manager.db.save_session(session)
-                    st.session_state.guest_continue_active = True
-                    st.session_state.chat_blocked_by_dialog = False
-                    st.session_state.verification_stage = None
-                    st.success("You can now continue as a Guest.")
-                    st.rerun()
-
-    elif current_stage == 'send_code_recognized':
-        # Don't show any buttons - just the sending status
-        email_to_verify = st.session_state.get('verification_email')
-        if email_to_verify:
-            st.info(f"📧 **Sending verification code to {session_manager._mask_email(email_to_verify)}...**")
-            
-            # Immediately perform the send (the actual sending happens after this renders)
-            st.session_state.send_code_now = True
-            st.rerun()
-
-    elif current_stage == 'email_entry':
-        st.info("🚀 You've used your guest questions. Please verify your email to unlock 10 questions per day!")
-        with st.form("email_verification_form", clear_on_submit=False):
-            st.markdown("**📧 Enter your email address to receive a verification code:**")
-            current_email_input = st.text_input(
-                "Email Address", 
-                placeholder="your@email.com", 
-                value=st.session_state.get('verification_email', session.email or ""), 
-                key="manual_email_input",
-                help="We'll send you a 6-digit verification code that's valid for 1 minute."
-            )
-            submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
-            if submit_email:
-                if current_email_input:
-                    result = session_manager.handle_guest_email_verification(session, current_email_input)
-                    if result['success']:
-                        st.success(result['message'])
-                        st.session_state.verification_email = current_email_input
-                        st.session_state.verification_stage = "code_entry"
-                        st.rerun()
-                    else:
-                        st.error(result['message'])
-                        if "unusual activity" in result['message'].lower(): 
-                            st.stop()
-                else:
-                    st.error("Please enter an email address to receive the code.")
-        
-    elif current_stage == 'code_entry':
-        verification_email = st.session_state.get('verification_email', session.email)
-        st.success(f"📧 **Verification code sent to** **{session_manager._mask_email(verification_email)}**")
-        st.info("📱 Check your email (including spam/junk folders). The code expires in 1 minute.")
-        
-        with st.form("code_verification_form", clear_on_submit=False):
-            code = st.text_input(
-                "Enter 6-Digit Verification Code", 
-                placeholder="123456", 
-                max_chars=6, 
-                key="verification_code_input",
-                help="Enter the 6-digit code from your email"
-            )
-            col_verify, col_resend = st.columns(2)
-            with col_verify:
-                submit_code = st.form_submit_button("✅ Verify Code", use_container_width=True)
-            with col_resend:
-                resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
-            
-            if resend_code:
-                if verification_email:
-                    with st.spinner("Resending verification code..."):
-                        verification_sent = session_manager.email_verification.send_verification_code(verification_email)
-                        if verification_sent:
-                            st.success("✅ New verification code sent! Check your email.")
-                            st.session_state.verification_stage = "code_entry"
-                        else:
-                            st.error("❌ Failed to resend code. Please try again later.")
-                else:
-                    st.error("Error: No email address found. Please go back and enter your email.")
-                    st.session_state.verification_stage = "email_entry"
-                st.rerun()
-
-            if submit_code:
-                if code and len(code) == 6:
-                    with st.spinner("🔍 Verifying your code..."):
-                        result = session_manager.verify_email_code(session, code)
-                    if result['success']:
-                        st.success(result['message'])
-                        st.balloons()
-                        # Clean up verification state on success
-                        st.session_state.chat_blocked_by_dialog = False
-                        st.session_state.verification_stage = None
-                        st.session_state.guest_continue_active = False
-                        st.session_state.final_answer_acknowledged = False
-                        st.session_state.gentle_prompt_shown = False
-                        st.session_state.email_verified_final_answer_acknowledged = False
-                        if 'just_answered' in st.session_state:
-                             del st.session_state.just_answered
-                        st.rerun()
-                    else:
-                        st.error(result['message'])
-                elif code:
-                    st.error("Please enter a 6-digit verification code.")
-                else:
-                    st.error("Please enter the verification code you received.")
-    
-    elif current_stage == 'declined_recognized_email_prompt_only':
-        # Non-blocking prompt for users who declined recognized email
-        should_block_chat_input = False # ALLOW CHAT INPUT
-        st.session_state.chat_blocked_by_dialog = False
-
-        remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
-        st.info(f"✅ **Continuing as Guest** - You have **{remaining_questions} questions** remaining from your guest allowance.")
-        st.info("💡 **Pro Tip:** Verify your email anytime to unlock 10 questions/day + chat history saving.")
-
-        with st.expander("📧 Want to Verify a Different Email?", expanded=False):
-            col_opts1, col_opts2 = st.columns(2)
-            with col_opts1:
-                if st.button("📧 Enter My Email for Verification", use_container_width=True, key="new_email_opt_btn"):
-                    st.session_state.verification_email = ""
-                    st.session_state.verification_stage = "email_entry"
+            # PRIORITY 1: Handle re-verification for recognized devices
+            if session.reverification_pending:
+                should_show_prompt = True
+                should_block_chat_input = True
+                if st.session_state.verification_stage is None:
+                    st.session_state.verification_stage = 'initial_check'
                     st.session_state.guest_continue_active = False
-                    st.rerun()
-            with col_opts2:
-                if st.button("👍 Continue as Guest", use_container_width=True, key="continue_guest_btn"):
-                    st.session_state.guest_continue_active = True
-                    st.session_state.chat_blocked_by_dialog = False
-                    st.session_state.verification_stage = None
-                    st.success("Perfect! You can continue as a Guest. The email verification option will always be available.")
+
+            # PRIORITY 2: Handle guest who JUST hit their limit (GENTLE approach with the reading button)
+            # This only triggers if they JUST answered a question and it put them over the limit.
+            elif user_just_hit_guest_limit:
+                st.session_state.just_answered = False # Consume the flag
+                should_show_prompt = True
+                should_block_chat_input = False  # DON'T block immediately
+                
+                st.success("🎯 **You've explored FiFi AI with your 4 guest questions!**")
+                st.info("Take your time to read this answer. When you're ready, verify your email to unlock 10 questions per day + chat history saving!")
+                
+                with st.expander("📧 Ready to Unlock More Questions?", expanded=False):
+                    st.markdown("### 🚀 What You'll Get After Email Verification:")
+                    st.markdown("• **10 questions per day** • **Chat history saving** • **Cross-device sync**")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("📧 Yes, Let's Verify My Email!", use_container_width=True, key="gentle_verify_btn"):
+                            st.session_state.verification_stage = 'email_entry'
+                            st.session_state.chat_blocked_by_dialog = True # Block chat when they decide to verify
+                            st.session_state.final_answer_acknowledged = True
+                            st.rerun()
+                    with col2:
+                        if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="continue_reading_btn"):
+                            st.session_state.final_answer_acknowledged = True
+                            st.success("Perfect! Take your time. The verification option will remain available above.")
+                            st.rerun()
+                
+                st.session_state.chat_blocked_by_dialog = False # Temporarily keep chat unblocked
+                return False
+
+            # PRIORITY 2B: Handle email verified guest who JUST hit their limit (GENTLE approach)
+            # This only triggers if they JUST answered a question and it put them over the limit.
+            elif user_just_hit_email_verified_limit:
+                st.session_state.just_answered = False # Consume the flag
+                should_show_prompt = True
+                should_block_chat_input = False
+                
+                st.success("🎯 **You've completed your 10 daily questions!**")
+                st.info("Take your time to read this answer. Your questions will reset in 24 hours, or consider registering for 20 questions/day!")
+                
+                with st.expander("🚀 Want More Questions Daily?", expanded=False):
+                    st.markdown("### 📈 Upgrade Benefits:")
+                    st.markdown("• **20 questions per day** • **Tier system with breaks** • **Priority support**")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
+                            # Link to registration page, no need to change chat state
+                            st.link_button("Register Here", "https://www.12taste.com/in/my-account/", use_container_width=True) # Direct link
+                            st.session_state.email_verified_final_answer_acknowledged = True
+                            st.rerun()
+                    with col2:
+                        if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="email_verified_continue_reading"):
+                            st.session_state.email_verified_final_answer_acknowledged = True
+                            st.success("Perfect! Take your time reading.")
+                            st.rerun()
+                
+                st.session_state.chat_blocked_by_dialog = False
+                return False
+
+            # PRIORITY 3: Handle guest who is at their limit but DID NOT just ask a question (e.g., new session, page refresh)
+            elif is_guest_limit_hit and not st.session_state.final_answer_acknowledged:
+                should_show_prompt = True
+                should_block_chat_input = True
+                if st.session_state.verification_stage is None:
+                    st.session_state.verification_stage = 'email_entry'
+                    st.session_state.guest_continue_active = False
+
+            # PRIORITY 3B: Handle email verified guest who is at their limit but DID NOT just ask a question
+            elif is_email_verified_limit_hit and not st.session_state.email_verified_final_answer_acknowledged:
+                should_show_prompt = True
+                should_block_chat_input = True
+                st.error("🛑 **Daily Limit Reached**")
+                st.info("You've used your 10 questions for today. Your questions reset in 24 hours, or consider registering for 20 questions/day!")
+                st.link_button("Register for 20 questions/day", "https://www.12taste.com/in/my-account/")
+                st.session_state.chat_blocked_by_dialog = True
+                return True
+
+            # PRIORITY 4: Handle declined recognized email scenario (non-blocking, unless guest limit hit after decline)
+            elif session.declined_recognized_email_at and not st.session_state.guest_continue_active and not is_guest_limit_hit:
+                should_show_prompt = True
+                should_block_chat_input = False # It's a prompt, but they can still chat if they have questions left
+                if st.session_state.verification_stage is None:
+                    st.session_state.verification_stage = 'declined_recognized_email_prompt_only'
+
+            # If no prompt should be shown based on conditions, ensure state is clean
+            if not should_show_prompt:
+                st.session_state.chat_blocked_by_dialog = False
+                st.session_state.verification_stage = None
+                if 'just_answered' in st.session_state: # Clean up the flag if not used
+                    del st.session_state.just_answered
+                return False
+
+            # Set chat blocking state based on the type of prompt
+            st.session_state.chat_blocked_by_dialog = should_block_chat_input
+            
+            # Only show error header for blocking prompts
+            if should_block_chat_input:
+                st.error("📧 **Action Required**")
+
+            current_stage = st.session_state.verification_stage
+
+            if current_stage == 'initial_check':
+                # Use a container to ensure clean rendering
+                prompt_container = st.container()
+                
+                with prompt_container:
+                    email_to_reverify = session.pending_email
+                    masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
+                    st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
+                    st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
+                    
+                    # FIXED: Use session ID for stable keys instead of timestamp
+                    button_key_suffix = session.session_id[:8]  # First 8 chars of session ID
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("✅ Verify this email", 
+                                    use_container_width=True, 
+                                    key=f"reverify_yes_{button_key_suffix}"):
+                            
+                            # Add logging to debug
+                            logger.info(f"Verify button clicked in session {session.session_id[:8]}")
+                            
+                            session.recognition_response = "yes_reverify"
+                            session.declined_recognized_email_at = None
+                            st.session_state.verification_email = email_to_reverify
+                            st.session_state.verification_stage = "send_code_recognized"
+                            
+                            # Ensure session ID is preserved
+                            st.session_state.current_session_id = session.session_id
+                            
+                            session_manager.db.save_session(session)
+                            st.rerun()
+                    with col2:
+                        if st.button("❌ No, I don't recognize the email", 
+                                    use_container_width=True, 
+                                    key=f"reverify_no_{button_key_suffix}"):
+                            
+                            logger.info(f"Decline button clicked in session {session.session_id[:8]}")
+                            
+                            session.recognition_response = "no_declined_reco"
+                            session.declined_recognized_email_at = datetime.now()
+                            session.user_type = UserType.GUEST 
+                            session.reverification_pending = False
+                            session.pending_user_type = None
+                            session.pending_email = None
+                            session.pending_full_name = None
+                            session.pending_zoho_contact_id = None
+                            session.pending_wp_token = None
+                            
+                            # Ensure session ID is preserved
+                            st.session_state.current_session_id = session.session_id
+                            
+                            session_manager.db.save_session(session)
+                            st.session_state.guest_continue_active = True
+                            st.session_state.chat_blocked_by_dialog = False
+                            st.session_state.verification_stage = None
+                            st.success("You can now continue as a Guest.")
+                            st.rerun()
+
+            elif current_stage == 'send_code_recognized':
+                # Don't show any buttons - just the sending status
+                email_to_verify = st.session_state.get('verification_email')
+                if email_to_verify:
+                    st.info(f"📧 **Sending verification code to {session_manager._mask_email(email_to_verify)}...**")
+                    
+                    # Immediately perform the send (the actual sending happens after this renders)
+                    st.session_state.send_code_now = True
                     st.rerun()
 
-    return should_block_chat_input
+            elif current_stage == 'email_entry':
+                st.info("🚀 You've used your guest questions. Please verify your email to unlock 10 questions per day!")
+                with st.form("email_verification_form", clear_on_submit=False):
+                    st.markdown("**📧 Enter your email address to receive a verification code:**")
+                    current_email_input = st.text_input(
+                        "Email Address", 
+                        placeholder="your@email.com", 
+                        value=st.session_state.get('verification_email', session.email or ""), 
+                        key="manual_email_input",
+                        help="We'll send you a 6-digit verification code that's valid for 1 minute."
+                    )
+                    submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+                    if submit_email:
+                        if current_email_input:
+                            result = session_manager.handle_guest_email_verification(session, current_email_input)
+                            if result['success']:
+                                st.success(result['message'])
+                                st.session_state.verification_email = current_email_input
+                                st.session_state.verification_stage = "code_entry"
+                                st.rerun()
+                            else:
+                                st.error(result['message'])
+                                if "unusual activity" in result['message'].lower(): 
+                                    st.stop()
+                        else:
+                            st.error("Please enter an email address to receive the code.")
+                
+            elif current_stage == 'code_entry':
+                verification_email = st.session_state.get('verification_email', session.email)
+                st.success(f"📧 **Verification code sent to** **{session_manager._mask_email(verification_email)}**")
+                st.info("📱 Check your email (including spam/junk folders). The code expires in 1 minute.")
+                
+                with st.form("code_verification_form", clear_on_submit=False):
+                    code = st.text_input(
+                        "Enter 6-Digit Verification Code", 
+                        placeholder="123456", 
+                        max_chars=6, 
+                        key="verification_code_input",
+                        help="Enter the 6-digit code from your email"
+                    )
+                    col_verify, col_resend = st.columns(2)
+                    with col_verify:
+                        submit_code = st.form_submit_button("✅ Verify Code", use_container_width=True)
+                    with col_resend:
+                        resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
+                    
+                    if resend_code:
+                        if verification_email:
+                            with st.spinner("Resending verification code..."):
+                                verification_sent = session_manager.email_verification.send_verification_code(verification_email)
+                                if verification_sent:
+                                    st.success("✅ New verification code sent! Check your email.")
+                                    st.session_state.verification_stage = "code_entry"
+                                else:
+                                    st.error("❌ Failed to resend code. Please try again later.")
+                        else:
+                            st.error("Error: No email address found. Please go back and enter your email.")
+                            st.session_state.verification_stage = "email_entry"
+                        st.rerun()
+
+                    if submit_code:
+                        if code and len(code) == 6:
+                            with st.spinner("🔍 Verifying your code..."):
+                                result = session_manager.verify_email_code(session, code)
+                            if result['success']:
+                                st.success(result['message'])
+                                st.balloons()
+                                # Clean up verification state on success
+                                st.session_state.chat_blocked_by_dialog = False
+                                st.session_state.verification_stage = None
+                                st.session_state.guest_continue_active = False
+                                st.session_state.final_answer_acknowledged = False
+                                st.session_state.gentle_prompt_shown = False
+                                st.session_state.email_verified_final_answer_acknowledged = False
+                                if 'just_answered' in st.session_state:
+                                    del st.session_state.just_answered
+                                st.rerun()
+                            else:
+                                st.error(result['message'])
+                        elif code:
+                            st.error("Please enter a 6-digit verification code.")
+                        else:
+                            st.error("Please enter the verification code you received.")
+            
+            elif current_stage == 'declined_recognized_email_prompt_only':
+                # Non-blocking prompt for users who declined recognized email
+                should_block_chat_input = False # ALLOW CHAT INPUT
+                st.session_state.chat_blocked_by_dialog = False
+
+                remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
+                st.info(f"✅ **Continuing as Guest** - You have **{remaining_questions} questions** remaining from your guest allowance.")
+                st.info("💡 **Pro Tip:** Verify your email anytime to unlock 10 questions/day + chat history saving.")
+
+                with st.expander("📧 Want to Verify a Different Email?", expanded=False):
+                    col_opts1, col_opts2 = st.columns(2)
+                    with col_opts1:
+                        if st.button("📧 Enter My Email for Verification", use_container_width=True, key="new_email_opt_btn"):
+                            st.session_state.verification_email = ""
+                            st.session_state.verification_stage = "email_entry"
+                            st.session_state.guest_continue_active = False
+                            st.rerun()
+                    with col_opts2:
+                        if st.button("👍 Continue as Guest", use_container_width=True, key="continue_guest_btn"):
+                            st.session_state.guest_continue_active = True
+                            st.session_state.chat_blocked_by_dialog = False
+                            st.session_state.verification_stage = None
+                            st.success("Perfect! You can continue as a Guest. The email verification option will always be available.")
+                            st.rerun()
+
+            return should_block_chat_input
+        
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
     
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
-
-    # CRITICAL FIX: Check if fingerprinting is actually needed
-    fingerprint_needed = (
-        session.fingerprint_id and
-        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-    )
-
-    # Initialize fingerprinting status if needed
-    if 'fingerprint_status' not in st.session_state:
-        st.session_state.fingerprint_status = 'done' if not fingerprint_needed else 'pending'
-        st.session_state.is_chat_ready = not fingerprint_needed # CRITICAL: Enable chat if no fingerprinting needed
-
-    # CRITICAL FIX: Don't start fingerprinting process if already done or not needed
-    if fingerprint_needed and st.session_state.get('fingerprint_status') == 'pending':
-        st.session_state.fingerprint_status = 'pending_js'
-        st.session_state.fingerprint_wait_start = time.time()
-        st.session_state.is_chat_ready = False
-        logger.info(f"Starting fingerprinting process for session {session.session_id[:8]} on chat page.")
-
-    # Render fingerprinting component if needed
-    if fingerprint_needed and st.session_state.get('fingerprint_status') == 'pending_js':
-        fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-        if not st.session_state.get(fingerprint_key, False):
-            try:
-                session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-                st.session_state[fingerprint_key] = True
-                logger.info(f"Triggered fingerprint component rendering for session {session.session_id[:8]} on chat page.")
-            except Exception as e:
-                logger.error(f"Fingerprinting component failed: {e}")
-                st.session_state.is_chat_ready = True # CRITICAL: Enable chat even if fingerprinting fails
-                st.session_state.fingerprint_status = 'failed'
-
-        current_time_float = time.time()
-        wait_start = st.session_state.get('fingerprint_wait_start', current_time_float)
-        elapsed = current_time_float - wait_start
-        remaining = max(0, 10 - elapsed) # REDUCED: 10 seconds timeout instead of 15
-
-        if remaining > 0:
-            st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
-            st.caption("FiFi is setting up device recognition for security and session management.")
-            progress_value = min(elapsed / 10, 1.0)
-            st.progress(progress_value, text="Session Security Setup")
-            st.markdown("---")
-
-            # CRITICAL: Don't rerun too frequently
-            if remaining > 0:
-                time.sleep(1) # Add small delay to prevent excessive reruns
-                st.rerun()
-        else:
-            # Timeout reached, enable chat input with fallback fingerprint
-            st.session_state.is_chat_ready = True
-            st.session_state.fingerprint_status = 'timeout'
-            logger.warning(f"Fingerprint timeout (10s) for session {session.session_id[:8]} - enabling chat input with fallback.")
-            st.rerun()
-        
-        return # CRITICAL: Don't render rest of chat interface during fingerprinting
-
-    # CRITICAL: If we reach here, fingerprinting is done or not needed
-    if not st.session_state.get('is_chat_ready', False):
-        st.session_state.is_chat_ready = True
-        logger.info(f"Chat ready for session {session.session_id[:8]}")
 
     # Simple activity tracking
     if activity_result:
@@ -5331,7 +5323,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 indicators = []
                 if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
                 if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
-                if msg.get("is_meta_response"): indicators.append("📈 Session Analytics") # Added from B
+                if msg.get("is_meta_response"): indicators.append("📈 Session Analytics") # For meta-responses
                 if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                 
                 if msg.get("safety_override"):
@@ -5340,9 +5332,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 if msg.get("has_citations") and msg.get("has_inline_citations"):
                     st.caption("📚 Response includes verified citations")
                 
-    # FIXED: Chat input disabled by fingerprinting OR dialog OR bans
+    # Chat input disabled by dialog OR bans
     overall_chat_disabled = (
-        not st.session_state.get('is_chat_ready', False) or # Fingerprinting not complete
         should_disable_chat_input_by_dialog or # Email dialog active
         session.ban_status.value != BanStatus.NONE.value # User is banned
     )
@@ -5818,6 +5809,7 @@ def main_fixed():
 
         # Route to appropriate page
         if current_page != "chat":
+            # The fingerprinting logic is now primarily handled within render_welcome_page
             render_welcome_page(session_manager)
         else:
             # Get existing session (should already exist from loading state or prior direct creation)
@@ -5831,40 +5823,6 @@ def main_fixed():
                 st.rerun()
                 return
 
-            # 🔥 RENDER FINGERPRINTING FIRST, BEFORE TIMEOUT LOGIC
-            fingerprint_needed = (
-                session is not None and (
-                    not session.fingerprint_id or
-                    session.fingerprint_method == "temporary_fallback_python" or
-                    session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-                )
-            )
-            
-            # This part replaces the old explicit `if fingerprint_needed` block for rendering
-            # The `render_chat_interface_simplified` will now handle the rendering of the fingerprint component itself.
-            # This main_fixed just needs to ensure the `fingerprint_status` is correctly initialized/updated
-            # to signal `render_chat_interface_simplified` to do its job.
-
-            # Update fingerprint_status if a persistent fingerprint is now available
-            if not fingerprint_needed and st.session_state.get('fingerprint_status') != 'done':
-                st.session_state.fingerprint_status = 'done'
-                st.session_state.is_chat_ready = True
-                if 'fingerprint_wait_start' in st.session_state:
-                    del st.session_state['fingerprint_wait_start']
-                logger.info(f"Fingerprinting resolved, marking as 'done' for session {session.session_id[:8]}.")
-            elif fingerprint_needed and st.session_state.get('fingerprint_status') not in ['pending_js', 'failed', 'timeout']:
-                # If still needed but not yet in JS process, set to pending
-                st.session_state.fingerprint_status = 'pending_js'
-                st.session_state.fingerprint_wait_start = time.time()
-                st.session_state.is_chat_ready = False
-                logger.info(f"Setting fingerprint_status to 'pending_js' for session {session.session_id[:8]}.")
-
-            # 🔥 NOW DO TIMEOUT LOGIC AFTER JAVASCRIPT IS RENDERED (BUT ALSO CONSIDER JS FINGERPRINTING)
-            # The `render_chat_interface_simplified` now contains the logic for rendering the fingerprint
-            # component and managing its internal timeout and `is_chat_ready` flag.
-            # We must ensure that `render_chat_interface_simplified` is called first so it can do its work,
-            # and then rerun if it signals that the fingerprinting is still in progress and requires a rerun.
-            
             # Render activity tracker and check for timeout
             activity_data_from_js = None
             if session and session.session_id:
