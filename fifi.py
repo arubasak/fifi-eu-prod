@@ -1,18 +1,3 @@
-Of course, I can help with that. Here is the upgraded code from Code B with the specified functionalities from Code A integrated.
-
-### Summary of Integrated Changes:
-
-*   **AI & Search Logic (`EnhancedAI`, `PineconeAssistantTool`, `TavilyFallbackAgent`):** The entire AI system has been replaced to prioritize Pinecone with specific business rules. The Tavily web search fallback is now significantly more intelligent, using an LLM to reformulate user questions for better, context-aware results.
-*   **Business Rule Enforcement:**
-    *   The Pinecone assistant is now instructed to never provide pricing or stock information, instead redirecting users to the sales team.
-    *   The fallback logic is more robust, triggering a web search only when Pinecone explicitly states it cannot find information, ensuring the business rules are followed first.
-*   **Meta-Conversation Handling:** The assistant can now understand and respond to questions about the conversation itself (e.g., "summarize our chat," "how many questions have I asked?") using a zero-token, code-based analysis, saving on API costs.
-*   **Context-Aware Validation:** The industry context check now considers the previous turns of the conversation, allowing it to correctly identify follow-up questions (like "what about pricing?") as relevant.
-*   **Proactive User Notifications:** A non-blocking notice now appears in the chat interface when a user asks about pricing or stock, informing them that such information is dynamic and should be formally verified.
-
-This integration makes the AI assistant more aligned with business objectives, more contextually aware, and more efficient in its processing.
-
-```python
 import streamlit as st
 import os
 import uuid
