@@ -4695,17 +4695,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display."""
     with st.sidebar:
-        # CRITICAL: Refresh session if fingerprinting just completed
-        if (st.session_state.get('fingerprint_status') == 'done' and 
-            session.fingerprint_id and 
-            session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))):
-            
-            # Session object is stale, reload from database
-            fresh_session = session_manager.db.load_session(session.session_id)
-            if fresh_session:
-                session = fresh_session
-                logger.info(f"🔄 Refreshed session in sidebar: {session.fingerprint_id[:12]}...")
-
         st.title("🎛️ Dashboard")        
         
         if session.user_type.value == UserType.REGISTERED_USER.value:
