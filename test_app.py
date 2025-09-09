@@ -4199,12 +4199,30 @@ def handle_fingerprint_requests_from_query():
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock."""
     
+      
+    st.title("🤖 Welcome to FiFi AI Assistant")
+    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
+
     # Show loading overlay if in loading state
     if show_loading_overlay():
         return
-    
-    st.title("🤖 Welcome to FiFi AI Assistant")
-    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
+    # Show fingerprinting progress if needed (from suggestion #2)
+    session = session_manager.get_session() if st.session_state.get('current_session_id') else None
+    if session and not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
+        current_time_float = time.time()
+        wait_start = st.session_state.get('fingerprint_wait_start')
+        elapsed = current_time_float - wait_start
+        remaining = max(0, 20 - elapsed)
+        
+        if remaining > 0:
+            st.info(f"🔒 **Initializing secure session...** ({remaining:.0f}s remaining)")
+            st.caption("Setting up device recognition and security features.")
+        else:
+            st.info("🔒 **Finalizing setup...** Almost ready!")
+        
+        # Add progress bar
+        progress_value = min(elapsed / 20, 1.0)
+        st.progress(progress_value, text="Initializing FiFi AI Assistant")
     
     st.markdown("---")
     
