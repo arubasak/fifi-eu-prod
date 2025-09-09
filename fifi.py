@@ -4956,7 +4956,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         return True # Disable chat input
 
     # Determine current user status
-    	user_is_guest = (session.user_type.value == UserType.GUEST.value)
+    user_is_guest = (session.user_type.value == UserType.GUEST.value)
 	user_is_email_verified = (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value)
 	guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
 	email_verified_limit_value = session_manager.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]
