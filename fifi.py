@@ -4762,22 +4762,16 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.info("💡 You are currently using guest questions. Verify your email to get more.") # Alternative message
                 
         # Show fingerprint status
-        if st.session_state.get('fingerprint_status') == 'done':
-            if session.fingerprint_id:
+        if session.fingerprint_id:
+            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                st.markdown("**Device ID:** Identifying...")
+                st.caption("Fingerprinting in progress...")                
+            else:
                 st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
                 st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
-            else: # Should not happen if 'done', but fallback
-                st.markdown("**Device ID:** Unknown")
-                st.caption("Fingerprint acquired, but data missing.")
-        elif st.session_state.get('fingerprint_status') == 'timeout':
-            st.markdown("**Device ID:** Fallback ID used")
-            st.caption("Fingerprinting timed out. Using a temporary ID.")
-        elif st.session_state.get('fingerprint_status') == 'failed':
-            st.markdown("**Device ID:** Fallback ID used")
-            st.caption("Fingerprinting failed. Using a temporary ID.")
-        else: # 'pending' or 'pending_js'
+        else: # Fallback if fingerprint_id itself is None (should ideally be caught by temp_py_ early)
             st.markdown("**Device ID:** Initializing...")
-            st.caption("Waiting for device recognition...")
+            st.caption("Starting fingerprinting...")
 
 
         # Display time since last activity
@@ -5570,7 +5564,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
 
-        st.rerun() # Ensure UI updates correctly after processing prompt
+        # st.rerun() # Ensure UI updates correctly after processing prompt
 
 def ensure_initialization_fixed():
     """Fixed version without duplicate spinner since we have loading overlay"""
