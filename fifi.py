@@ -5657,7 +5657,7 @@ def ensure_initialization_fixed():
 
 # Modified main function with proper loading state handling
 def main_fixed():
-    """Main entry point with corrected fingerprinting logic aligned with test_app.py"""
+    """Main entry point with corrected fingerprinting logic and session refresh"""
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
@@ -5864,6 +5864,23 @@ def main_fixed():
 
             # --- End Global Fingerprinting Logic ---
 
+            # CRITICAL FIX: Refresh session from database if fingerprinting just completed
+            # This addresses the session staleness issue where sidebar shows "Initializing..." 
+            # even though the database has the correct fingerprint ID
+            if (st.session_state.get('fingerprint_status') == 'done' and 
+                session.fingerprint_id and 
+                session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))):
+                
+                # Session object is stale, reload from database
+                logger.info(f"🔄 Detected stale session object, reloading from database for {session.session_id[:8]}")
+                fresh_session = session_manager.db.load_session(session.session_id)
+                if fresh_session and not fresh_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                    session = fresh_session
+                    logger.info(f"✅ Refreshed session with real fingerprint ID: {session.fingerprint_id[:12]}...")
+                    # Force a rerun to update the sidebar display
+                    st.rerun()
+                    return
+
             # Render activity tracker and check for timeout
             activity_data_from_js = None
             if session and session.session_id:
@@ -5890,7 +5907,6 @@ def main_fixed():
         logger.error(f"Main application error: {e}", exc_info=True)
         st.error("⚠️ An unexpected error occurred. Please refresh the page.")
         st.info(f"Error details: {str(e)}")
-
 
 if __name__ == "__main__":
     try: # Keep this for robust error handling
