@@ -4956,7 +4956,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         return True # Disable chat input
 
     # Determine current user status
-	user_is_guest = (session.user_type.value == UserType.GUEST.value)
+    	user_is_guest = (session.user_type.value == UserType.GUEST.value)
 	user_is_email_verified = (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value)
 	guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
 	email_verified_limit_value = session_manager.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]
@@ -5852,12 +5852,12 @@ st.info(f"Error details: {str(e)}")
 
 
 if __name__ == "__main__":
-try: # Keep this for robust error handling
-main_fixed()
-except Exception as e:
-logger.critical(f"Critical application error: {e}", exc_info=True)
-st.error("💥 Critical application error occurred.")
-st.info("Please refresh the page to restart the application.")
-# Clear all session state to force clean restart
-for key in list(st.session_state.keys()):
-	del st.session_state[key]
+    try: # Keep this for robust error handling
+        main_fixed()
+    except Exception as e:
+        logger.critical(f"Critical application error: {e}", exc_info=True)
+        st.error("💥 Critical application error occurred.")
+        st.info("Please refresh the page to restart the application.")
+        # Clear all session state to force clean restart
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
