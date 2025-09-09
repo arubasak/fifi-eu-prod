@@ -4694,7 +4694,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display."""
     with st.sidebar:
-        with st.sidebar:
         # CRITICAL: Refresh session if fingerprinting just completed
         if (st.session_state.get('fingerprint_status') == 'done' and 
             session.fingerprint_id and 
