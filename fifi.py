@@ -2916,24 +2916,20 @@ class SessionManager:
 
                     # Check limits and handle bans. This is where the 24-hour reset happens.
                     limit_check = self.question_limits.is_within_limits(session)
-                    if not limit_check.get('allowed', True):
-                        # If the user is being prompted for re-verification due to higher historical privilege,
-                        # do not show a ban message, but let the dialog handle it.
-                        if session.reverification_pending and limit_check.get('reason') == 'guest_limit': # This condition seems redundant based on the `if not allowed and reason != guest_limit` above
-                            logger.info(f"Session {session.session_id[:8]} is pending re-verification, suppressing ban message and allowing dialog.")
-                        else:
-                            ban_type = limit_check.get('ban_type', 'unknown')
-                            message = limit_check.get('message', 'Access restricted due to usage policy.')
-                            time_remaining = limit_check.get('time_remaining')
-                            
-                            st.error(f"🚫 **Access Restricted**")
-                            if time_remaining:
-                                hours = max(0, int(time_remaining.total_seconds() // 3600))
-                                minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                                st.error(f"Time remaining: {hours}h {minutes}m")
-                            st.info(message)
-                            logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
+                    if not limit_check.get('allowed', True) and limit_check.get('reason') != 'guest_limit':
                         
+                        ban_type = limit_check.get('ban_type', 'unknown')
+                        message = limit_check.get('message', 'Access restricted due to usage policy.')
+                        time_remaining = limit_check.get('time_remaining')
+                        
+                        st.error(f"🚫 **Access Restricted**")
+                        if time_remaining:
+                            hours = max(0, int(time_remaining.total_seconds() // 3600))
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.info(message)
+                        logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
+                    
                         try:
                             self.db.save_session(session)
                         except Exception as e:
@@ -5056,7 +5052,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         return False
 
     # PRIORITY 3: Handle guest who is at their limit but DID NOT just ask a question (e.g., new session, page refresh)
-    elif is_guest_limit_hit and not st.session_state.final_answer_acknowledged:
+    elif is_guest_limit_hit:
         should_show_prompt = True
         should_block_chat_input = True
         if st.session_state.verification_stage is None:
