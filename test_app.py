@@ -4513,6 +4513,26 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     if 'email_verified_final_answer_acknowledged' not in st.session_state:
         st.session_state.email_verified_final_answer_acknowledged = False
 
+    # NEW: Handle the actual email sending if flagged
+    if st.session_state.get('send_code_now', False) and st.session_state.get('verification_email'):
+        email_to_send = st.session_state.verification_email
+        result = session_manager.handle_guest_email_verification(session, email_to_send)
+        
+        # Clear the send flag
+        del st.session_state['send_code_now']
+        
+        if result['success']:
+            st.success(result['message'])
+            st.session_state.verification_stage = "code_entry"
+        else:
+            st.error(result['message'])
+            if "unusual activity" in result['message'].lower(): 
+                st.stop()
+            st.session_state.verification_stage = "initial_check"
+        
+        st.rerun()
+        return True  # Block chat during this transition
+
     # Check if a hard block is in place first (non-email-verification related bans)
     limit_check = session_manager.question_limits.is_within_limits(session)
     if not limit_check['allowed'] and limit_check.get('reason') not in ['guest_limit', 'email_verified_limit']:
@@ -4643,53 +4663,57 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     current_stage = st.session_state.verification_stage
 
     if current_stage == 'initial_check':
-        email_to_reverify = session.pending_email
-        masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
-        st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
-        st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
+        # Use a container to ensure clean rendering
+        prompt_container = st.container()
         
-        col1, col2 = st.columns(2)
-        with col1:
-            # BUTTON 1
-            if st.button("✅ Verify this email", use_container_width=True, key="reverify_yes_btn"):
-                session.recognition_response = "yes_reverify"
-                session.declined_recognized_email_at = None
-                st.session_state.verification_email = email_to_reverify
-                st.session_state.verification_stage = "send_code_recognized"
-                session_manager.db.save_session(session)
-                st.rerun()
-        with col2:
-            # BUTTON 2 - Ensure this label and key are correct in your deployed file
-            if st.button("❌ No, I don't recognize the email", use_container_width=True, key="reverify_no_btn"):
-                session.recognition_response = "no_declined_reco"
-                session.declined_recognized_email_at = datetime.now()
-                session.user_type = UserType.GUEST 
-                session.reverification_pending = False
-                session.pending_user_type = None
-                session.pending_email = None
-                session.pending_full_name = None
-                session.pending_zoho_contact_id = None
-                session.pending_wp_token = None
-                session_manager.db.save_session(session)
-                st.session_state.guest_continue_active = True
-                st.session_state.chat_blocked_by_dialog = False
-                st.session_state.verification_stage = None
-                st.success("You can now continue as a Guest.")
-                st.rerun()
+        with prompt_container:
+            email_to_reverify = session.pending_email
+            masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
+            st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
+            st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
+            
+            # Create a unique key for this render cycle to prevent duplicates
+            button_key_suffix = str(int(time.time() * 1000))
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Verify this email", 
+                            use_container_width=True, 
+                            key=f"reverify_yes_btn_{button_key_suffix}"):
+                    session.recognition_response = "yes_reverify"
+                    session.declined_recognized_email_at = None
+                    st.session_state.verification_email = email_to_reverify
+                    st.session_state.verification_stage = "send_code_recognized"
+                    session_manager.db.save_session(session)
+                    st.rerun()
+            with col2:
+                if st.button("❌ No, I don't recognize the email", 
+                            use_container_width=True, 
+                            key=f"reverify_no_btn_{button_key_suffix}"):
+                    session.recognition_response = "no_declined_reco"
+                    session.declined_recognized_email_at = datetime.now()
+                    session.user_type = UserType.GUEST 
+                    session.reverification_pending = False
+                    session.pending_user_type = None
+                    session.pending_email = None
+                    session.pending_full_name = None
+                    session.pending_zoho_contact_id = None
+                    session.pending_wp_token = None
+                    session_manager.db.save_session(session)
+                    st.session_state.guest_continue_active = True
+                    st.session_state.chat_blocked_by_dialog = False
+                    st.session_state.verification_stage = None
+                    st.success("You can now continue as a Guest.")
+                    st.rerun()
 
     elif current_stage == 'send_code_recognized':
+        # Don't show any buttons - just the sending status
         email_to_verify = st.session_state.get('verification_email')
         if email_to_verify:
-            with st.spinner(f"Sending verification code to {session_manager._mask_email(email_to_verify)}..."):
-                result = session_manager.handle_guest_email_verification(session, email_to_verify)
-                if result['success']:
-                    st.success(result['message'])
-                    st.session_state.verification_stage = "code_entry"
-                else:
-                    st.error(result['message'])
-                    if "unusual activity" in result['message'].lower(): 
-                        st.stop()
-                    st.session_state.verification_stage = "email_entry"
+            st.info(f"📧 **Sending verification code to {session_manager._mask_email(email_to_verify)}...**")
+            
+            # Immediately perform the send (the actual sending happens after this renders)
+            st.session_state.send_code_now = True
             st.rerun()
 
     elif current_stage == 'email_entry':
@@ -4801,7 +4825,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.rerun()
 
     return should_block_chat
-
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
     
