@@ -4743,7 +4743,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     st.caption(f"⏰ {remaining_tier2} questions until 24-hour reset")
                 else:
                     st.caption("🚫 Daily limit reached - 24 hour reset required")
-				
 		elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             st.info("📧 **Email Verified Guest**")
             if session.email:
