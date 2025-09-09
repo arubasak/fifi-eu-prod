@@ -5564,7 +5564,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
 
-        # st.rerun() # Ensure UI updates correctly after processing prompt
+        st.rerun() # Ensure UI updates correctly after processing prompt
 
 def ensure_initialization_fixed():
     """Fixed version without duplicate spinner since we have loading overlay"""
