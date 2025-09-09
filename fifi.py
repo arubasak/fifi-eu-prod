@@ -5656,7 +5656,7 @@ def ensure_initialization_fixed():
 
 # Modified main function with proper loading state handling
 def main_fixed():
-    """Main entry point with loading state management"""
+    """Main entry point with loading state management and fixed fingerprinting"""
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
@@ -5720,15 +5720,24 @@ def main_fixed():
             if loading_reason == 'start_guest':
                 # Create guest session
                 session = session_manager.get_session()
-                if session and session.last_activity is None:
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
-                st.session_state.page = "chat"
-                if 'loading_reason' in st.session_state:
-                    del st.session_state['loading_reason']
+                if session:
+                    if session.last_activity is None:
+                        session.last_activity = datetime.now()
+                        session_manager.db.save_session(session)
+                    st.session_state.page = "chat"
+                    # FIXED: Always enable chat immediately for guest sessions
+                    st.session_state.is_chat_ready = True
+                    st.session_state.fingerprint_status = 'pending_js' # Indicate JS fingerprinting is expected
+                    logger.info(f"Chat input unlocked for guest session {session.session_id[:8]}, fingerprinting initiated in background.")
+                    if 'loading_reason' in st.session_state:
+                        del st.session_state['loading_reason']
+                else:
+                    set_loading_state(False)
+                    st.error("Failed to start guest session. Please try again.")
+                    return
 
             elif loading_reason == 'authenticate':
-                # Handle authentication (you'll need to store username/password temporarily)
+                # Handle authentication
                 username = st.session_state.get('temp_username', '')
                 password = st.session_state.get('temp_password', '')
 
@@ -5738,6 +5747,9 @@ def main_fixed():
                         session = authenticated_session # Assign to session variable
                         st.session_state.current_session_id = authenticated_session.session_id
                         st.session_state.page = "chat"
+                        # FIXED: Always enable chat immediately for authenticated sessions
+                        st.session_state.is_chat_ready = True
+                        st.session_state.fingerprint_status = 'done' # Authenticated users don't need to wait
                         # Clear temporary credentials
                         if 'temp_username' in st.session_state:
                             del st.session_state['temp_username']
@@ -5755,28 +5767,6 @@ def main_fixed():
                     set_loading_state(False)
                     st.error("Authentication failed: Missing username or password.")
                     return
-
-            # NEW: Logic to unlock chat input after session is created/authenticated and initial fingerprint check
-            if session:
-                # Check if the session has a *stable* fingerprint (not a temporary Python fallback
-                # that's still waiting for the JS component to return its data).
-                # The `fingerprint_checked_for_inheritance_{session.session_id}` flag, set by get_session(),
-                # indicates that the initial inheritance/fingerprint check has occurred.
-                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-                inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
-
-                if fingerprint_is_stable or inheritance_checked:
-                    st.session_state.is_chat_ready = True
-                    st.session_state.fingerprint_status = 'done' # Mark as done since a stable FP is established
-                    logger.info(f"Chat input unlocked for session {session.session_id[:8]} after initial session/fingerprint setup.")
-                else:
-                    # If it's still a temporary fingerprint and inheritance check hasn't happened yet,
-                    # keep chat locked. This state implies the JS fingerprint component is expected to run.
-                    st.session_state.is_chat_ready = False
-                    st.session_state.fingerprint_status = 'pending_js'
-                    logger.info(f"Chat input remains locked for session {session.session_id[:8]} pending JS fingerprinting.")
-            else:
-                st.session_state.is_chat_ready = False # Ensure locked if no session obtained
 
             # Clear loading state and rerun to show the actual page
             set_loading_state(False)
@@ -5826,6 +5816,38 @@ def main_fixed():
                 st.session_state['page'] = None
                 st.rerun()
                 return
+
+            # FIXED: Ensure fingerprinting component renders if needed on chat page
+            fingerprint_needed = (
+                not session.fingerprint_id or
+                session.fingerprint_method == "temporary_fallback_python" or
+                session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+            )
+            
+            fingerprint_rendered_key = f'fingerprint_rendered_{session.session_id}'
+            if fingerprint_needed and not st.session_state.get(fingerprint_rendered_key, False):
+                try:
+                    session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                    st.session_state[fingerprint_rendered_key] = True
+                    st.session_state.fingerprint_status = 'pending_js'
+                    logger.info(f"✅ Fingerprint component rendered for session {session.session_id[:8]} on chat page.")
+                except Exception as e:
+                    logger.error(f"Fingerprinting component failed on chat page: {e}")
+                    # Don't disable chat if fingerprinting fails
+                    st.session_state.fingerprint_status = 'failed'
+
+            # Handle fingerprinting completion/timeout for background processing
+            if st.session_state.get('fingerprint_status') == 'pending_js':
+                current_time_float = time.time()
+                wait_start = st.session_state.get('fingerprint_wait_start')
+                if wait_start is None:
+                    st.session_state.fingerprint_wait_start = current_time_float
+                elif current_time_float - wait_start > 20:  # 20 seconds timeout for FP
+                    st.session_state.fingerprint_status = 'timeout'
+                    logger.warning(f"Fingerprint timeout (20s) - chat remains enabled with fallback for session {session.session_id[:8]} on chat page.")
+                    # Clear the wait start flag
+                    if 'fingerprint_wait_start' in st.session_state:
+                        del st.session_state['fingerprint_wait_start']
 
             # Render activity tracker and check for timeout
             activity_data_from_js = None
