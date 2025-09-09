@@ -4519,6 +4519,12 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     Controls `st.session_state.chat_blocked_by_dialog` and returns if chat input should be disabled.
     """
     
+    # Ensure we're working with the correct session
+    if st.session_state.get('current_session_id') != session.session_id:
+        logger.warning(f"Session mismatch in email prompt! State: {st.session_state.get('current_session_id', 'None')[:8]}, Param: {session.session_id[:8]}")
+        # Force correct session
+        st.session_state.current_session_id = session.session_id
+    
     # Initialize relevant session states if not present
     if 'verification_stage' not in st.session_state:
         st.session_state.verification_stage = None
@@ -4690,24 +4696,35 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
             st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
             
-            # Create a unique key for this render cycle to prevent duplicates
-            button_key_suffix = str(int(time.time() * 1000))
+            # FIXED: Use session ID for stable keys instead of timestamp
+            button_key_suffix = session.session_id[:8]  # First 8 chars of session ID
             
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("✅ Verify this email", 
                             use_container_width=True, 
-                            key=f"reverify_yes_btn_{button_key_suffix}"):
+                            key=f"reverify_yes_{button_key_suffix}"):
+                    
+                    # Add logging to debug
+                    logger.info(f"Verify button clicked in session {session.session_id[:8]}")
+                    
                     session.recognition_response = "yes_reverify"
                     session.declined_recognized_email_at = None
                     st.session_state.verification_email = email_to_reverify
                     st.session_state.verification_stage = "send_code_recognized"
+                    
+                    # Ensure session ID is preserved
+                    st.session_state.current_session_id = session.session_id
+                    
                     session_manager.db.save_session(session)
                     st.rerun()
             with col2:
                 if st.button("❌ No, I don't recognize the email", 
                             use_container_width=True, 
-                            key=f"reverify_no_btn_{button_key_suffix}"):
+                            key=f"reverify_no_{button_key_suffix}"):
+                    
+                    logger.info(f"Decline button clicked in session {session.session_id[:8]}")
+                    
                     session.recognition_response = "no_declined_reco"
                     session.declined_recognized_email_at = datetime.now()
                     session.user_type = UserType.GUEST 
@@ -4717,6 +4734,10 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     session.pending_full_name = None
                     session.pending_zoho_contact_id = None
                     session.pending_wp_token = None
+                    
+                    # Ensure session ID is preserved
+                    st.session_state.current_session_id = session.session_id
+                    
                     session_manager.db.save_session(session)
                     st.session_state.guest_continue_active = True
                     st.session_state.chat_blocked_by_dialog = False
