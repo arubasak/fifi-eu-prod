@@ -2688,8 +2688,8 @@ class SessionManager:
             logger.error(f"Error checking manual CRM eligibility for {session.session_id[:8]}: {e}")
             return False
     def _attempt_fingerprint_inheritance(self, session: UserSession):
-        """Attempts to inherit session data from existing sessions with the same fingerprint.
-        Prioritizes the highest user type and merges usage statistics.
+        """
+        Attempts to inherit session data from existing sessions with the same fingerprint.
         This version contains the definitive fix for handling expired bans and resetting question counts correctly.
         """
         logger.info(f"🔄 Attempting fingerprint inheritance for session {session.session_id[:8]} with fingerprint {session.fingerprint_id[:8]}...")
@@ -2706,7 +2706,7 @@ class SessionManager:
             session.visitor_type = "returning_visitor"
             all_sessions_for_merge = [session] + historical_fp_sessions
             
-            # --- Initialize merged values ---
+            # --- Initialize values for merging ---
             merged_total_question_count = session.total_question_count
             merged_last_question_time = session.last_question_time
             merged_daily_question_count = session.daily_question_count
@@ -2716,16 +2716,19 @@ class SessionManager:
 
             # --- Pass 1: Find the highest privilege identity and the most recent ban ---
             for s in all_sessions_for_merge:
+                # Find the most authoritative session for identity
                 if self._get_privilege_level(s.user_type) > self._get_privilege_level(source_for_identity.user_type):
                     source_for_identity = s
                 elif self._get_privilege_level(s.user_type) == self._get_privilege_level(source_for_identity.user_type):
                     if s.last_activity and (not source_for_identity.last_activity or s.last_activity > source_for_identity.last_activity):
                         source_for_identity = s
                 
+                # Find the single most recent ban to evaluate
                 if s.ban_status != BanStatus.NONE and s.ban_end_time:
                     if most_recent_ban_session is None or s.ban_end_time > most_recent_ban_session.ban_end_time:
                         most_recent_ban_session = s
                 
+                # Merge total count and last question time unconditionally for now
                 merged_total_question_count = max(merged_total_question_count, s.total_question_count)
                 if s.last_question_time and (not merged_last_question_time or s.last_question_time > merged_last_question_time):
                     merged_last_question_time = s.last_question_time
@@ -2734,20 +2737,21 @@ class SessionManager:
             ban_is_active = most_recent_ban_session and now < most_recent_ban_session.ban_end_time
             
             if ban_is_active:
-                # User is still actively banned. Inherit the ban and the question count that caused it.
+                # The user is still under an active ban. Inherit the ban and the question count that caused it.
                 logger.info(f"Inheritance: Found ACTIVE ban for fingerprint. Applying to session {session.session_id[:8]}.")
                 session.ban_status = most_recent_ban_session.ban_status
                 session.ban_start_time = most_recent_ban_session.ban_start_time
                 session.ban_end_time = most_recent_ban_session.ban_end_time
                 session.ban_reason = most_recent_ban_session.ban_reason
                 session.question_limit_reached = True
-                # Find the max daily count from any session within the 24h window
+                
+                # Find the max daily count from any session within the 24h window to ensure the count is accurate
                 for s in all_sessions_for_merge:
                      if s.daily_question_count and s.last_question_time and (now - s.last_question_time < timedelta(hours=24)):
                          merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
             else:
-                # User is NOT actively banned (either never was, or the ban has expired).
-                logger.info(f"Inheritance: No active ban found for fingerprint. Checking last question time for count reset.")
+                # No active ban exists. The user is either new, their ban expired, or enough time has passed.
+                logger.info(f"Inheritance: No active ban found for fingerprint. Evaluating question count reset.")
                 session.ban_status = BanStatus.NONE
                 session.ban_start_time = None
                 session.ban_end_time = None
@@ -2756,13 +2760,14 @@ class SessionManager:
 
                 # Now, check if the daily count should be reset based on the last question time.
                 if merged_last_question_time and (now - merged_last_question_time) < timedelta(hours=24):
-                    # Last question was within 24h, so find the max count from that window.
+                    # The last question was recent. Find the max count from that window.
                     for s in all_sessions_for_merge:
                         if s.daily_question_count and s.last_question_time and (now - s.last_question_time < timedelta(hours=24)):
                             merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
                 else:
-                    # Last question was > 24h ago, or no questions ever, so reset the count.
-                    logger.info("Inheritance: Last question time is > 24h ago. Resetting daily count to 0.")
+                    # Last question was > 24h ago, or no questions were ever asked. Reset the count.
+                    # This logic now correctly handles the expired ban scenario.
+                    logger.info("Inheritance: Last question time is > 24h ago OR ban has expired. Resetting daily count to 0.")
                     merged_daily_question_count = 0
                     merged_last_question_time = None
             
@@ -2791,7 +2796,6 @@ class SessionManager:
 
         except Exception as e:
             logger.error(f"Error during fingerprint inheritance for session {session.session_id[:8]}: {e}", exc_info=True)
-        
         
     def get_session(self) -> Optional[UserSession]:
         """Gets or creates the current user session with enhanced validation."""
@@ -3075,14 +3079,6 @@ class SessionManager:
             verification_success = self.email_verification.verify_code(email_to_verify, sanitized_code)
             
             if verification_success:
-                logger.info(f"✅ BEFORE email verification upgrade for session {session.session_id[:8]}:")
-                logger.info(f"   - User Type: {session.user_type.value}")
-                logger.info(f"   - Daily Questions: {session.daily_question_count}")
-                logger.info(f"   - Total Questions: {session.total_question_count}")
-                logger.info(f"   - Has Messages: {len(session.messages)}")
-                logger.info(f"   - Reverification Pending: {session.reverification_pending}")
-                old_user_type = session.user_type
-                
                 if session.reverification_pending:
                     # Reclaim pending user type and identity
                     session.user_type = session.pending_user_type if session.pending_user_type else UserType.EMAIL_VERIFIED_GUEST # Fallback
@@ -3100,67 +3096,40 @@ class SessionManager:
                 else:
                     # Upgrade user to email verified guest (normal first-time verification)
                     session.user_type = UserType.EMAIL_VERIFIED_GUEST
-                    # Email already set in handle_guest_email_verification
                     logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST (first time): {session.email}")
 
-                # Recalculate ban status if upgrading from EMAIL_VERIFIED_GUEST to REGISTERED_USER
-                # This only matters if they were already banned as an email-verified guest
-                if (old_user_type.value == UserType.EMAIL_VERIFIED_GUEST.value and 
-                    session.user_type.value == UserType.REGISTERED_USER.value and 
-                    session.ban_status.value != BanStatus.NONE.value):
+                # --- DEFINITIVE FIX: REVISED BAN LOGIC ---
+                # This applies if the user re-verifies into a REGISTERED_USER state while under a ban.
+                if session.user_type.value == UserType.REGISTERED_USER.value and session.ban_status.value != BanStatus.NONE.value:
+                    logger.info(f"Recalculating ban for user upgrading to REGISTERED_USER {session.session_id[:8]}")
                     
-                    logger.info(f"Recalculating ban for upgraded user {session.session_id[:8]} from {old_user_type.value} to {session.user_type.value}")
-                    logger.info(f"Current ban: status={session.ban_status.value}, reason='{session.ban_reason}', end_time={session.ban_end_time}")
-
-                    if session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value:
-                        logger.info(f"Found 24-hour ban, checking if it needs conversion...")
-
-                        if session.daily_question_count >= 20:
-                            logger.info(f"Keeping 24-hour ban as user hit Registered User Tier 2 limit (20 questions)")
-                            session.ban_reason = "Daily limit of 20 questions reached"
-                        elif session.daily_question_count >= 10:
-                            logger.info(f"Converting 24-hour ban to 1-hour Tier 1 ban for {session.session_id[:8]} (Registered User limit)")
-                            # --- DEFINITIVE FIX START ---
-                            # Use the start time of the OLD 24-hour ban as the anchor for the new 1-hour ban.
-                            start_time_for_ban = session.ban_start_time if session.ban_start_time else datetime.now()
-                            session.ban_status = BanStatus.ONE_HOUR
-                            session.ban_start_time = start_time_for_ban
-                            session.ban_end_time = start_time_for_ban + timedelta(hours=1)
-                            session.ban_reason = "Registered user Tier 1 limit reached (10 questions)"
-                            logger.info(f"New ban: status={session.ban_status.value}, start_time={session.ban_start_time}, end_time={session.ban_end_time}")
-                            # --- DEFINITIVE FIX END ---
-                        else:
-                            logger.info(f"Removing ban for upgraded user {session.session_id[:8]} as they haven't hit Registered User limits")
+                    if session.ban_status.value in [BanStatus.ONE_HOUR.value, BanStatus.TWENTY_FOUR_HOUR.value]:
+                        if session.daily_question_count < 20:
+                            logger.info(f"User {session.session_id[:8]} upgraded to REGISTERED_USER. Lifting Tier 1 ban to allow immediate access to Tier 2 questions.")
+                            # LIFT THE BAN ENTIRELY
                             session.ban_status = BanStatus.NONE
                             session.ban_start_time = None
                             session.ban_end_time = None
                             session.ban_reason = None
                             session.question_limit_reached = False
+                        else:
+                            logger.info(f"User {session.session_id[:8]} upgraded but has already met or exceeded Tier 2 limit. 24h ban remains.")
+                            session.ban_reason = "Registered user daily limit reached (20 questions)"
 
-                session.question_limit_reached = False  # Reset limit flag
-                # Clear declined_recognized_email_at on successful verification
+                session.question_limit_reached = False
                 session.declined_recognized_email_at = None 
                 
-                # Set last_activity to now (official start for logged-in users)
                 if session.last_activity is None:
                     session.last_activity = datetime.now()
 
-                # Save upgraded session
                 try:
                     self.db.save_session(session)
-                    logger.info(f"✅ AFTER email verification upgrade for session {session.session_id[:8]}:")
-                    logger.info(f"   - User Type: {session.user_type.value}")
-                    logger.info(f"   - Daily Questions: {session.daily_question_count} (PRESERVED from device history)")
-                    logger.info(f"   - Total Questions: {session.total_question_count}")
-                    logger.info(f"   - Has Messages: {len(session.messages)}")
-                    logger.info(f"   - CRM Eligible: {self._is_crm_save_eligible(session, 'email_verification_success')}")
-
                 except Exception as e:
                     logger.error(f"Failed to save upgraded session: {e}")
                 
                 return {
                     'success': True,
-                    'message': f'✅ Email verified successfully! You now have {10 - session.daily_question_count if session.daily_question_count <= 10 else 0} questions remaining today (total 10 for the day).'
+                    'message': '✅ Email verified successfully!'
                 }
             else:
                 return {
@@ -3210,18 +3179,7 @@ class SessionManager:
                 
                 if wp_token and user_email:
                     current_session = self.get_session()
-
-                    old_user_type = current_session.user_type
                     
-                    # --- SIMPLIFIED LOGIC FOR daily_question_count ON REGISTERED_USER LOGIN ---
-                    # Per user clarification: the 24-hour reset rule for daily_question_count
-                    # applies universally. No special "override" to preserve a count beyond
-                    # 24 hours just because of REGISTERED_USER login.
-                    # current_session.daily_question_count and current_session.last_question_time
-                    # will already reflect the correct state due to get_session()'s inheritance
-                    # and 24-hour reset logic.
-                    
-                    # Clear any pending re-verification flags, as direct login supersedes it
                     if current_session.reverification_pending:
                         logger.info(f"REGISTERED_USER login for {current_session.session_id[:8]} supersedes pending re-verification.")
                         current_session.reverification_pending = False
@@ -3230,51 +3188,34 @@ class SessionManager:
                         current_session.pending_full_name = None
                         current_session.pending_zoho_contact_id = None
                         current_session.pending_wp_token = None
-                    # Clear declined_recognized_email_at on successful login
                     current_session.declined_recognized_email_at = None
 
-                    # Upgrade to registered user
+                    # Upgrade user attributes
                     current_session.user_type = UserType.REGISTERED_USER
                     current_session.email = user_email
                     current_session.full_name = user_display_name
                     current_session.wp_token = wp_token
-                    current_session.question_limit_reached = False # Reset any limit flags
-                    
-                    # Set last_activity to now (official start for logged-in users)
                     current_session.last_activity = datetime.now()
-                    # NEW: Recalculate ban status based on new user type - handle ANY user upgrading to REGISTERED_USER
-                    if (current_session.user_type.value == UserType.REGISTERED_USER.value and 
-                        current_session.ban_status.value != BanStatus.NONE.value):
-    
+                    
+                    # --- DEFINITIVE FIX: REVISED BAN LOGIC ---
+                    if current_session.ban_status.value != BanStatus.NONE.value:
                         logger.info(f"Recalculating ban for user upgrading to REGISTERED_USER {current_session.session_id[:8]}")
-                        logger.info(f"Old type: {old_user_type.value}, Current ban: status={current_session.ban_status.value}, reason='{current_session.ban_reason}', end_time={current_session.ban_end_time}")
-
-                        # Handle any existing ban when upgrading to Registered User
-                        if current_session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value:
-                            logger.info(f"Found 24-hour ban, checking if it needs conversion...")
-
-                            # Convert based on current question count for Registered User limits
-                            if current_session.daily_question_count >= 20:
-                                # Keep 24-hour ban for Tier 2 limit (20 questions)
-                                logger.info(f"Keeping 24-hour ban as user hit Tier 2 limit (20 questions)")
-                                current_session.ban_reason = "Daily limit of 20 questions reached"
-                            elif current_session.daily_question_count >= 10:
-                                # Convert to 1-hour ban for Tier 1 (10 questions)
-                                logger.info(f"Converting 24-hour ban to 1-hour Tier 1 ban for {current_session.session_id[:8]} (Registered User limit)")
-                                start_time_for_ban = current_session.ban_start_time if current_session.ban_start_time else datetime.now()
-                                current_session.ban_status = BanStatus.ONE_HOUR
-                                current_session.ban_start_time = start_time_for_ban
-                                current_session.ban_end_time = start_time_for_ban + timedelta(hours=1)
-                                current_session.ban_reason = "Registered user Tier 1 limit reached (10 questions)"
-                                logger.info(f"New ban: status={current_session.ban_status.value}, start_time={current_session.ban_start_time}, end_time={current_session.ban_end_time}")
-                            else:
-                                # They haven't hit any registered user limit, remove ban
-                                logger.info(f"Removing ban for upgraded user {current_session.session_id[:8]} as they haven't hit Registered User limits")
+                        
+                        # Only lift bans related to question limits, not evasion bans.
+                        if current_session.ban_status.value in [BanStatus.ONE_HOUR.value, BanStatus.TWENTY_FOUR_HOUR.value]:
+                            # If they haven't reached the full Registered User limit (20), lift the ban.
+                            if current_session.daily_question_count < 20:
+                                logger.info(f"User {current_session.session_id[:8]} upgraded to REGISTERED_USER. Lifting Tier 1 ban to allow immediate access to Tier 2 questions.")
+                                # LIFT THE BAN ENTIRELY
                                 current_session.ban_status = BanStatus.NONE
                                 current_session.ban_start_time = None
                                 current_session.ban_end_time = None
                                 current_session.ban_reason = None
                                 current_session.question_limit_reached = False
+                            else:
+                                # They have already asked 20+ questions, so the 24h ban must remain.
+                                logger.info(f"User {current_session.session_id[:8]} upgraded but has already met or exceeded Tier 2 limit. 24h ban remains.")
+                                current_session.ban_reason = "Registered user daily limit reached (20 questions)"
                     
                     # Save authenticated session
                     try:
