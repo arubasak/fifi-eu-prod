@@ -1237,7 +1237,7 @@ class DatabaseManager:
             logger.warning(f"🚨 EVASION PENALTY: {penalty_hours}h ban applied to {session.session_id[:8]} (Level {session.escalation_level})")
             return penalty_hours
         
-        def _apply_ban(self, session: UserSession, ban_type: BanStatus, reason: str):
+        def _apply_ban(self, session: UserSession, ban_type: BanStatus, reason: str, start_time: Optional[datetime] = None):
             """Applies a ban to the session for a specified duration."""
             ban_hours = {
                 BanStatus.ONE_HOUR.value: 1,
@@ -1245,13 +1245,12 @@ class DatabaseManager:
                 BanStatus.EVASION_BLOCK.value: session.current_penalty_hours
             }.get(ban_type.value, 24)
 
-            session.ban_status = ban_type
-            session.ban_start_time = datetime.now()
+            session.ban_start_time = start_time if start_time else datetime.now()
             session.ban_end_time = session.ban_start_time + timedelta(hours=ban_hours)
             session.ban_reason = reason
             session.question_limit_reached = True
-            
-            logger.info(f"Ban applied to session {session.session_id[:8]}: Type={ban_type.value}, Duration={ban_hours}h, Reason='{reason}'.")
+    
+            logger.info(f"Ban applied to session {session.session_id[:8]}: Type={ban_type.value}, Duration={ban_hours}h, Start={session.ban_start_time}, Reason='{reason}'.")
         
         def _get_ban_message(self, session: UserSession) -> str:
             """Provides a user-friendly message for current bans."""
@@ -2820,6 +2819,18 @@ class SessionManager:
                 # declined_recognized_email_at is handled by QuestionLimitManager.detect_guest_email_evasion
                 logger.info(f"No re-verification needed for {session.session_id[:8]}. User type set to {session.user_type.value}.")
 
+            # --- NEW: Preserve the original ban timestamp before resetting ---
+            # Find the most recent, relevant ban start time from all historical sessions.
+            # This is our crucial anchor timestamp.
+            original_ban_anchor_time = None
+            for s in all_sessions_for_merge:
+                # We only care about the timestamp if there's an actual ban that's not an evasion block
+                if s.ban_status not in [BanStatus.NONE, BanStatus.EVASION_BLOCK] and s.ban_start_time:
+                    if original_ban_anchor_time is None or s.ban_start_time > original_ban_anchor_time:
+                        original_ban_anchor_time = s.ban_start_time
+            if original_ban_anchor_time:
+                logger.info(f"Found ban anchor time for inheritance: {original_ban_anchor_time}")
+                
             # --- FINAL AND DEFINITIVE BAN STATUS DETERMINATION ---
             # This logic now directly applies the ban status based on the *final* session state
             # (user_type, daily_question_count) and overrides any less relevant historical bans.
@@ -2849,15 +2860,15 @@ class SessionManager:
 
                 if user_type_for_ban == UserType.REGISTERED_USER:
                     if daily_q_for_ban >= 20: # Registered user Tier 2 limit
-                        self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user daily limit reached (20 questions)")
+                        self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user daily limit reached (20 questions)", start_time=original_ban_anchor_time)
                         logger.info(f"Applied Registered User 24h ban for {session.session_id[:8]} (20+ questions).")
                     elif daily_q_for_ban >= 10: # Registered user Tier 1 limit
-                        self.question_limits._apply_ban(session, BanStatus.ONE_HOUR, "Registered user Tier 1 limit reached (10 questions)")
+                        self.question_limits._apply_ban(session, BanStatus.ONE_HOUR, "Registered user Tier 1 limit reached (10 questions)", start_time=original_ban_anchor_time)
                         logger.info(f"Applied Registered User 1h ban for {session.session_id[:8]} (10 questions).")
                     # If daily_q_for_ban < 10, no ban.
                 elif user_type_for_ban == UserType.EMAIL_VERIFIED_GUEST:
                     if daily_q_for_ban >= 10: # Email verified guest limit
-                        self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached (10 questions)")
+                        self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached (10 questions)", start_time=original_ban_anchor_time)
                         logger.info(f"Applied Email Verified Guest 24h ban for {session.session_id[:8]} (10+ questions).")
                     # If daily_q_for_ban < 10, no ban.
                 elif user_type_for_ban == UserType.GUEST:
