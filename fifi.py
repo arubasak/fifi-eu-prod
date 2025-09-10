@@ -3215,10 +3215,14 @@ class SessionManager:
                         elif session.daily_question_count >= 10:
                             logger.info(f"Converting 24-hour ban to 1-hour Tier 1 ban for {session.session_id[:8]} (Registered User limit)")
                             session.ban_status = BanStatus.ONE_HOUR
-                            session.ban_start_time = datetime.now()
-                            session.ban_end_time = session.ban_start_time + timedelta(hours=1) # Bug fix: used session not current_session
+    
+                            # FIX: Use the time the 10th question was asked as the ban start time.
+                            start_time_for_ban = session.last_question_time if session.last_question_time else datetime.now()
+                            session.ban_start_time = start_time_for_ban
+                            session.ban_end_time = start_time_for_ban + timedelta(hours=1)
+    
                             session.ban_reason = "Registered user Tier 1 limit reached (10 questions)"
-                            logger.info(f"New ban: status={session.ban_status.value}, end_time={session.ban_end_time}")
+                            logger.info(f"New ban: status={session.ban_status.value}, start_time={session.ban_start_time}, end_time={session.ban_end_time}")
                         else:
                             logger.info(f"Removing ban for upgraded user {session.session_id[:8]} as they haven't hit Registered User limits")
                             session.ban_status = BanStatus.NONE
@@ -3352,10 +3356,11 @@ class SessionManager:
                                 # Convert to 1-hour ban for Tier 1 (10 questions)
                                 logger.info(f"Converting 24-hour ban to 1-hour Tier 1 ban for {current_session.session_id[:8]} (Registered User limit)")
                                 current_session.ban_status = BanStatus.ONE_HOUR
-                                current_session.ban_start_time = datetime.now()
-                                current_session.ban_end_time = current_session.ban_start_time + timedelta(hours=1)
+                                start_time_for_ban = current_session.last_question_time if current_session.last_question_time else datetime.now()
+                                current_session.ban_start_time = start_time_for_ban
+                                current_session.ban_end_time = start_time_for_ban + timedelta(hours=1)
                                 current_session.ban_reason = "Registered user Tier 1 limit reached (10 questions)"
-                                logger.info(f"New ban: status={current_session.ban_status.value}, end_time={current_session.ban_end_time}")
+                                logger.info(f"New ban: status={current_session.ban_status.value}, start_time={current_session.ban_start_time}, end_time={current_session.ban_end_time}")
                             else:
                                 # They haven't hit any registered user limit, remove ban
                                 logger.info(f"Removing ban for upgraded user {current_session.session_id[:8]} as they haven't hit Registered User limits")
