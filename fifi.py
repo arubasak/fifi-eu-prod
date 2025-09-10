@@ -2730,23 +2730,6 @@ class SessionManager:
             # Determine the most authoritative source for user type and identity fields
             source_for_identity_and_base_data = session
 
-            # --- NEW: Find the most recent, relevant ban information from history ---
-            most_recent_ban_session = None
-            for s in all_sessions_for_merge:
-                if s.ban_status not in [BanStatus.NONE] and s.ban_start_time:
-                    if most_recent_ban_session is None or s.ban_start_time > most_recent_ban_session.ban_start_time:
-                        most_recent_ban_session = s
-
-            # --- DEFINITIVE FIX START ---
-            # Check if the most recent ban from history has expired.
-            # If it has, we MUST reset the question count for the new session.
-            now = datetime.now()
-            if most_recent_ban_session and most_recent_ban_session.ban_end_time and now >= most_recent_ban_session.ban_end_time:
-                logger.info(f"Inherited ban for fingerprint {session.fingerprint_id[:8]} has EXPIRED. Resetting daily question count to 0 for new session.")
-                merged_daily_question_count = 0  # Reset the count because the user served their time.
-                merged_last_question_time = None # Also reset the last question time.
-            # --- DEFINITIVE FIX END ---
-
             for s in all_sessions_for_merge:
                 # Determine the most authoritative source for user type and identity fields
                 if self._get_privilege_level(s.user_type) > self._get_privilege_level(source_for_identity_and_base_data.user_type):
@@ -2757,21 +2740,24 @@ class SessionManager:
                         source_for_identity_and_base_data = s
 
                 # Merge usage counts (take max for daily and total)
+                now = datetime.now()
                 if s.daily_question_count is not None:
-                    # IMPORTANT: Only consider daily_question_count if its 24-hour window has NOT passed,
-                    # UNLESS we already reset it above due to an expired ban.
-                    if merged_daily_question_count == 0 and merged_last_question_time is None:
-                        pass # Do nothing, count is correctly reset.
-                    elif s.active or (s.last_question_time and (now - s.last_question_time < timedelta(hours=24))):
+                    # IMPORTANT: Only consider daily_question_count if it's potentially valid (i.e., within 24h or if last_question_time is None)
+                    # Or if the session itself is active. This prevents inheriting stale/reset counts.
+                    if s.active or (s.last_question_time and (now - s.last_question_time < timedelta(hours=24))):
                         merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
+                    else:
+                        # If the session is inactive and its 24-hour window has passed, its daily_question_count is effectively 0 for inheritance.
+                        pass # merged_daily_question_count will already be initialized to `session.daily_question_count` so we're good.
                 
                 if s.total_question_count is not None:
                     merged_total_question_count = max(merged_total_question_count, s.total_question_count)
 
-                # Merge last_question_time (most recent) unless it was reset
-                if merged_last_question_time is not None:
-                    if s.last_question_time and (not merged_last_question_time or s.last_question_time > merged_last_question_time):
-                        merged_last_question_time = s.last_question_time
+                # Merge last_question_time (most recent from all sessions for the fingerprint)
+                if s.last_question_time and (not merged_last_question_time or s.last_question_time > merged_last_question_time):
+                    merged_last_question_time = s.last_question_time
+                elif merged_last_question_time is None and s.last_question_time is not None:
+                    merged_last_question_time = s.last_question_time
 
                 # Merge evasion stats (take max)
                 if s.evasion_count is not None: merged_evasion_count = max(merged_evasion_count, s.evasion_count)
@@ -2800,10 +2786,11 @@ class SessionManager:
             session.current_penalty_hours = merged_current_penalty_hours
             session.escalation_level = merged_escalation_level
             session.email_addresses_used = list(merged_email_addresses_used)
-            session.email_switches_count = session.email_switches_count
+            session.email_switches_count = session.email_switches_count # Not merging this in inheritance, keep current (email_switches_count)
 
             # Determine privilege inheritance (user type and identity)
             if self._get_privilege_level(source_for_identity_and_base_data.user_type) > self._get_privilege_level(session.user_type):
+                # Found a higher privilege session; set pending re-verification.
                 session.reverification_pending = True
                 session.pending_user_type = source_for_identity_and_base_data.user_type
                 session.pending_email = source_for_identity_and_base_data.email
@@ -2811,9 +2798,12 @@ class SessionManager:
                 session.pending_zoho_contact_id = source_for_identity_and_base_data.zoho_contact_id
                 session.pending_wp_token = source_for_identity_and_base_data.wp_token
                 session.browser_privacy_level = source_for_identity_and_base_data.browser_privacy_level
-                session.declined_recognized_email_at = None
-                logger.info(f"Re-verification pending for {session.session_id[:8]}.")
+                session.declined_recognized_email_at = None # Clear if higher privilege is pending
+
+                logger.info(f"Re-verification pending for {session.session_id[:8]}. Higher privilege ({source_for_identity_and_base_data.user_type.value}) found for fingerprint, but requires email verification.")
             else:
+                # Current session is already at the highest or equal privilege level found for this fingerprint.
+                # Apply identity fields directly.
                 session.user_type = source_for_identity_and_base_data.user_type
                 session.email = source_for_identity_and_base_data.email
                 session.full_name = source_for_identity_and_base_data.full_name
@@ -2826,17 +2816,33 @@ class SessionManager:
                 session.pending_full_name = None
                 session.pending_zoho_contact_id = None
                 session.pending_wp_token = None
+                # declined_recognized_email_at is handled by QuestionLimitManager.detect_guest_email_evasion
                 logger.info(f"No re-verification needed for {session.session_id[:8]}. User type set to {session.user_type.value}.")
 
-            original_ban_anchor_time = most_recent_ban_session.ban_start_time if most_recent_ban_session else None
-            
-            # FINAL AND DEFINITIVE BAN STATUS DETERMINATION
+            # --- NEW: Preserve the original ban timestamp before resetting ---
+            # Find the most recent, relevant ban start time from all historical sessions.
+            # This is our crucial anchor timestamp.
+            original_ban_anchor_time = None
+            for s in all_sessions_for_merge:
+                # We only care about the timestamp if there's an actual ban that's not an evasion block
+                if s.ban_status not in [BanStatus.NONE, BanStatus.EVASION_BLOCK] and s.ban_start_time:
+                    if original_ban_anchor_time is None or s.ban_start_time > original_ban_anchor_time:
+                        original_ban_anchor_time = s.ban_start_time
+            if original_ban_anchor_time:
+                logger.info(f"Found ban anchor time for inheritance: {original_ban_anchor_time}")
+                
+            # --- FINAL AND DEFINITIVE BAN STATUS DETERMINATION ---
+            # This logic now directly applies the ban status based on the *final* session state
+            # (user_type, daily_question_count) and overrides any less relevant historical bans.
+
+            # Step 1: Default to no ban
             session.ban_status = BanStatus.NONE
             session.ban_start_time = None
             session.ban_end_time = None
             session.ban_reason = None
             session.question_limit_reached = False
 
+            # Step 2: Apply evasion ban if detected
             if evasion_ban_found:
                 session.ban_status = BanStatus.EVASION_BLOCK
                 session.ban_start_time = evasion_ban_start_time
@@ -2844,32 +2850,54 @@ class SessionManager:
                 session.ban_reason = evasion_ban_reason
                 session.question_limit_reached = evasion_question_limit_reached
                 logger.info(f"Explicitly applied inherited evasion block for {session.session_id[:8]}.")
-            # If the most recent ban has NOT expired, re-apply it.
-            elif most_recent_ban_session and most_recent_ban_session.ban_end_time and now < most_recent_ban_session.ban_end_time:
-                logger.info(f"Inherited ban for fingerprint {session.fingerprint_id[:8]} is still ACTIVE. Re-applying.")
-                session.ban_status = most_recent_ban_session.ban_status
-                session.ban_start_time = most_recent_ban_session.ban_start_time
-                session.ban_end_time = most_recent_ban_session.ban_end_time
-                session.ban_reason = most_recent_ban_session.ban_reason
-                session.question_limit_reached = True
-            
-            # Update fingerprint if necessary
+            else:
+                # Step 3: Determine ban based on the *final* user type and question count for this session
+                # This explicitly re-evaluates and applies the correct ban, overriding any old bans
+                # from lower privilege types that might have been carried over.
+
+                user_type_for_ban = session.user_type
+                daily_q_for_ban = session.daily_question_count
+
+                if user_type_for_ban == UserType.REGISTERED_USER:
+                    if daily_q_for_ban >= 20: # Registered user Tier 2 limit
+                        self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user daily limit reached (20 questions)", start_time=original_ban_anchor_time)
+                        logger.info(f"Applied Registered User 24h ban for {session.session_id[:8]} (20+ questions).")
+                    elif daily_q_for_ban >= 10: # Registered user Tier 1 limit
+                        self.question_limits._apply_ban(session, BanStatus.ONE_HOUR, "Registered user Tier 1 limit reached (10 questions)", start_time=original_ban_anchor_time)
+                        logger.info(f"Applied Registered User 1h ban for {session.session_id[:8]} (10 questions).")
+                    # If daily_q_for_ban < 10, no ban.
+                elif user_type_for_ban == UserType.EMAIL_VERIFIED_GUEST:
+                    if daily_q_for_ban >= 10: # Email verified guest limit
+                        self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached (10 questions)", start_time=original_ban_anchor_time)
+                        logger.info(f"Applied Email Verified Guest 24h ban for {session.session_id[:8]} (10+ questions).")
+                    # If daily_q_for_ban < 10, no ban.
+                elif user_type_for_ban == UserType.GUEST:
+                    # Guests don't get a hard ban applied during inheritance; their limit is handled by UI prompt.
+                    # Ensure no ban is active for guests if they are simply at their limit.
+                    session.ban_status = BanStatus.NONE
+                    session.ban_reason = None
+                    session.question_limit_reached = False
+                    logger.info(f"No hard ban applied during inheritance for Guest user {session.session_id[:8]} at limit.")
+
+            # Update fingerprint to the 'real' one if current is temporary and a real one was found
             if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and \
                not source_for_identity_and_base_data.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+
+                logger.info(f"Updating temporary fingerprint {session.fingerprint_id[:8]} to recognized fingerprint {source_for_identity_and_base_data.fingerprint_id[:8]}")
                 session.fingerprint_id = source_for_identity_and_base_data.fingerprint_id
                 session.fingerprint_method = source_for_identity_and_base_data.fingerprint_method
 
-            # Update last_activity if necessary
+            # Ensure last_activity is updated if it was None or older than source
             if session.last_activity is None and source_for_identity_and_base_data.last_activity is not None:
                 session.last_activity = source_for_identity_and_base_data.last_activity
             elif source_for_identity_and_base_data.last_activity and (not session.last_activity or source_for_identity_and_base_data.last_activity > session.last_activity):
                 session.last_activity = source_for_identity_and_base_data.last_activity
 
-            logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, fp={session.fingerprint_id[:8]}, active={session.active}, rev_pending={session.reverification_pending}, final_ban={session.ban_status.value}, ban_reason='{session.ban_reason}', ban_end_time={session.ban_end_time}")
+
+            logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value} (from {original_session_user_type_at_start.value}), daily_q={session.daily_question_count}, total_q={session.total_question_count}, fp={session.fingerprint_id[:8]}, active={session.active}, rev_pending={session.reverification_pending}, final_ban={session.ban_status.value}, ban_reason='{session.ban_reason}', ban_end_time={session.ban_end_time}")
 
         except Exception as e:
             logger.error(f"Error during fingerprint inheritance for session {session.session_id[:8]}: {e}", exc_info=True)
-        
     def get_session(self) -> Optional[UserSession]:
         """Gets or creates the current user session with enhanced validation."""
         logger.info(f"🔍 get_session() called - current_session_id in state: {st.session_state.get('current_session_id', 'None')}")
