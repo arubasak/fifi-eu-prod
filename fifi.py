@@ -1805,9 +1805,9 @@ class PineconeAssistantTool:
                             
                             if link_url:
                                 if '?' in link_url:
-                                    link_url += '&utm_source=fifi-in'
+                                    link_url += '&utm_source=fifi-eu'
                                 else:
-                                    link_url += '?utm_source=fifi-in'
+                                    link_url += '?utm_source=fifi-eu'
                                 
                                 display_text = link_url
                                 if display_text not in seen_items:
