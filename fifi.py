@@ -5073,7 +5073,21 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         should_block_chat = True
         st.error("🛑 **Daily Limit Reached**")
         st.info("You've used your 10 questions for today. Your questions reset in 24 hours, or consider registering for 20 questions/day!")
-        st.link_button("Register for 20 questions/day", "https://www.12taste.com/in/my-account/")
+        # --- MODIFICATION START ---
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.link_button("Register for 20 questions/day", "https://www.12taste.com/in/my-account/", use_container_width=True)
+            
+        with col2:
+            if st.button("Return to Welcome Page", use_container_width=True):
+                # End the session cleanly
+                session_manager.end_session(session)
+                # Use st_javascript to force a top-level redirect in the parent frame
+                js_redirect = f"window.top.location.href = 'https://fifi-eu.streamlit.app/';"
+                st.components.v1.html(f"<script>{js_redirect}</script>", height=0, width=0)
+                st.rerun()
+        # --- MODIFICATION END ---
         st.session_state.chat_blocked_by_dialog = True
         return True
 
