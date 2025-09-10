@@ -1179,7 +1179,7 @@ class DatabaseManager:
                         return {
                             'allowed': False,
                             'reason': 'registered_user_tier1_limit', # New specific reason
-                            'message': "You've reached the Tier 1 limit (10 questions). Please wait 1 hour before continuing."
+                            'message': "You've reached the Tier 1 limit (10 questions). Please wait 1 hour or lesser depending on the last question asked."
                         }
                     else: # Questions 11-19
                         remaining = user_limit - session.daily_question_count
