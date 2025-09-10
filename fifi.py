@@ -1258,7 +1258,7 @@ class DatabaseManager:
             if session.ban_status.value == BanStatus.EVASION_BLOCK.value:
                 return "Access restricted due to policy violation. Please try again later."
             elif session.ban_status.value == BanStatus.ONE_HOUR.value:
-                return "You've reached the Tier 1 limit (10 questions). Please wait 1 hour before continuing."
+                return "You've reached the Tier 1 limit (10 questions). Please wait 1 hour or lesser depending on the last question asked."
             elif session.user_type.value == UserType.REGISTERED_USER.value:
                 return "Daily limit reached. Please retry in 24 hours."
             else: # Email Verified Guest or other 24-hour bans
