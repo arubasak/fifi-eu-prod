@@ -3264,6 +3264,13 @@ class SessionManager:
                 if session.last_activity is None:
                     session.last_activity = datetime.now()
 
+                # NEW: Re-run inheritance after email verification for Guest -> Email Verified transitions
+                # This ensures we pick up previous session counts now that we have an email
+                if not session.reverification_pending and not is_same_session_upgrade:
+                    logger.info(f"🔄 Re-running inheritance after email verification for {session.session_id[:8]} with email {email_to_verify}")
+                    self._attempt_fingerprint_inheritance(session)
+                    logger.info(f"📊 Post-inheritance counts: daily={session.daily_question_count}, total={session.total_question_count}")
+
                 try:
                     self.db.save_session(session)
                 except Exception as e:
