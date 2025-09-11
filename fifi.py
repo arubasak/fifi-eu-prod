@@ -1115,7 +1115,6 @@ class DatabaseManager:
                     }
                 # If at 10 or more, but less than 20 (user_limit)
                 elif session.daily_question_count >= 10:
-                    # Tier 2: Questions 11-20
                     # If daily_question_count is exactly 10, this is the trigger for the Tier 1 ban.
                     if session.daily_question_count == 10:
                         reason_str = 'registered_user_tier1_limit'
@@ -3050,7 +3049,7 @@ class SessionManager:
             
             # Multiple email detection
             if len(unique_emails) > 1:
-                logger.info(f"🚨 Multiple emails detected for fingerprint {fingerprint_id[:8]}: {unique_emails}")
+                logger.info(f"🚨 Multiple emails ({len(unique_emails)}) detected for fingerprint {fingerprint_id[:8]}: {unique_emails}")
                 return {
                     'has_history': True,
                     'multiple_emails': True,
@@ -3727,142 +3726,142 @@ class SessionManager:
             "source": "Topic Analysis"
         }
     
-def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-    """Gets AI response and manages session state."""
-    try:
-        # Handle cases where fingerprint_id might still be temporary or None during early load.
-        # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
-        rate_limiter_id = session.fingerprint_id
-        if rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-            # Fallback to session_id for truly un-fingerprinted or temporary cases,
-            # to still apply some level of protection, albeit less robust.
-            rate_limiter_id = session.session_id
-            logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
+    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+        """Gets AI response and manages session state."""
+        try:
+            # Handle cases where fingerprint_id might still be temporary or None during early load.
+            # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
+            rate_limiter_id = session.fingerprint_id
+            if rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                # Fallback to session_id for truly un-fingerprinted or temporary cases,
+                # to still apply some level of protection, albeit less robust.
+                rate_limiter_id = session.session_id
+                logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
 
-        # Check rate limiting using fingerprint_id (or fallback session_id)
-        rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
-        if not rate_limit_result['allowed']:
-            time_until_next = rate_limit_result.get('time_until_next', 0)
-            max_requests = rate_limit_result.get('max_requests', 2)
-            window_seconds = rate_limit_result.get('window_seconds', 60)
+            # Check rate limiting using fingerprint_id (or fallback session_id)
+            rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
+            if not rate_limit_result['allowed']:
+                time_until_next = rate_limit_result.get('time_until_next', 0)
+                max_requests = rate_limit_result.get('max_requests', 2)
+                window_seconds = rate_limit_result.get('window_seconds', 60)
+                
+                # Store rate limit info (NO expiry timer - stays until dismissed or success)
+                st.session_state.rate_limit_hit = {
+                    'timestamp': datetime.now(),
+                    'time_until_next': time_until_next,
+                    'max_requests': max_requests,
+                    'window_seconds': window_seconds
+                }
+                
+                return {
+                    'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
+                    'success': False,
+                    'source': 'Rate Limiter',
+                    'time_until_next': time_until_next
+                }
             
-            # Store rate limit info (NO expiry timer - stays until dismissed or success)
-            st.session_state.rate_limit_hit = {
-                'timestamp': datetime.now(),
-                'time_until_next': time_until_next,
-                'max_requests': max_requests,
-                'window_seconds': window_seconds
-            }
-            
-            return {
-                'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
-                'success': False,
-                'source': 'Rate Limiter',
-                'time_until_next': time_until_next
-            }
-        
-        # Content moderation check
-        moderation_result = check_content_moderation(prompt, self.ai.openai_client)
-        if moderation_result and moderation_result.get("flagged"):
-            categories = moderation_result.get('categories', [])
-            logger.warning(f"Input flagged by moderation for: {', '.join(categories)}")
-            
-            # Store moderation error info in session state
-            st.session_state.moderation_flagged = {
-                'timestamp': datetime.now(),
-                'categories': categories,
-                'message': moderation_result.get("message", "Your message violates our content policy. Please rephrase your question.")
-            }
-            
-            return {
-                "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
-                "success": False,
-                "source": "Content Moderation",
-                "used_search": False,
-                "used_pinecone": False,
-                "has_citations": False,
-                "has_inline_citations": False,
-                "safety_override": False
-            }
+            # Content moderation check
+            moderation_result = check_content_moderation(prompt, self.ai.openai_client)
+            if moderation_result and moderation_result.get("flagged"):
+                categories = moderation_result.get('categories', [])
+                logger.warning(f"Input flagged by moderation for: {', '.join(categories)}")
+                
+                # Store moderation error info in session state
+                st.session_state.moderation_flagged = {
+                    'timestamp': datetime.now(),
+                    'categories': categories,
+                    'message': moderation_result.get("message", "Your message violates our content policy. Please rephrase your question.")
+                }
+                
+                return {
+                    "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
+                    "success": False,
+                    "source": "Content Moderation",
+                    "used_search": False,
+                    "used_pinecone": False,
+                    "has_citations": False,
+                    "has_inline_citations": False,
+                    "safety_override": False
+                }
 
-        # NEW: Check if it's a meta-conversation query (Solution 1)
-        meta_detection = self.detect_meta_conversation_query(prompt)
-        if meta_detection["is_meta"]:
-            logger.info(f"Meta-conversation query detected: {meta_detection['type']}")
+            # NEW: Check if it's a meta-conversation query (Solution 1)
+            meta_detection = self.detect_meta_conversation_query(prompt)
+            if meta_detection["is_meta"]:
+                logger.info(f"Meta-conversation query detected: {meta_detection['type']}")
 
-            # Record the question for usage tracking (even meta-questions count)
-            self.question_limits.record_question(session)
+                # Record the question for usage tracking (even meta-questions count)
+                self.question_limits.record_question(session)
 
-            # Add user message to session history
-            user_message = {'role': 'user', 'content': prompt}
-            session.messages.append(user_message)
+                # Add user message to session history
+                user_message = {'role': 'user', 'content': prompt}
+                session.messages.append(user_message)
 
-            # Handle meta-query (zero tokens used)
-            meta_response = self.handle_meta_conversation_query(
-                session, meta_detection["type"], meta_detection["scope"]
-            )
+                # Handle meta-query (zero tokens used)
+                meta_response = self.handle_meta_conversation_query(
+                    session, meta_detection["type"], meta_detection["scope"]
+                )
 
-            # Add assistant response to history
-            assistant_message = {
-                'role': 'assistant',
-                'content': meta_response.get('content', 'Analysis complete.'),
-                'source': meta_response.get('source', 'Conversation Analytics'),
-                'is_meta_response': True  # Flag for UI display
-            }
-            session.messages.append(assistant_message)
-            
-            # Update activity and save session
-            self._update_activity(session)
+                # Add assistant response to history
+                assistant_message = {
+                    'role': 'assistant',
+                    'content': meta_response.get('content', 'Analysis complete.'),
+                    'source': meta_response.get('source', 'Conversation Analytics'),
+                    'is_meta_response': True  # Flag for UI display
+                }
+                session.messages.append(assistant_message)
+                
+                # Update activity and save session
+                self._update_activity(session)
 
-            return meta_response
+                return meta_response
 
-        # CHANGE 2: Update the function call to pass conversation history
-        context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
-        if context_result and not context_result.get("relevant", True):
-            confidence = context_result.get("confidence", 0.0)
-            category = context_result.get("category", "unknown")
-            reason = context_result.get("reason", "Not relevant to food & beverage ingredients industry")
-            
-            logger.warning(f"Industry context check flagged input: category={category}, confidence={confidence:.2f}, reason={reason}")
-            
-            # Customize response based on category
-            if category in ["personal_cooking", "off_topic"]:
-                context_message = "I'm specialized in helping food & beverage industry professionals with ingredient sourcing, formulation, and technical questions. Could you please rephrase your question to focus on professional food ingredient needs?"
-            elif category == "unrelated_industry":
-                context_message = "I'm designed to assist with food & beverage ingredients and related industry topics. For questions outside the food industry, please try a general-purpose AI assistant."
-            else:
-                context_message = "Your question doesn't seem to be related to food & beverage ingredients. I specialize in helping with ingredient sourcing, formulation, suppliers, and food industry technical questions."
-            
-            # Store context error info in session state
-            st.session_state.context_flagged = {
-                'timestamp': datetime.now(),
-                'category': category,
-                'confidence': confidence,
-                'reason': reason,
-                'message': context_message
-            }
-            
-            return {
-                "content": context_message,
-                "success": False,
-                "source": "Industry Context Filter",
-                "used_search": False,
-                "used_pinecone": False,
-                "has_citations": False,
-                "has_inline_citations": False,
-                "safety_override": False,
-                "context_category": category,
-                "context_confidence": confidence
-            }
+            # CHANGE 2: Update the function call to pass conversation history
+            context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
+            if context_result and not context_result.get("relevant", True):
+                confidence = context_result.get("confidence", 0.0)
+                category = context_result.get("category", "unknown")
+                reason = context_result.get("reason", "Not relevant to food & beverage ingredients industry")
+                
+                logger.warning(f"Industry context check flagged input: category={category}, confidence={confidence:.2f}, reason={reason}")
+                
+                # Customize response based on category
+                if category in ["personal_cooking", "off_topic"]:
+                    context_message = "I'm specialized in helping food & beverage industry professionals with ingredient sourcing, formulation, and technical questions. Could you please rephrase your question to focus on professional food ingredient needs?"
+                elif category == "unrelated_industry":
+                    context_message = "I'm designed to assist with food & beverage ingredients and related industry topics. For questions outside the food industry, please try a general-purpose AI assistant."
+                else:
+                    context_message = "Your question doesn't seem to be related to food & beverage ingredients. I specialize in helping with ingredient sourcing, formulation, suppliers, and food industry technical questions."
+                
+                # Store context error info in session state
+                st.session_state.context_flagged = {
+                    'timestamp': datetime.now(),
+                    'category': category,
+                    'confidence': confidence,
+                    'reason': reason,
+                    'message': context_message
+                }
+                
+                return {
+                    "content": context_message,
+                    "success": False,
+                    "source": "Industry Context Filter",
+                    "used_search": False,
+                    "used_pinecone": False,
+                    "has_citations": False,
+                    "has_inline_citations": False,
+                    "safety_override": False,
+                    "context_category": category,
+                    "context_confidence": confidence
+                }
 
-        # NEW: Check for pricing/stock questions
-        is_pricing_stock_query = self.detect_pricing_stock_question(prompt)
-        if is_pricing_stock_query:
-            # Store pricing notification info (similar to rate_limit_hit)
-            st.session_state.pricing_stock_notice = {
-                'timestamp': datetime.now(),
-                'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost', 'expensive', 'cheap']) else 'stock',
-                'message': """**Important Notice About Pricing & Stock Information:**
+            # NEW: Check for pricing/stock questions
+            is_pricing_stock_query = self.detect_pricing_stock_question(prompt)
+            if is_pricing_stock_query:
+                # Store pricing notification info (similar to rate_limit_hit)
+                st.session_state.pricing_stock_notice = {
+                    'timestamp': datetime.now(),
+                    'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost', 'expensive', 'cheap']) else 'stock',
+                    'message': """**Important Notice About Pricing & Stock Information:**
 
 Pricing and stock availability are dynamic in nature and subject to market conditions, supplier availability, and other factors that can change at any point in time. The information provided is for general reference only and may not reflect current market conditions unless confirmed through a formal order process.
 
@@ -3872,109 +3871,109 @@ Pricing and stock availability are dynamic in nature and subject to market condi
 - Request formal quotes for confirmed pricing based on your specific requirements
 
 Please proceed with your question, keeping in mind that any pricing or stock information provided should be verified through official channels."""
-            }
+                }
 
-        # Continue with regular processing for non-meta queries
-        # Check question limits (THIS IS THE PRE-QUESTION LIMIT CHECK)
-        limit_check = self.question_limits.is_within_limits(session)
+            # Continue with regular processing for non-meta queries
+            # Check question limits (THIS IS THE PRE-QUESTION LIMIT CHECK)
+            limit_check = self.question_limits.is_within_limits(session)
 
-        # MODIFIED: Apply ban BEFORE any returns or reruns
-        if not limit_check['allowed']:
-            ban_message = limit_check.get("message", 'Access restricted.')
+            # MODIFIED: Apply ban BEFORE any returns or reruns
+            if not limit_check['allowed']:
+                ban_message = limit_check.get("message", 'Access restricted.')
 
-            # Apply the ban here IMMEDIATELY, before any returns
-            if limit_check.get('reason') == 'registered_user_tier1_limit':
-                # Apply the 5-minute ban
-                self.question_limits._apply_ban(session, BanStatus.ONE_HOUR, "Registered user Tier 1 limit reached (10 questions)")
-                # Important: Update activity and save immediately after applying ban
-                self._update_activity(session)
-                logger.info(f"Registered User Tier 1 (10 questions) ban applied for session {session.session_id[:8]} at question attempt.")
+                # Apply the ban here IMMEDIATELY, before any returns
+                if limit_check.get('reason') == 'registered_user_tier1_limit':
+                    # Apply the 5-minute ban
+                    self.question_limits._apply_ban(session, BanStatus.ONE_HOUR, "Registered user Tier 1 limit reached (10 questions)")
+                    # Important: Update activity and save immediately after applying ban
+                    self._update_activity(session)
+                    logger.info(f"Registered User Tier 1 (10 questions) ban applied for session {session.session_id[:8]} at question attempt.")
+                    
+                    # Return the ban response
+                    return {
+                        'banned': True,
+                        'content': ban_message,
+                        'time_remaining': timedelta(minutes=5)  # 5 minute ban for testing
+                    }
+                    
+                elif limit_check.get('reason') == 'registered_user_tier2_limit':
+                    self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user daily limit reached (20 questions)")
+                    self._update_activity(session)
+                    logger.info(f"Registered User Tier 2 (20 questions) ban applied for session {session.session_id[:8]} at question attempt.")
+                    
+                    return {
+                        'banned': True,
+                        'content': ban_message,
+                        'time_remaining': timedelta(hours=24)
+                    }
+                    
+                elif limit_check.get('reason') == 'email_verified_guest_limit':
+                    self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached (10 questions)")
+                    self._update_activity(session)
+                    logger.info(f"Email Verified Guest (10 questions) ban applied for session {session.session_id[:8]} at question attempt.")
+                    
+                    return {
+                        'banned': True,
+                        'content': ban_message,
+                        'time_remaining': timedelta(hours=24)
+                    }
+                    
+                elif limit_check.get('reason') == 'guest_limit':
+                    # Guest limit (4 questions) still requires email verification, not a hard ban here.
+                    return {'requires_email': True, 'content': 'Email verification required.'}
                 
-                # Return the ban response
+                # For any other ban reason (like evasion or active ban from `is_within_limits`)
                 return {
                     'banned': True,
                     'content': ban_message,
-                    'time_remaining': timedelta(minutes=5)  # 5 minute ban for testing
+                    'time_remaining': limit_check.get('time_remaining')
                 }
-                
-            elif limit_check.get('reason') == 'registered_user_tier2_limit':
-                self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Registered user daily limit reached (20 questions)")
-                self._update_activity(session)
-                logger.info(f"Registered User Tier 2 (20 questions) ban applied for session {session.session_id[:8]} at question attempt.")
-                
-                return {
-                    'banned': True,
-                    'content': ban_message,
-                    'time_remaining': timedelta(hours=24)
-                }
-                
-            elif limit_check.get('reason') == 'email_verified_guest_limit':
-                self.question_limits._apply_ban(session, BanStatus.TWENTY_FOUR_HOUR, "Email-verified daily limit reached (10 questions)")
-                self._update_activity(session)
-                logger.info(f"Email Verified Guest (10 questions) ban applied for session {session.session_id[:8]} at question attempt.")
-                
-                return {
-                    'banned': True,
-                    'content': ban_message,
-                    'time_remaining': timedelta(hours=24)
-                }
-                
-            elif limit_check.get('reason') == 'guest_limit':
-                # Guest limit (4 questions) still requires email verification, not a hard ban here.
-                return {'requires_email': True, 'content': 'Email verification required.'}
+
+            self._clear_error_notifications()
             
-            # For any other ban reason (like evasion or active ban from `is_within_limits`)
-            return {
-                'banned': True,
-                'content': ban_message,
-                'time_remaining': limit_check.get('time_remaining')
+            # Sanitize input
+            sanitized_prompt = sanitize_input(prompt, 4000)
+            if not sanitized_prompt:
+                return {
+                    'content': 'Please enter a valid question.',
+                    'success': False,
+                    'source': 'Input Validation'
+                }
+            
+            # Record question (only if allowed to ask) - MOVED HERE AFTER ALL LIMIT CHECKS PASS
+            self.question_limits.record_question(session)
+            logger.info(f"Question recorded for session {session.session_id[:8]} AFTER all pre-checks.")
+            
+            # Get AI response
+            ai_response = self.ai.get_response(sanitized_prompt, session.messages)
+            
+            # Add messages to session
+            user_message = {'role': 'user', 'content': sanitized_prompt}
+            assistant_message = {
+                'role': 'assistant',
+                'content': ai_response.get('content', 'No response generated.'),
+                'source': ai_response.get('source'),
+                'used_pinecone': ai_response.get('used_pinecone', False),
+                'used_search': ai_response.get('used_search', False),
+                'has_citations': ai_response.get('has_citations', False),
+                'has_inline_citations': ai_response.get('has_inline_citations', False),
+                'safety_override': ai_response.get('safety_override', False)
             }
-
-        self._clear_error_notifications()
-        
-        # Sanitize input
-        sanitized_prompt = sanitize_input(prompt, 4000)
-        if not sanitized_prompt:
+            
+            session.messages.extend([user_message, assistant_message])
+            
+            # Update activity and save session
+            self._update_activity(session)
+            
+            return ai_response  # Return the AI response directly now
+            
+        except Exception as e:
+            logger.error(f"AI response generation failed: {e}", exc_info=True)
             return {
-                'content': 'Please enter a valid question.',
+                'content': 'I encountered an error processing your request. Please try again.',
                 'success': False,
-                'source': 'Input Validation'
+                'source': 'Error Handler'
             }
-        
-        # Record question (only if allowed to ask) - MOVED HERE AFTER ALL LIMIT CHECKS PASS
-        self.question_limits.record_question(session)
-        logger.info(f"Question recorded for session {session.session_id[:8]} AFTER all pre-checks.")
-        
-        # Get AI response
-        ai_response = self.ai.get_response(sanitized_prompt, session.messages)
-        
-        # Add messages to session
-        user_message = {'role': 'user', 'content': sanitized_prompt}
-        assistant_message = {
-            'role': 'assistant',
-            'content': ai_response.get('content', 'No response generated.'),
-            'source': ai_response.get('source'),
-            'used_pinecone': ai_response.get('used_pinecone', False),
-            'used_search': ai_response.get('used_search', False),
-            'has_citations': ai_response.get('has_citations', False),
-            'has_inline_citations': ai_response.get('has_inline_citations', False),
-            'safety_override': ai_response.get('safety_override', False)
-        }
-        
-        session.messages.extend([user_message, assistant_message])
-        
-        # Update activity and save session
-        self._update_activity(session)
-        
-        return ai_response  # Return the AI response directly now
-        
-    except Exception as e:
-        logger.error(f"AI response generation failed: {e}", exc_info=True)
-        return {
-            'content': 'I encountered an error processing your request. Please try again.',
-            'success': False,
-            'source': 'Error Handler'
-        }
         
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
@@ -4053,6 +4052,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.session_state['page'] = None
+
     def check_if_attempting_to_exceed_limits(self, session: UserSession) -> bool:
         """
         Check if user is attempting to ask a question beyond their limits.
