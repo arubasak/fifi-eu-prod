@@ -4060,16 +4060,16 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
         Only blocks for ACTIVE bans, not for "about to exceed" scenarios.
         """
         limit_check = self.question_limits.is_within_limits(session)
-    
+        
         if not limit_check.get('allowed', True):
             reason = limit_check.get('reason')
             message = limit_check.get('message', 'Access restricted due to usage policy.')
-        
+            
             # Only block and show messages for ACTIVE bans (already in database)
             if reason == 'banned':
                 ban_type = limit_check.get('ban_type', 'unknown')
                 time_remaining = limit_check.get('time_remaining')
-            
+                
                 st.error("🚫 **Access Restricted**")
                 if time_remaining:
                     hours = max(0, int(time_remaining.total_seconds() // 3600))
@@ -4077,7 +4077,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                     st.error(f"Time remaining: {hours}h {minutes}m")
                 st.info(message)
                 return True
-            
+                
             # Handle guest limit (email verification required)
             elif reason == 'guest_limit':
                 st.error("🛑 **Guest Limit Reached**")
@@ -4089,11 +4089,11 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                 st.error("🛑 **Daily Limit Reached**")
                 st.info("You've used your 10 questions for today. Your questions reset in 24 hours, or consider registering for 20 questions/day!")
                 return True
-            
+                
             # DON'T BLOCK for registered user tier limits - let them attempt the question
             # This allows users at 10/20 to type and submit question #11
             # The ban will be applied in get_ai_response after submission
-        
+            
         return False
 
 def render_simple_activity_tracker(session_id: str):
