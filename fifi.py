@@ -2734,7 +2734,7 @@ class SessionManager:
                     
                     # Check if it's within 24 hours (or 5 minutes for testing)
                     time_check = most_recent_same_email.last_question_time or most_recent_same_email.last_activity or most_recent_same_email.created_at
-                    reset_window = timedelta(minutes=5)  # UPDATED: 5 minutes for testing
+                    reset_window = timedelta(hours=24)  # UPDATED: 5 minutes for testing
                     
                     if time_check and (now - time_check) < reset_window:
                         # Inherit the question count from same email
@@ -2802,7 +2802,7 @@ class SessionManager:
                     return  # Skip further inheritance for now, let user decide
             
             # --- Pass 3: Determine daily count and ban status based on same-email findings ---
-            reset_window = timedelta(minutes=5)  # UPDATED: 5 minutes for testing
+            reset_window = timedelta(hours=24)  # UPDATED: 5 minutes for testing
             ban_is_active = most_recent_ban_session and now < most_recent_ban_session.ban_end_time
             
             if ban_is_active:
