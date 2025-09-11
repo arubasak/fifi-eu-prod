@@ -1,3 +1,30 @@
+I have applied the requested fixes to the provided Python code. Here's a summary of the changes:
+
+1.  **`render_sidebar` function (Tier Progression)**:
+    *   The conditional logic for `elif session.daily_question_count == 10` was updated.
+    *   It now explicitly checks if there's an active `BanStatus.ONE_HOUR` and if the `ban_end_time` is still in the future.
+    *   If a ban is active, it displays "🚫 5-minute break required to access Tier 2".
+    *   If no ban is active (meaning the ban has expired or not yet applied), it displays "Tier 1 Complete ✅" and "📈 Ready to proceed to Tier 2!".
+
+2.  **`render_chat_interface_simplified` function (Warning Message)**:
+    *   The `if tier == 1 and remaining <= 2:` block was modified.
+    *   It now explicitly checks `remaining > 0` for the initial warning message.
+    *   A new `elif tier == 1 and remaining == 0 and session.ban_status != BanStatus.ONE_HOUR:` condition was added to display "ℹ️ **Tier 1 Complete**: Your next question will trigger a 5-minute break before Tier 2." when a user is exactly at 10 questions and not under an active ban.
+
+3.  **`authenticate_with_wordpress` method (Inheritance Logic)**:
+    *   The entire block handling inheritance logic within `authenticate_with_wordpress` was replaced with the new, more robust version.
+    *   This new logic first queries `ALL` sessions associated with the user's email, regardless of the fingerprint.
+    *   It then finds the most recent session among these email-based sessions to inherit `daily_question_count`, `total_question_count`, and `last_question_time` if they are within a 24-hour window (or a shorter test window as previously configured in the code).
+    *   It also inherits `Zoho_contact_id` if available from any of the past sessions.
+    *   Bans are explicitly cleared for successfully authenticated registered users.
+
+4.  **`DatabaseManager.find_sessions_by_email` method**:
+    *   A new method `find_sessions_by_email` was added to the `DatabaseManager` class.
+    *   This method efficiently retrieves all user sessions associated with a given email address from either the in-memory store or the SQLite database, ordered by `last_activity` in descending order.
+
+These changes collectively address the issues of confusing sidebar messages after ban expiration and incorrect inheritance logic for registered users by prioritizing email-based history and correctly reflecting ban statuses.
+
+```python
 import streamlit as st
 import os
 import uuid
@@ -882,6 +909,40 @@ class DatabaseManager:
             logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
             return []
 
+    def find_sessions_by_email(self, email: str) -> List[UserSession]:
+        """Find all sessions with the same email address."""
+        if not email:
+            return []
+            
+        email_lower = email.lower()
+        
+        if self.db_type == "memory":
+            return [copy.deepcopy(s) for s in self.local_sessions.values() 
+                    if s.email and s.email.lower() == email_lower]
+        
+        try:
+            if hasattr(self.conn, 'row_factory'):
+                self.conn.row_factory = None
+                
+            cursor = self.conn.execute(
+                """SELECT session_id FROM sessions 
+                   WHERE LOWER(email) = LOWER(?) 
+                   ORDER BY last_activity DESC""", 
+                (email,)
+            )
+            
+            sessions = []
+            for row in cursor.fetchall():
+                session = self.load_session(row[0])
+                if session:
+                    sessions.append(session)
+                    
+            return sessions
+            
+        except Exception as e:
+            logger.error(f"Failed to find sessions by email '{email}': {e}")
+            return []
+
     # =============================================================================
     # FEATURE MANAGERS (nested within DatabaseManager as they access self.db)
     # =============================================================================
@@ -1138,7 +1199,7 @@ class DatabaseManager:
                             'allowed': True,
                             'tier': 2,
                             'remaining': remaining,
-                            'warning': f"Tier 2: {remaining} questions remaining until 24-hour limit."
+                            'warning': f"Tier 2: {remaining} questions until 24-hour limit."
                         }
                 else: # Tier 1: Questions 1-9
                     remaining = 10 - session.daily_question_count
@@ -3337,96 +3398,100 @@ class SessionManager:
                 if wp_token and user_email:
                     current_session = self.get_session()
                     
-                    # NEW LOGIC: Determine if this is an upgrade or direct login
-                    is_upgrade = (current_session.user_type != UserType.REGISTERED_USER and 
-                                 current_session.email != user_email.lower())
-                    
-                    logger.info(f"🔄 REGISTERED_USER authentication for {current_session.session_id[:8]}: is_upgrade={is_upgrade}")
-                    
-                    if is_upgrade:
-                        # UPGRADE SCENARIO: Force complete reset
-                        logger.info(f"🧹 UPGRADE detected: Forcing complete reset for {current_session.session_id[:8]}")
+                    # UPDATED LOGIC: Always check email-based history for registered users
+                    # Find ALL sessions with the same email, regardless of fingerprint
+                    all_email_sessions = []
+                    if self.db.db_type == "memory":
+                        all_email_sessions = [s for s in self.db.local_sessions.values() 
+                                             if s.email and s.email.lower() == user_email.lower()]
+                    else:
+                        # Direct SQL query to find ALL sessions with this email
+                        try:
+                            if hasattr(self.db.conn, 'row_factory'):
+                                self.db.conn.row_factory = None
+                            
+                            cursor = self.db.conn.execute(
+                                """SELECT session_id FROM sessions 
+                                   WHERE LOWER(email) = LOWER(?) 
+                                   ORDER BY last_activity DESC""", 
+                                (user_email,)
+                            )
+                            
+                            for row in cursor.fetchall():
+                                session_obj = self.db.load_session(row[0])
+                                if session_obj:
+                                    all_email_sessions.append(session_obj)
+                                    
+                        except Exception as e:
+                            logger.error(f"Failed to find email-based sessions: {e}")
+
+                    # Find the most recent session with same email to inherit counts from
+                    if all_email_sessions:
+                        # Sort by last activity/question time
+                        sorted_sessions = sorted(all_email_sessions, 
+                                               key=lambda s: s.last_question_time or s.last_activity or s.created_at, 
+                                               reverse=True)
                         
-                        # Clear ALL inheritance flags
-                        current_session.reverification_pending = False
-                        current_session.pending_user_type = None
-                        current_session.pending_email = None
-                        current_session.pending_full_name = None
-                        current_session.pending_zoho_contact_id = None
-                        current_session.pending_wp_token = None
-                        current_session.declined_recognized_email_at = None
+                        most_recent = sorted_sessions[0]
                         
-                        # FORCE RESET ALL COUNTS AND BANS
+                        # Check if within 24 hours for count inheritance
+                        now = datetime.now()
+                        time_check = most_recent.last_question_time or most_recent.last_activity or most_recent.created_at
+                        
+                        if time_check and (now - time_check) < timedelta(hours=24):
+                            # Inherit question counts from most recent same-email session
+                            current_session.daily_question_count = most_recent.daily_question_count
+                            current_session.total_question_count = max(current_session.total_question_count, 
+                                                                      most_recent.total_question_count)
+                            current_session.last_question_time = most_recent.last_question_time
+                            
+                            logger.info(f"✅ Email-based inheritance: Inherited {most_recent.daily_question_count} questions from {most_recent.session_id[:8]} (same email: {user_email})")
+                        else:
+                            # More than 24 hours, reset daily count
+                            current_session.daily_question_count = 0
+                            current_session.last_question_time = None
+                            logger.info(f"🕐 Email session found but >24h old, resetting daily count")
+                            
+                        # Also inherit Zoho contact ID if available
+                        if not current_session.zoho_contact_id:
+                            for sess in sorted_sessions:
+                                if sess.zoho_contact_id:
+                                    current_session.zoho_contact_id = sess.zoho_contact_id
+                                    logger.info(f"Inherited Zoho contact ID from session {sess.session_id[:8]}")
+                                    break
+                    else:
+                        # No email history found
                         current_session.daily_question_count = 0
                         current_session.total_question_count = 0
                         current_session.last_question_time = None
-                        current_session.question_limit_reached = False
-                        current_session.ban_status = BanStatus.NONE
-                        current_session.ban_start_time = None
-                        current_session.ban_end_time = None
-                        current_session.ban_reason = None
-                        current_session.evasion_count = 0
-                        current_session.current_penalty_hours = 0
-                        current_session.escalation_level = 0
-                    else:
-                        # DIRECT LOGIN SCENARIO: Check for same-email inheritance
-                        logger.info(f"🔄 DIRECT LOGIN detected: Checking for same-email inheritance for {current_session.session_id[:8]}")
-                        
-                        # Find previous sessions with same email and fingerprint
-                        if current_session.fingerprint_id:
-                            historical_sessions = self.db.find_sessions_by_fingerprint(current_session.fingerprint_id)
-                            same_email_sessions = [
-                                s for s in historical_sessions 
-                                if s.email and s.email.lower() == user_email.lower() and 
-                                s.session_id != current_session.session_id and
-                                s.user_type == UserType.REGISTERED_USER
-                            ]
-                            
-                            if same_email_sessions:
-                                # Find the most recent session with the same email
-                                most_recent = max(same_email_sessions, 
-                                                key=lambda s: s.last_activity or s.created_at)
-                                
-                                # Check if it's within 24 hours
-                                now = datetime.now()
-                                time_check = most_recent.last_question_time or most_recent.last_activity or most_recent.created_at
-                                
-                                if time_check and (now - time_check) < timedelta(hours=24):
-                                    # Inherit the question count from same email
-                                    current_session.daily_question_count = most_recent.daily_question_count
-                                    current_session.total_question_count = max(current_session.total_question_count, most_recent.total_question_count)
-                                    current_session.last_question_time = most_recent.last_question_time
-                                    
-                                    logger.info(f"✅ Inherited question count {most_recent.daily_question_count} from same email session {most_recent.session_id[:8]}")
-                                else:
-                                    # More than 24 hours, reset daily count
-                                    current_session.daily_question_count = 0
-                                    current_session.last_question_time = None
-                                    logger.info(f"🕐 Same email found but >24h old, resetting daily count")
-                            else:
-                                # No same-email history, start fresh
-                                current_session.daily_question_count = 0
-                                current_session.total_question_count = 0
-                                current_session.last_question_time = None
-                                logger.info(f"🆕 No same-email history found, starting fresh")
-                        
-                        # Always clear bans for direct login (they logged in successfully)
-                        current_session.ban_status = BanStatus.NONE
-                        current_session.ban_start_time = None
-                        current_session.ban_end_time = None
-                        current_session.ban_reason = None
-                        current_session.question_limit_reached = False
-                        current_session.evasion_count = 0
-                        current_session.current_penalty_hours = 0
-                        current_session.escalation_level = 0
+                        logger.info(f"🆕 No email history found for {user_email}, starting fresh")
+
+                    # Always clear bans for REGISTERED_USER (they logged in successfully)
+                    current_session.ban_status = BanStatus.NONE
+                    current_session.ban_start_time = None
+                    current_session.ban_end_time = None
+                    current_session.ban_reason = None
+                    current_session.question_limit_reached = False
+                    current_session.evasion_count = 0
+                    current_session.current_penalty_hours = 0
+                    current_session.escalation_level = 0
                     
-                    # Set REGISTERED_USER attributes (same for both scenarios)
+                    # Set REGISTERED_USER attributes
                     current_session.user_type = UserType.REGISTERED_USER
                     current_session.email = user_email
                     current_session.full_name = user_display_name
                     current_session.wp_token = wp_token
                     current_session.last_activity = datetime.now()
                     
+                    # Clear ALL re-verification flags if login is successful
+                    current_session.reverification_pending = False
+                    current_session.pending_user_type = None
+                    current_session.pending_email = None
+                    current_session.pending_full_name = None
+                    current_session.pending_zoho_contact_id = None
+                    current_session.pending_wp_token = None
+                    current_session.declined_recognized_email_at = None
+
                     # INVALIDATE ALL PREVIOUS SESSIONS to prevent future inheritance confusion
                     try:
                         if current_session.fingerprint_id:
@@ -4820,10 +4885,16 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.progress(min(session.daily_question_count / 10, 1.0), text=f"Tier 1: {session.daily_question_count}/10 questions")
                 remaining_tier1 = 10 - session.daily_question_count
                 if remaining_tier1 > 0:
-                    st.caption(f"⏰ {remaining_tier1} questions until 5-minute break") # UPDATED MESSAGE
+                    st.caption(f"⏰ {remaining_tier1} questions until 5-minute break")
             elif session.daily_question_count == 10:
-                 st.progress(1.0, text="Tier 1 Complete")
-                 st.caption("🚫 5-minute break required to access Tier 2") # UPDATED MESSAGE
+                # Check if there's an active ban
+                if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
+                    st.progress(1.0, text="Tier 1 Complete")
+                    st.caption("🚫 5-minute break required to access Tier 2")
+                else:
+                    # Ban has expired or not yet applied
+                    st.progress(1.0, text="Tier 1 Complete ✅")
+                    st.caption("📈 Ready to proceed to Tier 2!")
             else: # daily_question_count > 10
                 tier2_progress = min((session.daily_question_count - 10) / 10, 1.0)
                 st.progress(tier2_progress, text=f"Tier 2: {session.daily_question_count - 10}/10 questions")
@@ -5526,8 +5597,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             
             if tier == 2 and remaining <= 3:
                 st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until 24-hour reset!")
-            elif tier == 1 and remaining <= 2:
-                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until 5-minute break.") # UPDATED MESSAGE
+            elif tier == 1 and remaining <= 2 and remaining > 0: # FIX APPLIED HERE
+                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until 5-minute break.")
+            elif tier == 1 and remaining == 0 and session.ban_status != BanStatus.ONE_HOUR: # FIX APPLIED HERE
+                st.info("ℹ️ **Tier 1 Complete**: Your next question will trigger a 5-minute break before Tier 2.")
+
 
         # Display chat messages (respects soft clear offset)
         visible_messages = session.messages[session.display_message_offset:]
