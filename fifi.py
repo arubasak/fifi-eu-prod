@@ -4995,64 +4995,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                 else:
                     st.error("Please enter an email address to receive the code.")
 
-    elif current_stage == 'initial_check':
-        # Use a container to ensure clean rendering
-        prompt_container = st.container()
-        
-        with prompt_container:
-            email_to_reverify = session.pending_email
-            masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
-            st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
-            st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
-            
-            # FIXED: Use session ID for stable keys instead of timestamp
-            button_key_suffix = session.session_id[:8]  # First 8 chars of session ID
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("✅ Verify this email", 
-                            use_container_width=True, 
-                            key=f"reverify_yes_{button_key_suffix}"):
-                    
-                    # Add logging to debug
-                    logger.info(f"Verify button clicked in session {session.session_id[:8]}")
-                    
-                    session.recognition_response = "yes_reverify"
-                    session.declined_recognized_email_at = None
-                    st.session_state.verification_email = email_to_reverify
-                    st.session_state.verification_stage = "send_code_recognized"
-                    
-                    # Ensure session ID is preserved
-                    st.session_state.current_session_id = session.session_id
-                    
-                    session_manager.db.save_session(session)
-                    st.rerun()
-            with col2:
-                if st.button("❌ No, I don't recognize the email", 
-                            use_container_width=True, 
-                            key=f"reverify_no_{button_key_suffix}"):
-                    
-                    logger.info(f"Decline button clicked in session {session.session_id[:8]}")
-                    
-                    session.recognition_response = "no_declined_reco"
-                    session.declined_recognized_email_at = datetime.now()
-                    session.user_type = UserType.GUEST 
-                    session.reverification_pending = False
-                    session.pending_user_type = None
-                    session.pending_email = None
-                    session.pending_full_name = None
-                    session.pending_zoho_contact_id = None
-                    session.pending_wp_token = None
-                    
-                    # Ensure session ID is preserved
-                    st.session_state.current_session_id = session.session_id
-                    
-                    session_manager.db.save_session(session)
-                    st.session_state.guest_continue_active = True
-                    st.session_state.chat_blocked_by_dialog = False
-                    st.session_state.verification_stage = None
-                    st.success("You can now continue as a Guest.")
-                    st.rerun()
+
     elif current_stage == 'initial_check':
             # Use a container to ensure clean rendering
             prompt_container = st.container()
