@@ -1186,7 +1186,7 @@ class DatabaseManager:
             return penalty_minutes # Return minutes instead of hours
         
         def _apply_ban(self, session: UserSession, ban_type: BanStatus, reason: str, start_time: Optional[datetime] = None):
-            """Applies a ban to the session for a specified duration."""
+            """Applies a ban to the session for a specified duration with immediate database persistence."""
             ban_hours = {
                 BanStatus.ONE_HOUR.value: 0.0833,  # CHANGED: 5 minutes (1/12 hour) for testing
                 BanStatus.TWENTY_FOUR_HOUR.value: 24,
@@ -1199,7 +1199,15 @@ class DatabaseManager:
             session.ban_reason = reason
             session.question_limit_reached = True
             
-            logger.info(f"Ban applied to session {session.session_id[:8]}: Type={ban_type.value}, Duration={ban_hours}h, Start={session.ban_start_time}, Reason='{reason}'.")
+            # CRITICAL: Save to database immediately
+            try:
+                # Access the session manager's db attribute for saving
+                st.session_state.session_manager.db.save_session(session)
+                logger.info(f"✅ Ban applied and saved to DB: {session.session_id[:8]} -> {ban_type.value} for {ban_hours}h")
+            except Exception as e:
+                logger.error(f"❌ Failed to save ban to database: {e}")
+
+            logger.info(f"Ban applied: Type={ban_type.value}, Duration={ban_hours}h, Start={session.ban_start_time}, Reason='{reason}'.")
         
         def _get_ban_message(self, session: UserSession, ban_reason_from_limit_check: Optional[str] = None) -> str:
             """
@@ -1860,12 +1868,6 @@ RULES:
 5. For pricing questions: add "market pricing" not specific prices
 6. For supplier questions: include "suppliers" or "sourcing"
 7. For availability: include "availability" or "stock"
-
-EXAMPLES:
-- After vanilla extract discussion, "What about pricing?" → "vanilla extract market pricing food ingredients"
-- Following citric acid talk, "Any suppliers?" → "citric acid suppliers food ingredients sourcing"
-- Standalone "new suppliers 2025" → "emerging food ingredient suppliers 2025"
-- "Tell me more" after stevia discussion → "stevia properties applications food ingredients"
 
 OUTPUT: Only the optimized search query, nothing else."""
 
@@ -2642,6 +2644,7 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Error checking manual CRM eligibility for {session.session_id[:8]}: {e}")
             return False
+
     def _attempt_fingerprint_inheritance(self, session: UserSession):
         """
         Attempts to inherit session data from existing sessions with the same fingerprint.
@@ -2651,26 +2654,83 @@ class SessionManager:
 
         try:
             historical_fp_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+            # Filter out the current session itself
             historical_fp_sessions = [s for s in historical_fp_sessions if s.session_id != session.session_id]
 
             if not historical_fp_sessions:
                 session.visitor_type = "new_visitor"
-                logger.info(f"Inheritance complete for new visitor {session.session_id[:8]}.")
+                logger.info(f"Inheritance complete for new visitor {session.session_id[:8]}. No historical sessions found.")
+                # This ensures any pending re-verification from a prior fingerprint is cleared if no history for this one
+                session.reverification_pending = False
+                session.pending_user_type = None
+                session.pending_email = None
+                session.pending_full_name = None
+                session.pending_zoho_contact_id = None
+                session.pending_wp_token = None
+                session.declined_recognized_email_at = None
                 return # Nothing to inherit
 
             session.visitor_type = "returning_visitor"
+            
+            # CRITICAL FIX: REGISTERED_USER always gets clean slate - NO INHERITANCE OF BANS/COUNTS
+            if session.user_type == UserType.REGISTERED_USER:
+                logger.info(f"🚫 REGISTERED_USER inheritance blocked for {session.session_id[:8]} - maintaining clean slate for bans/counts.")
+                # Still inherit the most privileged identity if it's a higher type
+                source_for_identity = session
+                for s in historical_fp_sessions:
+                    if self._get_privilege_level(s.user_type) > self._get_privilege_level(source_for_identity.user_type):
+                        source_for_identity = s
+                    elif self._get_privilege_level(s.user_type) == self._get_privilege_level(source_for_identity.user_type):
+                        if s.last_activity and (not source_for_identity.last_activity or s.last_activity > source_for_identity.last_activity):
+                            source_for_identity = s
+                
+                # Apply identity inheritance
+                if self._get_privilege_level(source_for_identity.user_type) > self._get_privilege_level(session.user_type):
+                    session.reverification_pending = True
+                    session.pending_user_type = source_for_identity.user_type
+                    session.pending_email = source_for_identity.email
+                    session.pending_full_name = source_for_identity.full_name
+                    session.pending_zoho_contact_id = source_for_identity.zoho_contact_id
+                    session.pending_wp_token = source_for_identity.wp_token
+                    logger.info(f"Inheriting higher privilege identity for REGISTERED_USER (via re-verification): {source_for_identity.user_type.value}")
+                elif source_for_identity.email: # Even if same type, update email/name if a good source exists
+                    session.email = source_for_identity.email
+                    session.full_name = source_for_identity.full_name
+                    session.zoho_contact_id = source_for_identity.zoho_contact_id
+                    session.wp_token = source_for_identity.wp_token
+
+                # For REGISTERED_USER, counts and bans should already be zeroed out by authentication or explicitly kept at 0 here
+                session.daily_question_count = 0
+                session.total_question_count = 0
+                session.last_question_time = None
+                session.ban_status = BanStatus.NONE
+                session.ban_start_time = None
+                session.ban_end_time = None
+                session.ban_reason = None
+                session.question_limit_reached = False
+                session.evasion_count = 0
+                session.current_penalty_hours = 0
+                session.escalation_level = 0
+                
+                return # Crucially exit here for REGISTERED_USER
+
+            # --- For GUEST and EMAIL_VERIFIED_GUEST, proceed with detailed inheritance ---
             all_sessions_for_merge = [session] + historical_fp_sessions
             
             # --- Initialize values for merging ---
             merged_total_question_count = session.total_question_count
             merged_last_question_time = session.last_question_time
             merged_daily_question_count = session.daily_question_count
-            source_for_identity = session
+            source_for_identity = session # Start with current session as identity source
             most_recent_ban_session = None
             now = datetime.now()
 
             # --- Pass 1: Find the highest privilege identity and the most recent ban ---
+            unique_emails_in_history = set() # For multiple email detection
             for s in all_sessions_for_merge:
+                if s.email:
+                    unique_emails_in_history.add(s.email.lower())
+
                 # Find the most authoritative session for identity
                 if self._get_privilege_level(s.user_type) > self._get_privilege_level(source_for_identity.user_type):
                     source_for_identity = s
@@ -2688,6 +2748,19 @@ class SessionManager:
                 if s.last_question_time and (not merged_last_question_time or s.last_question_time > merged_last_question_time):
                     merged_last_question_time = s.last_question_time
 
+            # --- Apply multiple email detection for recognition purposes ---
+            if len(unique_emails_in_history) > 1:
+                logger.info(f"🚨 Multiple emails ({len(unique_emails_in_history)}) detected for fingerprint - disabling explicit recognition prompt.")
+                # This should prevent the recognition prompt in UI, but still allow normal inheritance below
+                session.recognition_response = "multiple_emails_detected"
+                # If recognition is skipped due to multiple emails, ensure reverification is also not pending
+                session.reverification_pending = False
+                session.pending_user_type = None
+                session.pending_email = None
+                session.pending_full_name = None
+                session.pending_zoho_contact_id = None
+                session.pending_wp_token = None
+            
             # --- Pass 2: Determine daily count and ban status based on the findings ---
             ban_is_active = most_recent_ban_session and now < most_recent_ban_session.ban_end_time
             
@@ -2701,6 +2774,7 @@ class SessionManager:
                 session.question_limit_reached = True
                 
                 # Find the max daily count from any session within the 24h window to ensure the count is accurate
+                # Also consider the current session's count if it's higher (e.g., if user already asked questions in this session before inheritance applied)
                 for s in all_sessions_for_merge:
                      if s.daily_question_count and s.last_question_time and (now - s.last_question_time < timedelta(hours=24)):
                          merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
@@ -2716,6 +2790,7 @@ class SessionManager:
                 # Now, check if the daily count should be reset based on the last question time.
                 if merged_last_question_time and (now - merged_last_question_time) < timedelta(hours=24):
                     # The last question was recent. Find the max count from that window.
+                    # Also consider the current session's count
                     for s in all_sessions_for_merge:
                         if s.daily_question_count and s.last_question_time and (now - s.last_question_time < timedelta(hours=24)):
                             merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
@@ -2731,23 +2806,35 @@ class SessionManager:
             session.daily_question_count = merged_daily_question_count
             session.last_question_time = merged_last_question_time
 
-            # Apply identity
-            if self._get_privilege_level(source_for_identity.user_type) > self._get_privilege_level(session.user_type):
-                session.reverification_pending = True
-                session.pending_user_type = source_for_identity.user_type
-                session.pending_email = source_for_identity.email
-                session.pending_full_name = source_for_identity.full_name
+            # Apply identity (if no multiple emails detected, or if current session has lower privilege)
+            if (len(unique_emails_in_history) <= 1 or 
+                self._get_privilege_level(source_for_identity.user_type) > self._get_privilege_level(session.user_type)):
+                
+                if self._get_privilege_level(source_for_identity.user_type) > self._get_privilege_level(session.user_type):
+                    # Higher privilege found, set reverification pending
+                    session.reverification_pending = True
+                    session.pending_user_type = source_for_identity.user_type
+                    session.pending_email = source_for_identity.email
+                    session.pending_full_name = source_for_identity.full_name
+                    session.pending_zoho_contact_id = source_for_identity.zoho_contact_id
+                    session.pending_wp_token = source_for_identity.wp_token
+                    logger.info(f"🔄 Re-verification set for upgrade: {source_for_identity.user_type.value} for {session.session_id[:8]}")
+                else:
+                    # Same or lower privilege, just inherit the details if available
+                    session.user_type = source_for_identity.user_type
+                    session.email = source_for_identity.email
+                    session.full_name = source_for_identity.full_name
+                    session.zoho_contact_id = source_for_identity.zoho_contact_id
+                    session.wp_token = source_for_identity.wp_token
             else:
-                session.user_type = source_for_identity.user_type
-                session.email = source_for_identity.email
-                session.full_name = source_for_identity.full_name
+                logger.info(f"Inheritance: Identity not fully transferred due to multiple emails and no privilege upgrade for {session.session_id[:8]}.")
 
-            # Update fingerprint if necessary
-            if session.fingerprint_id.startswith("temp_") and not source_for_identity.fingerprint_id.startswith("temp_"):
+            # Update fingerprint if necessary (if current is temporary and a real one is found in history)
+            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and not source_for_identity.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 session.fingerprint_id = source_for_identity.fingerprint_id
                 session.fingerprint_method = source_for_identity.fingerprint_method
             
-            logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, ban_status={session.ban_status.value}")
+            logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}")
 
         except Exception as e:
             logger.error(f"Error during fingerprint inheritance for session {session.session_id[:8]}: {e}", exc_info=True)
@@ -2903,27 +2990,40 @@ class SessionManager:
         return True
 
     def check_fingerprint_history(self, fingerprint_id: str) -> Dict[str, Any]:
-        """Check if a fingerprint has historical sessions and return relevant information."""
+        """Check if a fingerprint has historical sessions and return relevant information, now handling multiple emails."""
         try:
             existing_sessions = self.db.find_sessions_by_fingerprint(fingerprint_id)
             
             if not existing_sessions:
                 return {'has_history': False}
             
-            # Find the most privileged active/inactive session for history suggestion
+            # Get unique emails
+            unique_emails = set()
+            for s in existing_sessions:
+                if s.email:
+                    unique_emails.add(s.email.lower())
+            
+            # Multiple email detection
+            if len(unique_emails) > 1:
+                logger.info(f"🚨 Multiple emails detected for fingerprint {fingerprint_id[:8]}: {unique_emails}")
+                return {
+                    'has_history': True,
+                    'multiple_emails': True,
+                    'email_count': len(unique_emails),
+                    'skip_recognition': True  # Don't show recognition dialog
+                }
+            
+            # Single email - show recognition
             most_privileged_session = None
             for s in existing_sessions:
-                if most_privileged_session is None or \
-                   self._get_privilege_level(s.user_type) > self._get_privilege_level(most_privileged_session.user_type) or \
-                   (self._get_privilege_level(s.user_type) == self._get_privilege_level(most_privileged_session.user_type) and 
-                    s.last_activity and (not most_privileged_session.last_activity or s.last_activity > most_privileged_session.last_activity)):
-                    
-                    if s.email: # Only consider if an email is present
-                        most_privileged_session = s
+                if s.email and (most_privileged_session is None or 
+                               self._get_privilege_level(s.user_type) > self._get_privilege_level(most_privileged_session.user_type)):
+                    most_privileged_session = s
 
             if most_privileged_session:
                 return {
                     'has_history': True,
+                    'multiple_emails': False,
                     'email': most_privileged_session.email,
                     'full_name': most_privileged_session.full_name,
                     'user_type': most_privileged_session.user_type.value,
@@ -3026,8 +3126,9 @@ class SessionManager:
             }
             logger.debug(f"handle_guest_email_verification returning FAILURE (Unexpected Exception): {final_result}")
             return final_result
+
     def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
-        """Verifies the email verification code and upgrades user status."""
+        """Verifies the email verification code and upgrades user status with clean slate logic for new emails."""
         try:
             email_to_verify = session.pending_email if session.reverification_pending else session.email
 
@@ -3042,8 +3143,23 @@ class SessionManager:
             verification_success = self.email_verification.verify_code(email_to_verify, sanitized_code)
             
             if verification_success:
+                # Check if this is a NEW EMAIL (different from any previous sessions for this fingerprint)
+                is_new_email = True
+                previous_emails = set()
+                try:
+                    if session.fingerprint_id:
+                        historical_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+                        for old_session in historical_sessions:
+                            if old_session.email:
+                                previous_emails.add(old_session.email.lower())
+                        is_new_email = email_to_verify.lower() not in previous_emails
+                        logger.info(f"Email verification for {session.session_id[:8]}: is_new_email={is_new_email}, previous_emails={previous_emails}")
+                except Exception as e:
+                    logger.error(f"Error checking email history for new email determination: {e}")
+                    is_new_email = True # Default to clean slate on error
+
                 if session.reverification_pending:
-                    # Reclaim pending user type and identity
+                    # Reclaim existing user type and identity (keep inherited counts from _attempt_fingerprint_inheritance)
                     session.user_type = session.pending_user_type if session.pending_user_type else UserType.EMAIL_VERIFIED_GUEST # Fallback
                     session.email = session.pending_email
                     session.full_name = session.pending_full_name
@@ -3057,34 +3173,27 @@ class SessionManager:
                     session.pending_wp_token = None
                     logger.info(f"✅ User {session.session_id[:8]} reclaimed higher privilege: {session.user_type.value} via re-verification for {session.email}")
                 else:
-                    # Upgrade user to email verified guest (normal first-time verification)
+                    # New email verification or existing email as guest without pending higher privilege
                     session.user_type = UserType.EMAIL_VERIFIED_GUEST
-                    logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST (first time): {session.email}")
-
-                # --- UPDATED BAN LOGIC FOR REGISTERED_USER ---
-                # When a user upgrades to REGISTERED_USER, all previous bans are lifted,
-                # and question counts are reset for a fresh start at the highest tier.
-                if session.user_type.value == UserType.REGISTERED_USER.value:
-                    logger.info(f"User {session.session_id[:8]} upgraded to REGISTERED_USER - resetting counts and lifting all bans")
                     
-                    # RESET DAILY QUESTION COUNT TO 0
-                    session.daily_question_count = 0
-                    session.last_question_time = None
+                    # CLEAN SLATE for truly new emails (shared device protection)
+                    if is_new_email:
+                        logger.info(f"🧹 CLEAN SLATE: New email {email_to_verify} gets fresh start, resetting all counts and bans for {session.session_id[:8]}")
+                        session.daily_question_count = 0
+                        session.total_question_count = 0
+                        session.last_question_time = None
+                        session.question_limit_reached = False
+                        session.ban_status = BanStatus.NONE
+                        session.ban_start_time = None
+                        session.ban_end_time = None
+                        session.ban_reason = None
+                        session.evasion_count = 0
+                        session.current_penalty_hours = 0
+                        session.escalation_level = 0
+                    else:
+                        logger.info(f"♻️ EXISTING EMAIL: For {email_to_verify}, keeping counts as determined by inheritance.")
                     
-                    # LIFT ALL BANS (including evasion blocks)
-                    session.ban_status = BanStatus.NONE
-                    session.ban_start_time = None
-                    session.ban_end_time = None
-                    session.ban_reason = None
-                    session.question_limit_reached = False
-                    
-                    # Reset evasion tracking for fresh start (kept for dormant infrastructure)
-                    session.evasion_count = 0
-                    session.current_penalty_hours = 0
-                    session.escalation_level = 0
-                    
-                    logger.info(f"✅ User {session.session_id[:8]} now has full REGISTERED_USER privileges: 0/20 questions")
-
+                    logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email}")
 
                 session.question_limit_reached = False
                 session.declined_recognized_email_at = None 
@@ -3115,7 +3224,7 @@ class SessionManager:
             }
 
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        """Authenticates user with WordPress and creates/updates session."""
+        """Authenticates user with WordPress and creates/updates session with a FORCED COMPLETE RESET for REGISTERED_USER."""
         if not self.config.WORDPRESS_URL:
             st.error("WordPress authentication is not configured. Please contact support.")
             logger.warning("WordPress authentication attempted but URL not configured.")
@@ -3150,55 +3259,62 @@ class SessionManager:
                 if wp_token and user_email:
                     current_session = self.get_session()
                     
-                    if current_session.reverification_pending:
-                        logger.info(f"REGISTERED_USER login for {current_session.session_id[:8]} supersedes pending re-verification.")
-                        current_session.reverification_pending = False
-                        current_session.pending_user_type = None
-                        current_session.pending_email = None
-                        current_session.pending_full_name = None
-                        current_session.pending_zoho_contact_id = None
-                        current_session.pending_wp_token = None
+                    # CRITICAL FIX: Force complete reset for REGISTERED_USER upgrade
+                    logger.info(f"🔄 REGISTERED_USER authentication: Forcing complete reset for {current_session.session_id[:8]}")
+                    
+                    # 1. Clear ALL inheritance flags first
+                    current_session.reverification_pending = False
+                    current_session.pending_user_type = None
+                    current_session.pending_email = None
+                    current_session.pending_full_name = None
+                    current_session.pending_zoho_contact_id = None
+                    current_session.pending_wp_token = None
                     current_session.declined_recognized_email_at = None
-
-                    # Upgrade user attributes
+                    
+                    # 2. FORCE RESET ALL COUNTS AND BANS (regardless of previous state)
+                    current_session.daily_question_count = 0  # ALWAYS START AT 0/20
+                    current_session.total_question_count = 0  # Reset for fresh tracking
+                    current_session.last_question_time = None
+                    current_session.question_limit_reached = False
+                    
+                    # 3. CLEAR ALL BANS (write to DB)
+                    current_session.ban_status = BanStatus.NONE
+                    current_session.ban_start_time = None
+                    current_session.ban_end_time = None
+                    current_session.ban_reason = None
+                    
+                    # 4. Reset evasion tracking
+                    current_session.evasion_count = 0
+                    current_session.current_penalty_hours = 0
+                    current_session.escalation_level = 0
+                    
+                    # 5. Set REGISTERED_USER attributes
                     current_session.user_type = UserType.REGISTERED_USER
                     current_session.email = user_email
                     current_session.full_name = user_display_name
                     current_session.wp_token = wp_token
                     current_session.last_activity = datetime.now()
                     
-                    # --- UPDATED BAN LOGIC FOR REGISTERED_USER ---
-                    # When a user logs in as REGISTERED_USER, all previous bans are lifted,
-                    # and question counts are reset for a fresh start at the highest tier.
-                    if current_session.ban_status.value != BanStatus.NONE.value or current_session.daily_question_count > 0:
-                        logger.info(f"User {current_session.session_id[:8]} authenticated as REGISTERED_USER - resetting counts and lifting all bans")
-                        
-                        # RESET DAILY QUESTION COUNT TO 0
-                        current_session.daily_question_count = 0
-                        current_session.last_question_time = None
-                        
-                        # LIFT ALL BANS (including evasion blocks)
-                        current_session.ban_status = BanStatus.NONE
-                        current_session.ban_start_time = None
-                        current_session.ban_end_time = None
-                        current_session.ban_reason = None
-                        current_session.question_limit_reached = False
-                        
-                        # Reset evasion tracking for fresh start (kept for dormant infrastructure)
-                        current_session.evasion_count = 0
-                        current_session.current_penalty_hours = 0
-                        current_session.escalation_level = 0
-                        
-                        logger.info(f"✅ User {current_session.session_id[:8]} now has full REGISTERED_USER privileges: 0/20 questions")
+                    # 6. INVALIDATE ALL PREVIOUS SESSIONS (prevent future inheritance of old states)
+                    try:
+                        if current_session.fingerprint_id:
+                            historical_sessions = self.db.find_sessions_by_fingerprint(current_session.fingerprint_id)
+                            for old_session in historical_sessions:
+                                if old_session.session_id != current_session.session_id:
+                                    old_session.active = False  # Mark inactive to prevent inheritance
+                                    self.db.save_session(old_session)
+                                    logger.info(f"Invalidated old session {old_session.session_id[:8]} to prevent inheritance")
+                    except Exception as e:
+                        logger.error(f"Failed to invalidate old sessions: {e}")
                     
-                    # Save authenticated session
+                    # 7. Save the reset session
                     try:
                         self.db.save_session(current_session)
-                        logger.info(f"User authenticated and upgraded to REGISTERED_USER: {user_email}, daily_q={current_session.daily_question_count}")
+                        logger.info(f"✅ REGISTERED_USER reset complete: {user_email}, 0/20 questions, all bans cleared")
                         
                     except Exception as e:
                         logger.error(f"Failed to save authenticated session: {e}")
-                        st.error("Authentication succeeded but session could not be saved. Please try again or contact support.")
+                        st.error("Authentication succeeded but session could not be saved. Please try again.")
                         return None
                     
                     return current_session
@@ -4799,10 +4915,8 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             st.error(result['message'])
             # The 'unusual activity' message is from evasion, which is now disabled.
             # Keeping this check in case of future re-enabling or other types of unusual activity.
-            if "unusual activity" in result['message'].lower(): 
-                st.stop()
-            # If sending failed for other reasons (e.g., Supabase error), stay in initial or email entry stage
-            st.session_state.verification_stage = st.session_state.get('verification_stage', 'initial_check') # Fallback
+            # No specific action for "unusual activity" currently as email evasion detection is disabled.
+            st.session_state.verification_stage = st.session_state.get('verification_stage', 'initial_check') # Fallback to avoid getting stuck
         
         st.rerun()
         return True  # Block chat during this transition
@@ -5104,8 +5218,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                         st.error(result['message'])
                         # No "unusual activity" message due to evasion being disabled
                         # Still keep this check in case of future changes.
-                        if "unusual activity" in result['message'].lower(): 
-                            st.stop()
+                        # No specific action for "unusual activity" currently as email evasion detection is disabled.
                 else:
                     st.error("Please enter an email address to receive the code.")
         
@@ -5504,10 +5617,10 @@ def ensure_initialization_fixed():
                 })()
             
             rate_limiter = RateLimiter(max_requests=2, window_seconds=60)
-            fingerprinting_manager = st.session_state.db_manager.FingerprintingManager()
+            fingerprinting_manager = DatabaseManager.FingerprintingManager()
             
             try:
-                email_verification_manager = st.session_state.db_manager.EmailVerificationManager(config)
+                email_verification_manager = DatabaseManager.EmailVerificationManager(config)
                 if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
                     email_verification_manager = type('DummyEmail', (), {
                         'send_verification_code': lambda self, email: False,
@@ -5520,7 +5633,7 @@ def ensure_initialization_fixed():
                     'verify_code': lambda self, email, code: False
                 })()
             
-            question_limit_manager = st.session_state.db_manager.QuestionLimitManager()
+            question_limit_manager = DatabaseManager.QuestionLimitManager()
             
             st.session_state.session_manager = SessionManager(
                 config, st.session_state.db_manager, zoho_manager, ai_system, 
