@@ -4996,7 +4996,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.error("Please enter an email address to receive the code.")
 
 
-    elif current_stage == 'initial_check':
+        elif current_stage == 'initial_check':
             # Use a container to ensure clean rendering
             prompt_container = st.container()
             
