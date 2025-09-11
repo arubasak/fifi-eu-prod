@@ -1,3 +1,13 @@
+Okay, I will apply all the corrections we discussed to the codebase. The key changes will be:
+
+1.  **Disabling Email Evasion Logic:** `detect_guest_email_evasion` will always return `False`, and its call will be removed from `handle_guest_email_verification`.
+2.  **Unconditional Ban/Count Reset for `REGISTERED_USER`:** Upon upgrading or logging in as `REGISTERED_USER`, all bans will be lifted, and `daily_question_count` will be reset to `0`, providing a clean start.
+3.  **Specific Ban Messages:** `_get_ban_message` will be updated to provide distinct messages for 5-minute (Tier 1) and 24-hour (Tier 2) bans for registered users.
+4.  **No Redundant Ban Application in `check_if_attempting_to_exceed_limits`:** This function will only check limits and display UI messages, without modifying the session's ban status. The actual ban application occurs in `get_ai_response`.
+
+Here is the improved and corrected codebase:
+
+```python
 import streamlit as st
 import os
 import uuid
@@ -1055,7 +1065,7 @@ class DatabaseManager:
             self.question_limits = {
                 UserType.GUEST.value: 4,
                 UserType.EMAIL_VERIFIED_GUEST.value: 10,
-                UserType.REGISTERED_USER.value: 20  # CHANGED: Reduced from 40 to 20
+                UserType.REGISTERED_USER.value: 20
             }
             # UPDATED: Reduced penalties to minutes for testing (from hours) - kept for future use. Fractional hours for 5min, 10min, etc.
             self.evasion_penalties = [0.0833, 0.1667, 0.3333, 0.6667, 1]  # 5min, 10min, 20min, 40min, 60min as fractional hours
@@ -1081,7 +1091,7 @@ class DatabaseManager:
                         'reason': 'banned',
                         'ban_type': session.ban_status.value,
                         'time_remaining': time_remaining,
-                        'message': self._get_ban_message(session)
+                        'message': self._get_ban_message(session, session.ban_status.value) # Pass ban_status as reason for message
                     }
                 else:
                     logger.info(f"Ban for session {session.session_id[:8]} expired. Resetting status and counters.")
@@ -1107,20 +1117,22 @@ class DatabaseManager:
             # ENHANCED: Tier-based logic for registered users
             if session.user_type.value == UserType.REGISTERED_USER.value:
                 if session.daily_question_count >= user_limit: # For registered, user_limit is 20
+                    reason_str = 'registered_user_tier2_limit'
                     return {
                         'allowed': False,
-                        'reason': 'registered_user_tier2_limit', # New specific reason
-                        'message': "Daily limit of 20 questions reached. Please retry in 24 hours."
+                        'reason': reason_str, # New specific reason
+                        'message': self._get_ban_message(session, reason_str)
                     }
                 # If at 10 or more, but less than 20 (user_limit)
                 elif session.daily_question_count >= 10:
                     # Tier 2: Questions 11-20
                     # If daily_question_count is exactly 10, this is the trigger for the Tier 1 ban.
                     if session.daily_question_count == 10:
+                        reason_str = 'registered_user_tier1_limit'
                         return {
                             'allowed': False,
-                            'reason': 'registered_user_tier1_limit', # New specific reason
-                            'message': "You've reached the Tier 1 limit (10 questions). Please wait 5 minutes to access Tier 2."
+                            'reason': reason_str, # New specific reason
+                            'message': self._get_ban_message(session, reason_str)
                         }
                     else: # Questions 11-19
                         remaining = user_limit - session.daily_question_count
@@ -1141,18 +1153,20 @@ class DatabaseManager:
             # Original logic for other user types
             if session.user_type.value == UserType.GUEST.value:
                 if session.daily_question_count >= user_limit: # user_limit is 4 for GUEST
+                    reason_str = 'guest_limit'
                     return {
                         'allowed': False,
-                        'reason': 'guest_limit',
+                        'reason': reason_str,
                         'message': 'Please provide your email address to continue.'
                     }
             
             elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
                 if session.daily_question_count >= user_limit: # user_limit is 10 for EMAIL_VERIFIED_GUEST
+                    reason_str = 'email_verified_guest_limit'
                     return {
                         'allowed': False,
-                        'reason': 'email_verified_guest_limit', # New specific reason
-                        'message': self._get_email_verified_limit_message()
+                        'reason': reason_str, # New specific reason
+                        'message': self._get_ban_message(session, reason_str)
                     }
             
             return {'allowed': True}
@@ -1197,16 +1211,24 @@ class DatabaseManager:
             
             logger.info(f"Ban applied to session {session.session_id[:8]}: Type={ban_type.value}, Duration={ban_hours}h, Start={session.ban_start_time}, Reason='{reason}'.")
         
-        def _get_ban_message(self, session: UserSession) -> str:
-            """Provides a user-friendly message for current bans."""
+        def _get_ban_message(self, session: UserSession, ban_reason_from_limit_check: Optional[str] = None) -> str:
+            """
+            Provides a user-friendly message for current bans,
+            now differentiating between registered user tier limits.
+            """
             if session.ban_status.value == BanStatus.EVASION_BLOCK.value:
                 return "Access restricted due to policy violation. Please try again later."
-            elif session.ban_status.value == BanStatus.ONE_HOUR.value:
-                return "You've reached the Tier 1 limit (10 questions). Please wait 5 minutes to access Tier 2."  # UPDATED MESSAGE
-            elif session.user_type.value == UserType.REGISTERED_USER.value:
-                return "Daily limit reached. Please retry in 24 hours."
-            else: # Email Verified Guest or other 24-hour bans
+            elif ban_reason_from_limit_check == 'registered_user_tier1_limit' or session.ban_status.value == BanStatus.ONE_HOUR.value:
+                return "You've reached the Tier 1 limit (10 questions). Please wait 5 minutes to access Tier 2."
+            elif ban_reason_from_limit_check == 'registered_user_tier2_limit' or (session.user_type.value == UserType.REGISTERED_USER.value and session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value):
+                return "Daily limit of 20 questions reached. Please retry in 24 hours."
+            elif ban_reason_from_limit_check == 'email_verified_guest_limit' or (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value and session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value):
                 return self._get_email_verified_limit_message()
+            # Generic catch-all for other 24-hour bans (if any apply to non-registered)
+            elif session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value:
+                return "Daily limit reached. Please retry in 24 hours."
+            else: # Fallback, should not be hit if all cases are covered
+                return "Access restricted due to usage policy."
         
         def _get_email_verified_limit_message(self) -> str:
             """Specific message for email-verified guests hitting their daily limit."""
@@ -2946,18 +2968,7 @@ class SessionManager:
                 logger.debug(f"handle_guest_email_verification returning FAILURE: Invalid email format for {email}")
                 return {'success': False, 'message': 'Please enter a valid email address.'}
             
-            # UPDATED: NO EVASION CHECK - Email switching is now always allowed with OTP verification
-            # The following block is removed as per the latest requirements:
-            # if self.question_limits.detect_guest_email_evasion(session, self.db):
-            #     penalty_hours = self.question_limits.apply_evasion_penalty(session)
-            #     self.db.save_session(session)
-            #     logger.warning(f"🚨 EMAIL EVASION DETECTED: Applied {penalty_hours}h penalty to session {session.session_id[:8]}")
-            #     final_result = {
-            #         'success': False, 
-            #         'message': f'Unusual activity detected. Access temporarily restricted for {penalty_hours} hours.'
-            #     }
-            #     logger.debug(f"handle_guest_email_verification returning FAILURE (Evasion): {final_result}")
-            #     return final_result
+            # UPDATED: Removed evasion check as per requirement: email switching is allowed.
             
             # Track email usage for this session
             if sanitized_email not in session.email_addresses_used:
@@ -3643,6 +3654,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                 ban_message = limit_check.get("message", 'Access restricted.')
 
                 # Apply the ban here, right when the user tries to ask the 'next' question that crosses the limit
+                # This ensures the session state is updated before the message is displayed and the UI reruns.
                 if limit_check.get('reason') == 'registered_user_tier1_limit':
                     # Apply the 5-minute ban
                     self.question_limits._apply_ban(session, BanStatus.ONE_HOUR, "Registered user Tier 1 limit reached (10 questions)")
@@ -3661,6 +3673,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                     # Guest limit (4 questions) still requires email verification, not a hard ban here.
                     # The prompt for email verification is handled by display_email_prompt_if_needed.
                     # No explicit _apply_ban here as guest_limit leads to the email prompt, not a ban status.
+                    # This branch should explicitly return a requires_email flag to trigger the UI prompt.
                     return {'requires_email': True, 'content': 'Email verification required.'}
                 
                 # For any other ban reason (like evasion or active ban from `is_within_limits`), just return the ban message.
@@ -3800,36 +3813,48 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                 del st.session_state[key]
             st.session_state['page'] = None
     def check_if_attempting_to_exceed_limits(self, session: UserSession) -> bool:
-        """Check if user is attempting to ask a question beyond their limits."""
+        """
+        Check if user is attempting to ask a question beyond their limits.
+        This function *only displays UI messages* and returns True/False to block chat input.
+        The actual ban application and session state modification happen in get_ai_response.
+        """
         limit_check = self.question_limits.is_within_limits(session)
         
         if not limit_check.get('allowed', True):
             reason = limit_check.get('reason')
+            message = limit_check.get('message', 'Access restricted due to usage policy.')
             
+            # Display messages based on specific reasons without applying a ban here
             if reason == 'guest_limit':
-                # The display_email_prompt_if_needed will handle the prompt.
-                # Just return True to block chat input and ensure the prompt appears.
+                st.error("🛑 **Guest Limit Reached**")
+                st.info("You've used your 4 guest questions. Please verify your email to unlock 10 more questions per day!")
                 return True
 
-            elif reason == 'email_verified_guest_limit':  # Corrected reason name
-                # This should be handled by is_within_limits which applies the ban,
-                # and display_email_prompt_if_needed should show the 24h limit message.
-                # So we just return True to block the chat input.
+            elif reason == 'email_verified_guest_limit':
+                st.error("🛑 **Daily Limit Reached**")
+                st.info("You've used your 10 questions for today. Your questions reset in 24 hours, or consider registering for 20 questions/day!")
                 return True
                 
             elif reason == 'registered_user_tier1_limit':
-                # This also triggers a ban in get_ai_response already,
-                # so we just return True to block chat input and show the ban message.
+                st.error("🛑 **Tier 1 Limit Reached**")
+                st.info("You've reached the Tier 1 limit (10 questions). Please wait 5 minutes to access Tier 2.")
                 return True
 
             elif reason == 'registered_user_tier2_limit':
-                # This also triggers a ban in get_ai_response already,
-                # so we just return True to block chat input and show the ban message.
+                st.error("🛑 **Daily Limit Reached**")
+                st.info("You've used your 20 questions for today. Please wait 24 hours for the limit to reset.")
                 return True
                 
-            else:  # Other ban types (evasion_block)
-                # Any other ban type will be shown by is_within_limits and this function's
-                # return will simply block the input.
+            elif reason == 'banned': # Generic ban due to evasion or other explicit application
+                ban_type = limit_check.get('ban_type', 'unknown')
+                time_remaining = limit_check.get('time_remaining')
+                
+                st.error("🚫 **Access Restricted**")
+                if time_remaining:
+                    hours = max(0, int(time_remaining.total_seconds() // 3600))
+                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                    st.error(f"Time remaining: {hours}h {minutes}m")
+                st.info(message)
                 return True
         
         return False
@@ -4799,993 +4824,989 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.session_state.chat_blocked_by_dialog = True # Hard ban, block everything
         return True # Disable chat input
 
-	# Determine current user status
-user_is_guest = (session.user_type.value == UserType.GUEST.value)
-user_is_email_verified = (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value)
-guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
-email_verified_limit_value = session_manager.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]
-daily_q_value = session.daily_question_count
-is_guest_limit_hit = (user_is_guest and daily_q_value >= guest_limit_value)
-is_email_verified_limit_hit = (user_is_email_verified and daily_q_value >= email_verified_limit_value)
-
-# NEW LOGIC: Only consider it "just hit limit" if the 'just_answered' flag is true
-user_just_hit_guest_limit = is_guest_limit_hit and st.session_state.get('just_answered', False)
-user_just_hit_email_verified_limit = is_email_verified_limit_hit and st.session_state.get('just_answered', False)
-
-# NEW: Check if forced verification is required
-must_verify_immediately = st.session_state.get('must_verify_email_immediately', False)
-skip_allowed = st.session_state.get('skip_email_allowed', True)
-
-should_show_prompt = False
-should_block_chat = True  # Default to blocking when prompt is shown
-
-# PRIORITY 1: Handle forced verification for returning guest (no skip option)
-if user_is_guest and must_verify_immediately and daily_q_value == 0:
-    should_show_prompt = True
-    should_block_chat = True
-    if st.session_state.verification_stage is None:
-        st.session_state.verification_stage = 'forced_verification'
-
-# PRIORITY 2: Handle re-verification for recognized devices
-elif session.reverification_pending:
-    should_show_prompt = True
-    should_block_chat = True
-    if st.session_state.verification_stage is None:
-        st.session_state.verification_stage = 'initial_check'
-        st.session_state.guest_continue_active = False
-
-# PRIORITY 3: Handle guest who JUST hit their limit (GENTLE approach with the reading button)
-elif user_just_hit_guest_limit:
-    st.session_state.just_answered = False # Consume the flag
-    should_show_prompt = True
-    should_block_chat = False  # DON'T block immediately
+    # Determine current user status
+    user_is_guest = (session.user_type.value == UserType.GUEST.value)
+    user_is_email_verified = (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value)
+    guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
+    email_verified_limit_value = session_manager.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]
+    daily_q_value = session.daily_question_count
+    is_guest_limit_hit = (user_is_guest and daily_q_value >= guest_limit_value)
+    is_email_verified_limit_hit = (user_is_email_verified and daily_q_value >= email_verified_limit_value)
     
-    st.success("🎯 **You've explored FiFi AI with your 4 guest questions!**")
-    st.info("Take your time to read this answer. When you're ready, verify your email to unlock 10 questions per day + chat history saving!")
+    # NEW LOGIC: Only consider it "just hit limit" if the 'just_answered' flag is true
+    user_just_hit_guest_limit = is_guest_limit_hit and st.session_state.get('just_answered', False)
+    user_just_hit_email_verified_limit = is_email_verified_limit_hit and st.session_state.get('just_answered', False)
     
-    with st.expander("📧 Ready to Unlock More Questions?", expanded=False):
-        st.markdown("### 🚀 What You'll Get After Email Verification:")
-        st.markdown("• **10 questions per day** • **Chat history saving** • **Cross-device sync**")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("📧 Yes, Let's Verify My Email!", use_container_width=True, key="gentle_verify_btn"):
-                st.session_state.verification_stage = 'email_entry'
-                st.session_state.chat_blocked_by_dialog = True
-                st.session_state.final_answer_acknowledged = True
-                st.rerun()
-        with col2:
-            if skip_allowed: # Guest can still skip *after* the initial gentle prompt
-                if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="continue_reading_btn"):
-                    st.session_state.final_answer_acknowledged = True
-                    st.success("Perfect! Take your time. The verification option will remain available above.")
-                    st.rerun()
-            else:
-                st.info("Email verification is required to continue.")
-    
-    st.session_state.chat_blocked_by_dialog = False
-    return False
-
-# PRIORITY 4: Handle email verified guest who JUST hit their limit (GENTLE approach)
-elif user_just_hit_email_verified_limit:
-    st.session_state.just_answered = False # Consume the flag
-    should_show_prompt = True
-    should_block_chat = False
-    
-    st.success("🎯 **You've completed your 10 daily questions!**")
-    st.info("Take your time to read this answer. Your questions will reset in 24 hours, or consider registering for 20 questions/day!")
-    
-    with st.expander("🚀 Want More Questions Daily?", expanded=False):
-        st.markdown("### 📈 Upgrade Benefits:")
-        st.markdown("• **20 questions per day** • **Tier system with breaks** • **Priority support**")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
-                st.link_button("Register Here", "https://www.12taste.com/in/my-account/", use_container_width=True) # Direct link
-                st.session_state.email_verified_final_answer_acknowledged = True
-                st.rerun()
-        with col2:
-            if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="email_verified_continue_reading"):
-                st.session_state.email_verified_final_answer_acknowledged = True
-                st.success("Perfect! Take your time reading.")
-                st.rerun()
-    
-    st.session_state.chat_blocked_by_dialog = False
-    return False
-
-# PRIORITY 5: Handle guest who is at their limit but DID NOT just ask a question (e.g., new session)
-elif is_guest_limit_hit:
-    should_show_prompt = True
-    should_block_chat = True
-    if st.session_state.verification_stage is None:
-        st.session_state.verification_stage = 'email_entry'
-        st.session_state.guest_continue_active = False
-
-# PRIORITY 6: Handle email verified guest who is at their limit but DID NOT just ask a question
-elif is_email_verified_limit_hit and not st.session_state.email_verified_final_answer_acknowledged:
-    should_show_prompt = True
-    should_block_chat = True
-    st.error("🛑 **Daily Limit Reached**")
-    st.info("You've used your 10 questions for today. Your questions reset in 24 hours, or consider registering for 20 questions/day!")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.link_button("Register for 20 questions/day", "https://www.12taste.com/in/my-account/", use_container_width=True)
-    with col2:
-        if st.button("Return to Welcome Page", use_container_width=True):
-            session_manager.end_session(session)
-            js_redirect = f"window.top.location.href = 'https://fifi-eu.streamlit.app/';"
-            st.components.v1.html(f"<script>{js_redirect}</script>", height=0, width=0)
-            st.rerun()
-    
-    st.session_state.chat_blocked_by_dialog = True
-    return True
-
-# PRIORITY 7: Handle declined recognized email scenario
-elif session.declined_recognized_email_at and not st.session_state.guest_continue_active and not is_guest_limit_hit:
-    should_show_prompt = True
-    should_block_chat = False
-    if st.session_state.verification_stage is None:
-        st.session_state.verification_stage = 'declined_recognized_email_prompt_only'
-
-# If no prompt should be shown based on conditions, ensure state is clean
-if not should_show_prompt:
-    st.session_state.chat_blocked_by_dialog = False
-    st.session_state.verification_stage = None
-    if 'just_answered' in st.session_state: # Clean up the flag if not used
-         del st.session_state.just_answered
-    return False
-
-# Set chat blocking state based on the type of prompt
-st.session_state.chat_blocked_by_dialog = should_block_chat
-
-# Only show error header for blocking prompts
-if should_block_chat:
-    st.error("📧 **Action Required**")
-
-current_stage = st.session_state.verification_stage
-
-# NEW: Handle forced verification stage (no skip option)
-if current_stage == 'forced_verification':
-    st.error("📧 **Email Verification Required**")
-    st.info("This device has already used the guest question allowance. Please verify your email to continue using FiFi AI.")
-    
-    with st.form("forced_email_verification_form", clear_on_submit=False):
-        st.markdown("**📧 Enter your email address to receive a verification code:**")
-        current_email_input = st.text_input(
-            "Email Address", 
-            placeholder="your@email.com",
-            key="forced_email_input",
-            help="Email verification is required to continue."
-        )
-        submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
-        
-        # NO SKIP BUTTON - verification is mandatory
-        
-        if submit_email:
-            if current_email_input:
-                # Reset the must_verify flag after a submission attempt
-                st.session_state.must_verify_email_immediately = False
-                st.session_state.skip_email_allowed = True # Reset to default allowed after forced verification attempt
-                
-                result = session_manager.handle_guest_email_verification(session, current_email_input)
-                if result['success']:
-                    st.success(result['message'])
-                    st.session_state.verification_email = current_email_input
-                    st.session_state.verification_stage = "code_entry"
-                    st.rerun()
-                else:
-                    st.error(result['message'])
-            else:
-                st.error("Please enter an email address to receive the code.")
-
-elif current_stage == 'initial_check':
-    # Use a container to ensure clean rendering
-    prompt_container = st.container()
-    
-    with prompt_container:
-        email_to_reverify = session.pending_email
-        masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
-        st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
-        st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
-        
-        # FIXED: Use session ID for stable keys instead of timestamp
-        button_key_suffix = session.session_id[:8]  # First 8 chars of session ID
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("✅ Verify this email", 
-                        use_container_width=True, 
-                        key=f"reverify_yes_{button_key_suffix}"):
-                
-                # Add logging to debug
-                logger.info(f"Verify button clicked in session {session.session_id[:8]}")
-                
-                session.recognition_response = "yes_reverify"
-                session.declined_recognized_email_at = None
-                st.session_state.verification_email = email_to_reverify
-                st.session_state.verification_stage = "send_code_recognized"
-                
-                # Ensure session ID is preserved
-                st.session_state.current_session_id = session.session_id
-                
-                session_manager.db.save_session(session)
-                st.rerun()
-        with col2:
-            if st.button("❌ No, I don't recognize the email", 
-                        use_container_width=True, 
-                        key=f"reverify_no_{button_key_suffix}"):
-                
-                logger.info(f"Decline button clicked in session {session.session_id[:8]}")
-                
-                session.recognition_response = "no_declined_reco"
-                session.declined_recognized_email_at = datetime.now()
-                session.user_type = UserType.GUEST 
-                session.reverification_pending = False
-                session.pending_user_type = None
-                session.pending_email = None
-                session.pending_full_name = None
-                session.pending_zoho_contact_id = None
-                session.pending_wp_token = None
-                
-                # Ensure session ID is preserved
-                st.session_state.current_session_id = session.session_id
-                
-                session_manager.db.save_session(session)
-                st.session_state.guest_continue_active = True
-                st.session_state.chat_blocked_by_dialog = False
-                st.session_state.verification_stage = None
-                st.success("You can now continue as a Guest.")
-                st.rerun()
-
-elif current_stage == 'send_code_recognized':
-    # Don't show any buttons - just the sending status
-    email_to_verify = st.session_state.get('verification_email')
-    if email_to_verify:
-        st.info(f"📧 **Sending verification code to {session_manager._mask_email(email_to_verify)}...**")
-        
-        # Immediately perform the send (the actual sending happens after this renders)
-        st.session_state.send_code_now = True
-        st.rerun()
-
-elif current_stage == 'email_entry':
+    # NEW: Check if forced verification is required
+    must_verify_immediately = st.session_state.get('must_verify_email_immediately', False)
     skip_allowed = st.session_state.get('skip_email_allowed', True)
-    
-    st.info("🚀 You've used your guest questions. Please verify your email to unlock 10 questions per day!")
-    with st.form("email_verification_form", clear_on_submit=False):
-        st.markdown("**📧 Enter your email address to receive a verification code:**")
-        current_email_input = st.text_input(
-            "Email Address", 
-            placeholder="your@email.com", 
-            value=st.session_state.get('verification_email', session.email or ""), 
-            key="manual_email_input",
-            help="We'll send you a 6-digit verification code that's valid for 1 minute."
-        )
+
+    should_show_prompt = False
+    should_block_chat = True  # Default to blocking when prompt is shown
+
+    # PRIORITY 1: Handle forced verification for returning guest (no skip option)
+    if user_is_guest and must_verify_immediately and daily_q_value == 0:
+        should_show_prompt = True
+        should_block_chat = True
+        if st.session_state.verification_stage is None:
+            st.session_state.verification_stage = 'forced_verification'
+
+    # PRIORITY 2: Handle re-verification for recognized devices
+    elif session.reverification_pending:
+        should_show_prompt = True
+        should_block_chat = True
+        if st.session_state.verification_stage is None:
+             st.session_state.verification_stage = 'initial_check'
+             st.session_state.guest_continue_active = False
+
+    # PRIORITY 3: Handle guest who JUST hit their limit (GENTLE approach with the reading button)
+    elif user_just_hit_guest_limit:
+        st.session_state.just_answered = False # Consume the flag
+        should_show_prompt = True
+        should_block_chat = False  # DON'T block immediately
         
-        if skip_allowed:
+        st.success("🎯 **You've explored FiFi AI with your 4 guest questions!**")
+        st.info("Take your time to read this answer. When you're ready, verify your email to unlock 10 questions per day + chat history saving!")
+        
+        with st.expander("📧 Ready to Unlock More Questions?", expanded=False):
+            st.markdown("### 🚀 What You'll Get After Email Verification:")
+            st.markdown("• **10 questions per day** • **Chat history saving** • **Cross-device sync**")
+            
             col1, col2 = st.columns(2)
             with col1:
-                submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
-            with col2:
-                skip_button = st.form_submit_button("Skip for now", use_container_width=True)
-                
-            if skip_button:
-                st.session_state.verification_stage = None
-                st.session_state.chat_blocked_by_dialog = False
-                st.info("You can verify your email later.")
-                st.rerun()
-        else:
-            submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
-        
-        if submit_email:
-            if current_email_input:
-                result = session_manager.handle_guest_email_verification(session, current_email_input)
-                if result['success']:
-                    st.success(result['message'])
-                    st.session_state.verification_email = current_email_input
-                    st.session_state.verification_stage = "code_entry"
+                if st.button("📧 Yes, Let's Verify My Email!", use_container_width=True, key="gentle_verify_btn"):
+                    st.session_state.verification_stage = 'email_entry'
+                    st.session_state.chat_blocked_by_dialog = True
+                    st.session_state.final_answer_acknowledged = True
                     st.rerun()
+            with col2:
+                if skip_allowed: # Guest can still skip *after* the initial gentle prompt
+                    if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="continue_reading_btn"):
+                        st.session_state.final_answer_acknowledged = True
+                        st.success("Perfect! Take your time. The verification option will remain available above.")
+                        st.rerun()
                 else:
-                    st.error(result['message'])
-                    # No "unusual activity" message due to evasion being disabled
-                    # Still keep this check in case of future changes.
-                    if "unusual activity" in result['message'].lower(): 
-                        st.stop()
-            else:
-                st.error("Please enter an email address to receive the code.")
-    
-elif current_stage == 'code_entry':
-    verification_email = st.session_state.get('verification_email', session.email)
-    st.success(f"📧 **Verification code sent to** **{session_manager._mask_email(verification_email)}**")
-    st.info("📱 Check your email (including spam/junk folders). The code expires in 1 minute.")
-    
-    with st.form("code_verification_form", clear_on_submit=False):
-        code = st.text_input(
-            "Enter 6-Digit Verification Code", 
-            placeholder="123456", 
-            max_chars=6, 
-            key="verification_code_input",
-            help="Enter the 6-digit code from your email"
-        )
-        col_verify, col_resend = st.columns(2)
-        with col_verify:
-            submit_code = st.form_submit_button("✅ Verify Code", use_container_width=True)
-        with col_resend:
-            resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
+                    st.info("Email verification is required to continue.")
         
-        if resend_code:
-            if verification_email:
-                with st.spinner("Resending verification code..."):
-                    verification_sent = session_manager.email_verification.send_verification_code(verification_email)
-                    if verification_sent:
-                        st.success("✅ New verification code sent! Check your email.")
-                        st.session_state.verification_stage = "code_entry"
-                    else:
-                        st.error("❌ Failed to resend code. Please try again later.")
-            else:
-                st.error("Error: No email address found. Please go back and enter your email.")
-                st.session_state.verification_stage = "email_entry"
-            st.rerun()
+        st.session_state.chat_blocked_by_dialog = False
+        return False
 
-        if submit_code:
-            if code and len(code) == 6:
-                with st.spinner("🔍 Verifying your code..."):
-                    result = session_manager.verify_email_code(session, code)
-                if result['success']:
-                    st.success(result['message'])
-                    st.balloons()
-                    # Clean up verification state on success
+    # PRIORITY 4: Handle email verified guest who JUST hit their limit (GENTLE approach)
+    elif user_just_hit_email_verified_limit:
+        st.session_state.just_answered = False # Consume the flag
+        should_show_prompt = True
+        should_block_chat = False
+        
+        st.success("🎯 **You've completed your 10 daily questions!**")
+        st.info("Take your time to read this answer. Your questions will reset in 24 hours, or consider registering for 20 questions/day!")
+        
+        with st.expander("🚀 Want More Questions Daily?", expanded=False):
+            st.markdown("### 📈 Upgrade Benefits:")
+            st.markdown("• **20 questions per day** • **Tier system with breaks** • **Priority support**")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
+                    st.link_button("Register Here", "https://www.12taste.com/in/my-account/", use_container_width=True) # Direct link
+                    st.session_state.email_verified_final_answer_acknowledged = True
+                    st.rerun()
+            with col2:
+                if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="email_verified_continue_reading"):
+                    st.session_state.email_verified_final_answer_acknowledged = True
+                    st.success("Perfect! Take your time reading.")
+                    st.rerun()
+        
+        st.session_state.chat_blocked_by_dialog = False
+        return False
+
+    # PRIORITY 5: Handle guest who is at their limit but DID NOT just ask a question (e.g., new session)
+    elif is_guest_limit_hit:
+        should_show_prompt = True
+        should_block_chat = True
+        if st.session_state.verification_stage is None:
+            st.session_state.verification_stage = 'email_entry'
+            st.session_state.guest_continue_active = False
+
+    # PRIORITY 6: Handle email verified guest who is at their limit but DID NOT just ask a question
+    elif is_email_verified_limit_hit and not st.session_state.email_verified_final_answer_acknowledged:
+        should_show_prompt = True
+        should_block_chat = True
+        st.error("🛑 **Daily Limit Reached**")
+        st.info("You've used your 10 questions for today. Your questions reset in 24 hours, or consider registering for 20 questions/day!")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.link_button("Register for 20 questions/day", "https://www.12taste.com/in/my-account/", use_container_width=True)
+        with col2:
+            if st.button("Return to Welcome Page", use_container_width=True):
+                session_manager.end_session(session)
+                js_redirect = f"window.top.location.href = 'https://fifi-eu.streamlit.app/';"
+                st.components.v1.html(f"<script>{js_redirect}</script>", height=0, width=0)
+                st.rerun()
+        
+        st.session_state.chat_blocked_by_dialog = True
+        return True
+
+    # PRIORITY 7: Handle declined recognized email scenario
+    elif session.declined_recognized_email_at and not st.session_state.guest_continue_active and not is_guest_limit_hit:
+        should_show_prompt = True
+        should_block_chat = False
+        if st.session_state.verification_stage is None:
+            st.session_state.verification_stage = 'declined_recognized_email_prompt_only'
+
+    # If no prompt should be shown based on conditions, ensure state is clean
+    if not should_show_prompt:
+        st.session_state.chat_blocked_by_dialog = False
+        st.session_state.verification_stage = None
+        if 'just_answered' in st.session_state: # Clean up the flag if not used
+             del st.session_state.just_answered
+        return False
+
+    # Set chat blocking state based on the type of prompt
+    st.session_state.chat_blocked_by_dialog = should_block_chat
+    
+    # Only show error header for blocking prompts
+    if should_block_chat:
+        st.error("📧 **Action Required**")
+
+    current_stage = st.session_state.verification_stage
+
+    # NEW: Handle forced verification stage (no skip option)
+    if current_stage == 'forced_verification':
+        st.error("📧 **Email Verification Required**")
+        st.info("This device has already used the guest question allowance. Please verify your email to continue using FiFi AI.")
+        
+        with st.form("forced_email_verification_form", clear_on_submit=False):
+            st.markdown("**📧 Enter your email address to receive a verification code:**")
+            current_email_input = st.text_input(
+                "Email Address", 
+                placeholder="your@email.com",
+                key="forced_email_input",
+                help="Email verification is required to continue."
+            )
+            submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+            
+            # NO SKIP BUTTON - verification is mandatory
+            
+            if submit_email:
+                if current_email_input:
+                    # Reset the must_verify flag after a submission attempt
+                    st.session_state.must_verify_email_immediately = False
+                    st.session_state.skip_email_allowed = True # Reset to default allowed after forced verification attempt
+                    
+                    result = session_manager.handle_guest_email_verification(session, current_email_input)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.session_state.verification_email = current_email_input
+                        st.session_state.verification_stage = "code_entry"
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter an email address to receive the code.")
+
+    elif current_stage == 'initial_check':
+        # Use a container to ensure clean rendering
+        prompt_container = st.container()
+        
+        with prompt_container:
+            email_to_reverify = session.pending_email
+            masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
+            st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
+            st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
+            
+            # FIXED: Use session ID for stable keys instead of timestamp
+            button_key_suffix = session.session_id[:8]  # First 8 chars of session ID
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Verify this email", 
+                            use_container_width=True, 
+                            key=f"reverify_yes_{button_key_suffix}"):
+                    
+                    # Add logging to debug
+                    logger.info(f"Verify button clicked in session {session.session_id[:8]}")
+                    
+                    session.recognition_response = "yes_reverify"
+                    session.declined_recognized_email_at = None
+                    st.session_state.verification_email = email_to_reverify
+                    st.session_state.verification_stage = "send_code_recognized"
+                    
+                    # Ensure session ID is preserved
+                    st.session_state.current_session_id = session.session_id
+                    
+                    session_manager.db.save_session(session)
+                    st.rerun()
+            with col2:
+                if st.button("❌ No, I don't recognize the email", 
+                            use_container_width=True, 
+                            key=f"reverify_no_{button_key_suffix}"):
+                    
+                    logger.info(f"Decline button clicked in session {session.session_id[:8]}")
+                    
+                    session.recognition_response = "no_declined_reco"
+                    session.declined_recognized_email_at = datetime.now()
+                    session.user_type = UserType.GUEST 
+                    session.reverification_pending = False
+                    session.pending_user_type = None
+                    session.pending_email = None
+                    session.pending_full_name = None
+                    session.pending_zoho_contact_id = None
+                    session.pending_wp_token = None
+                    
+                    # Ensure session ID is preserved
+                    st.session_state.current_session_id = session.session_id
+                    
+                    session_manager.db.save_session(session)
+                    st.session_state.guest_continue_active = True
+                    st.session_state.chat_blocked_by_dialog = False
+                    st.session_state.verification_stage = None
+                    st.success("You can now continue as a Guest.")
+                    st.rerun()
+
+            elif current_stage == 'send_code_recognized':
+                # Don't show any buttons - just the sending status
+                email_to_verify = st.session_state.get('verification_email')
+                if email_to_verify:
+                    st.info(f"📧 **Sending verification code to {session_manager._mask_email(email_to_verify)}...**")
+                    
+                    # Immediately perform the send (the actual sending happens after this renders)
+                    st.session_state.send_code_now = True
+                    st.rerun()
+
+            elif current_stage == 'email_entry':
+                skip_allowed = st.session_state.get('skip_email_allowed', True)
+                
+                st.info("🚀 You've used your guest questions. Please verify your email to unlock 10 questions per day!")
+                with st.form("email_verification_form", clear_on_submit=False):
+                    st.markdown("**📧 Enter your email address to receive a verification code:**")
+                    current_email_input = st.text_input(
+                        "Email Address", 
+                        placeholder="your@email.com", 
+                        value=st.session_state.get('verification_email', session.email or ""), 
+                        key="manual_email_input",
+                        help="We'll send you a 6-digit verification code that's valid for 1 minute."
+                    )
+                    
+                    if skip_allowed:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+                        with col2:
+                            skip_button = st.form_submit_button("Skip for now", use_container_width=True)
+                            
+                        if skip_button:
+                            st.session_state.verification_stage = None
+                            st.session_state.chat_blocked_by_dialog = False
+                            st.info("You can verify your email later.")
+                            st.rerun()
+                    else:
+                        submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+                    
+                    if submit_email:
+                        if current_email_input:
+                            result = session_manager.handle_guest_email_verification(session, current_email_input)
+                            if result['success']:
+                                st.success(result['message'])
+                                st.session_state.verification_email = current_email_input
+                                st.session_state.verification_stage = "code_entry"
+                                st.rerun()
+                            else:
+                                st.error(result['message'])
+                                # No "unusual activity" message due to evasion being disabled
+                                # Still keep this check in case of future changes.
+                                if "unusual activity" in result['message'].lower(): 
+                                    st.stop()
+                        else:
+                            st.error("Please enter an email address to receive the code.")
+                
+            elif current_stage == 'code_entry':
+                verification_email = st.session_state.get('verification_email', session.email)
+                st.success(f"📧 **Verification code sent to** **{session_manager._mask_email(verification_email)}**")
+                st.info("📱 Check your email (including spam/junk folders). The code expires in 1 minute.")
+                
+                with st.form("code_verification_form", clear_on_submit=False):
+                    code = st.text_input(
+                        "Enter 6-Digit Verification Code", 
+                        placeholder="123456", 
+                        max_chars=6, 
+                        key="verification_code_input",
+                        help="Enter the 6-digit code from your email"
+                    )
+                    col_verify, col_resend = st.columns(2)
+                    with col_verify:
+                        submit_code = st.form_submit_button("✅ Verify Code", use_container_width=True)
+                    with col_resend:
+                        resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
+                    
+                    if resend_code:
+                        if verification_email:
+                            with st.spinner("Resending verification code..."):
+                                verification_sent = session_manager.email_verification.send_verification_code(verification_email)
+                                if verification_sent:
+                                    st.success("✅ New verification code sent! Check your email.")
+                                    st.session_state.verification_stage = "code_entry"
+                                else:
+                                    st.error("❌ Failed to resend code. Please try again later.")
+                        else:
+                            st.error("Error: No email address found. Please go back and enter your email.")
+                            st.session_state.verification_stage = "email_entry"
+                        st.rerun()
+
+                    if submit_code:
+                        if code and len(code) == 6:
+                                with st.spinner("🔍 Verifying your code..."):
+                                    result = session_manager.verify_email_code(session, code)
+                                if result['success']:
+                                    st.success(result['message'])
+                                    st.balloons()
+                                    # Clean up verification state on success
+                                    st.session_state.chat_blocked_by_dialog = False
+                                    st.session_state.verification_stage = None
+                                    st.session_state.guest_continue_active = False
+                                    st.session_state.final_answer_acknowledged = False
+                                    st.session_state.gentle_prompt_shown = False
+                                    st.session_state.email_verified_final_answer_acknowledged = False
+                                    # NEW: Clear must_verify_email_immediately and skip_email_allowed on successful verification
+                                    st.session_state.must_verify_email_immediately = False
+                                    st.session_state.skip_email_allowed = True
+                                    if 'just_answered' in st.session_state:
+                                         del st.session_state.just_answered
+                                    st.rerun()
+                                else:
+                                    st.error(result['message'])
+                            elif code:
+                                st.error("Please enter a 6-digit verification code.")
+                            else:
+                                st.error("Please enter the verification code you received.")
+                
+            elif current_stage == 'declined_recognized_email_prompt_only':
+                # Non-blocking prompt for users who declined recognized email
+                st.session_state.chat_blocked_by_dialog = False
+
+                remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
+                st.info(f"✅ **Continuing as Guest** - You have **{remaining_questions} questions** remaining from your guest allowance.")
+                st.info("💡 **Pro Tip:** Verify your email anytime to unlock 10 questions/day + chat history saving.")
+
+                with st.expander("📧 Want to Verify a Different Email?", expanded=False):
+                    col_opts1, col_opts2 = st.columns(2)
+                    with col_opts1:
+                        if st.button("📧 Enter My Email for Verification", use_container_width=True, key="new_email_opt_btn"):
+                            st.session_state.verification_email = ""
+                            st.session_state.verification_stage = "email_entry"
+                            st.session_state.guest_continue_active = False
+                            st.rerun()
+                    with col_opts2:
+                        if st.button("👍 Continue as Guest", use_container_width=True, key="continue_guest_btn"):
+                            st.session_state.guest_continue_active = True
+                            st.session_state.chat_blocked_by_dialog = False
+                            st.session_state.verification_stage = None
+                            st.success("Perfect! You can continue as a Guest. The email verification option will always be available.")
+                            st.rerun()
+
+            return should_block_chat
+
+        def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
+            """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
+            
+            st.title("🤖 FiFi AI Assistant")
+            st.caption("Your intelligent food & beverage sourcing companion.")
+
+            # NEW: Show fingerprint waiting status
+            if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
+                current_time_float = time.time() # Use float for direct comparison with time.time()
+                wait_start = st.session_state.get('fingerprint_wait_start')
+                elapsed = current_time_float - wait_start
+                remaining = max(0, 20 - elapsed)
+                
+                if remaining > 0:
+                    st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
+                    st.caption("FiFi is setting up device recognition for security and session management.")
+                else:
+                    st.info("🔒 **Finalizing setup...** Almost ready!")
+                
+                # Add a subtle progress bar
+                progress_value = min(elapsed / 20, 1.0)
+                st.progress(progress_value, text="Session Security Setup")
+                st.markdown("---")
+
+            # Simple activity tracking
+            if activity_result:
+                js_last_activity_timestamp = activity_result.get('last_activity')
+                if js_last_activity_timestamp:
+                    try:
+                        new_activity = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
+                        if session.last_activity is None or new_activity > session.last_activity:
+                            session.last_activity = new_activity
+                            session_manager._save_session_with_retry(session)
+                    except Exception as e:
+                        logger.error(f"Failed to update activity from JavaScript: {e}")
+
+            # Browser close detection for emergency saves
+            if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
+                try:
+                    render_simplified_browser_close_detection(session.session_id)
+                except Exception as e:
+                    logger.error(f"Browser close detection failed: {e}")
+
+            # Display email prompt if needed AND get status to disable chat input
+            should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
+
+            # Render chat content ONLY if not blocked by a dialog
+            if not st.session_state.get('chat_blocked_by_dialog', False):
+                # ENHANCED: Show tier warnings for registered users
+                limit_check_for_display = session_manager.question_limits.is_within_limits(session)
+                if (session.user_type.value == UserType.REGISTERED_USER.value and 
+                    limit_check_for_display.get('allowed') and 
+                    limit_check_for_display.get('tier')):
+                    
+                    tier = limit_check_for_display.get('tier')
+                    remaining = limit_check_for_display.get('remaining', 0)
+                    
+                    if tier == 2 and remaining <= 3:
+                        st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until 24-hour reset!")
+                    elif tier == 1 and remaining <= 2:
+                        st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until 5-minute break.") # UPDATED MESSAGE
+
+                # Display chat messages (respects soft clear offset)
+                visible_messages = session.messages[session.display_message_offset:]
+                for msg in visible_messages:
+                    with st.chat_message(msg.get("role", "user")):
+                        st.markdown(msg.get("content", ""), unsafe_allow_html=True)
+                        
+                        if msg.get("source"):
+                            source_color = {
+                                "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                "Error Handler": "❌", "Session Analytics": "📈", # Added from B
+                                "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍" # Added from B
+                            }.get(msg['source'], "🤖")
+                            st.caption(f"{source_color} Source: {msg['source']}")
+                        
+                        indicators = []
+                        if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
+                        if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
+                        if msg.get("is_meta_response"): indicators.append("📈 Session Analytics") # For meta-responses
+                        if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                        
+                        if msg.get("safety_override"):
+                            st.warning("🛡️ Safety Override: Switched to verified sources")
+                        
+                        if msg.get("has_citations") and msg.get("has_inline_citations"):
+                            st.caption("📚 Response includes verified citations")
+                        
+            # Chat input section with inline error notifications + manual dismiss
+            # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
+            # And combine with other disabled conditions
+            overall_chat_disabled = (
+                not st.session_state.get('is_chat_ready', False) or 
+                should_disable_chat_input_by_dialog or 
+                session.ban_status.value != BanStatus.NONE.value
+            )
+
+            # Rate limit notification with manual dismiss
+            if 'rate_limit_hit' in st.session_state:
+                rate_limit_info = st.session_state.rate_limit_hit
+                time_until_next = rate_limit_info.get('time_until_next', 0)
+                max_requests = rate_limit_info.get('max_requests', 2)
+                window_seconds = rate_limit_info.get('window_seconds', 60)
+                
+                # Calculate remaining time dynamically
+                current_time = datetime.now()
+                elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
+                remaining_time = max(0, int(time_until_next - elapsed))
+                
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    if remaining_time > 0:
+                        st.error(f"⏱️ **Rate limit exceeded** - Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
+                    else:
+                        st.error(f"⏱️ **Rate limit exceeded** - Please wait a moment before asking another question.")
+                with col2:
+                    if st.button("✕", key="dismiss_rate_limit", help="Dismiss this message", use_container_width=True):
+                        del st.session_state.rate_limit_hit
+                        st.rerun()
+
+            # Content moderation notification with manual dismiss
+            if 'moderation_flagged' in st.session_state:
+                moderation_info = st.session_state.moderation_flagged
+                categories = moderation_info.get('categories', [])
+                categories_text = ', '.join(categories) if categories else 'policy violation'
+                message = moderation_info.get('message', 'Your message violates our content policy.')
+                
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    st.error(f"🛡️ **Content Policy Violation** - {categories_text}")
+                    st.info(f"💡 **Guidance**: {message}")
+                with col2:
+                    if st.button("✕", key="dismiss_moderation", help="Dismiss this message", use_container_width=True):
+                        del st.session_state.moderation_flagged
+                        st.rerun()
+
+            # Context error notification with manual dismiss
+            if 'context_flagged' in st.session_state:
+                context_info = st.session_state.context_flagged
+                category = context_info.get('category', 'off-topic')
+                confidence = context_info.get('confidence', 0.0)
+                message = context_info.get('message', '')
+                
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    if category == "unrelated_industry":
+                        st.warning(f"🏭 **Outside Food Industry** - This question doesn't relate to food & beverage ingredients.")
+                    elif category in ["personal_cooking", "off_topic"]:
+                        st.warning(f"👨‍🍳 **Personal vs Professional** - I'm designed for B2B food industry questions.")
+                    else:
+                        st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or formulation.")
+                    
+                    st.info(f"💡 **Guidance**: {message}")
+                    st.caption(f"Confidence: {confidence:.1%} | Category: {category}")
+                with col2:
+                    if st.button("✕", key="dismiss_context", help="Dismiss this message", use_container_width=True):
+                        del st.session_state.context_flagged
+                        st.rerun()
+            
+            # NEW: Pricing/Stock notice with manual dismiss
+            if 'pricing_stock_notice' in st.session_state:
+                notice_info = st.session_state.pricing_stock_notice
+                query_type = notice_info.get('query_type', 'pricing')
+                message = notice_info.get('message', '')
+
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    if query_type == 'pricing':
+                        st.info("💰 **Pricing Information Notice**")
+                    else:
+                        st.info("📦 **Stock Availability Notice**")
+
+                    st.markdown(message)
+                with col2:
+                    if st.button("✕", key="dismiss_pricing_notice", help="Dismiss this message", use_container_width=True):
+                        del st.session_state.pricing_stock_notice
+                        st.rerun()
+
+            # Show approaching limit warnings (Option 2 enhancement)
+            if not overall_chat_disabled:
+                user_type = session.user_type.value
+                current_count = session.daily_question_count
+                
+                if user_type == UserType.GUEST.value and current_count == 3:
+                    st.warning("⚠️ **Final Guest Question Coming Up!** Your next question will be your last before email verification is required.")
+                    
+                elif user_type == UserType.EMAIL_VERIFIED_GUEST.value and current_count == 9:
+                    st.warning("⚠️ **Final Question Today!** Your next question will be your last for the next 24 hours.")
+                    
+                elif user_type == UserType.REGISTERED_USER.value:
+                    if current_count == 9:
+                        st.warning("⚠️ **Tier 1 Final Question Coming Up!** After your next question, you'll need a 5-minute break.") # UPDATED MESSAGE
+                    elif current_count == 19:
+                        st.warning("⚠️ **Final Question Today!** Your next question will be your last for 24 hours.")
+
+            prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                                    disabled=overall_chat_disabled)
+            
+            if prompt:
+                logger.info(f"🎯 Processing question from {session.session_id[:8]}")
+                
+                # Check if attempting to exceed limits _before_ sending to AI
+                # This call will now also handle displaying appropriate messages/bans.
+                if session_manager.check_if_attempting_to_exceed_limits(session):
+                    # If `check_if_attempting_to_exceed_limits` returns True, it means a limit was hit
+                    # and a message/ban has been displayed.
+                    # For guest limit, we specifically set the verification stage.
+                    if session.user_type.value == UserType.GUEST.value and \
+                       session.daily_question_count >= session_manager.question_limits.question_limits[UserType.GUEST.value]:
+                        st.session_state.verification_stage = 'email_entry'
+                        st.session_state.chat_blocked_by_dialog = True
+                        st.session_state.final_answer_acknowledged = True # Acknowledge the 'final answer' to trigger dialog
+                    st.rerun()
+                    return
+                
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+                
+                with st.chat_message("assistant"):
+                    with st.spinner("🔍 FiFi is processing your question and we request your patience..."):
+                        try:
+                            response = session_manager.get_ai_response(session, prompt)
+                            st.session_state.just_answered = True # Set flag for gentle prompts
+                            
+                            if response.get('requires_email'):
+                                st.error("📧 Please verify your email to continue.")
+                                st.session_state.verification_stage = 'email_entry' 
+                                st.session_state.chat_blocked_by_dialog = True
+                            elif response.get('banned'):
+                                st.error(response.get("content", 'Access restricted.'))
+                                if response.get('time_remaining'):
+                                    time_remaining = response['time_remaining']
+                                    hours = int(time_remaining.total_seconds() // 3600)
+                                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                                    st.error(f"Time remaining: {hours}h {minutes}m")
+                            else:
+                                # Show the AI response and metadata
+                                st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                                if response.get("source"):
+                                    source_color = {
+                                        "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                        "Error Handler": "❌", "Session Analytics": "📈",
+                                        "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍"
+                                    }.get(response['source'], "🤖")
+                                    st.caption(f"{source_color} Source: {response['source']}")
+                                
+                                indicators = []
+                                if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
+                                if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
+                                if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
+                                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                                
+                                if response.get("safety_override"): st.warning("🛡️ Safety Override: Switched to verified sources")
+                                if response.get("has_citations") and response.get("has_inline_citations"): st.caption("📚 Response includes verified citations")
+                                
+                                logger.info(f"✅ Question processed successfully")
+
+                        except Exception as e:
+                            logger.error(f"❌ AI response failed: {e}", exc_info=True)
+                            st.error("⚠️ I encountered an error. Please try again.")
+                st.rerun()
+
+        def ensure_initialization_fixed():
+            """Fixed version without duplicate spinner since we have loading overlay"""
+            if 'initialized' not in st.session_state or not st.session_state.initialized:
+                logger.info("Starting application initialization sequence (no spinner shown, overlay is active)...")
+                
+                try:
+                    config = Config()
+                    pdf_exporter = PDFExporter()
+                    
+                    try:
+                        db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+                        st.session_state.db_manager = db_manager
+                    except Exception as db_e:
+                        logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
+                        st.session_state.db_manager = type('FallbackDB', (), {
+                            'db_type': 'memory',
+                            'local_sessions': {},
+                            'save_session': lambda self, session: None,
+                            'load_session': lambda self, session_id: None,
+                            'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
+                            'find_sessions_by_email': lambda self, email: []
+                        })()
+                    
+                    try:
+                        zoho_manager = ZohoCRMManager(config, pdf_exporter)
+                    except Exception as e:
+                        logger.error(f"Zoho manager failed: {e}")
+                        zoho_manager = type('FallbackZoho', (), {
+                            'config': config,
+                            'save_chat_transcript_sync': lambda self, session, reason: False
+                        })()
+                    
+                    try:
+                        ai_system = EnhancedAI(config)
+                    except Exception as e:
+                        logger.error(f"AI system failed: {e}")
+                        ai_system = type('FallbackAI', (), {
+                            "openai_client": None,
+                            'get_response': lambda self, prompt, history=None: {
+                                "content": "AI system temporarily unavailable.",
+                                "success": False
+                            }
+                        })()
+                    
+                    rate_limiter = RateLimiter(max_requests=2, window_seconds=60)
+                    fingerprinting_manager = st.session_state.db_manager.FingerprintingManager()
+                    
+                    try:
+                        email_verification_manager = st.session_state.db_manager.EmailVerificationManager(config)
+                        if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
+                            email_verification_manager = type('DummyEmail', (), {
+                                'send_verification_code': lambda self, email: False,
+                                'verify_code': lambda self, email, code: False
+                            })()
+                    except Exception as e:
+                        logger.error(f"Email verification failed: {e}")
+                        email_verification_manager = type('DummyEmail', (), {
+                            'send_verification_code': lambda self, email: False,
+                            'verify_code': lambda self, email, code: False
+                        })()
+                    
+                    question_limit_manager = st.session_state.db_manager.QuestionLimitManager()
+                    
+                    st.session_state.session_manager = SessionManager(
+                        config, st.session_state.db_manager, zoho_manager, ai_system, 
+                        rate_limiter, fingerprinting_manager, email_verification_manager, 
+                        question_limit_manager
+                    )
+                    
+                    st.session_state.pdf_exporter = pdf_exporter
+                    st.session_state.error_handler = error_handler
+                    st.session_state.fingerprinting_manager = fingerprinting_manager
+                    st.session_state.email_verification_manager = email_verification_manager
+                    st.session_state.question_limit_manager = question_limit_manager
+
                     st.session_state.chat_blocked_by_dialog = False
                     st.session_state.verification_stage = None
                     st.session_state.guest_continue_active = False
-                    st.session_state.final_answer_acknowledged = False
-                    st.session_state.gentle_prompt_shown = False
-                    st.session_state.email_verified_final_answer_acknowledged = False
-                    # NEW: Clear must_verify_email_immediately and skip_email_allowed on successful verification
-                    st.session_state.must_verify_email_immediately = False
-                    st.session_state.skip_email_allowed = True
-                    if 'just_answered' in st.session_state:
-                         del st.session_state.just_answered
-                    st.rerun()
-                else:
-                    st.error(result['message'])
-            elif code:
-                st.error("Please enter a 6-digit verification code.")
-            else:
-                st.error("Please enter the verification code you received.")
-
-elif current_stage == 'declined_recognized_email_prompt_only':
-    # Non-blocking prompt for users who declined recognized email
-    st.session_state.chat_blocked_by_dialog = False
-
-    remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
-    st.info(f"✅ **Continuing as Guest** - You have **{remaining_questions} questions** remaining from your guest allowance.")
-    st.info("💡 **Pro Tip:** Verify your email anytime to unlock 10 questions/day + chat history saving.")
-
-    with st.expander("📧 Want to Verify a Different Email?", expanded=False):
-        col_opts1, col_opts2 = st.columns(2)
-        with col_opts1:
-            if st.button("📧 Enter My Email for Verification", use_container_width=True, key="new_email_opt_btn"):
-                st.session_state.verification_email = ""
-                st.session_state.verification_stage = "email_entry"
-                st.session_state.guest_continue_active = False
-                st.rerun()
-        with col_opts2:
-            if st.button("👍 Continue as Guest", use_container_width=True, key="continue_guest_btn"):
-                st.session_state.guest_continue_active = True
-                st.session_state.chat_blocked_by_dialog = False
-                st.session_state.verification_stage = None
-                st.success("Perfect! You can continue as a Guest. The email verification option will always be available.")
-                st.rerun()
-
-return should_block_chat
-
-
-def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
-    """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
-    
-    st.title("🤖 FiFi AI Assistant")
-    st.caption("Your intelligent food & beverage sourcing companion.")
-
-    # NEW: Show fingerprint waiting status
-    if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
-        current_time_float = time.time() # Use float for direct comparison with time.time()
-        wait_start = st.session_state.get('fingerprint_wait_start')
-        elapsed = current_time_float - wait_start
-        remaining = max(0, 20 - elapsed)
-        
-        if remaining > 0:
-            st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
-            st.caption("FiFi is setting up device recognition for security and session management.")
-        else:
-            st.info("🔒 **Finalizing setup...** Almost ready!")
-        
-        # Add a subtle progress bar
-        progress_value = min(elapsed / 20, 1.0)
-        st.progress(progress_value, text="Session Security Setup")
-        st.markdown("---")
-
-    # Simple activity tracking
-    if activity_result:
-        js_last_activity_timestamp = activity_result.get('last_activity')
-        if js_last_activity_timestamp:
-            try:
-                new_activity = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
-                if session.last_activity is None or new_activity > session.last_activity:
-                    session.last_activity = new_activity
-                    session_manager._save_session_with_retry(session)
-            except Exception as e:
-                logger.error(f"Failed to update activity from JavaScript: {e}")
-
-    # Browser close detection for emergency saves
-    if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
-        try:
-            render_simplified_browser_close_detection(session.session_id)
-        except Exception as e:
-            logger.error(f"Browser close detection failed: {e}")
-
-    # Display email prompt if needed AND get status to disable chat input
-    should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
-
-    # Render chat content ONLY if not blocked by a dialog
-    if not st.session_state.get('chat_blocked_by_dialog', False):
-        # ENHANCED: Show tier warnings for registered users
-        limit_check_for_display = session_manager.question_limits.is_within_limits(session)
-        if (session.user_type.value == UserType.REGISTERED_USER.value and 
-            limit_check_for_display.get('allowed') and 
-            limit_check_for_display.get('tier')):
-            
-            tier = limit_check_for_display.get('tier')
-            remaining = limit_check_for_display.get('remaining', 0)
-            
-            if tier == 2 and remaining <= 3:
-                st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until 24-hour reset!")
-            elif tier == 1 and remaining <= 2:
-                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until 5-minute break.") # UPDATED MESSAGE
-
-        # Display chat messages (respects soft clear offset)
-        visible_messages = session.messages[session.display_message_offset:]
-        for msg in visible_messages:
-            with st.chat_message(msg.get("role", "user")):
-                st.markdown(msg.get("content", ""), unsafe_allow_html=True)
-                
-                if msg.get("source"):
-                    source_color = {
-                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
-                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                        "Error Handler": "❌", "Session Analytics": "📈", # Added from B
-                        "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍" # Added from B
-                    }.get(msg['source'], "🤖")
-                    st.caption(f"{source_color} Source: {msg['source']}")
-                
-                indicators = []
-                if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
-                if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
-                if msg.get("is_meta_response"): indicators.append("📈 Session Analytics") # For meta-responses
-                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-                
-                if msg.get("safety_override"):
-                    st.warning("🛡️ Safety Override: Switched to verified sources")
-                
-                if msg.get("has_citations") and msg.get("has_inline_citations"):
-                    st.caption("📚 Response includes verified citations")
-                
-    # Chat input section with inline error notifications + manual dismiss
-    # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
-    # And combine with other disabled conditions
-    overall_chat_disabled = (
-        not st.session_state.get('is_chat_ready', False) or 
-        should_disable_chat_input_by_dialog or 
-        session.ban_status.value != BanStatus.NONE.value
-    )
-
-    # Rate limit notification with manual dismiss
-    if 'rate_limit_hit' in st.session_state:
-        rate_limit_info = st.session_state.rate_limit_hit
-        time_until_next = rate_limit_info.get('time_until_next', 0)
-        max_requests = rate_limit_info.get('max_requests', 2)
-        window_seconds = rate_limit_info.get('window_seconds', 60)
-        
-        # Calculate remaining time dynamically
-        current_time = datetime.now()
-        elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
-        remaining_time = max(0, int(time_until_next - elapsed))
-        
-        col1, col2 = st.columns([5, 1])
-        with col1:
-            if remaining_time > 0:
-                st.error(f"⏱️ **Rate limit exceeded** - Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
-            else:
-                st.error(f"⏱️ **Rate limit exceeded** - Please wait a moment before asking another question.")
-        with col2:
-            if st.button("✕", key="dismiss_rate_limit", help="Dismiss this message", use_container_width=True):
-                del st.session_state.rate_limit_hit
-                st.rerun()
-
-    # Content moderation notification with manual dismiss
-    if 'moderation_flagged' in st.session_state:
-        moderation_info = st.session_state.moderation_flagged
-        categories = moderation_info.get('categories', [])
-        categories_text = ', '.join(categories) if categories else 'policy violation'
-        message = moderation_info.get('message', 'Your message violates our content policy.')
-        
-        col1, col2 = st.columns([5, 1])
-        with col1:
-            st.error(f"🛡️ **Content Policy Violation** - {categories_text}")
-            st.info(f"💡 **Guidance**: {message}")
-        with col2:
-            if st.button("✕", key="dismiss_moderation", help="Dismiss this message", use_container_width=True):
-                del st.session_state.moderation_flagged
-                st.rerun()
-
-    # Context error notification with manual dismiss
-    if 'context_flagged' in st.session_state:
-        context_info = st.session_state.context_flagged
-        category = context_info.get('category', 'off-topic')
-        confidence = context_info.get('confidence', 0.0)
-        message = context_info.get('message', '')
-        
-        col1, col2 = st.columns([5, 1])
-        with col1:
-            if category == "unrelated_industry":
-                st.warning(f"🏭 **Outside Food Industry** - This question doesn't relate to food & beverage ingredients.")
-            elif category in ["personal_cooking", "off_topic"]:
-                st.warning(f"👨‍🍳 **Personal vs Professional** - I'm designed for B2B food industry questions.")
-            else:
-                st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or formulation.")
-            
-            st.info(f"💡 **Guidance**: {message}")
-            st.caption(f"Confidence: {confidence:.1%} | Category: {category}")
-        with col2:
-            if st.button("✕", key="dismiss_context", help="Dismiss this message", use_container_width=True):
-                del st.session_state.context_flagged
-                st.rerun()
-    
-    # NEW: Pricing/Stock notice with manual dismiss
-    if 'pricing_stock_notice' in st.session_state:
-        notice_info = st.session_state.pricing_stock_notice
-        query_type = notice_info.get('query_type', 'pricing')
-        message = notice_info.get('message', '')
-
-        col1, col2 = st.columns([5, 1])
-        with col1:
-            if query_type == 'pricing':
-                st.info("💰 **Pricing Information Notice**")
-            else:
-                st.info("📦 **Stock Availability Notice**")
-
-            st.markdown(message)
-        with col2:
-            if st.button("✕", key="dismiss_pricing_notice", help="Dismiss this message", use_container_width=True):
-                del st.session_state.pricing_stock_notice
-                st.rerun()
-
-    # Show approaching limit warnings (Option 2 enhancement)
-    if not overall_chat_disabled:
-        user_type = session.user_type.value
-        current_count = session.daily_question_count
-        
-        if user_type == UserType.GUEST.value and current_count == 3:
-            st.warning("⚠️ **Final Guest Question Coming Up!** Your next question will be your last before email verification is required.")
-            
-        elif user_type == UserType.EMAIL_VERIFIED_GUEST.value and current_count == 9:
-            st.warning("⚠️ **Final Question Today!** Your next question will be your last for the next 24 hours.")
-            
-        elif user_type == UserType.REGISTERED_USER.value:
-            if current_count == 9:
-                st.warning("⚠️ **Tier 1 Final Question Coming Up!** After your next question, you'll need a 5-minute break.") # UPDATED MESSAGE
-            elif current_count == 19:
-                st.warning("⚠️ **Final Question Today!** Your next question will be your last for 24 hours.")
-
-    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=overall_chat_disabled)
-    
-    if prompt:
-        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
-        
-        # Check if attempting to exceed limits _before_ sending to AI
-        # This call will now also handle displaying appropriate messages/bans.
-        if session_manager.check_if_attempting_to_exceed_limits(session):
-            # If `check_if_attempting_to_exceed_limits` returns True, it means a limit was hit
-            # and a message/ban has been displayed.
-            # For guest limit, we specifically set the verification stage.
-            if session.user_type.value == UserType.GUEST.value and \
-               session.daily_question_count >= session_manager.question_limits.question_limits[UserType.GUEST.value]:
-                st.session_state.verification_stage = 'email_entry'
-                st.session_state.chat_blocked_by_dialog = True
-                st.session_state.final_answer_acknowledged = True # Acknowledge the 'final answer' to trigger dialog
-            st.rerun()
-            return
-        
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        with st.chat_message("assistant"):
-            with st.spinner("🔍 FiFi is processing your question and we request your patience..."):
-                try:
-                    response = session_manager.get_ai_response(session, prompt)
-                    st.session_state.just_answered = True # Set flag for gentle prompts
+                    # NEW: Initialize chat readiness flag
+                    st.session_state.is_chat_ready = False 
                     
-                    if response.get('requires_email'):
-                        st.error("📧 Please verify your email to continue.")
-                        st.session_state.verification_stage = 'email_entry' 
-                        st.session_state.chat_blocked_by_dialog = True
-                    elif response.get('banned'):
-                        st.error(response.get("content", 'Access restricted.'))
-                        if response.get('time_remaining'):
-                            time_remaining = response['time_remaining']
-                            hours = int(time_remaining.total_seconds() // 3600)
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                            st.error(f"Time remaining: {hours}h {minutes}m")
-                    else:
-                        # Show the AI response and metadata
-                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
-                        if response.get("source"):
-                            source_color = {
-                                "FiFi": "🧠", "FiFi Web Search": "🌐",
-                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                                "Error Handler": "❌", "Session Analytics": "📈",
-                                "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍"
-                            }.get(response['source'], "🤖")
-                            st.caption(f"{source_color} Source: {response['source']}")
-                        
-                        indicators = []
-                        if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
-                        if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
-                        if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
-                        if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-                        
-                        if response.get("safety_override"): st.warning("🛡️ Safety Override: Switched to verified sources")
-                        if response.get("has_citations") and response.get("has_inline_citations"): st.caption("📚 Response includes verified citations")
-                        
-                        logger.info(f"✅ Question processed successfully")
-
+                    st.session_state.initialized = True
+                    logger.info("✅ Application initialized successfully")
+                    return True
+                    
                 except Exception as e:
-                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
-                    st.error("⚠️ I encountered an error. Please try again.")
-        st.rerun()
-
-
-def ensure_initialization_fixed():
-    """Fixed version without duplicate spinner since we have loading overlay"""
-    if 'initialized' not in st.session_state or not st.session_state.initialized:
-        logger.info("Starting application initialization sequence (no spinner shown, overlay is active)...")
-        
-        try:
-            config = Config()
-            pdf_exporter = PDFExporter()
+                    logger.critical(f"Critical initialization failure: {e}", exc_info=True)
+                    st.session_state.initialized = False
+                    return False
             
-            try:
-                db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
-                st.session_state.db_manager = db_manager
-            except Exception as db_e:
-                logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
-                st.session_state.db_manager = type('FallbackDB', (), {
-                    'db_type': 'memory',
-                    'local_sessions': {},
-                    'save_session': lambda self, session: None,
-                    'load_session': lambda self, session_id: None,
-                    'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
-                    'find_sessions_by_email': lambda self, email: []
-                })()
-            
-            try:
-                zoho_manager = ZohoCRMManager(config, pdf_exporter)
-            except Exception as e:
-                logger.error(f"Zoho manager failed: {e}")
-                zoho_manager = type('FallbackZoho', (), {
-                    'config': config,
-                    'save_chat_transcript_sync': lambda self, session, reason: False
-                })()
-            
-            try:
-                ai_system = EnhancedAI(config)
-            except Exception as e:
-                logger.error(f"AI system failed: {e}")
-                ai_system = type('FallbackAI', (), {
-                    "openai_client": None,
-                    'get_response': lambda self, prompt, history=None: {
-                        "content": "AI system temporarily unavailable.",
-                        "success": False
-                    }
-                })()
-            
-            rate_limiter = RateLimiter(max_requests=2, window_seconds=60)
-            fingerprinting_manager = st.session_state.db_manager.FingerprintingManager()
-            
-            try:
-                email_verification_manager = st.session_state.db_manager.EmailVerificationManager(config)
-                if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
-                    email_verification_manager = type('DummyEmail', (), {
-                        'send_verification_code': lambda self, email: False,
-                        'verify_code': lambda self, email, code: False
-                    })()
-            except Exception as e:
-                logger.error(f"Email verification failed: {e}")
-                email_verification_manager = type('DummyEmail', (), {
-                    'send_verification_code': lambda self, email: False,
-                    'verify_code': lambda self, email, code: False
-                })()
-            
-            question_limit_manager = st.session_state.db_manager.QuestionLimitManager()
-            
-            st.session_state.session_manager = SessionManager(
-                config, st.session_state.db_manager, zoho_manager, ai_system, 
-                rate_limiter, fingerprinting_manager, email_verification_manager, 
-                question_limit_manager
-            )
-            
-            st.session_state.pdf_exporter = pdf_exporter
-            st.session_state.error_handler = error_handler
-            st.session_state.fingerprinting_manager = fingerprinting_manager
-            st.session_state.email_verification_manager = email_verification_manager
-            st.session_state.question_limit_manager = question_limit_manager
-
-            st.session_state.chat_blocked_by_dialog = False
-            st.session_state.verification_stage = None
-            st.session_state.guest_continue_active = False
-            # NEW: Initialize chat readiness flag
-            st.session_state.is_chat_ready = False 
-            
-            st.session_state.initialized = True
-            logger.info("✅ Application initialized successfully")
             return True
-            
-        except Exception as e:
-            logger.critical(f"Critical initialization failure: {e}", exc_info=True)
-            st.session_state.initialized = False
-            return False
-    
-    return True
 
+        # Modified main function with proper loading state handling (from prompt)
+        def main_fixed():
+            """Main application entry point with optimized fingerprint handling."""
+            try:
+                st.set_page_config(
+                    page_title="FiFi AI Assistant", 
+                    page_icon="🤖", 
+                    layout="wide"
+                )
+            except Exception as e:
+                logger.error(f"Failed to set page config: {e}")
 
-# Modified main function with proper loading state handling (from prompt)
-def main_fixed():
-    """Main application entry point with optimized fingerprint handling."""
-    try:
-        st.set_page_config(
-            page_title="FiFi AI Assistant", 
-            page_icon="🤖", 
-            layout="wide"
-        )
-    except Exception as e:
-        logger.error(f"Failed to set page config: {e}")
+            # NEW: Check for expired session flag and force welcome page
+            if st.session_state.get('session_expired', False):
+                logger.info("Session expired flag detected - forcing welcome page")
+                st.session_state['page'] = None
+                if 'session_expired' in st.session_state:
+                    del st.session_state['session_expired']
+                st.info("⏰ Your session expired. Please start a new session.")
 
-    # NEW: Check for expired session flag and force welcome page
-    if st.session_state.get('session_expired', False):
-        logger.info("Session expired flag detected - forcing welcome page")
-        st.session_state['page'] = None
-        if 'session_expired' in st.session_state:
-            del st.session_state['session_expired']
-        st.info("⏰ Your session expired. Please start a new session.")
-
-    # Initialize loading state if not already set (for first run)
-    if 'is_loading' not in st.session_state:
-        st.session_state.is_loading = False
-        st.session_state.loading_message = ""
-    # NEW: Ensure is_chat_ready is always present and initially False
-    if 'is_chat_ready' not in st.session_state:
-        st.session_state.is_chat_ready = False
-
-    # Initialize session state if needed
-    if 'initialized' not in st.session_state:
-        # Initialize all session state at once
-        defaults = {
-            "initialized": False,
-            "is_loading": False,
-            "loading_message": "",
-            "is_chat_ready": False,
-            "fingerprint_complete": False,
-            "chat_blocked_by_dialog": False,
-            "verification_stage": None,
-            "guest_continue_active": False,
-            "final_answer_acknowledged": False,
-            "gentle_prompt_shown": False,
-            "email_verified_final_answer_acknowledged": False,
-            "must_verify_email_immediately": False, # NEW
-            "skip_email_allowed": True, # NEW
-            "page": None
-        }
-        
-        for key, value in defaults.items():
-            if key not in st.session_state:
-                st.session_state[key] = value
-        
-        # Quick initialization without spinner
-        try:
-            init_success = ensure_initialization_fixed()
-            if not init_success:
-                st.error("⚠️ Application failed to initialize properly.")
-                st.info("Please refresh the page to try again.")
-                return
-            st.session_state.initialized = True
-            logger.info("✅ Application initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Initialization failed: {e}", exc_info=True)
-            st.error("⚠️ Application failed to initialize. Please refresh.")
-            return
-
-    # Handle emergency saves and fingerprint data EARLY
-    handle_emergency_save_requests_from_query()
-    handle_fingerprint_requests_from_query()
-
-    # Get session manager
-    session_manager = st.session_state.get('session_manager')
-    if not session_manager:
-        st.error("❌ Session Manager not available. Please refresh the page.")
-        return
-
-    # Handle loading states
-    loading_state = st.session_state.get('is_loading', False)
-    
-    # If we're in loading state, handle the actual initialization
-    if loading_state:
-        # Show the loading overlay
-        if show_loading_overlay():
-            pass  # Overlay is shown
-        
-        # Perform the actual operations based on what triggered the loading
-        try:
-            # Handle different loading scenarios
-            loading_reason = st.session_state.get('loading_reason', 'unknown')
-            
-            session = None
-            if loading_reason == 'start_guest':
-                # Create guest session
-                session = session_manager.get_session()
-                if session and session.last_activity is None:
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
-                st.session_state.page = "chat"
-                if 'loading_reason' in st.session_state:
-                    del st.session_state['loading_reason']
-                
-            elif loading_reason == 'authenticate':
-                # Handle authentication
-                username = st.session_state.get('temp_username', '')
-                password = st.session_state.get('temp_password', '')
-                
-                if username and password:
-                    authenticated_session = session_manager.authenticate_with_wordpress(username, password)
-                    if authenticated_session:
-                        session = authenticated_session
-                        st.session_state.current_session_id = authenticated_session.session_id
-                        st.session_state.page = "chat"
-                        # Clear temporary credentials
-                        if 'temp_username' in st.session_state:
-                            del st.session_state['temp_username']
-                        if 'temp_password' in st.session_state:
-                            del st.session_state['temp_password']
-                        if 'loading_reason' in st.session_state:
-                            del st.session_state['loading_reason']
-                        st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
-                        st.balloons()
-                        st.rerun()
-                    else:
-                        set_loading_state(False)
-                        return
-                else:
-                    set_loading_state(False)
-                    st.error("Authentication failed: Missing username or password.")
-                    return
-
-            # Check session fingerprint status
-            if session:
-                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-                inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
-
-                if fingerprint_is_stable or inheritance_checked:
-                    st.session_state.is_chat_ready = True
-                    logger.info(f"Chat input unlocked for session {session.session_id[:8]} after initial session/fingerprint setup.")
-                else:
-                    st.session_state.is_chat_ready = False
-                    logger.info(f"Chat input remains locked for session {session.session_id[:8]} pending JS fingerprinting.")
-            else:
+            # Initialize loading state if not already set (for first run)
+            if 'is_loading' not in st.session_state:
+                st.session_state.is_loading = False
+                st.session_state.loading_message = ""
+            # NEW: Ensure is_chat_ready is always present and initially False
+            if 'is_chat_ready' not in st.session_state:
                 st.session_state.is_chat_ready = False
 
-            # Clear loading state and rerun to show the actual page
-            set_loading_state(False)
-            st.rerun()
-            return
-            
-        except Exception as e:
-            set_loading_state(False)
-            st.error(f"⚠️ Error during loading: {str(e)}")
-            logger.error(f"Loading state error: {e}", exc_info=True)
-            return
-
-    # Normal page rendering (when not in loading state)
-    current_page = st.session_state.get('page')
-    
-    if current_page != "chat":
-        render_welcome_page(session_manager)
-    else:
-        # Get existing session
-        session = session_manager.get_session()
-        
-        if session is None or not session.active:
-            logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            st.session_state['page'] = None
-            st.rerun()
-            return
-        
-        # RENDER FINGERPRINTING FIRST, BEFORE TIMEOUT LOGIC
-        fingerprint_needed = (
-            session is not None and (
-                not session.fingerprint_id or
-                session.fingerprint_method == "temporary_fallback_python" or
-                session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-            )
-        )
-        
-        if fingerprint_needed:
-            fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-            if not st.session_state.get(fingerprint_key, False):
-                session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-                st.session_state[fingerprint_key] = True
-                logger.info(f"✅ Fingerprint component rendered for session {session.session_id[:8]}")
-
-        # NOW DO TIMEOUT LOGIC AFTER JAVASCRIPT IS RENDERED
-        if session:
-            fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-            
-            if fingerprint_is_stable:
-                # Real fingerprint already obtained, enable chat immediately
-                st.session_state.is_chat_ready = True
-                if 'fingerprint_wait_start' in st.session_state:
-                    del st.session_state['fingerprint_wait_start']  # Clear timeout
-            else:
-                # Still waiting for JS fingerprinting
-                current_time_float = time.time()
-                wait_start = st.session_state.get('fingerprint_wait_start')
+            # Initialize session state if needed
+            if 'initialized' not in st.session_state:
+                # Initialize all session state at once
+                defaults = {
+                    "initialized": False,
+                    "is_loading": False,
+                    "loading_message": "",
+                    "is_chat_ready": False,
+                    "fingerprint_complete": False,
+                    "chat_blocked_by_dialog": False,
+                    "verification_stage": None,
+                    "guest_continue_active": False,
+                    "final_answer_acknowledged": False,
+                    "gentle_prompt_shown": False,
+                    "email_verified_final_answer_acknowledged": False,
+                    "must_verify_email_immediately": False, # NEW
+                    "skip_email_allowed": True, # NEW
+                    "page": None
+                }
                 
-                if wait_start is None:
-                    # First time seeing temp fingerprint, start timeout
-                    st.session_state.fingerprint_wait_start = current_time_float
-                    st.session_state.is_chat_ready = False
-                    logger.info(f"Starting fingerprint wait timer for session {session.session_id[:8]}")
-                elif current_time_float - wait_start > 20:  # 20 seconds timeout
-                    # Timeout reached, enable chat with fallback fingerprint
-                    st.session_state.is_chat_ready = True
-                    logger.warning(f"Fingerprint timeout (20s) - enabling chat with fallback for session {session.session_id[:8]}")
+                for key, value in defaults.items():
+                    if key not in st.session_state:
+                        st.session_state[key] = value
+                
+                # Quick initialization without spinner
+                try:
+                    init_success = ensure_initialization_fixed()
+                    if not init_success:
+                        st.error("⚠️ Application failed to initialize properly.")
+                        st.info("Please refresh the page to try again.")
+                        return
+                    st.session_state.initialized = True
+                    logger.info("✅ Application initialized successfully")
+                    
+                except Exception as e:
+                    logger.error(f"Initialization failed: {e}", exc_info=True)
+                    st.error("⚠️ Application failed to initialize. Please refresh.")
+                    return
+
+            # Handle emergency saves and fingerprint data EARLY
+            handle_emergency_save_requests_from_query()
+            handle_fingerprint_requests_from_query()
+
+            # Get session manager
+            session_manager = st.session_state.get('session_manager')
+            if not session_manager:
+                st.error("❌ Session Manager not available. Please refresh the page.")
+                return
+
+            # Handle loading states
+            loading_state = st.session_state.get('is_loading', False)
+            
+            # If we're in loading state, handle the actual initialization
+            if loading_state:
+                # Show the loading overlay
+                if show_loading_overlay():
+                    pass  # Overlay is shown
+                
+                # Perform the actual operations based on what triggered the loading
+                try:
+                    # Handle different loading scenarios
+                    loading_reason = st.session_state.get('loading_reason', 'unknown')
+                    
+                    session = None
+                    if loading_reason == 'start_guest':
+                        # Create guest session
+                        session = session_manager.get_session()
+                        if session and session.last_activity is None:
+                            session.last_activity = datetime.now()
+                            session_manager.db.save_session(session)
+                        st.session_state.page = "chat"
+                        if 'loading_reason' in st.session_state:
+                            del st.session_state['loading_reason']
+                        
+                    elif loading_reason == 'authenticate':
+                        # Handle authentication
+                        username = st.session_state.get('temp_username', '')
+                        password = st.session_state.get('temp_password', '')
+                        
+                        if username and password:
+                            authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                            if authenticated_session:
+                                session = authenticated_session
+                                st.session_state.current_session_id = authenticated_session.session_id
+                                st.session_state.page = "chat"
+                                # Clear temporary credentials
+                                if 'temp_username' in st.session_state:
+                                    del st.session_state['temp_username']
+                                if 'temp_password' in st.session_state:
+                                    del st.session_state['temp_password']
+                                if 'loading_reason' in st.session_state:
+                                    del st.session_state['loading_reason']
+                                st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
+                                st.balloons()
+                                st.rerun()
+                            else:
+                                set_loading_state(False)
+                                return
+                        else:
+                            set_loading_state(False)
+                            st.error("Authentication failed: Missing username or password.")
+                            return
+
+                    # Check session fingerprint status
+                    if session:
+                        fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                        inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
+
+                        if fingerprint_is_stable or inheritance_checked:
+                            st.session_state.is_chat_ready = True
+                            logger.info(f"Chat input unlocked for session {session.session_id[:8]} after initial session/fingerprint setup.")
+                        else:
+                            st.session_state.is_chat_ready = False
+                            logger.info(f"Chat input remains locked for session {session.session_id[:8]} pending JS fingerprinting.")
+                    else:
+                        st.session_state.is_chat_ready = False
+
+                    # Clear loading state and rerun to show the actual page
+                    set_loading_state(False)
+                    st.rerun()
+                    return
+                    
+                except Exception as e:
+                    set_loading_state(False)
+                    st.error(f"⚠️ Error during loading: {str(e)}")
+                    logger.error(f"Loading state error: {e}", exc_info=True)
+                    return
+
+            # Normal page rendering (when not in loading state)
+            current_page = st.session_state.get('page')
+            
+            if current_page != "chat":
+                render_welcome_page(session_manager)
+            else:
+                # Get existing session
+                session = session_manager.get_session()
+                
+                if session is None or not session.active:
+                    logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
+                    for key in list(st.session_state.keys()):
+                        del st.session_state[key]
+                    st.session_state['page'] = None
+                    st.rerun()
+                    return
+                
+                # RENDER FINGERPRINTING FIRST, BEFORE TIMEOUT LOGIC
+                fingerprint_needed = (
+                    session is not None and (
+                        not session.fingerprint_id or
+                        session.fingerprint_method == "temporary_fallback_python" or
+                        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                    )
+                )
+                
+                if fingerprint_needed:
+                    fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+                    if not st.session_state.get(fingerprint_key, False):
+                        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                        st.session_state[fingerprint_key] = True
+                        logger.info(f"✅ Fingerprint component rendered for session {session.session_id[:8]}")
+
+                # NOW DO TIMEOUT LOGIC AFTER JAVASCRIPT IS RENDERED
+                if session:
+                    fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                    
+                    if fingerprint_is_stable:
+                        # Real fingerprint already obtained, enable chat immediately
+                        st.session_state.is_chat_ready = True
+                        if 'fingerprint_wait_start' in st.session_state:
+                            del st.session_state['fingerprint_wait_start']  # Clear timeout
+                    else:
+                        # Still waiting for JS fingerprinting
+                        current_time_float = time.time()
+                        wait_start = st.session_state.get('fingerprint_wait_start')
+                        
+                        if wait_start is None:
+                            # First time seeing temp fingerprint, start timeout
+                            st.session_state.fingerprint_wait_start = current_time_float
+                            st.session_state.is_chat_ready = False
+                            logger.info(f"Starting fingerprint wait timer for session {session.session_id[:8]}")
+                        elif current_time_float - wait_start > 20:  # 20 seconds timeout
+                            # Timeout reached, enable chat with fallback fingerprint
+                            st.session_state.is_chat_ready = True
+                            logger.warning(f"Fingerprint timeout (20s) - enabling chat with fallback for session {session.session_id[:8]}")
+                        else:
+                            # Still waiting within timeout period
+                            st.session_state.is_chat_ready = False
                 else:
-                    # Still waiting within timeout period
                     st.session_state.is_chat_ready = False
-        else:
-            st.session_state.is_chat_ready = False
 
-        # Right after timeout logic
-        if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
-            # Just rerun to keep the UI updating
-            st.rerun()
-            return  # Stop execution to allow rerun
-        
-        # Render activity tracker and check for timeout
-        activity_data_from_js = None
-        if session and session.session_id:
-            activity_tracker_state_key = f'has_activity_tracker_for_{session.session_id.replace("-", "_")}'
-            if activity_tracker_state_key not in st.session_state or \
-               st.session_state.get(f'{activity_tracker_state_key}_session_id_check') != session.session_id:
+                # Right after timeout logic
+                if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
+                    # Just rerun to keep the UI updating
+                    st.rerun()
+                    return  # Stop execution to allow rerun
                 
-                logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
-                activity_data_from_js = render_simple_activity_tracker(session.session_id)
-                st.session_state[activity_tracker_state_key] = True
-                st.session_state[f'{activity_tracker_state_key}_session_id_check'] = session.session_id
-                st.session_state.latest_activity_data_from_js = activity_data_from_js
-            else:
-                activity_data_from_js = st.session_state.latest_activity_data_from_js
-        
-        timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
-        if timeout_triggered:
-            return
+                # Render activity tracker and check for timeout
+                activity_data_from_js = None
+                if session and session.session_id:
+                    activity_tracker_state_key = f'has_activity_tracker_for_{session.session_id.replace("-", "_")}'
+                    if activity_tracker_state_key not in st.session_state or \
+                       st.session_state.get(f'{activity_tracker_state_key}_session_id_check') != session.session_id:
+                        
+                        logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
+                        activity_data_from_js = render_simple_activity_tracker(session.session_id)
+                        st.session_state[activity_tracker_state_key] = True
+                        st.session_state[f'{activity_tracker_state_key}_session_id_check'] = session.session_id
+                        st.session_state.latest_activity_data_from_js = activity_data_from_js
+                    else:
+                        activity_data_from_js = st.session_state.latest_activity_data_from_js
+                
+                timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+                if timeout_triggered:
+                    return
 
-        render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-        render_chat_interface_simplified(session_manager, session, activity_data_from_js)
+                render_sidebar(session_manager, session, st.session_state.pdf_exporter)
+                render_chat_interface_simplified(session_manager, session, activity_data_from_js)
 
-
-if __name__ == "__main__":
-    main_fixed()
+        if __name__ == "__main__":
+            main_fixed()
