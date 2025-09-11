@@ -1126,7 +1126,7 @@ class DatabaseManager:
                         }
                     # At exactly 10 but NO ACTIVE BAN - allow attempt at question 11
                     elif session.daily_question_count == 10:
-                    return {
+                        return {
                             'allowed': True,
                             'tier': 1,
                             'remaining': 0,
