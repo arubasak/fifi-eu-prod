@@ -5053,148 +5053,206 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.session_state.verification_stage = None
                     st.success("You can now continue as a Guest.")
                     st.rerun()
+    elif current_stage == 'initial_check':
+            # Use a container to ensure clean rendering
+            prompt_container = st.container()
+            
+            with prompt_container:
+                email_to_reverify = session.pending_email
+                masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
+                st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
+                st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
+                
+                # FIXED: Use session ID for stable keys instead of timestamp
+                button_key_suffix = session.session_id[:8]  # First 8 chars of session ID
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Verify this email", 
+                                use_container_width=True, 
+                                key=f"reverify_yes_{button_key_suffix}"):
+                        
+                        # Add logging to debug
+                        logger.info(f"Verify button clicked in session {session.session_id[:8]}")
+                        
+                        session.recognition_response = "yes_reverify"
+                        session.declined_recognized_email_at = None
+                        st.session_state.verification_email = email_to_reverify
+                        st.session_state.verification_stage = "send_code_recognized"
+                        
+                        # Ensure session ID is preserved
+                        st.session_state.current_session_id = session.session_id
+                        
+                        session_manager.db.save_session(session)
+                        st.rerun()
+                with col2:
+                    if st.button("❌ No, I don't recognize the email", 
+                                use_container_width=True, 
+                                key=f"reverify_no_{button_key_suffix}"):
+                        
+                        logger.info(f"Decline button clicked in session {session.session_id[:8]}")
+                        
+                        session.recognition_response = "no_declined_reco"
+                        session.declined_recognized_email_at = datetime.now()
+                        session.user_type = UserType.GUEST 
+                        session.reverification_pending = False
+                        session.pending_user_type = None
+                        session.pending_email = None
+                        session.pending_full_name = None
+                        session.pending_zoho_contact_id = None
+                        session.pending_wp_token = None
+                        
+                        # Ensure session ID is preserved
+                        st.session_state.current_session_id = session.session_id
+                        
+                        session_manager.db.save_session(session)
+                        st.session_state.guest_continue_active = True
+                        st.session_state.chat_blocked_by_dialog = False
+                        st.session_state.verification_stage = None
+                        st.success("You can now continue as a Guest.")
+                        st.rerun()
 
-            elif current_stage == 'send_code_recognized':
-                # Don't show any buttons - just the sending status
-                email_to_verify = st.session_state.get('verification_email')
-                if email_to_verify:
-                    st.info(f"📧 **Sending verification code to {session_manager._mask_email(email_to_verify)}...**")
-                    
-                    # Immediately perform the send (the actual sending happens after this renders)
-                    st.session_state.send_code_now = True
+        elif current_stage == 'send_code_recognized':
+            # Don't show any buttons - just the sending status
+            email_to_verify = st.session_state.get('verification_email')
+            if email_to_verify:
+                st.info(f"📧 **Sending verification code to {session_manager._mask_email(email_to_verify)}...**")
+                
+                # Immediately perform the send (the actual sending happens after this renders)
+                st.session_state.send_code_now = True
+                st.rerun()
+
+        elif current_stage == 'email_entry':
+            skip_allowed = st.session_state.get('skip_email_allowed', True)
+            
+            st.info("🚀 You've used your guest questions. Please verify your email to unlock 10 questions per day!")
+            with st.form("email_verification_form", clear_on_submit=False):
+                st.markdown("**📧 Enter your email address to receive a verification code:**")
+                current_email_input = st.text_input(
+                    "Email Address", 
+                    placeholder="your@email.com", 
+                    value=st.session_state.get('verification_email', session.email or ""), 
+                    key="manual_email_input",
+                    help="We'll send you a 6-digit verification code that's valid for 1 minute."
+                )
+                
+                if skip_allowed:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+                    with col2:
+                        skip_button = st.form_submit_button("Skip for now", use_container_width=True)
+                        
+                    if skip_button:
+                        st.session_state.verification_stage = None
+                        st.session_state.chat_blocked_by_dialog = False
+                        st.info("You can verify your email later.")
+                        st.rerun()
+                else:
+                    submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+                
+                if submit_email:
+                    if current_email_input:
+                        result = session_manager.handle_guest_email_verification(session, current_email_input)
+                        if result['success']:
+                            st.success(result['message'])
+                            st.session_state.verification_email = current_email_input
+                            st.session_state.verification_stage = "code_entry"
+                            st.rerun()
+                        else:
+                            st.error(result['message'])
+                            # No "unusual activity" message due to evasion being disabled
+                            # Still keep this check in case of future changes.
+                            if "unusual activity" in result['message'].lower(): 
+                                st.stop()
+                    else:
+                        st.error("Please enter an email address to receive the code.")
+            
+        elif current_stage == 'code_entry':
+            verification_email = st.session_state.get('verification_email', session.email)
+            st.success(f"📧 **Verification code sent to** **{session_manager._mask_email(verification_email)}**")
+            st.info("📱 Check your email (including spam/junk folders). The code expires in 1 minute.")
+            
+            with st.form("code_verification_form", clear_on_submit=False):
+                code = st.text_input(
+                    "Enter 6-Digit Verification Code", 
+                    placeholder="123456", 
+                    max_chars=6, 
+                    key="verification_code_input",
+                    help="Enter the 6-digit code from your email"
+                )
+                col_verify, col_resend = st.columns(2)
+                with col_verify:
+                    submit_code = st.form_submit_button("✅ Verify Code", use_container_width=True)
+                with col_resend:
+                    resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
+                
+                if resend_code:
+                    if verification_email:
+                        with st.spinner("Resending verification code..."):
+                            verification_sent = session_manager.email_verification.send_verification_code(verification_email)
+                            if verification_sent:
+                                st.success("✅ New verification code sent! Check your email.")
+                                st.session_state.verification_stage = "code_entry"
+                            else:
+                                st.error("❌ Failed to resend code. Please try again later.")
+                    else:
+                        st.error("Error: No email address found. Please go back and enter your email.")
+                        st.session_state.verification_stage = "email_entry"
                     st.rerun()
 
-            elif current_stage == 'email_entry':
-                skip_allowed = st.session_state.get('skip_email_allowed', True)
-                
-                st.info("🚀 You've used your guest questions. Please verify your email to unlock 10 questions per day!")
-                with st.form("email_verification_form", clear_on_submit=False):
-                    st.markdown("**📧 Enter your email address to receive a verification code:**")
-                    current_email_input = st.text_input(
-                        "Email Address", 
-                        placeholder="your@email.com", 
-                        value=st.session_state.get('verification_email', session.email or ""), 
-                        key="manual_email_input",
-                        help="We'll send you a 6-digit verification code that's valid for 1 minute."
-                    )
-                    
-                    if skip_allowed:
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
-                        with col2:
-                            skip_button = st.form_submit_button("Skip for now", use_container_width=True)
-                            
-                        if skip_button:
-                            st.session_state.verification_stage = None
-                            st.session_state.chat_blocked_by_dialog = False
-                            st.info("You can verify your email later.")
-                            st.rerun()
-                    else:
-                        submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
-                    
-                    if submit_email:
-                        if current_email_input:
-                            result = session_manager.handle_guest_email_verification(session, current_email_input)
+                if submit_code:
+                    if code and len(code) == 6:
+                            with st.spinner("🔍 Verifying your code..."):
+                                result = session_manager.verify_email_code(session, code)
                             if result['success']:
                                 st.success(result['message'])
-                                st.session_state.verification_email = current_email_input
-                                st.session_state.verification_stage = "code_entry"
+                                st.balloons()
+                                # Clean up verification state on success
+                                st.session_state.chat_blocked_by_dialog = False
+                                st.session_state.verification_stage = None
+                                st.session_state.guest_continue_active = False
+                                st.session_state.final_answer_acknowledged = False
+                                st.session_state.gentle_prompt_shown = False
+                                st.session_state.email_verified_final_answer_acknowledged = False
+                                # NEW: Clear must_verify_email_immediately and skip_email_allowed on successful verification
+                                st.session_state.must_verify_email_immediately = False
+                                st.session_state.skip_email_allowed = True
+                                if 'just_answered' in st.session_state:
+                                     del st.session_state.just_answered
                                 st.rerun()
                             else:
                                 st.error(result['message'])
-                                # No "unusual activity" message due to evasion being disabled
-                                # Still keep this check in case of future changes.
-                                if "unusual activity" in result['message'].lower(): 
-                                    st.stop()
+                        elif code:
+                            st.error("Please enter a 6-digit verification code.")
                         else:
-                            st.error("Please enter an email address to receive the code.")
-                
-            elif current_stage == 'code_entry':
-                verification_email = st.session_state.get('verification_email', session.email)
-                st.success(f"📧 **Verification code sent to** **{session_manager._mask_email(verification_email)}**")
-                st.info("📱 Check your email (including spam/junk folders). The code expires in 1 minute.")
-                
-                with st.form("code_verification_form", clear_on_submit=False):
-                    code = st.text_input(
-                        "Enter 6-Digit Verification Code", 
-                        placeholder="123456", 
-                        max_chars=6, 
-                        key="verification_code_input",
-                        help="Enter the 6-digit code from your email"
-                    )
-                    col_verify, col_resend = st.columns(2)
-                    with col_verify:
-                        submit_code = st.form_submit_button("✅ Verify Code", use_container_width=True)
-                    with col_resend:
-                        resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
-                    
-                    if resend_code:
-                        if verification_email:
-                            with st.spinner("Resending verification code..."):
-                                verification_sent = session_manager.email_verification.send_verification_code(verification_email)
-                                if verification_sent:
-                                    st.success("✅ New verification code sent! Check your email.")
-                                    st.session_state.verification_stage = "code_entry"
-                                else:
-                                    st.error("❌ Failed to resend code. Please try again later.")
-                        else:
-                            st.error("Error: No email address found. Please go back and enter your email.")
-                            st.session_state.verification_stage = "email_entry"
+                            st.error("Please enter the verification code you received.")
+            
+        elif current_stage == 'declined_recognized_email_prompt_only':
+            # Non-blocking prompt for users who declined recognized email
+            st.session_state.chat_blocked_by_dialog = False
+
+            remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
+            st.info(f"✅ **Continuing as Guest** - You have **{remaining_questions} questions** remaining from your guest allowance.")
+            st.info("💡 **Pro Tip:** Verify your email anytime to unlock 10 questions/day + chat history saving.")
+
+            with st.expander("📧 Want to Verify a Different Email?", expanded=False):
+                col_opts1, col_opts2 = st.columns(2)
+                with col_opts1:
+                    if st.button("📧 Enter My Email for Verification", use_container_width=True, key="new_email_opt_btn"):
+                        st.session_state.verification_email = ""
+                        st.session_state.verification_stage = "email_entry"
+                        st.session_state.guest_continue_active = False
+                        st.rerun()
+                with col_opts2:
+                    if st.button("👍 Continue as Guest", use_container_width=True, key="continue_guest_btn"):
+                        st.session_state.guest_continue_active = True
+                        st.session_state.chat_blocked_by_dialog = False
+                        st.session_state.verification_stage = None
+                        st.success("Perfect! You can continue as a Guest. The email verification option will always be available.")
                         st.rerun()
 
-                    if submit_code:
-                        if code and len(code) == 6:
-                                with st.spinner("🔍 Verifying your code..."):
-                                    result = session_manager.verify_email_code(session, code)
-                                if result['success']:
-                                    st.success(result['message'])
-                                    st.balloons()
-                                    # Clean up verification state on success
-                                    st.session_state.chat_blocked_by_dialog = False
-                                    st.session_state.verification_stage = None
-                                    st.session_state.guest_continue_active = False
-                                    st.session_state.final_answer_acknowledged = False
-                                    st.session_state.gentle_prompt_shown = False
-                                    st.session_state.email_verified_final_answer_acknowledged = False
-                                    # NEW: Clear must_verify_email_immediately and skip_email_allowed on successful verification
-                                    st.session_state.must_verify_email_immediately = False
-                                    st.session_state.skip_email_allowed = True
-                                    if 'just_answered' in st.session_state:
-                                         del st.session_state.just_answered
-                                    st.rerun()
-                                else:
-                                    st.error(result['message'])
-                            elif code:
-                                st.error("Please enter a 6-digit verification code.")
-                            else:
-                                st.error("Please enter the verification code you received.")
-                
-            elif current_stage == 'declined_recognized_email_prompt_only':
-                # Non-blocking prompt for users who declined recognized email
-                st.session_state.chat_blocked_by_dialog = False
-
-                remaining_questions = session_manager.question_limits.question_limits[UserType.GUEST.value] - session.daily_question_count
-                st.info(f"✅ **Continuing as Guest** - You have **{remaining_questions} questions** remaining from your guest allowance.")
-                st.info("💡 **Pro Tip:** Verify your email anytime to unlock 10 questions/day + chat history saving.")
-
-                with st.expander("📧 Want to Verify a Different Email?", expanded=False):
-                    col_opts1, col_opts2 = st.columns(2)
-                    with col_opts1:
-                        if st.button("📧 Enter My Email for Verification", use_container_width=True, key="new_email_opt_btn"):
-                            st.session_state.verification_email = ""
-                            st.session_state.verification_stage = "email_entry"
-                            st.session_state.guest_continue_active = False
-                            st.rerun()
-                    with col_opts2:
-                        if st.button("👍 Continue as Guest", use_container_width=True, key="continue_guest_btn"):
-                            st.session_state.guest_continue_active = True
-                            st.session_state.chat_blocked_by_dialog = False
-                            st.session_state.verification_stage = None
-                            st.success("Perfect! You can continue as a Guest. The email verification option will always be available.")
-                            st.rerun()
-
-            return should_block_chat
+        return should_block_chat
 
         def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
             """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
