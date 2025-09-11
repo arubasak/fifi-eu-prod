@@ -1130,7 +1130,7 @@ class DatabaseManager:
                             'allowed': True,
                             'tier': 1,
                             'remaining': 0,
-                            'warning': Next question will trigger a 5-minute break before Tier 2."
+                            'warning': "Next question will trigger a 5-minute break before Tier 2."
                         }
                     else: # Questions 11-19
                         remaining = user_limit - session.daily_question_count
