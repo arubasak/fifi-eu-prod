@@ -1113,15 +1113,24 @@ class DatabaseManager:
                         'reason': reason_str, # New specific reason
                         'message': self._get_ban_message(session, reason_str)
                     }
-                # If at 10 or more, but less than 20 (user_limit)
+                # If at 10 or more, but less than 20
                 elif session.daily_question_count >= 10:
-                    # If daily_question_count is exactly 10, this is the trigger for the Tier 1 ban.
-                    if session.daily_question_count == 10:
-                        reason_str = 'registered_user_tier1_limit'
+                    if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
+                        time_remaining = session.ban_end_time - datetime.now()
                         return {
                             'allowed': False,
-                            'reason': reason_str, # New specific reason
-                            'message': self._get_ban_message(session, reason_str)
+                            'reason': 'banned'
+                            'ban_type': BanStatus.ONE_HOUR.value,
+                            'time_remaining': time_remaining,
+                            'message': self._get_ban_message(session, 'registered_user_tier1_limit')
+                        }
+                    # At exactly 10 but NO ACTIVE BAN - allow attempt at question 11
+                    elif session.daily_question_count == 10:
+                    return {
+                            'allowed': True,
+                            'tier': 1,
+                            'remaining': 0,
+                            'warning': Next question will trigger a 5-minute break before Tier 2."
                         }
                     else: # Questions 11-19
                         remaining = user_limit - session.daily_question_count
