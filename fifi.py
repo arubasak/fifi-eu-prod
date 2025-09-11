@@ -3212,86 +3212,86 @@ class SessionManager:
                     )
                     
                     logger.info(f"Email verification for {session.session_id[:8]}: is_new_email={is_new_email}, is_same_session_upgrade={is_same_session_upgrade}, previous_emails={previous_emails}")
-            except Exception as e:
-                logger.error(f"Error checking email history for new email determination: {e}")
-                is_new_email = True # Default to clean slate on error
+                except Exception as e:
+                    logger.error(f"Error checking email history for new email determination: {e}")
+                    is_new_email = True # Default to clean slate on error
 
-            if session.reverification_pending:
-                # Reclaim existing user type and identity (keep inherited counts from _attempt_fingerprint_inheritance)
-                session.user_type = session.pending_user_type if session.pending_user_type else UserType.EMAIL_VERIFIED_GUEST # Fallback
-                session.email = session.pending_email
-                session.full_name = session.pending_full_name
-                session.zoho_contact_id = session.pending_zoho_contact_id
-                session.wp_token = session.pending_wp_token
-                session.reverification_pending = False
-                session.pending_user_type = None
-                session.pending_email = None
-                session.pending_full_name = None
-                session.pending_zoho_contact_id = None
-                session.pending_wp_token = None
-                logger.info(f"✅ User {session.session_id[:8]} reclaimed higher privilege: {session.user_type.value} via re-verification for {session.email}")
-            else:
-                # New email verification or existing email as guest without pending higher privilege
-                old_daily_count = session.daily_question_count  # PRESERVE current count
-                session.user_type = UserType.EMAIL_VERIFIED_GUEST
-                
-                # UPDATED: Preserve counts for same session upgrade (GUEST -> EMAIL_VERIFIED_GUEST)
-                if is_same_session_upgrade:
-                    logger.info(f"🔄 SAME SESSION UPGRADE: Preserving question count {old_daily_count} from GUEST to EMAIL_VERIFIED_GUEST for {session.session_id[:8]}")
-                    # Keep existing counts - don't reset anything
-                elif is_new_email:
-                    # CLEAN SLATE for truly new emails (shared device protection)
-                    logger.info(f"🧹 CLEAN SLATE: New email {email_to_verify} gets fresh start, resetting all counts and bans for {session.session_id[:8]}")
-                    session.daily_question_count = 0
-                    session.total_question_count = 0
-                    session.last_question_time = None
-                    session.question_limit_reached = False
-                    session.ban_status = BanStatus.NONE
-                    session.ban_start_time = None
-                    session.ban_end_time = None
-                    session.ban_reason = None
-                    session.evasion_count = 0
-                    session.current_penalty_hours = 0
-                    session.escalation_level = 0
+                if session.reverification_pending:
+                    # Reclaim existing user type and identity (keep inherited counts from _attempt_fingerprint_inheritance)
+                    session.user_type = session.pending_user_type if session.pending_user_type else UserType.EMAIL_VERIFIED_GUEST # Fallback
+                    session.email = session.pending_email
+                    session.full_name = session.pending_full_name
+                    session.zoho_contact_id = session.pending_zoho_contact_id
+                    session.wp_token = session.pending_wp_token
+                    session.reverification_pending = False
+                    session.pending_user_type = None
+                    session.pending_email = None
+                    session.pending_full_name = None
+                    session.pending_zoho_contact_id = None
+                    session.pending_wp_token = None
+                    logger.info(f"✅ User {session.session_id[:8]} reclaimed higher privilege: {session.user_type.value} via re-verification for {session.email}")
                 else:
-                    logger.info(f"♻️ EXISTING EMAIL: For {email_to_verify}, keeping counts as determined by inheritance.")
+                    # New email verification or existing email as guest without pending higher privilege
+                    old_daily_count = session.daily_question_count  # PRESERVE current count
+                    session.user_type = UserType.EMAIL_VERIFIED_GUEST
                 
-                logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email} with {session.daily_question_count} questions")
+                    # UPDATED: Preserve counts for same session upgrade (GUEST -> EMAIL_VERIFIED_GUEST)
+                    if is_same_session_upgrade:
+                        logger.info(f"🔄 SAME SESSION UPGRADE: Preserving question count {old_daily_count} from GUEST to EMAIL_VERIFIED_GUEST for {session.session_id[:8]}")
+                        # Keep existing counts - don't reset anything
+                    elif is_new_email:
+                        # CLEAN SLATE for truly new emails (shared device protection)
+                        logger.info(f"🧹 CLEAN SLATE: New email {email_to_verify} gets fresh start, resetting all counts and bans for {session.session_id[:8]}")
+                        session.daily_question_count = 0
+                        session.total_question_count = 0
+                        session.last_question_time = None
+                        session.question_limit_reached = False
+                        session.ban_status = BanStatus.NONE
+                        session.ban_start_time = None
+                        session.ban_end_time = None
+                        session.ban_reason = None
+                        session.evasion_count = 0
+                        session.current_penalty_hours = 0
+                        session.escalation_level = 0
+                    else:
+                        logger.info(f"♻️ EXISTING EMAIL: For {email_to_verify}, keeping counts as determined by inheritance.")
+                
+                    logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email} with {session.daily_question_count} questions")
 
-            session.question_limit_reached = False
-            session.declined_recognized_email_at = None 
+                session.question_limit_reached = False
+                session.declined_recognized_email_at = None 
             
-            if session.last_activity is None:
-                session.last_activity = datetime.now()
+                if session.last_activity is None:
+                    session.last_activity = datetime.now()
 
-            # NEW: Re-run inheritance after email verification for Guest -> Email Verified transitions
-            # This ensures we pick up previous session counts now that we have an email
-            if not session.reverification_pending and not is_same_session_upgrade:
-                logger.info(f"🔄 Re-running inheritance after email verification for {session.session_id[:8]} with email {email_to_verify}")
-                self._attempt_fingerprint_inheritance(session)
-                logger.info(f"📊 Post-inheritance counts: daily={session.daily_question_count}, total={session.total_question_count}")
+                # NEW: Re-run inheritance after email verification for Guest -> Email Verified transitions
+                # This ensures we pick up previous session counts now that we have an email
+                if not session.reverification_pending and not is_same_session_upgrade:
+                    logger.info(f"🔄 Re-running inheritance after email verification for {session.session_id[:8]} with email {email_to_verify}")
+                    self._attempt_fingerprint_inheritance(session)
+                    logger.info(f"📊 Post-inheritance counts: daily={session.daily_question_count}, total={session.total_question_count}")
 
-            try:
-                self.db.save_session(session)
-            except Exception as e:
-                logger.error(f"Failed to save upgraded session: {e}")
+                try:
+                    self.db.save_session(session)
+                except Exception as e:
+                    logger.error(f"Failed to save upgraded session: {e}")
             
-            return {
-                'success': True,
-                'message': '✅ Email verified successfully!'
-            }
-        else:
+                return {
+                    'success': True,
+                    'message': '✅ Email verified successfully!'
+                }
+            else:
+                return {
+                    'success': False,
+                    'message': 'Invalid verification code. Please check the code and try again.'
+                }
+            
+        except Exception as e:
+            logger.error(f"Email code verification failed: {e}")
             return {
                 'success': False,
-                'message': 'Invalid verification code. Please check the code and try again.'
+                'message': 'Verification failed. Please try again.'
             }
-            
-    except Exception as e:
-        logger.error(f"Email code verification failed: {e}")
-        return {
-            'success': False,
-            'message': 'Verification failed. Please try again.'
-        }
         
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
         """Authenticates user with WordPress and creates/updates session with conditional reset logic."""
