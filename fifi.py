@@ -1119,7 +1119,7 @@ class DatabaseManager:
                         time_remaining = session.ban_end_time - datetime.now()
                         return {
                             'allowed': False,
-                            'reason': 'banned'
+                            'reason': 'banned',
                             'ban_type': BanStatus.ONE_HOUR.value,
                             'time_remaining': time_remaining,
                             'message': self._get_ban_message(session, 'registered_user_tier1_limit')
