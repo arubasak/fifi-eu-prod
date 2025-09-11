@@ -1186,28 +1186,28 @@ class DatabaseManager:
             return penalty_minutes # Return minutes instead of hours
         
         def _apply_ban(self, session: UserSession, ban_type: BanStatus, reason: str, start_time: Optional[datetime] = None):
-            """Applies a ban to the session for a specified duration with immediate database persistence."""
-            ban_hours = {
-                BanStatus.ONE_HOUR.value: 0.0833,  # CHANGED: 5 minutes (1/12 hour) for testing
-                BanStatus.TWENTY_FOUR_HOUR.value: 24,
-                BanStatus.EVASION_BLOCK.value: session.current_penalty_hours
-            }.get(ban_type.value, 24)
+        """Applies a ban to the session for a specified duration with immediate database persistence."""
+        ban_hours = {
+            BanStatus.ONE_HOUR.value: 0.0833,  # CHANGED: 5 minutes (1/12 hour) for testing
+            BanStatus.TWENTY_FOUR_HOUR.value: 0.0833,  # UPDATED: 5 minutes for testing
+            BanStatus.EVASION_BLOCK.value: session.current_penalty_hours
+        }.get(ban_type.value, 0.0833)  # UPDATED: Default to 5 minutes for testing
 
-            session.ban_status = ban_type
-            session.ban_start_time = start_time if start_time else datetime.now()
-            session.ban_end_time = session.ban_start_time + timedelta(hours=ban_hours)
-            session.ban_reason = reason
-            session.question_limit_reached = True
-            
-            # CRITICAL: Save to database immediately
-            try:
-                # Access the session manager's db attribute for saving
-                st.session_state.session_manager.db.save_session(session)
-                logger.info(f"✅ Ban applied and saved to DB: {session.session_id[:8]} -> {ban_type.value} for {ban_hours}h")
-            except Exception as e:
-                logger.error(f"❌ Failed to save ban to database: {e}")
+        session.ban_status = ban_type
+        session.ban_start_time = start_time if start_time else datetime.now()
+        session.ban_end_time = session.ban_start_time + timedelta(hours=ban_hours)
+        session.ban_reason = reason
+        session.question_limit_reached = True
+        
+        # CRITICAL: Save to database immediately
+        try:
+            # Access the session manager's db attribute for saving
+            st.session_state.session_manager.db.save_session(session)
+            logger.info(f"✅ Ban applied and saved to DB: {session.session_id[:8]} -> {ban_type.value} for {ban_hours}h (5 min)")
+        except Exception as e:
+            logger.error(f"❌ Failed to save ban to database: {e}")
 
-            logger.info(f"Ban applied: Type={ban_type.value}, Duration={ban_hours}h, Start={session.ban_start_time}, Reason='{reason}'.")
+        logger.info(f"Ban applied: Type={ban_type.value}, Duration={ban_hours}h, Start={session.ban_start_time}, Reason='{reason}'.")
         
         def _get_ban_message(self, session: UserSession, ban_reason_from_limit_check: Optional[str] = None) -> str:
             """
@@ -2648,7 +2648,7 @@ class SessionManager:
     def _attempt_fingerprint_inheritance(self, session: UserSession):
         """
         Attempts to inherit session data from existing sessions with the same fingerprint AND same email.
-        Updated to prevent cross-email inheritance.
+        Updated to allow REGISTERED_USER inheritance and ensure proper user type precedence.
         """
         logger.info(f"🔄 Attempting fingerprint inheritance for session {session.session_id[:8]} with fingerprint {session.fingerprint_id[:8]}...")
 
@@ -2672,34 +2672,7 @@ class SessionManager:
 
             session.visitor_type = "returning_visitor"
             
-            # CRITICAL FIX: REGISTERED_USER always gets clean slate - NO INHERITANCE OF BANS/COUNTS
-            if session.user_type == UserType.REGISTERED_USER:
-                logger.info(f"🚫 REGISTERED_USER inheritance blocked for {session.session_id[:8]} - maintaining clean slate for bans/counts.")
-                
-                # Still inherit identity if it's from the same email and higher privilege
-                if session.email:
-                    same_email_sessions = [
-                        s for s in historical_fp_sessions 
-                        if s.email and s.email.lower() == session.email.lower()
-                    ]
-                    
-                    if same_email_sessions:
-                        source_for_identity = max(same_email_sessions, 
-                                                key=lambda s: (self._get_privilege_level(s.user_type), 
-                                                              s.last_activity or s.created_at))
-                        
-                        # Only inherit identity details, not counts
-                        if self._get_privilege_level(source_for_identity.user_type) >= self._get_privilege_level(session.user_type):
-                            session.full_name = source_for_identity.full_name or session.full_name
-                            session.zoho_contact_id = source_for_identity.zoho_contact_id or session.zoho_contact_id
-                            # Don't inherit wp_token for REGISTERED_USER as it's set by authentication
-                            logger.info(f"Inherited identity details from same-email session {source_for_identity.session_id[:8]}")
-
-                # For REGISTERED_USER, counts and bans should already be handled by authentication
-                return # Exit here for REGISTERED_USER
-
-            # --- For GUEST and EMAIL_VERIFIED_GUEST, proceed with detailed inheritance ---
-            # NEW: Filter by same email for count inheritance
+            # UPDATED: Allow REGISTERED_USER to inherit counts from same email sessions
             current_email = session.email.lower() if session.email else None
             
             # Separate identity inheritance from count inheritance
@@ -2722,9 +2695,15 @@ class SessionManager:
 
             # --- Pass 1: Find the highest privilege identity from ALL sessions (for identity) ---
             unique_emails_in_history = set()
+            highest_user_type_seen = UserType.GUEST
+            
             for s in all_sessions_for_identity:
                 if s.email:
                     unique_emails_in_history.add(s.email.lower())
+
+                # Track highest user type ever seen for this fingerprint
+                if self._get_privilege_level(s.user_type) > self._get_privilege_level(highest_user_type_seen):
+                    highest_user_type_seen = s.user_type
 
                 # Find the most authoritative session for identity
                 if self._get_privilege_level(s.user_type) > self._get_privilege_level(source_for_identity.user_type):
@@ -2733,7 +2712,59 @@ class SessionManager:
                     if s.last_activity and (not source_for_identity.last_activity or s.last_activity > source_for_identity.last_activity):
                         source_for_identity = s
 
-            # --- Pass 2: Find ban and count info from SAME EMAIL sessions only ---
+            # --- UPDATED: REGISTERED_USER inheritance logic ---
+            if session.user_type == UserType.REGISTERED_USER:
+                logger.info(f"🔄 REGISTERED_USER inheritance for {session.session_id[:8]} - checking for same-email count inheritance.")
+                
+                # Always clear bans for REGISTERED_USER (they logged in successfully)
+                session.ban_status = BanStatus.NONE
+                session.ban_start_time = None
+                session.ban_end_time = None
+                session.ban_reason = None
+                session.question_limit_reached = False
+                session.evasion_count = 0
+                session.current_penalty_hours = 0
+                session.escalation_level = 0
+                
+                # For REGISTERED_USER, inherit counts from same email sessions
+                if same_email_sessions_for_counts:
+                    # Find the most recent same-email session and inherit its counts
+                    most_recent_same_email = max(same_email_sessions_for_counts, 
+                                               key=lambda s: s.last_activity or s.created_at)
+                    
+                    # Check if it's within 24 hours (or 5 minutes for testing)
+                    time_check = most_recent_same_email.last_question_time or most_recent_same_email.last_activity or most_recent_same_email.created_at
+                    reset_window = timedelta(minutes=5)  # UPDATED: 5 minutes for testing
+                    
+                    if time_check and (now - time_check) < reset_window:
+                        # Inherit the question count from same email
+                        session.daily_question_count = most_recent_same_email.daily_question_count
+                        session.total_question_count = max(session.total_question_count, most_recent_same_email.total_question_count)
+                        session.last_question_time = most_recent_same_email.last_question_time
+                        
+                        logger.info(f"✅ REGISTERED_USER inherited question count {most_recent_same_email.daily_question_count} from same email session {most_recent_same_email.session_id[:8]}")
+                    else:
+                        # More than reset window, reset daily count
+                        session.daily_question_count = 0
+                        session.last_question_time = None
+                        logger.info(f"🕐 REGISTERED_USER same email found but >5min old, resetting daily count")
+                else:
+                    # No same-email history, start fresh
+                    session.daily_question_count = 0
+                    session.total_question_count = 0
+                    session.last_question_time = None
+                    logger.info(f"🆕 REGISTERED_USER no same-email history found, starting fresh")
+                
+                # Still inherit identity details if appropriate
+                if (not session.full_name and source_for_identity.full_name) or \
+                   (not session.zoho_contact_id and source_for_identity.zoho_contact_id):
+                    session.full_name = source_for_identity.full_name or session.full_name
+                    session.zoho_contact_id = source_for_identity.zoho_contact_id or session.zoho_contact_id
+                    logger.info(f"Inherited identity details from session {source_for_identity.session_id[:8]}")
+                
+                return # Exit here for REGISTERED_USER
+
+            # --- Pass 2: Find ban and count info from SAME EMAIL sessions only (for non-REGISTERED users) ---
             for s in same_email_sessions_for_counts:
                 # Find the single most recent ban to evaluate (same email only)
                 if s.ban_status != BanStatus.NONE and s.ban_end_time:
@@ -2756,7 +2787,22 @@ class SessionManager:
                 session.pending_zoho_contact_id = None
                 session.pending_wp_token = None
             
+            # --- UPDATED: User type precedence - always offer highest seen type ---
+            if highest_user_type_seen == UserType.REGISTERED_USER and session.user_type != UserType.REGISTERED_USER:
+                # This fingerprint has been used as REGISTERED_USER before, offer re-verification
+                registered_session = next((s for s in all_sessions_for_identity if s.user_type == UserType.REGISTERED_USER), None)
+                if registered_session and registered_session.email:
+                    session.reverification_pending = True
+                    session.pending_user_type = UserType.REGISTERED_USER
+                    session.pending_email = registered_session.email
+                    session.pending_full_name = registered_session.full_name
+                    session.pending_zoho_contact_id = registered_session.zoho_contact_id
+                    session.pending_wp_token = registered_session.wp_token
+                    logger.info(f"🔄 Offering REGISTERED_USER re-verification for {session.session_id[:8]} (highest precedence)")
+                    return  # Skip further inheritance for now, let user decide
+            
             # --- Pass 3: Determine daily count and ban status based on same-email findings ---
+            reset_window = timedelta(minutes=5)  # UPDATED: 5 minutes for testing
             ban_is_active = most_recent_ban_session and now < most_recent_ban_session.ban_end_time
             
             if ban_is_active:
@@ -2768,9 +2814,9 @@ class SessionManager:
                 session.ban_reason = most_recent_ban_session.ban_reason
                 session.question_limit_reached = True
                 
-                # Find the max daily count from same email sessions within the 24h window
+                # Find the max daily count from same email sessions within the reset window
                 for s in same_email_sessions_for_counts:
-                     if s.daily_question_count and s.last_question_time and (now - s.last_question_time < timedelta(hours=24)):
+                     if s.daily_question_count and s.last_question_time and (now - s.last_question_time < reset_window):
                          merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
             else:
                 # No active ban exists
@@ -2782,14 +2828,14 @@ class SessionManager:
                 session.question_limit_reached = False
 
                 # Check if the daily count should be reset based on last question time (same email)
-                if merged_last_question_time and (now - merged_last_question_time) < timedelta(hours=24):
+                if merged_last_question_time and (now - merged_last_question_time) < reset_window:
                     # The last question from same email was recent
                     for s in same_email_sessions_for_counts:
-                        if s.daily_question_count and s.last_question_time and (now - s.last_question_time < timedelta(hours=24)):
+                        if s.daily_question_count and s.last_question_time and (now - s.last_question_time < reset_window):
                             merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
                 else:
-                    # Last question was > 24h ago or no questions from same email
-                    logger.info("Inheritance: Last question time from same email is > 24h ago OR no same-email questions. Resetting daily count to 0.")
+                    # Last question was > reset window ago or no questions from same email
+                    logger.info("Inheritance: Last question time from same email is > 5min ago OR no same-email questions. Resetting daily count to 0.")
                     merged_daily_question_count = 0
                     merged_last_question_time = None
             
@@ -3127,7 +3173,10 @@ class SessionManager:
             return final_result
 
     def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
-        """Verifies the email verification code and upgrades user status with clean slate logic for new emails."""
+        """
+        Verifies the email verification code and upgrades user status.
+        Updated to preserve counts when upgrading from GUEST to EMAIL_VERIFIED_GUEST.
+        """
         try:
             email_to_verify = session.pending_email if session.reverification_pending else session.email
 
@@ -3144,7 +3193,9 @@ class SessionManager:
             if verification_success:
                 # Check if this is a NEW EMAIL (different from any previous sessions for this fingerprint)
                 is_new_email = True
+                is_same_session_upgrade = False  # NEW: Track if this is same session upgrade
                 previous_emails = set()
+                
                 try:
                     if session.fingerprint_id:
                         historical_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
@@ -3152,7 +3203,15 @@ class SessionManager:
                             if old_session.email:
                                 previous_emails.add(old_session.email.lower())
                         is_new_email = email_to_verify.lower() not in previous_emails
-                        logger.info(f"Email verification for {session.session_id[:8]}: is_new_email={is_new_email}, previous_emails={previous_emails}")
+                        
+                        # UPDATED: Check if this is same session upgrade (GUEST -> EMAIL_VERIFIED_GUEST)
+                        is_same_session_upgrade = (
+                            not session.reverification_pending and  # Not re-verification
+                            session.user_type == UserType.GUEST and  # Currently guest
+                            session.daily_question_count > 0  # Has asked questions in this session
+                        )
+                        
+                        logger.info(f"Email verification for {session.session_id[:8]}: is_new_email={is_new_email}, is_same_session_upgrade={is_same_session_upgrade}, previous_emails={previous_emails}")
                 except Exception as e:
                     logger.error(f"Error checking email history for new email determination: {e}")
                     is_new_email = True # Default to clean slate on error
@@ -3173,10 +3232,15 @@ class SessionManager:
                     logger.info(f"✅ User {session.session_id[:8]} reclaimed higher privilege: {session.user_type.value} via re-verification for {session.email}")
                 else:
                     # New email verification or existing email as guest without pending higher privilege
+                    old_daily_count = session.daily_question_count  # PRESERVE current count
                     session.user_type = UserType.EMAIL_VERIFIED_GUEST
                     
-                    # CLEAN SLATE for truly new emails (shared device protection)
-                    if is_new_email:
+                    # UPDATED: Preserve counts for same session upgrade (GUEST -> EMAIL_VERIFIED_GUEST)
+                    if is_same_session_upgrade:
+                        logger.info(f"🔄 SAME SESSION UPGRADE: Preserving question count {old_daily_count} from GUEST to EMAIL_VERIFIED_GUEST for {session.session_id[:8]}")
+                        # Keep existing counts - don't reset anything
+                    elif is_new_email:
+                        # CLEAN SLATE for truly new emails (shared device protection)
                         logger.info(f"🧹 CLEAN SLATE: New email {email_to_verify} gets fresh start, resetting all counts and bans for {session.session_id[:8]}")
                         session.daily_question_count = 0
                         session.total_question_count = 0
@@ -3192,7 +3256,7 @@ class SessionManager:
                     else:
                         logger.info(f"♻️ EXISTING EMAIL: For {email_to_verify}, keeping counts as determined by inheritance.")
                     
-                    logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email}")
+                    logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email} with {session.daily_question_count} questions")
 
                 session.question_limit_reached = False
                 session.declined_recognized_email_at = None 
