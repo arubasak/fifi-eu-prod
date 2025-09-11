@@ -4799,46 +4799,46 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.session_state.chat_blocked_by_dialog = True # Hard ban, block everything
         return True # Disable chat input
 
-    # Determine current user status
+# Determine current user status
     user_is_guest = (session.user_type.value == UserType.GUEST.value)
     user_is_email_verified = (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value)
     guest_limit_value = session_manager.question_limits.question_limits[UserType.GUEST.value]
     email_verified_limit_value = session_manager.question_limits.question_limits[UserType.EMAIL_VERIFIED_GUEST.value]
     daily_q_value = session.daily_question_count
-	is_guest_limit_hit = (user_is_guest and daily_q_value >= guest_limit_value)
-	is_email_verified_limit_hit = (user_is_email_verified and daily_q_value >= email_verified_limit_value)
-	
-	# NEW LOGIC: Only consider it "just hit limit" if the 'just_answered' flag is true
-	user_just_hit_guest_limit = is_guest_limit_hit and st.session_state.get('just_answered', False)
-	user_just_hit_email_verified_limit = is_email_verified_limit_hit and st.session_state.get('just_answered', False)
-	
-	# NEW: Check if forced verification is required
-	must_verify_immediately = st.session_state.get('must_verify_email_immediately', False)
-	skip_allowed = st.session_state.get('skip_email_allowed', True)
+    is_guest_limit_hit = (user_is_guest and daily_q_value >= guest_limit_value)
+    is_email_verified_limit_hit = (user_is_email_verified and daily_q_value >= email_verified_limit_value)
+    
+    # NEW LOGIC: Only consider it "just hit limit" if the 'just_answered' flag is true
+    user_just_hit_guest_limit = is_guest_limit_hit and st.session_state.get('just_answered', False)
+    user_just_hit_email_verified_limit = is_email_verified_limit_hit and st.session_state.get('just_answered', False)
+    
+    # NEW: Check if forced verification is required
+    must_verify_immediately = st.session_state.get('must_verify_email_immediately', False)
+    skip_allowed = st.session_state.get('skip_email_allowed', True)
 
-	should_show_prompt = False
-	should_block_chat = True  # Default to blocking when prompt is shown
+    should_show_prompt = False
+    should_block_chat = True  # Default to blocking when prompt is shown
 
-	# PRIORITY 1: Handle forced verification for returning guest (no skip option)
-	if user_is_guest and must_verify_immediately and daily_q_value == 0:
-		should_show_prompt = True
-		should_block_chat = True
-		if st.session_state.verification_stage is None:
-			st.session_state.verification_stage = 'forced_verification'
+    # PRIORITY 1: Handle forced verification for returning guest (no skip option)
+    if user_is_guest and must_verify_immediately and daily_q_value == 0:
+        should_show_prompt = True
+        should_block_chat = True
+        if st.session_state.verification_stage is None:
+            st.session_state.verification_stage = 'forced_verification'
 
-	# PRIORITY 2: Handle re-verification for recognized devices
-	elif session.reverification_pending:
-		should_show_prompt = True
-		should_block_chat = True
-		if st.session_state.verification_stage is None:
-			 st.session_state.verification_stage = 'initial_check'
-			 st.session_state.guest_continue_active = False
+    # PRIORITY 2: Handle re-verification for recognized devices
+    elif session.reverification_pending:
+        should_show_prompt = True
+        should_block_chat = True
+        if st.session_state.verification_stage is None:
+            st.session_state.verification_stage = 'initial_check'
+            st.session_state.guest_continue_active = False
 
-	# PRIORITY 3: Handle guest who JUST hit their limit (GENTLE approach with the reading button)
-	elif user_just_hit_guest_limit:
-		st.session_state.just_answered = False # Consume the flag
-		should_show_prompt = True
-		should_block_chat = False  # DON'T block immediately
+    # PRIORITY 3: Handle guest who JUST hit their limit (GENTLE approach with the reading button)
+    elif user_just_hit_guest_limit:
+        st.session_state.just_answered = False # Consume the flag
+        should_show_prompt = True
+        should_block_chat = False  # DON'T block immediately
 		
 		st.success("🎯 **You've explored FiFi AI with your 4 guest questions!**")
 		st.info("Take your time to read this answer. When you're ready, verify your email to unlock 10 questions per day + chat history saving!")
