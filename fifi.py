@@ -1186,28 +1186,28 @@ class DatabaseManager:
             return penalty_minutes # Return minutes instead of hours
         
         def _apply_ban(self, session: UserSession, ban_type: BanStatus, reason: str, start_time: Optional[datetime] = None):
-        """Applies a ban to the session for a specified duration with immediate database persistence."""
-        ban_hours = {
-            BanStatus.ONE_HOUR.value: 0.0833,  # CHANGED: 5 minutes (1/12 hour) for testing
-            BanStatus.TWENTY_FOUR_HOUR.value: 0.0833,  # UPDATED: 5 minutes for testing
-            BanStatus.EVASION_BLOCK.value: session.current_penalty_hours
-        }.get(ban_type.value, 0.0833)  # UPDATED: Default to 5 minutes for testing
+            """Applies a ban to the session for a specified duration with immediate database persistence."""
+            ban_hours = {
+                BanStatus.ONE_HOUR.value: 0.0833,  # CHANGED: 5 minutes (1/12 hour) for testing
+                BanStatus.TWENTY_FOUR_HOUR.value: 0.0833,  # UPDATED: 5 minutes for testing
+                BanStatus.EVASION_BLOCK.value: session.current_penalty_hours
+            }.get(ban_type.value, 0.0833)  # UPDATED: Default to 5 minutes for testing
 
-        session.ban_status = ban_type
-        session.ban_start_time = start_time if start_time else datetime.now()
-        session.ban_end_time = session.ban_start_time + timedelta(hours=ban_hours)
-        session.ban_reason = reason
-        session.question_limit_reached = True
+            session.ban_status = ban_type
+            session.ban_start_time = start_time if start_time else datetime.now()
+            session.ban_end_time = session.ban_start_time + timedelta(hours=ban_hours)
+            session.ban_reason = reason
+            session.question_limit_reached = True
         
-        # CRITICAL: Save to database immediately
-        try:
-            # Access the session manager's db attribute for saving
-            st.session_state.session_manager.db.save_session(session)
-            logger.info(f"✅ Ban applied and saved to DB: {session.session_id[:8]} -> {ban_type.value} for {ban_hours}h (5 min)")
-        except Exception as e:
-            logger.error(f"❌ Failed to save ban to database: {e}")
+            # CRITICAL: Save to database immediately
+            try:
+                # Access the session manager's db attribute for saving
+                st.session_state.session_manager.db.save_session(session)
+                logger.info(f"✅ Ban applied and saved to DB: {session.session_id[:8]} -> {ban_type.value} for {ban_hours}h (5 min)")
+            except Exception as e:
+                logger.error(f"❌ Failed to save ban to database: {e}")
 
-        logger.info(f"Ban applied: Type={ban_type.value}, Duration={ban_hours}h, Start={session.ban_start_time}, Reason='{reason}'.")
+            logger.info(f"Ban applied: Type={ban_type.value}, Duration={ban_hours}h, Start={session.ban_start_time}, Reason='{reason}'.")
         
         def _get_ban_message(self, session: UserSession, ban_reason_from_limit_check: Optional[str] = None) -> str:
             """
