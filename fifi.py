@@ -4980,7 +4980,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
             st.info("🔒 **Finalizing setup...** Almost ready!")
         
         # Add progress bar
-        progress_value = min(elapsed / FINGERPRINT_WAIT_TIMEOUT_SECONDS, 1.0)
+        progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
         st.progress(progress_value, text="Initializing FiFi AI Assistant")
     
     st.markdown("---")
@@ -6391,7 +6391,7 @@ def main_fixed():
 
         # Right after timeout logic
         ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant for condition
-        if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start') and (time.time() - st.session_state.get('fingerprint_wait_start', 0) < FINGERPRINT_WAIT_TIMEOUT_SECONDS):
+        if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start') and (time.time() - st.session_state.get('fingerprint_wait_start', 0) < FINGERPRINT_TIMEOUT_SECONDS):
             # Just rerun to keep the UI updating
             st.rerun()
             return  # Stop execution to allow rerun
