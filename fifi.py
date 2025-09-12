@@ -4965,13 +4965,13 @@ def render_welcome_page(session_manager: 'SessionManager'):
     # Show loading overlay if in loading state
     if show_loading_overlay():
         return
-    ## CHANGE: Use FINGERPRINT_WAIT_TIMEOUT_SECONDS constant
+    ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant
     session = session_manager.get_session() if st.session_state.get('current_session_id') else None
     if session and not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
         current_time_float = time.time()
         wait_start = st.session_state.get('fingerprint_wait_start')
         elapsed = current_time_float - wait_start
-        remaining = max(0, FINGERPRINT_WAIT_TIMEOUT_SECONDS - elapsed)
+        remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed)
         
         if remaining > 0:
             st.info(f"🔒 **Initializing secure session...** ({remaining:.0f}s remaining)")
@@ -6390,7 +6390,7 @@ def main_fixed():
             st.session_state.is_chat_ready = False
 
         # Right after timeout logic
-        ## CHANGE: Use FINGERPRINT_WAIT_TIMEOUT_SECONDS constant for condition
+        ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant for condition
         if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start') and (time.time() - st.session_state.get('fingerprint_wait_start', 0) < FINGERPRINT_WAIT_TIMEOUT_SECONDS):
             # Just rerun to keep the UI updating
             st.rerun()
