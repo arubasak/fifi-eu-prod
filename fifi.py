@@ -1767,30 +1767,39 @@ class PineconeAssistantTool:
             assistants_list = self.pc.assistant.list_assistants()
             if self.assistant_name not in [a.name for a in assistants_list]:
                 logger.warning(f"Assistant '{self.assistant_name}' not found. Creating...")
-                return self.pc.assistant.create_assistant(
+                # Create new assistant
+                self.pc.assistant.create_assistant(
                     assistant_name=self.assistant_name, 
                     instructions=instructions
                 )
+                logger.info(f"✅ Created assistant '{self.assistant_name}'")
             else:
-                logger.info(f"Connected to assistant: '{self.assistant_name}'")
-                assistant_obj = self.pc.assistant.Assistant(assistant_name=self.assistant_name)
-            
-                # Update instructions (no describe() needed)
+                logger.info(f"Found existing assistant: '{self.assistant_name}'")
+                # Update instructions using the correct method
                 try:
-                    assistant_obj.update(instructions=instructions)
-                    logger.info("✅ Instructions updated successfully")
+                    result = self.pc.assistant.update_assistant(
+                        assistant_name=self.assistant_name,
+                        instructions=instructions
+                    )
+                    logger.info(f"✅ Instructions updated for '{self.assistant_name}'")
+                    logger.info(f"Update result: {result}")
                 except Exception as e:
                     logger.warning(f"⚠️ Could not update instructions: {e}")
-                    # Continue anyway - assistant still works
-            
-                # Verify assistant is working by checking files
-                try:
-                    files = assistant_obj.list_files()
-                    logger.info(f"✅ Assistant verified - has {len(files)} files")
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not list files: {e}")
-            
-                return assistant_obj
+        
+            # Create assistant instance for chat operations
+            assistant_obj = self.pc.assistant.Assistant(assistant_name=self.assistant_name)
+        
+            # Verify assistant status using correct method
+            try:
+                status = self.pc.assistant.describe_assistant(
+                    assistant_name=self.assistant_name
+                )
+                logger.info(f"✅ Assistant status: {status.get('status', 'Unknown')}")
+                logger.info(f"✅ Assistant has {len(assistant_obj.list_files())} files")
+            except Exception as e:
+                logger.warning(f"Could not get assistant status: {e}")
+        
+            return assistant_obj
             
         except Exception as e:
             logger.error(f"Failed to initialize Pinecone Assistant: {e}")
