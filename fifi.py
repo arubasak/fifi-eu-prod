@@ -1805,68 +1805,69 @@ class PineconeAssistantTool:
             logger.error(f"Failed to initialize Pinecone Assistant: {e}")
             return None
     def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]:
-    if not self.assistant: 
-        return None
-    try:
-        pinecone_messages = [
-            PineconeMessage(
-                role="user" if isinstance(msg, HumanMessage) else "assistant", 
-                content=msg.content
-            ) for msg in chat_history
-        ]
+        if not self.assistant: 
+            return None
+        try:
+            pinecone_messages = [
+                PineconeMessage(
+                    role="user" if isinstance(msg, HumanMessage) else "assistant", 
+                    content=msg.content
+                ) for msg in chat_history
+            ]
         
-        response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o")
-        content = response.message.content
+            response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o")
+            content = response.message.content
         
-        # Process content to add UTM parameters to all links
-        import re
-        def add_utm_to_url(match):
-            url = match.group(2)
-            if 'utm_source=fifi-eu' not in url:
-                separator = '&' if '?' in url else '?'
-                return f'{match.group(1)}({url}{separator}utm_source=fifi-eu)'
-            return match.group(0)
+            # Process content to add UTM parameters to all links
+            import re
+            def add_utm_to_url(match):
+                url = match.group(2)
+                if 'utm_source=fifi-eu' not in url:
+                    separator = '&' if '?' in url else '?'
+                    return f'{match.group(1)}({url}{separator}utm_source=fifi-eu)'
+                return match.group(0)
         
-        # Add UTM to all markdown links in content
-        content = re.sub(r'(\[.*?\])\((https?://[^)]+)\)', add_utm_to_url, content)
+            # Add UTM to all markdown links in content
+            content = re.sub(r'(\[.*?\])\((https?://[^)]+)\)', add_utm_to_url, content)
         
-        # Check if content already has a Sources section
-        has_sources_section = "**Sources:**" in content or "**sources:**" in content.lower()
+            # Check if content already has a Sources section
+            has_sources_section = "**Sources:**" in content or "**sources:**" in content.lower()
         
-        # If no Sources section exists, extract URLs and add one
-        if not has_sources_section:
-            url_pattern = r'\[.*?\]\((https?://[^)]+)\)'
-            found_urls = re.findall(url_pattern, content)
-            if found_urls:
-                logger.info(f"Adding Sources section with {len(found_urls)} URLs")
-                citations_header = "\n\n---\n**Sources:**\n"
-                numbered_citations = []
-                seen_urls = set()
-                for url in found_urls:
-                    if url not in seen_urls:
-                        numbered_citations.append(f"[{len(seen_urls) + 1}] {url}")
-                        seen_urls.add(url)
+            # If no Sources section exists, extract URLs and add one
+            if not has_sources_section:
+                url_pattern = r'\[.*?\]\((https?://[^)]+)\)'
+                found_urls = re.findall(url_pattern, content)
+                if found_urls:
+                    logger.info(f"Adding Sources section with {len(found_urls)} URLs")
+                    citations_header = "\n\n---\n**Sources:**\n"
+                    numbered_citations = []
+                    seen_urls = set()
+                    for url in found_urls:
+                        if url not in seen_urls:
+                            numbered_citations.append(f"[{len(seen_urls) + 1}] {url}")
+                            seen_urls.add(url)
                 
-                if numbered_citations:
-                    content += citations_header + "\n".join(numbered_citations)
+                    if numbered_citations:
+                        content += citations_header + "\n".join(numbered_citations)
         
-        # Determine if we have citations based on URLs in content
-        has_citations = bool(re.findall(r'\[.*?\]\((https?://[^)]+)\)', content))
+            # Determine if we have citations based on URLs in content
+            has_citations = bool(re.findall(r'\[.*?\]\((https?://[^)]+)\)', content))
         
-        return {
-            "content": content, 
-            "success": True, 
-            "source": "FiFi",
-            "has_citations": has_citations,
-            "response_length": len(content),
-            "used_pinecone": True,
-            "used_search": False,
-            "has_inline_citations": has_citations,
-            "safety_override": False
-        }
-    except Exception as e:
-        logger.error(f"Pinecone Assistant error: {str(e)}", exc_info=True)
-        return None
+            return {
+                "content": content, 
+                "success": True, 
+                "source": "FiFi",
+                "has_citations": has_citations,
+                "response_length": len(content),
+                "used_pinecone": True,
+                "used_search": False,
+                "has_inline_citations": has_citations,
+                "safety_override": False
+            }
+        except Exception as e:
+            logger.error(f"Pinecone Assistant error: {str(e)}", exc_info=True)
+            return None
+    
 # CHANGE: LLM-Powered Query Reformulation (Replaces old TavilyFallbackAgent entirely)
 class TavilyFallbackAgent:
     def __init__(self, tavily_api_key: str, openai_api_key: str = None):
