@@ -1819,18 +1819,6 @@ class PineconeAssistantTool:
             content = response.message.content
             has_citations = False
             
-            # Process content to add UTM parameters to all links
-            import re
-            def add_utm_to_url(match):
-                url = match.group(2)
-                if 'utm_source=fifi-eu' not in url:
-                    separator = '&' if '?' in url else '?'
-                    return f'{match.group(1)}({url}{separator}utm_source=fifi-eu)'
-                return match.group(0)
-            
-            # Add UTM to all markdown links in content
-            content = re.sub(r'(\[.*?\])\((https?://[^)]+)\)', add_utm_to_url, content)
-            
             # Try to get citations from Pinecone response object
             citations_list = []
             if hasattr(response, 'citations') and response.citations:
@@ -1930,23 +1918,6 @@ class PineconeAssistantTool:
                 logger.info(f"Added {len(citations_list)} sources to response")
             else:
                 logger.info("No source URLs found in Pinecone citations")
-                
-                # Fallback: Extract URLs from processed content
-                url_pattern = r'\[.*?\]\((https?://[^)]+)\)'
-                found_urls = re.findall(url_pattern, content)
-                if found_urls:
-                    logger.info(f"Extracting {len(found_urls)} URLs from content as fallback")
-                    citations_header = "\n\n---\n**Sources:**\n"
-                    numbered_citations = []
-                    seen_urls = set()
-                    for url in found_urls:
-                        if url not in seen_urls:
-                            numbered_citations.append(f"[{len(seen_urls) + 1}] {url}")
-                            seen_urls.add(url)
-                    
-                    if numbered_citations:
-                        content += citations_header + "\n".join(numbered_citations)
-                        has_citations = True
             
             return {
                 "content": content, 
@@ -1956,7 +1927,7 @@ class PineconeAssistantTool:
                 "response_length": len(content),
                 "used_pinecone": True,
                 "used_search": False,
-                "has_inline_citations": bool(citations_list or has_citations),
+                "has_inline_citations": bool(citations_list),
                 "safety_override": False
             }
         except Exception as e:
