@@ -40,7 +40,7 @@ from production_config import (
     CRM_SAVE_MIN_QUESTIONS, EVASION_BAN_HOURS,
     FASTAPI_EMERGENCY_SAVE_URL, FASTAPI_EMERGENCY_SAVE_TIMEOUT,
     DAILY_RESET_WINDOW, SESSION_TIMEOUT_DELTA,
-    FINGERPRINT_WAIT_TIMEOUT_SECONDS # <--- ADDED FINGERPRINT_WAIT_TIMEOUT_SECONDS
+    FINGERPRINT_TIMEOUT_SECONDS # <--- ADDED FINGERPRINT_TIMEOUT_SECONDS
 )
 
 # NEW: Import for simplified browser reload
@@ -5017,7 +5017,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
         current_time_float = time.time()
         wait_start = st.session_state.get('fingerprint_wait_start')
         elapsed = current_time_float - wait_start
-        remaining = max(0, FINGERPRINT_WAIT_TIMEOUT_SECONDS - elapsed)
+        remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed)
         
         if remaining > 0:
             st.info(f"🔒 **Initializing secure session...** ({remaining:.0f}s remaining)")
@@ -5026,7 +5026,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
             st.info("🔒 **Finalizing setup...** Almost ready!")
         
         # Add progress bar
-        progress_value = min(elapsed / FINGERPRINT_WAIT_TIMEOUT_SECONDS, 1.0)
+        progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
         st.progress(progress_value, text="Initializing FiFi AI Assistant")
     
     st.markdown("---")
@@ -5811,7 +5811,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         current_time_float = time.time() # Use float for direct comparison with time.time()
         wait_start = st.session_state.get('fingerprint_wait_start')
         elapsed = current_time_float - wait_start
-        remaining = max(0, FINGERPRINT_WAIT_TIMEOUT_SECONDS - elapsed) ## CHANGE: Use constant
+        remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed) ## CHANGE: Use constant
         
         if remaining > 0:
             st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
@@ -5820,7 +5820,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             st.info("🔒 **Finalizing setup...** Almost ready!")
         
         # Add a subtle progress bar
-        progress_value = min(elapsed / FINGERPRINT_WAIT_TIMEOUT_SECONDS, 1.0) ## CHANGE: Use constant
+        progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0) ## CHANGE: Use constant
         st.progress(progress_value, text="Session Security Setup")
         st.markdown("---")
 
@@ -6432,11 +6432,11 @@ def main_fixed():
                         st.session_state.fingerprint_wait_start = current_time_float
                         st.session_state.is_chat_ready = False
                         logger.info(f"Starting fingerprint wait timer for non-registered session {session.session_id[:8]}")
-                    ## CHANGE: Use FINGERPRINT_WAIT_TIMEOUT_SECONDS constant
-                    elif current_time_float - wait_start > FINGERPRINT_WAIT_TIMEOUT_SECONDS:  # Timeout
+                    ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant
+                    elif current_time_float - wait_start > FINGERPRINT_TIMEOUT_SECONDS:  # Timeout
                         # Timeout reached, enable chat with fallback fingerprint
                         st.session_state.is_chat_ready = True
-                        logger.warning(f"Fingerprint timeout ({FINGERPRINT_WAIT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
+                        logger.warning(f"Fingerprint timeout ({FINGERPRINT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
                     else:
                         # Still waiting within timeout period
                         st.session_state.is_chat_ready = False
@@ -6444,11 +6444,11 @@ def main_fixed():
             st.session_state.is_chat_ready = False
 
         # Right after timeout logic
-        ## CHANGE: Use FINGERPRINT_WAIT_TIMEOUT_SECONDS constant for condition
+        ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant for condition
         # This condition now correctly ensures only non-registered users (who are not yet chat_ready and are still waiting for FP) trigger reruns.
         if session and session.user_type != UserType.REGISTERED_USER and \
            not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start') and \
-           (time.time() - st.session_state.get('fingerprint_wait_start', 0) < FINGERPRINT_WAIT_TIMEOUT_SECONDS):
+           (time.time() - st.session_state.get('fingerprint_wait_start', 0) < FINGERPRINT_TIMEOUT_SECONDS):
             # Just rerun to keep the UI updating
             st.rerun()
             return  # Stop execution to allow rerun
