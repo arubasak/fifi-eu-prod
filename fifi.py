@@ -2098,51 +2098,80 @@ OUTPUT: Only the optimized search query, nothing else."""
             "reason": "Standard safety fallback"
         }
 
-    def query(self, message: str, chat_history: List[BaseMessage], pinecone_error_type: str = None) -> Dict[str, Any]:
+    def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]:
+        if not self.assistant: 
+            return None
         try:
-            # STEP 1: Reformulate query with conversation context
-            # Use the new LLM-powered reformulation
-            standalone_query = self.reformulate_query_for_search(message, chat_history)
+            pinecone_messages = [
+                PineconeMessage(
+                    role="user" if isinstance(msg, HumanMessage) else "assistant", 
+                    content=msg.content
+                ) for msg in chat_history
+            ]
             
-            # STEP 2: Determine search strategy
-            strategy = self.determine_search_strategy(standalone_query, pinecone_error_type)
+            response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o")
+            content = response.message.content
+            has_citations = False
             
-            # STEP 3: Build Tavily search parameters with reformulated query
-            search_params = {
-                "query": standalone_query,
-                "max_results": 5,
-                "search_depth": "advanced"
-            }
-
-            if strategy.get("exclude_domains"):
-                search_params["exclude_domains"] = strategy["exclude_domains"]
-                logger.info(f"🌐 Tavily worldwide search excluding {len(strategy['exclude_domains'])} competitor domains")
-            else:
-                logger.info(f"🌐 Tavily worldwide search with reformulated query: {standalone_query}")
-
-            # STEP 4: Execute search with standalone query
-            search_results = self.tavily_tool.invoke(input=search_params)
-            synthesized_content = self.synthesize_search_results(search_results, standalone_query)
-            final_content = self.add_utm_to_links(synthesized_content)
+            # Extract numbered list items and their corresponding URLs
+            import re
+            # Pattern to find numbered list items with links
+            # This looks for patterns like: 1. **Product Name** ... [More details](url)
+            lines = content.split('\n')
+            sources_dict = {}
+            
+            current_number = None
+            for line in lines:
+                # Check if line starts with a number (e.g., "1.", "2.", etc.)
+                number_match = re.match(r'^(\d+)\.\s+', line)
+                if number_match:
+                    current_number = number_match.group(1)
+                
+                # Find links in the current line
+                if current_number:
+                    link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+                    links = re.findall(link_pattern, line)
+                    for link_text, url in links:
+                        if 'details' in link_text.lower() or url.startswith('http'):
+                            sources_dict[current_number] = url
+                            current_number = None  # Reset after finding the link
+                            break
+            
+            # Create Sources section if we found any links
+            if sources_dict:
+                has_citations = True
+                citations_header = "\n\n---\n**Sources:**\n"
+                citations_list = []
+                
+                # Sort by number and create citations
+                for num in sorted(sources_dict.keys(), key=int):
+                    url = sources_dict[num]
+                    # Add UTM parameters if not already present
+                    if 'utm_source=fifi-eu' not in url:
+                        if '?' in url:
+                            url += '&utm_source=fifi-eu'
+                        else:
+                            url += '?utm_source=fifi-eu'
+                    
+                    citations_list.append(f"[{num}] {url}")
+                
+                if citations_list:
+                    content += citations_header + "\n".join(citations_list)
             
             return {
-                "content": final_content,
-                "success": True,
-                "source": f"FiFi Web Search ({strategy['strategy']})",
-                "used_pinecone": False,
-                "used_search": True,
-                "has_citations": True,
-                "has_inline_citations": True,
-                "safety_override": False,
-                "search_strategy": strategy["strategy"],
-                "search_reason": strategy["reason"],
-                "original_question": message,
-                "reformulated_query": standalone_query
+                "content": content, 
+                "success": True, 
+                "source": "FiFi",
+                "has_citations": has_citations,
+                "response_length": len(content),
+                "used_pinecone": True,
+                "used_search": False,
+                "has_inline_citations": has_citations,
+                "safety_override": False
             }
         except Exception as e:
-            logger.error(f"Tavily search error: {str(e)}")
+            logger.error(f"Pinecone Assistant error: {str(e)}")
             return None
-
 class EnhancedAI:
     """Enhanced AI system with improved error handling and bidirectional fallback."""
     
