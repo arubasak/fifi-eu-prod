@@ -3000,133 +3000,133 @@ class SessionManager:
     def get_session(self) -> Optional[UserSession]:
         """Gets or creates the current user session with enhanced validation."""
         logger.info(f"🔍 get_session() called - current_session_id in state: {st.session_state.get('current_session_id', 'None')}")
-
+    
         # Perform periodic cleanup
         self._periodic_cleanup()
 
         try:
-        session_id = st.session_state.get('current_session_id')
+            session_id = st.session_state.get('current_session_id')
         
-        if session_id:
-            # ADD THIS: Check if session loading is already in progress
-            if st.session_state.get(f'loading_{session_id}', False):
-                logger.warning(f"Session {session_id[:8]} already being loaded, skipping")
-                return None
+            if session_id:
+                # ADD THIS: Check if session loading is already in progress
+                if st.session_state.get(f'loading_{session_id}', False):
+                    logger.warning(f"Session {session_id[:8]} already being loaded, skipping")
+                    return None
     
-            st.session_state[f'loading_{session_id}'] = True
-            session = self.db.load_session(session_id)
-            st.session_state[f'loading_{session_id}'] = False  # Clear the flag
+                st.session_state[f'loading_{session_id}'] = True
+                session = self.db.load_session(session_id)
+                st.session_state[f'loading_{session_id}'] = False  # Clear the flag
             
-            if session and session.active:
-                # NEW: Check if any bans have expired
-                if session.ban_status != BanStatus.NONE:
-                    if session.ban_end_time and datetime.now() >= session.ban_end_time:
-                        logger.info(f"Ban expired for session {session.session_id[:8]}. Clearing ban status.")
+                if session and session.active:
+                    # NEW: Check if any bans have expired
+                    if session.ban_status != BanStatus.NONE:
+                        if session.ban_end_time and datetime.now() >= session.ban_end_time:
+                            logger.info(f"Ban expired for session {session.session_id[:8]}. Clearing ban status.")
                         
-                        # Clear the ban
-                        session.ban_status = BanStatus.NONE
-                        session.ban_start_time = None
-                        session.ban_end_time = None
-                        session.ban_reason = None
-                        session.question_limit_reached = False
+                            # Clear the ban
+                            session.ban_status = BanStatus.NONE
+                            session.ban_start_time = None
+                            session.ban_end_time = None
+                            session.ban_reason = None
+                            session.question_limit_reached = False
                         
-                        # For testing mode with 5-minute bans, also reset daily count
-                        # Remove this block for production!
-                        if session.user_type == UserType.REGISTERED_USER:
-                            # Check if 5 minutes have passed since last question
-                            if session.last_question_time:
-                                time_since_last = datetime.now() - session.last_question_time
-                                if time_since_last >= timedelta(minutes=5):  # Testing window
-                                    logger.info(f"Testing mode: Resetting daily count after ban expiry")
-                                    session.daily_question_count = 0  # Reset to 0, not 10!
-                                    session.last_question_time = None
+                            # For testing mode with 5-minute bans, also reset daily count
+                            # Remove this block for production!
+                            if session.user_type == UserType.REGISTERED_USER:
+                                # Check if 5 minutes have passed since last question
+                                if session.last_question_time:
+                                    time_since_last = datetime.now() - session.last_question_time
+                                    if time_since_last >= timedelta(minutes=5):  # Testing window
+                                        logger.info(f"Testing mode: Resetting daily count after ban expiry")
+                                        session.daily_question_count = 0  # Reset to 0, not 10!
+                                        session.last_question_time = None
                         
-                        # Save the updated session
-                        self.db.save_session(session)
+                            # Save the updated session
+                            self.db.save_session(session)
                 
-                # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
-                # And this check hasn't been performed for this session yet in the current rerun cycle.
-                fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
-                if (session.fingerprint_id and 
-                    session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
-                    not st.session_state.get(fingerprint_checked_key, False)):
+                    # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
+                    # And this check hasn't been performed for this session yet in the current rerun cycle.
+                    fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
+                    if (session.fingerprint_id and 
+                        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
+                        not st.session_state.get(fingerprint_checked_key, False)):
                     
-                    self._attempt_fingerprint_inheritance(session)
-                    # Save session after potential inheritance to persist updated user type/counts
-                    self.db.save_session(session) # Crucial to save here
-                    st.session_state[fingerprint_checked_key] = True # Mark as checked for this session
-                    logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
+                        self._attempt_fingerprint_inheritance(session)
+                        # Save session after potential inheritance to persist updated user type/counts
+                        self.db.save_session(session) # Crucial to save here
+                        st.session_state[fingerprint_checked_key] = True # Mark as checked for this session
+                        logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
 
-                # NEW: Check if guest needs forced verification - this is the "second guest session" logic.
-                # This check only happens if the user is a GUEST and hasn't asked any questions in THIS session.
-                if session.user_type.value == UserType.GUEST.value and session.daily_question_count == 0:
-                    # Find all historical sessions for this fingerprint
-                    historical_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+                    # NEW: Check if guest needs forced verification - this is the "second guest session" logic.
+                    # This check only happens if the user is a GUEST and hasn't asked any questions in THIS session.
+                    if session.user_type.value == UserType.GUEST.value and session.daily_question_count == 0:
+                        # Find all historical sessions for this fingerprint
+                        historical_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
                     
-                    # Check if any *other* session with this fingerprint was a GUEST and hit the limit
-                    guest_sessions_with_questions = [
-                        s for s in historical_sessions 
-                        if s.session_id != session.session_id # Must be a different session
-                        and s.user_type.value == UserType.GUEST.value 
-                        and s.daily_question_count >= self.question_limits.question_limits[UserType.GUEST.value] # Must have hit guest limit
-                    ]
+                        # Check if any *other* session with this fingerprint was a GUEST and hit the limit
+                        guest_sessions_with_questions = [
+                            s for s in historical_sessions 
+                            if s.session_id != session.session_id # Must be a different session
+                            and s.user_type.value == UserType.GUEST.value 
+                            and s.daily_question_count >= self.question_limits.question_limits[UserType.GUEST.value] # Must have hit guest limit
+                        ]
                     
-                    if guest_sessions_with_questions:
-                        logger.info(f"Session {session.session_id[:8]} must verify email - fingerprint already used guest questions in previous session(s)")
-                        st.session_state.must_verify_email_immediately = True
-                        st.session_state.skip_email_allowed = False # No skipping for forced verification
+                        if guest_sessions_with_questions:
+                            logger.info(f"Session {session.session_id[:8]} must verify email - fingerprint already used guest questions in previous session(s)")
+                            st.session_state.must_verify_email_immediately = True
+                            st.session_state.skip_email_allowed = False # No skipping for forced verification
 
-                # Check limits and handle bans. This is where the 24-hour reset happens.
-                limit_check = self.question_limits.is_within_limits(session)
-                if not limit_check.get('allowed', True) and limit_check.get('reason') != 'guest_limit':
+                    # Check limits and handle bans. This is where the 24-hour reset happens.
+                    limit_check = self.question_limits.is_within_limits(session)
+                    if not limit_check.get('allowed', True) and limit_check.get('reason') != 'guest_limit':
                     
-                    ban_type = limit_check.get('ban_type', 'unknown')
-                    message = limit_check.get('message', 'Access restricted due to usage policy.')
-                    time_remaining = limit_check.get('time_remaining')
+                        ban_type = limit_check.get('ban_type', 'unknown')
+                        message = limit_check.get('message', 'Access restricted due to usage policy.')
+                        time_remaining = limit_check.get('time_remaining')
                     
-                    st.error(f"🚫 **Access Restricted**")
-                    if time_remaining:
-                        hours = max(0, int(time_remaining.total_seconds() // 3600))
-                        minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                        st.error(f"Time remaining: {hours}h {minutes}m")
-                    st.info(message)
-                    logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
+                        st.error(f"🚫 **Access Restricted**")
+                        if time_remaining:
+                            hours = max(0, int(time_remaining.total_seconds() // 3600))
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                        st.info(message)
+                        logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
                 
-                    try:
-                        self.db.save_session(session)
-                    except Exception as e:
-                        logger.error(f"Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
+                        try:
+                            self.db.save_session(session)
+                        except Exception as e:
+                            logger.error(f"Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
                     
+                        return session
+                
                     return session
-                
-                return session
-            else:
-                logger.warning(f"Session {session_id[:8]} not found or inactive. Creating new session.")
-                if 'current_session_id' in st.session_state:
-                    del st.session_state['current_session_id']
+                else:
+                    logger.warning(f"Session {session_id[:8]} not found or inactive. Creating new session.")
+                    if 'current_session_id' in st.session_state:
+                        del st.session_state['current_session_id']
 
-        logger.info(f"Creating new session")
-        new_session = self._create_new_session()
-        st.session_state.current_session_id = new_session.session_id
+            logger.info(f"Creating new session")
+            new_session = self._create_new_session()
+            st.session_state.current_session_id = new_session.session_id
         
-        # Immediately attempt fingerprint inheritance for the *newly created* session
-        # This is critical if a user starts a new session but has an existing fingerprint
-        self._attempt_fingerprint_inheritance(new_session) # <--- This call will now also correctly set visitor_type
-        st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
+            # Immediately attempt fingerprint inheritance for the *newly created* session
+            # This is critical if a user starts a new session but has an existing fingerprint
+            self._attempt_fingerprint_inheritance(new_session) # <--- This call will now also correctly set visitor_type
+            st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
         
-        self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
-        logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
-        return new_session
+            self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
+            logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
+            return new_session
         
-    except Exception as e:
-        logger.error(f"Failed to get/create session: {e}", exc_info=True)
-        fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None)
-        fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
-        fallback_session.fingerprint_method = "emergency_fallback"
-        st.session_state.current_session_id = fallback_session.session_id
-        st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
-        logger.error(f"Emergency fallback session created {fallback_session.session_id[:8]}")
-        return fallback_session
+        except Exception as e:
+            logger.error(f"Failed to get/create session: {e}", exc_info=True)
+            fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None)
+            fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
+            fallback_session.fingerprint_method = "emergency_fallback"
+            st.session_state.current_session_id = fallback_session.session_id
+            st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
+            logger.error(f"Emergency fallback session created {fallback_session.session_id[:8]}")
+            return fallback_session
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]) -> bool:
         """Applies fingerprinting data from custom component to the session with better validation."""
         logger.debug(f"🔍 APPLYING FINGERPRINT received from JS: {fingerprint_data.get('fingerprint_id', 'None')[:8]} to session {session.session_id[:8]}")
