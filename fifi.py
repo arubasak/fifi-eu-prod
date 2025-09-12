@@ -1773,15 +1773,28 @@ class PineconeAssistantTool:
                 )
             else:
                 logger.info(f"Connected to assistant: '{self.assistant_name}'")
-                # OPTIONAL: Update instructions of existing assistant if needed
                 assistant_obj = self.pc.assistant.Assistant(assistant_name=self.assistant_name)
-                assistant_obj.update(instructions=instructions)
+            
+                # Update instructions (no describe() needed)
+                try:
+                    assistant_obj.update(instructions=instructions)
+                    logger.info("✅ Instructions updated successfully")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not update instructions: {e}")
+                    # Continue anyway - assistant still works
+            
+                # Verify assistant is working by checking files
+                try:
+                    files = assistant_obj.list_files()
+                    logger.info(f"✅ Assistant verified - has {len(files)} files")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not list files: {e}")
+            
                 return assistant_obj
-                # return self.pc.assistant.Assistant(assistant_name=self.assistant_name)
+            
         except Exception as e:
             logger.error(f"Failed to initialize Pinecone Assistant: {e}")
             return None
-
     def query(self, chat_history: List[BaseMessage]) -> Dict[str, Any]:
         if not self.assistant: 
             return None
