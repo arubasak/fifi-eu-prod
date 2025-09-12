@@ -39,7 +39,8 @@ from production_config import (
     MAX_MESSAGE_LENGTH, MAX_PDF_MESSAGES, MAX_FINGERPRINT_CACHE_SIZE, MAX_RATE_LIMIT_TRACKING, MAX_ERROR_HISTORY,
     CRM_SAVE_MIN_QUESTIONS, EVASION_BAN_HOURS,
     FASTAPI_EMERGENCY_SAVE_URL, FASTAPI_EMERGENCY_SAVE_TIMEOUT,
-    DAILY_RESET_WINDOW, SESSION_TIMEOUT_DELTA, FINGERPRINT_TIMEOUT_SECONDS
+    DAILY_RESET_WINDOW, SESSION_TIMEOUT_DELTA,
+    FINGERPRINT_WAIT_TIMEOUT_SECONDS # <--- ADDED FINGERPRINT_WAIT_TIMEOUT_SECONDS
 )
 
 # NEW: Import for simplified browser reload
@@ -249,9 +250,12 @@ class EnhancedErrorHandler:
 
     def handle_api_error(self, component: str, operation: str, error: Exception) -> ErrorContext:
         error_str = str(error).lower()
-        error_type = type(error).__name__
         
-        if "timeout" in error_str:
+        # Check if the error is a requests.exceptions.ReadTimeout for Zoho token
+        if isinstance(error, requests.exceptions.ReadTimeout) and component == "ZohoCRMManager" and operation == "get_access_token":
+             # This specific timeout often means the Zoho auth server is just slow. Not critical.
+            severity, message = ErrorSeverity.LOW, "token request timed out but may still be processing."
+        elif "timeout" in error_str:
             severity, message = ErrorSeverity.MEDIUM, "is responding slowly."
         elif "unauthorized" in error_str or "401" in error_str or "403" in error_str:
             severity, message = ErrorSeverity.HIGH, "authentication failed. Please check API keys."
@@ -263,7 +267,7 @@ class EnhancedErrorHandler:
             severity, message = ErrorSeverity.MEDIUM, "encountered an unexpected error."
 
         return ErrorContext(
-            component=component, operation=operation, error_type=error_type,
+            component=component, operation=operation, error_type=type(error).__name__, # Fix: Use type(error).__name__
             severity=severity, user_message=f"{component} {message}",
             technical_details=str(error),
             recovery_suggestions=["Try again", "Check your internet", "Contact support if issue persists"],
@@ -598,7 +602,7 @@ class DatabaseManager:
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         """Save session with SQLite Cloud compatibility and connection health check"""
-        logger.debug(f"💾 SAVING SESSION TO DB: {session.session_id[:8]} | user_type={session.user_type.value} | email={session.email} | messages={len(session.messages)} | daily_q={session.daily_question_count} | fp_id={session.fingerprint_id[:8]} | active={session.active}")
+        logger.debug(f"💾 SAVING SESSION TO DB: {session.session_id[:8]} | user_type={session.user_type.value} | email={session.email} | messages={len(session.messages)} | fp_id={session.fingerprint_id[:8] if session.fingerprint_id else 'None'} | active={session.active}") ## CHANGE: Handle None for FP ID
         
         self._ensure_connection_healthy() ## CHANGE: Simplified call
         
@@ -744,7 +748,6 @@ class DatabaseManager:
                 loaded_timeout_reason = row[40] if len(row) > 40 else None
 
 
-                # Convert last_activity from ISO format string or None
                 loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
 
                 user_session = UserSession(
@@ -1435,7 +1438,7 @@ class PDFExporter:
 
     @handle_api_errors("PDF Exporter", "Generate Chat PDF")
     def generate_chat_pdf(self, session: UserSession) -> Optional[io.BytesIO]:
-        """Generates a PDF of the chat transcript."""
+        """Generates a PDF of the chat transcript with size limits."""
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=letter)
         
@@ -1753,7 +1756,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
+                if attempt_note < max_retries - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -1802,7 +1805,8 @@ class ZohoCRMManager:
 
 class RateLimiter:
     """Simple in-memory rate limiter to prevent abuse."""
-    def __init__(self, max_requests: int = 2, window_seconds: int = 60): # UPDATED: 2 questions per 60 seconds
+    ## CHANGE: Use constants for RateLimiter init
+    def __init__(self, max_requests: int = RATE_LIMIT_REQUESTS, window_seconds: int = RATE_LIMIT_WINDOW_SECONDS):
         self.requests = defaultdict(list)
         self._lock = threading.Lock() # This is a separate RateLimiter specific lock, not the DB one
         self.max_requests = max_requests
@@ -2828,6 +2832,8 @@ class SessionManager:
         session_id = str(uuid.uuid4())
         session = UserSession(session_id=session_id, last_activity=None)
         
+        # For new sessions, always start with a temporary fingerprint
+        # This will be replaced by a real one for Guests, or marked as 'not_collected_registered' for Registered Users later.
         session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
         session.fingerprint_method = "temporary_fallback_python"
         
@@ -2890,10 +2896,11 @@ class SessionManager:
         Attempts to inherit session data with EMAIL as primary identifier for registered users.
         For non-registered users, it uses fingerprint.
         """
-        logger.info(f"🔄 Attempting inheritance for session {session.session_id[:8]} (Type: {session.user_type.value}) with FP: {session.fingerprint_id[:8]}...")
+        logger.info(f"🔄 Attempting inheritance for session {session.session_id[:8]} (Type: {session.user_type.value}) with FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'}...")
 
         try:
-            # PRIORITY 1: For REGISTERED_USER, use EMAIL-based inheritance
+            # PRIORITY 1: For REGISTERED_USER, use EMAIL-based inheritance ONLY
+            ## CHANGE: Removed fingerprint related updates for REGISTERED_USERs here, as FP is not collected.
             if session.user_type == UserType.REGISTERED_USER and session.email:
                 logger.info(f"📧 Using EMAIL-based inheritance for registered user {session.email}")
                 
@@ -2907,7 +2914,7 @@ class SessionManager:
                     now = datetime.now()
                     ## CHANGE: Use DAILY_RESET_WINDOW constant
                     if (most_recent.last_question_time and (now - most_recent.last_question_time) < DAILY_RESET_WINDOW) or \
-                       (not most_recent.last_question_time and (now - most_recent.last_activity) < DAILY_RESET_WINDOW): # If last_question_time is None, use last_activity for reset check
+                       (not most_recent.last_question_time and most_recent.last_activity and (now - most_recent.last_activity) < DAILY_RESET_WINDOW): # If last_question_time is None, use last_activity for reset check
                         # Inherit counts
                         session.daily_question_count = most_recent.daily_question_count
                         session.total_question_count = max(session.total_question_count, most_recent.total_question_count)
@@ -2938,7 +2945,7 @@ class SessionManager:
                 session.current_penalty_hours = 0
                 session.escalation_level = 0
                 
-                return  # Exit early for registered users, email is primary
+                return  # Exit early for registered users, email is primary and fingerprint is not collected
 
             # PRIORITY 2: For non-registered users (Guest/Email Verified), use fingerprint (existing logic)
             if not session.fingerprint_id or session.fingerprint_id.startswith(("temp_", "fallback_")):
@@ -3158,23 +3165,33 @@ class SessionManager:
                             session.ban_reason = None
                             session.question_limit_reached = False
                         
-                            ## CHANGE: Removed the testing mode 5-minute ban reset block
-                        
                             # Save the updated session
                             self.db.save_session(session)
                 
                     # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
                     # And this check hasn't been performed for this session yet in the current rerun cycle.
                     fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
-                    if (session.fingerprint_id and 
-                        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and 
-                        not st.session_state.get(fingerprint_checked_key, False)):
+                    
+                    ## CHANGE: Only attempt fingerprint inheritance for NON-REGISTERED users
+                    if session.user_type != UserType.REGISTERED_USER and \
+                       session.fingerprint_id and \
+                       session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and \
+                       not st.session_state.get(fingerprint_checked_key, False):
                     
                         self._attempt_fingerprint_inheritance(session)
                         # Save session after potential inheritance to persist updated user type/counts
                         self.db.save_session(session) # Crucial to save here
                         st.session_state[fingerprint_checked_key] = True # Mark as checked for this session
                         logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
+                    
+                    ## CHANGE: For REGISTERED USERS, ensure FP is marked as not collected/not applicable
+                    elif session.user_type == UserType.REGISTERED_USER and \
+                         (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_", "fallback_", "temp_py_"))): # Also check temp_py_
+                        session.fingerprint_id = "not_collected_registered_user"
+                        session.fingerprint_method = "email_primary"
+                        self.db.save_session(session) # Save immediately
+                        logger.info(f"Registered user {session.session_id[:8]} fingerprint marked as not collected.")
+
 
                     # NEW: Check if guest needs forced verification - this is the "second guest session" logic.
                     # This check only happens if the user is a GUEST and hasn't asked any questions in THIS session.
@@ -3230,9 +3247,15 @@ class SessionManager:
         
             # Immediately attempt fingerprint inheritance for the *newly created* session
             # This is critical if a user starts a new session but has an existing fingerprint
-            self._attempt_fingerprint_inheritance(new_session) # <--- This call will now also correctly set visitor_type
-            st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
-        
+            ## CHANGE: Only attempt fingerprint inheritance for NON-REGISTERED users; otherwise mark as not collected
+            if new_session.user_type != UserType.REGISTERED_USER:
+                self._attempt_fingerprint_inheritance(new_session) # <--- This call will now also correctly set visitor_type
+                st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
+            else: # For newly created REGISTERED_USER, mark FP as not collected
+                new_session.fingerprint_id = "not_collected_registered_user"
+                new_session.fingerprint_method = "email_primary"
+                logger.info(f"New REGISTERED_USER session {new_session.session_id[:8]} fingerprint marked as not collected.")
+
             self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
             logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
             return new_session
@@ -3249,7 +3272,7 @@ class SessionManager:
     
     ## CHANGE: Sync method for registered users
     def sync_registered_user_sessions(self, email: str, current_session_id: str):
-        """Sync question counts across all active sessions for a registered user by email."""
+        """Sync question counts across all active sessions for a registered user by email"""
         try:
             email_sessions = self.db.find_sessions_by_email(email)
             active_registered_sessions = [s for s in email_sessions 
@@ -3285,9 +3308,15 @@ class SessionManager:
             logger.error(f"Failed to sync registered user sessions for {email}: {e}")
 
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]) -> bool:
-        """Applies fingerprinting data from custom component to the session with better validation."""
-        logger.debug(f"🔍 APPLYING FINGERPRINT received from JS: {fingerprint_data.get('fingerprint_id', 'None')[:8]} to session {session.session_id[:8]}")
+        """Applies fingerprinting data from custom component to the session with better validation.
+        This function will now be called only for non-registered users (Guests)."""
+        logger.debug(f"🔍 APPLYING FINGERPRINT received from JS: {fingerprint_data.get('fingerprint_id', 'None')[:8]} to session {session.session_id[:8]} (UserType: {session.user_type.value})")
         
+        # Guard against applying fingerprint data to registered users
+        if session.user_type == UserType.REGISTERED_USER:
+            logger.warning(f"Attempted to apply fingerprint to REGISTERED_USER {session.session_id[:8]}. Ignoring.")
+            return False
+
         try:
             if not fingerprint_data or not isinstance(fingerprint_data, dict):
                 logger.warning("Invalid fingerprint data provided to apply_fingerprinting")
@@ -3330,7 +3359,13 @@ class SessionManager:
         return True
 
     def check_fingerprint_history(self, fingerprint_id: str) -> Dict[str, Any]:
-        """Check if a fingerprint has historical sessions and return relevant information, now handling multiple emails."""
+        """Check if a fingerprint has historical sessions and return relevant information, now handling multiple emails.
+        This function will primarily be used for non-registered users."""
+        
+        # For registered users, fingerprint history is not relevant for primary identification
+        # We don't have the session object here, so we assume this is only called in contexts where
+        # fingerprint is relevant (i.e., for guest recognition flows).
+
         try:
             existing_sessions = self.db.find_sessions_by_fingerprint(fingerprint_id)
             
@@ -3356,6 +3391,11 @@ class SessionManager:
             # Single email - show recognition
             most_privileged_session = None
             for s in existing_sessions:
+                # Ensure we don't try to recognize a REGISTERED_USER based on FP if email is primary
+                if s.user_type == UserType.REGISTERED_USER:
+                    logger.info(f"Skipping REGISTERED_USER session {s.session_id[:8]} for fingerprint-based recognition.")
+                    continue
+
                 if s.email and (most_privileged_session is None or 
                                self._get_privilege_level(s.user_type) > self._get_privilege_level(most_privileged_session.user_type)):
                     most_privileged_session = s
@@ -3492,7 +3532,7 @@ class SessionManager:
                 previous_emails = set()
                 
                 try:
-                    if session.fingerprint_id:
+                    if session.fingerprint_id and session.user_type != UserType.REGISTERED_USER: # Only check FP history for non-registered
                         historical_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
                         for old_session in historical_sessions:
                             if old_session.email:
@@ -3624,6 +3664,11 @@ class SessionManager:
                 if wp_token and user_email:
                     current_session = self.get_session()
                     
+                    ## CHANGE: Explicitly set fingerprint to not collected/not applicable for REGISTERED_USER
+                    current_session.fingerprint_id = "not_collected_registered_user"
+                    current_session.fingerprint_method = "email_primary"
+                    logger.info(f"Registered user {current_session.session_id[:8]} fingerprint marked as not collected/email primary.")
+
                     ## CHANGE: Always check email-based history for registered users
                     all_email_sessions = self.db.find_sessions_by_email(user_email)
 
@@ -3677,14 +3722,6 @@ class SessionManager:
                     current_session.evasion_count = 0
                     current_session.current_penalty_hours = 0
                     current_session.escalation_level = 0
-
-                    ## CHANGE: REMOVED: Testing mode 5-minute daily count reset on login block
-                    # if current_session.last_question_time:
-                    #     time_since_last = datetime.now() - current_session.last_question_time
-                    #     if time_since_last >= timedelta(minutes=5):  # Testing: 5 min instead of 24 hours
-                    #         logger.info(f"Testing mode: Resetting daily count on login due to 5-minute window")
-                    #         current_session.daily_question_count = 0
-                    #         current_session.last_question_time = None
                     
                     # Set REGISTERED_USER attributes
                     current_session.user_type = UserType.REGISTERED_USER
@@ -3704,20 +3741,10 @@ class SessionManager:
 
                     ## CHANGE: Do NOT invalidate all previous sessions to prevent future inheritance confusion
                     ## The multi-device sync and email-based inheritance should handle this better.
-                    # try:
-                    #     if current_session.fingerprint_id:
-                    #         historical_sessions = self.db.find_sessions_by_fingerprint(current_session.fingerprint_id)
-                    #         for old_session in historical_sessions:
-                    #             if old_session.session_id != current_session.session_id:
-                    #                 old_session.active = False
-                    #                 self.db.save_session(old_session)
-                    #                 logger.info(f"Invalidated old session {old_session.session_id[:8]} to prevent inheritance")
-                    # except Exception as e:
-                    #     logger.error(f"Failed to invalidate old sessions: {e}")
 
                     ## CHANGE: Enable chat immediately for registered users
                     st.session_state.is_chat_ready = True
-                    st.session_state.fingerprint_wait_start = None
+                    st.session_state.fingerprint_wait_start = None # Ensure any FP wait is cleared for this user
 
                     # Save the updated session
                     try:
@@ -4023,11 +4050,14 @@ class SessionManager:
             # Handle cases where fingerprint_id might still be temporary or None during early load.
             # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
             rate_limiter_id = session.fingerprint_id
-            if rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                # Fallback to session_id for truly un-fingerprinted or temporary cases,
-                # to still apply some level of protection, albeit less robust.
+            ## CHANGE: For REGISTERED_USERs, use session_id for rate limiting as FP is not collected.
+            if session.user_type == UserType.REGISTERED_USER:
+                rate_limiter_id = session.session_id
+                logger.debug(f"Rate limiter using session ID as fallback for REGISTERED_USER {session.session_id[:8]} (FP not collected).")
+            elif rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 rate_limiter_id = session.session_id
                 logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
+
 
             ## CHANGE: Use constants for rate limits
             rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
@@ -4430,7 +4460,7 @@ def render_simple_activity_tracker(session_id: str):
 
     simple_tracker_js = f"""
     (() => {{
-        const sessionId = "{session_id}";
+        const sessionId = "{json.dumps(session_id)}"; // CHANGE: Safely embed sessionId
         const stateKey = 'fifi_activity_{safe_session_id}';
         
         // Initialize or get existing state
@@ -4675,9 +4705,9 @@ def render_simplified_browser_close_detection(session_id: str):
     enhanced_close_js = f"""
     <script>
     (function() {{
-        const sessionId = '{session_id}';
-        const FASTAPI_URL = '{FASTAPI_EMERGENCY_SAVE_URL}'; ## CHANGE: Use constant
-        const FASTAPI_TIMEOUT_MS = {FASTAPI_EMERGENCY_SAVE_TIMEOUT * 1000}; ## CHANGE: Use constant
+        const sessionId = "{json.dumps(session_id)}"; // CHANGE: Safely embed sessionId
+        const FASTAPI_URL = "{json.dumps(FASTAPI_EMERGENCY_SAVE_URL)}"; // CHANGE: Use constant and safely embed
+        const FASTAPI_TIMEOUT_MS = {FASTAPI_EMERGENCY_SAVE_TIMEOUT * 1000}; // CHANGE: Use constant
         const STREAMLIT_FALLBACK_URL = window.location.origin + window.location.pathname; 
         
         if (window.fifi_close_enhanced_initialized) return;
@@ -4747,7 +4777,7 @@ def render_simplified_browser_close_detection(session_id: str):
             // ALWAYS trigger Streamlit fallback via image, for maximum redundancy
             const fallbackUrl = STREAMLIT_FALLBACK_URL + 
                 '?event=emergency_close' +
-                '&session_id=' + sessionId +
+                '&session_id=' + sessionId + 
                 '&reason=' + reason +
                 '&fallback=true';
             
@@ -4803,7 +4833,8 @@ def render_simplified_browser_close_detection(session_id: str):
         logger.error(f"Failed to render enhanced browser close detection: {e}")
 
 def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
-    """Processes fingerprint data received via URL query parameters."""
+    """Processes fingerprint data received via URL query parameters.
+    This function now explicitly guards against processing for REGISTERED_USERs."""
     try:
         session_manager = st.session_state.get('session_manager')
         if not session_manager:
@@ -4814,6 +4845,16 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         if not session:
             logger.error(f"❌ Fingerprint processing: Session '{session_id[:8]}' not found in database.")
             return False
+        
+        ## CHANGE: Guard against processing fingerprint data for REGISTERED_USERs
+        if session.user_type == UserType.REGISTERED_USER:
+            logger.warning(f"Attempted to process fingerprint from query for REGISTERED_USER {session.session_id[:8]}. Ignoring as fingerprint is not collected for this user type.")
+            # Ensure chat is ready and clear any FP wait if this happens for a registered user
+            st.session_state.is_chat_ready = True
+            st.session_state.fingerprint_status = 'not_applicable'
+            if 'fingerprint_wait_start' in st.session_state:
+                del st.session_state['fingerprint_wait_start']
+            return False # Indicate that fingerprint was not applied
         
         logger.info(f"✅ Processing fingerprint for session '{session_id[:8]}': ID={fingerprint_id[:8]}, Method={method}, Privacy={privacy}")
         
@@ -4940,9 +4981,11 @@ def handle_fingerprint_requests_from_query():
             success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
-            if success:
-                logger.info(f"🔄 Fingerprint processed successfully, stopping execution to preserve page state")
-                st.stop()
+            # This reruns the script, and since `process_fingerprint_from_query` now explicitly checks
+            # for REGISTERED_USER and returns False, this block ensures the state is correctly updated.
+            # No need for st.stop() here as the rerun is desired to update the UI with FP status.
+            st.rerun() 
+            
         except Exception as e:
             logger.error(f"Silent fingerprint processing failed: {e}")
         
@@ -4954,24 +4997,27 @@ def handle_fingerprint_requests_from_query():
 # UI COMPONENTS
 # =============================================================================
 
-# Modified render_welcome_page function (from prompt)
+# Modified render_welcome_page function
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock."""
     
-      
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
 
     # Show loading overlay if in loading state
     if show_loading_overlay():
         return
-    ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant
+    
     session = session_manager.get_session() if st.session_state.get('current_session_id') else None
-    if session and not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
+    
+    ## CHANGE: Only show fingerprint loading for non-REGISTERED users
+    if session and session.user_type != UserType.REGISTERED_USER and \
+       not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
+        
         current_time_float = time.time()
         wait_start = st.session_state.get('fingerprint_wait_start')
         elapsed = current_time_float - wait_start
-        remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed)
+        remaining = max(0, FINGERPRINT_WAIT_TIMEOUT_SECONDS - elapsed)
         
         if remaining > 0:
             st.info(f"🔒 **Initializing secure session...** ({remaining:.0f}s remaining)")
@@ -4980,7 +5026,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
             st.info("🔒 **Finalizing setup...** Almost ready!")
         
         # Add progress bar
-        progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
+        progress_value = min(elapsed / FINGERPRINT_WAIT_TIMEOUT_SECONDS, 1.0)
         st.progress(progress_value, text="Initializing FiFi AI Assistant")
     
     st.markdown("---")
@@ -5138,7 +5184,11 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 
         # Show fingerprint status
         if session.fingerprint_id:
-            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+            ## CHANGE: Logic for displaying FP ID for registered users
+            if session.user_type == UserType.REGISTERED_USER and session.fingerprint_id == "not_collected_registered_user":
+                st.markdown("**Device ID:** Not Collected")
+                st.caption("Fingerprinting not applicable for registered users (email primary)")
+            elif session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 st.markdown("**Device ID:** Identifying...")
                 st.caption("Fingerprinting in progress...")                
             else:
@@ -5755,11 +5805,13 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
 
     # NEW: Show fingerprint waiting status ONLY for non-registered users
     ## CHANGE: Only show fingerprint wait for non-registered users
-    if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start') and session.user_type != UserType.REGISTERED_USER:
+    if session.user_type != UserType.REGISTERED_USER and \
+       not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
+        
         current_time_float = time.time() # Use float for direct comparison with time.time()
         wait_start = st.session_state.get('fingerprint_wait_start')
         elapsed = current_time_float - wait_start
-        remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed) ## CHANGE: Use constant
+        remaining = max(0, FINGERPRINT_WAIT_TIMEOUT_SECONDS - elapsed) ## CHANGE: Use constant
         
         if remaining > 0:
             st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
@@ -5768,7 +5820,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             st.info("🔒 **Finalizing setup...** Almost ready!")
         
         # Add a subtle progress bar
-        progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0) ## CHANGE: Use constant
+        progress_value = min(elapsed / FINGERPRINT_WAIT_TIMEOUT_SECONDS, 1.0) ## CHANGE: Use constant
         st.progress(progress_value, text="Session Security Setup")
         st.markdown("---")
 
@@ -6292,19 +6344,22 @@ def main_fixed():
                     st.error("Authentication failed: Missing username or password.")
                     return
 
-            # Check session fingerprint status for non-registered users
-            if session and session.user_type != UserType.REGISTERED_USER:
-                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-                inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
-
-                if fingerprint_is_stable or inheritance_checked:
-                    st.session_state.is_chat_ready = True
-                    logger.info(f"Chat input unlocked for non-registered session {session.session_id[:8]} after initial session/fingerprint setup.")
+            # Determine chat readiness based on user type and fingerprint status
+            if session:
+                if session.user_type == UserType.REGISTERED_USER:
+                    st.session_state.is_chat_ready = True # Always ready for registered users
+                    logger.info(f"Chat input unlocked for REGISTERED_USER {session.session_id[:8]} (email primary).")
                 else:
-                    st.session_state.is_chat_ready = False
-                    logger.info(f"Chat input remains locked for non-registered session {session.session_id[:8]} pending JS fingerprinting.")
-            elif session and session.user_type == UserType.REGISTERED_USER:
-                 st.session_state.is_chat_ready = True # Always ready for registered users
+                    # For non-registered users, fingerprint is still required
+                    fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                    inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
+
+                    if fingerprint_is_stable or inheritance_checked:
+                        st.session_state.is_chat_ready = True
+                        logger.info(f"Chat input unlocked for non-registered session {session.session_id[:8]} after initial session/fingerprint setup.")
+                    else:
+                        st.session_state.is_chat_ready = False
+                        logger.info(f"Chat input remains locked for non-registered session {session.session_id[:8]} pending JS fingerprinting.")
             else:
                 st.session_state.is_chat_ready = False
 
@@ -6337,61 +6392,63 @@ def main_fixed():
             st.rerun()
             return
         
-        # RENDER FINGERPRINTING FIRST, BEFORE TIMEOUT LOGIC
-        fingerprint_needed = (
-            session is not None and (
+        ## CHANGE: Conditionally render fingerprinting component only for non-registered users
+        if session.user_type != UserType.REGISTERED_USER:
+            fingerprint_needed = (
                 not session.fingerprint_id or
                 session.fingerprint_method == "temporary_fallback_python" or
                 session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
             )
-        )
-        
-        if fingerprint_needed:
-            fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-            if not st.session_state.get(fingerprint_key, False):
-                session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-                st.session_state[fingerprint_key] = True
-                logger.info(f"✅ Fingerprint component rendered for session {session.session_id[:8]}")
-
-        # NOW DO TIMEOUT LOGIC AFTER JAVASCRIPT IS RENDERED
-        if session:
-            fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
             
-            ## CHANGE: Logic for registered users to skip fingerprint wait
+            if fingerprint_needed:
+                fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+                if not st.session_state.get(fingerprint_key, False):
+                    session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                    st.session_state[fingerprint_key] = True
+                    logger.info(f"✅ Fingerprint component rendered for session {session.session_id[:8]}")
+
+        # NOW DO TIMEOUT LOGIC AFTER JAVASCRIPT IS RENDERED (ONLY FOR NON-REGISTERED)
+        if session:
             if session.user_type == UserType.REGISTERED_USER:
-                st.session_state.is_chat_ready = True
+                st.session_state.is_chat_ready = True # Always ready for registered users
                 if 'fingerprint_wait_start' in st.session_state:
                     del st.session_state['fingerprint_wait_start']
-                logger.info(f"✅ Registered user {session.email} - chat enabled immediately (fingerprint optional)")
-            elif fingerprint_is_stable:
-                # Real fingerprint already obtained, enable chat immediately
-                st.session_state.is_chat_ready = True
-                if 'fingerprint_wait_start' in st.session_state:
-                    del st.session_state['fingerprint_wait_start']  # Clear timeout
-            else:
-                # Still waiting for JS fingerprinting (only for non-registered)
-                current_time_float = time.time()
-                wait_start = st.session_state.get('fingerprint_wait_start')
+                logger.info(f"✅ Registered user {session.email} - chat enabled immediately (fingerprint not applicable).")
+            else: # Non-registered users still wait for fingerprint
+                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
                 
-                if wait_start is None:
-                    # First time seeing temp fingerprint, start timeout
-                    st.session_state.fingerprint_wait_start = current_time_float
-                    st.session_state.is_chat_ready = False
-                    logger.info(f"Starting fingerprint wait timer for non-registered session {session.session_id[:8]}")
-                ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant
-                elif current_time_float - wait_start > FINGERPRINT_TIMEOUT_SECONDS:  # Timeout
-                    # Timeout reached, enable chat with fallback fingerprint
+                if fingerprint_is_stable:
+                    # Real fingerprint already obtained, enable chat immediately
                     st.session_state.is_chat_ready = True
-                    logger.warning(f"Fingerprint timeout ({FINGERPRINT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
+                    if 'fingerprint_wait_start' in st.session_state:
+                        del st.session_state['fingerprint_wait_start']  # Clear timeout
                 else:
-                    # Still waiting within timeout period
-                    st.session_state.is_chat_ready = False
+                    # Still waiting for JS fingerprinting (only for non-registered)
+                    current_time_float = time.time()
+                    wait_start = st.session_state.get('fingerprint_wait_start')
+                    
+                    if wait_start is None:
+                        # First time seeing temp fingerprint, start timeout
+                        st.session_state.fingerprint_wait_start = current_time_float
+                        st.session_state.is_chat_ready = False
+                        logger.info(f"Starting fingerprint wait timer for non-registered session {session.session_id[:8]}")
+                    ## CHANGE: Use FINGERPRINT_WAIT_TIMEOUT_SECONDS constant
+                    elif current_time_float - wait_start > FINGERPRINT_WAIT_TIMEOUT_SECONDS:  # Timeout
+                        # Timeout reached, enable chat with fallback fingerprint
+                        st.session_state.is_chat_ready = True
+                        logger.warning(f"Fingerprint timeout ({FINGERPRINT_WAIT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
+                    else:
+                        # Still waiting within timeout period
+                        st.session_state.is_chat_ready = False
         else:
             st.session_state.is_chat_ready = False
 
         # Right after timeout logic
-        ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant for condition
-        if not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start') and (time.time() - st.session_state.get('fingerprint_wait_start', 0) < FINGERPRINT_TIMEOUT_SECONDS):
+        ## CHANGE: Use FINGERPRINT_WAIT_TIMEOUT_SECONDS constant for condition
+        # This condition now correctly ensures only non-registered users (who are not yet chat_ready and are still waiting for FP) trigger reruns.
+        if session and session.user_type != UserType.REGISTERED_USER and \
+           not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start') and \
+           (time.time() - st.session_state.get('fingerprint_wait_start', 0) < FINGERPRINT_WAIT_TIMEOUT_SECONDS):
             # Just rerun to keep the UI updating
             st.rerun()
             return  # Stop execution to allow rerun
