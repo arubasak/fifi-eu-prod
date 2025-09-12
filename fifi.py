@@ -1825,7 +1825,7 @@ class PineconeAssistantTool:
                 url = match.group(2)
                 if 'utm_source=fifi-eu' not in url:
                     separator = '&' if '?' in url else '?'
-                    return f'{match.group(1)}({url}{separator}utm_source=fifi-eu})'
+                    return f'{match.group(1)}({url}{separator}utm_source=fifi-eu)'
                 return match.group(0)
             
             # Add UTM to all markdown links in content
