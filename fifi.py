@@ -4852,12 +4852,6 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
         return False
 
-code
-Python
-download
-content_copy
-expand_less
-
 return False
         
     except Exception as e:
