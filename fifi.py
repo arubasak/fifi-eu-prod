@@ -4852,12 +4852,6 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
         return False
 
-return False
-        
-    except Exception as e:
-        logger.error(f"❌ Emergency save processing failed: {e}", exc_info=True)
-        return False
-
 def handle_emergency_save_requests_from_query():
     """Checks for and processes emergency save requests sent via URL query parameters."""
     logger.info("🔍 EMERGENCY SAVE HANDLER: Checking for query parameter requests for emergency save...")
