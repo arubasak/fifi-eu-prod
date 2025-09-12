@@ -1751,6 +1751,7 @@ class PineconeAssistantTool:
                 "    'Thank you for your interest in pricing information. For the most accurate and up-to-date pricing and quotes, please visit the product page directly on our website or contact our sales team at sales-eu@12taste.com for personalized assistance.'\n"
                 "2.  **HANDLE 'NOT FOUND' GRACEFULLY:** If you cannot find information for a specific product or topic in your documents, you MUST respond with EXACTLY: 'I don't have specific information about this topic in my knowledge base.'\n"
                 "3.  **NO FABRICATION:** NEVER invent information, product details, specifications, suppliers, or any data not present in your documents. NEVER create fake citations, URLs, or source references.\n\n"
+                "4.  **DISCONTINUED PRODUCTS:** If a product has been discontinued, inform the user and provide similar alternatives if available in your knowledge base.\n\n"
                 "**RESPONSE GUIDELINES:**\n"
                 "- **BE CONCISE:** Provide direct answers from your documents.\n"
                 "- **CITE SOURCES:** Use citations like [1], [2] when pulling information from documents.\n"
@@ -1760,6 +1761,7 @@ class PineconeAssistantTool:
                 "1. Does the question ask for price or stock? -> Use the sales redirection message.\n"
                 "2. Is the information in my documents? -> Answer with citations.\n"
                 "3. Is the information NOT in my documents? -> Use the 'I don't have specific information...' message."
+                "4. Is the product discontinued? -> Inform and provide alternatives if available."
             )
             
             assistants_list = self.pc.assistant.list_assistants()
@@ -1772,10 +1774,10 @@ class PineconeAssistantTool:
             else:
                 logger.info(f"Connected to assistant: '{self.assistant_name}'")
                 # OPTIONAL: Update instructions of existing assistant if needed
-                # assistant_obj = self.pc.assistant.Assistant(assistant_name=self.assistant_name)
-                # assistant_obj.update(instructions=instructions)
-                # return assistant_obj
-                return self.pc.assistant.Assistant(assistant_name=self.assistant_name)
+                assistant_obj = self.pc.assistant.Assistant(assistant_name=self.assistant_name)
+                assistant_obj.update(instructions=instructions)
+                return assistant_obj
+                # return self.pc.assistant.Assistant(assistant_name=self.assistant_name)
         except Exception as e:
             logger.error(f"Failed to initialize Pinecone Assistant: {e}")
             return None
