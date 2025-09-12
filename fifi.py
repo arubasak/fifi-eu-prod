@@ -1823,28 +1823,29 @@ class PineconeAssistantTool:
                 has_citations = True
                 citations_header = "\n\n---\n**Sources:**\n"
                 citations_list = []
-                seen_items = set()
-                
+                seen_urls = set()
+    
                 for citation in response.citations:
                     for reference in citation.references:
                         if hasattr(reference, 'file') and reference.file:
-                            link_url = None
+                            # ONLY use metadata source_url - no fallback to signed_url
                             if hasattr(reference.file, 'metadata') and reference.file.metadata:
-                                link_url = reference.file.metadata.get('source_url')
-                            if not link_url and hasattr(reference.file, 'signed_url') and reference.file.signed_url:
-                                link_url = reference.file.signed_url
-                            
-                            if link_url:
-                                if '?' in link_url:
-                                    link_url += '&utm_source=fifi-eu'
-                                else:
-                                    link_url += '?utm_source=fifi-eu'
-                                
-                                display_text = link_url
-                                if display_text not in seen_items:
-                                    link = f"[{len(seen_items) + 1}] [{display_text}]({link_url})"
+                                source_url = reference.file.metadata.get('source_url')
+                    
+                                if source_url and source_url not in seen_urls:
+                                    # Add UTM parameters
+                                    if '?' in source_url:
+                                        final_url = source_url + '&utm_source=fifi-eu'
+                                    else:
+                                        final_url = source_url + '?utm_source=fifi-eu'
+                        
+                                    # Create citation link
+                                    link = f"[{len(seen_urls) + 1}] {final_url}"
                                     citations_list.append(link)
-                                    seen_items.add(display_text)
+                                    seen_urls.add(source_url)
+    
+                if citations_list:
+                    content += citations_header + "\n".join(citations_list)
                             else:
                                 display_text = getattr(reference.file, 'name', 'Unknown Source')
                                 if display_text not in seen_items:
