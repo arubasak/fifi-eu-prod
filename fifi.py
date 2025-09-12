@@ -5568,25 +5568,29 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             tier = limit_check_for_display.get('tier')
             remaining = limit_check_for_display.get('remaining', 0)
             
+            # Check actual ban status for accurate messaging
+            has_active_tier1_ban = (
+                session.ban_status == BanStatus.ONE_HOUR and 
+                session.ban_end_time and 
+                datetime.now() < session.ban_end_time
+            )
+            
             if tier == 2 and remaining <= 3:
                 st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until 24-hour reset!")
-            elif tier == 1 and remaining <= 2 and remaining > 0: # FIX APPLIED HERE
+            elif tier == 1 and remaining <= 2 and remaining > 0:
                 st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until 5-minute break.")
-            elif tier == 1 and remaining == 0:
-                # Check if ban already exists and has expired
-                if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time:
-                    if datetime.now() >= session.ban_end_time:
-                        # Ban has expired, user can proceed to Tier 2
-                        st.info("✅ **Tier 1 Complete**: You can now proceed to Tier 2!")
-                    else:
-                        # Ban is still active (shouldn't reach here normally)
-                        time_remaining = session.ban_end_time - datetime.now()
-                        minutes = int(time_remaining.total_seconds() / 60)
-                        st.warning(f"⏳ **5-minute break in progress**: {minutes} minutes remaining")
+            elif session.daily_question_count == 10:
+                # At exactly 10 questions - check ban status
+                if has_active_tier1_ban:
+                    time_remaining = session.ban_end_time - datetime.now()
+                    minutes = int(time_remaining.total_seconds() / 60)
+                    st.warning(f"⏳ **5-minute break in progress**: {minutes} minutes remaining")
+                elif session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() >= session.ban_end_time:
+                    # Ban has expired
+                    st.info("✅ **Tier 1 Complete**: You can now proceed to Tier 2!")
                 else:
-                    # No ban applied yet, will trigger on next question
+                    # No ban yet
                     st.info("ℹ️ **Tier 1 Complete**: Your next question will trigger a 5-minute break before Tier 2.")
-
 
         # Display chat messages (respects soft clear offset)
         visible_messages = session.messages[session.display_message_offset:]
