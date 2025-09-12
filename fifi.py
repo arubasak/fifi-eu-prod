@@ -1819,18 +1819,36 @@ class PineconeAssistantTool:
             content = response.message.content
             has_citations = False
             
+            # Try to get citations from Pinecone response object
+            citations_list = []
             if hasattr(response, 'citations') and response.citations:
                 has_citations = True
-                citations_header = "\n\n---\n**Sources:**\n"
-                citations_list = []
                 seen_urls = set()
                 
-                for citation in response.citations:
-                    for reference in citation.references:
+                logger.info(f"Found {len(response.citations)} citations in Pinecone response")
+                
+                for i, citation in enumerate(response.citations):
+                    logger.debug(f"Processing citation {i+1}")
+                    for j, reference in enumerate(citation.references):
+                        logger.debug(f"  Processing reference {j+1}")
                         if hasattr(reference, 'file') and reference.file:
-                            # ONLY use metadata source_url - no fallback to signed_url
+                            # Log file details
+                            logger.debug(f"    File name: {getattr(reference.file, 'name', 'Unknown')}")
+                            
+                            # Try to get URL from metadata with different possible field names
                             if hasattr(reference.file, 'metadata') and reference.file.metadata:
-                                source_url = reference.file.metadata.get('source_url')
+                                metadata = reference.file.metadata
+                                logger.debug(f"    Available metadata fields: {list(metadata.keys())}")
+                                
+                                # Try different possible field names
+                                possible_url_fields = ['source_url', 'Source_URL', 'source_URL', 'sourceUrl', 'url', 'URL', 'link', 'Link', 'product_url', 'product_link']
+                                source_url = None
+                                
+                                for field in possible_url_fields:
+                                    source_url = metadata.get(field)
+                                    if source_url:
+                                        logger.info(f"    Found URL in metadata field '{field}': {source_url}")
+                                        break
                                 
                                 if source_url and source_url not in seen_urls:
                                     # Add UTM parameters
@@ -1839,13 +1857,22 @@ class PineconeAssistantTool:
                                     else:
                                         final_url = source_url + '?utm_source=fifi-eu'
                                     
-                                    # Create citation link
-                                    link = f"[{len(seen_urls) + 1}] {final_url}"
-                                    citations_list.append(link)
+                                    citations_list.append(final_url)
                                     seen_urls.add(source_url)
+                            else:
+                                logger.debug("    No metadata found in file reference")
+            
+            # If we found citations, add them as Sources
+            if citations_list:
+                citations_header = "\n\n---\n**Sources:**\n"
+                numbered_citations = []
+                for i, url in enumerate(citations_list, 1):
+                    numbered_citations.append(f"[{i}] {url}")
                 
-                if citations_list:
-                    content += citations_header + "\n".join(citations_list)
+                content += citations_header + "\n".join(numbered_citations)
+                logger.info(f"Added {len(citations_list)} sources to response")
+            else:
+                logger.info("No source URLs found in Pinecone citations")
             
             return {
                 "content": content, 
@@ -1855,13 +1882,12 @@ class PineconeAssistantTool:
                 "response_length": len(content),
                 "used_pinecone": True,
                 "used_search": False,
-                "has_inline_citations": bool(citations_list) if has_citations else False,
+                "has_inline_citations": bool(citations_list),
                 "safety_override": False
             }
         except Exception as e:
             logger.error(f"Pinecone Assistant error: {str(e)}")
             return None
-
 # CHANGE: LLM-Powered Query Reformulation (Replaces old TavilyFallbackAgent entirely)
 class TavilyFallbackAgent:
     def __init__(self, tavily_api_key: str, openai_api_key: str = None):
@@ -2387,7 +2413,7 @@ class EnhancedAI:
             try:
                 logger.info("🌐 Falling back to FiFi web search...")
                 # Pass the full history for context-aware query reformulation
-                web_response = self.tavily_agent.query(prompt, langchain_history)
+                web_response = self.tavily_agent.query(prompt, langchain_history, self._get_current_pinecone_error_type())
                 
                 if web_response and web_response.get("success"):
                     logger.info(f"✅ Using web search response.")
