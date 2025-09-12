@@ -1133,7 +1133,7 @@ class DatabaseManager:
             # IMPORTANT: This logic now applies universally and always resets if 24h passed.
             if session.last_question_time:
                 time_since_last = datetime.now() - session.last_question_time
-                if time_since_last >= timedelta(hours=24):
+                if time_since_last >= timedelta(minutes=5):
                     logger.info(f"Daily question count reset for session {session.session_id[:8]} due to 24-hour window expiration.")
                     session.daily_question_count = 0
                     session.question_limit_reached = False
@@ -3482,7 +3482,7 @@ class SessionManager:
                         now = datetime.now()
                         time_check = most_recent.last_question_time or most_recent.last_activity or most_recent.created_at
                         
-                        if time_check and (now - time_check) < timedelta(hours=24):
+                        if time_check and (now - time_check) < timedelta(minutes=5):
                             # Inherit question counts from most recent same-email session
                             current_session.daily_question_count = most_recent.daily_question_count
                             current_session.total_question_count = max(current_session.total_question_count, 
