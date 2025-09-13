@@ -6432,26 +6432,20 @@ def main_fixed():
                         st.session_state.fingerprint_wait_start = current_time_float
                         st.session_state.is_chat_ready = False
                         logger.info(f"Starting fingerprint wait timer for non-registered session {session.session_id[:8]}")
-                    ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant
-                    elif current_time_float - wait_start > FINGERPRINT_TIMEOUT_SECONDS:  # Timeout
+                    ## CHANGE: Use FINGERPRINT_WAIT_TIMEOUT_SECONDS constant
+                    elif current_time_float - wait_start > FINGERPRINT_WAIT_TIMEOUT_SECONDS:  # Timeout
                         # Timeout reached, enable chat with fallback fingerprint
                         st.session_state.is_chat_ready = True
-                        logger.warning(f"Fingerprint timeout ({FINGERPRINT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
+                        logger.warning(f"Fingerprint timeout ({FINGERPRINT_WAIT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
                     else:
                         # Still waiting within timeout period
                         st.session_state.is_chat_ready = False
         else:
             st.session_state.is_chat_ready = False
 
-        # Right after timeout logic
-        ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant for condition
-        # This condition now correctly ensures only non-registered users (who are not yet chat_ready and are still waiting for FP) trigger reruns.
-        if session and session.user_type != UserType.REGISTERED_USER and \
-           not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start') and \
-           (time.time() - st.session_state.get('fingerprint_wait_start', 0) < FINGERPRINT_TIMEOUT_SECONDS):
-            # Just rerun to keep the UI updating
-            st.rerun()
-            return  # Stop execution to allow rerun
+        ## CHANGE: THE AGGRESSIVE RERUN LOOP HAS BEEN REMOVED FROM HERE
+        # The logic now correctly falls through to render the UI, which is what allows
+        # the browser to process the JavaScript for fingerprinting.
         
         # Render activity tracker and check for timeout
         activity_data_from_js = None
