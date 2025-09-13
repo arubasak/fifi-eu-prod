@@ -6228,26 +6228,19 @@ def ensure_initialization_fixed():
 # Modified main function with proper loading state handling (from prompt)
 def main_fixed():
     """Main application entry point with the new three-stage architecture."""
-    try:
-        st.set_page_config(
-            page_title="FiFi AI Assistant", 
-            page_icon="🤖", 
-            layout="wide"
-        )
-    except Exception as e:
-        logger.error(f"Failed to set page config: {e}")
+    st.set_page_config(
+        page_title="FiFi AI Assistant", 
+        page_icon="🤖", 
+        layout="wide"
+    )
 
-    # Initialize all necessary session state keys on first run
     if 'initialized' not in st.session_state:
+        # Initialize all necessary session state keys on first run
         defaults = {
-            "initialized": False, "app_stage": "WELCOME", # NEW: app_stage state
+            "initialized": False, "app_stage": "WELCOME",
             "is_loading": False, "loading_message": "",
-            "is_chat_ready": False, # This will now be controlled by app_stage
-            "fingerprint_complete": False, "chat_blocked_by_dialog": False,
-            "verification_stage": None, "guest_continue_active": False,
-            "final_answer_acknowledged": False, "gentle_prompt_shown": False,
-            "email_verified_final_answer_acknowledged": False,
-            "must_verify_email_immediately": False, "skip_email_allowed": True
+            "is_chat_ready": False,
+            "page": None # 'page' is now deprecated in favor of 'app_stage'
         }
         for key, value in defaults.items():
             if key not in st.session_state:
@@ -6264,9 +6257,8 @@ def main_fixed():
             st.error("⚠️ Application failed to initialize. Please refresh.")
             return
 
-    # Handle URL-based requests early to update state before rendering
+    # Handle only emergency saves from URL now
     handle_emergency_save_requests_from_query()
-    handle_fingerprint_requests_from_query()
 
     session_manager = st.session_state.get('session_manager')
     if not session_manager:
@@ -6275,7 +6267,7 @@ def main_fixed():
 
     # Handle loading state for page transitions (e.g., login, start guest)
     if st.session_state.get('is_loading', False):
-        if show_loading_overlay(): pass # Show overlay and do nothing else
+        show_loading_overlay()
         
         loading_reason = st.session_state.get('loading_reason')
         
@@ -6283,69 +6275,59 @@ def main_fixed():
             session = session_manager.get_session()
             if session:
                 st.session_state.app_stage = 'FINGERPRINTING'
-                if 'fingerprint_wait_start' not in st.session_state:
-                    st.session_state.fingerprint_wait_start = time.time()
-            
+        
         elif loading_reason == 'authenticate':
             username = st.session_state.get('temp_username', '')
             password = st.session_state.get('temp_password', '')
             if username and password:
-                # The authenticate function now handles setting the app_stage and rerunning
-                session_manager.authenticate_with_wordpress(username, password)
+                authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                if authenticated_session:
+                    # The authenticate function now handles setting the app_stage and rerunning
+                    pass
+                else:
+                    set_loading_state(False)
+                    return
             else:
                 set_loading_state(False)
                 st.error("Authentication failed: Missing credentials.")
-        
+
         set_loading_state(False)
         st.rerun()
         return
 
     # --- MAIN ROUTER ---
-    # Determine which stage to render based on session state.
     current_stage = st.session_state.get('app_stage', 'WELCOME')
     session = session_manager.get_session() if st.session_state.get('current_session_id') else None
 
-    if session:
-        # Override stage if conditions are met
-        is_registered = session.user_type == UserType.REGISTERED_USER
-        fp_is_stable = not (session.fingerprint_id is None or session.fingerprint_id.startswith("temp_"))
-        
-        if is_registered:
-            current_stage = 'CHAT' # Registered users always go to chat
-            st.session_state.is_chat_ready = True # Ensure chat is ready for registered users
-        elif fp_is_stable:
-            current_stage = 'CHAT' # Guests with stable FP go to chat
-            st.session_state.is_chat_ready = True # Ensure chat is ready for stable FP guests
-        elif current_stage == 'CHAT' and not fp_is_stable:
-            # If we're somehow in CHAT stage for a guest but FP isn't stable, it means timeout or fallback.
-            # Keep them in CHAT, but fingerprinting failed.
-            st.session_state.is_chat_ready = True # Allow chat, even with fallback FP
-        elif current_stage != 'WELCOME':
-            current_stage = 'FINGERPRINTING' # If guest and no stable FP, force fingerprinting page
-            st.session_state.is_chat_ready = False # Chat not ready during FP stage
+    # This logic ensures that even on a full browser refresh, the app returns to the correct stage.
+    if session and current_stage != 'WELCOME':
+        if session.user_type == UserType.REGISTERED_USER:
+            st.session_state.app_stage = 'CHAT'
+        else:
+            is_stable_fp = not (session.fingerprint_id is None or session.fingerprint_id.startswith("temp_"))
+            if is_stable_fp:
+                st.session_state.app_stage = 'CHAT'
+            else:
+                st.session_state.app_stage = 'FINGERPRINTING'
 
     # Render the determined stage
+    current_stage = st.session_state.app_stage # Re-fetch after potential override
+    
     if current_stage == 'CHAT':
-        # Final check for valid session before rendering chat
         if session and session.active:
             render_full_chat_ui(session_manager, session)
         else:
-            # If session is invalid, reset to welcome
-            logger.warning(f"Invalid or inactive session for CHAT stage. Resetting to WELCOME. Session ID: {session.session_id if session else 'None'}")
             st.session_state.app_stage = 'WELCOME'
-            st.session_state.is_chat_ready = False
             st.rerun()
             
     elif current_stage == 'FINGERPRINTING':
         if session and session.active:
             render_fingerprinting_page(session_manager, session)
         else:
-            logger.warning(f"Invalid or inactive session for FINGERPRINTING stage. Resetting to WELCOME. Session ID: {session.session_id if session else 'None'}")
             st.session_state.app_stage = 'WELCOME'
-            st.session_state.is_chat_ready = False
             st.rerun()
 
-    else: # Default to WELCOME stage
+    else: # Default to WELCOME
         render_welcome_page(session_manager)
 
 if __name__ == "__main__":
