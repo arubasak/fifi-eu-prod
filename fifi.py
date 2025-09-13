@@ -40,7 +40,7 @@ from production_config import (
     CRM_SAVE_MIN_QUESTIONS, EVASION_BAN_HOURS,
     FASTAPI_EMERGENCY_SAVE_URL, FASTAPI_EMERGENCY_SAVE_TIMEOUT,
     DAILY_RESET_WINDOW, SESSION_TIMEOUT_DELTA,
-    FINGERPRINT_WAIT_TIMEOUT_SECONDS 
+    FINGERPRINT_TIMEOUT_SECONDS 
 )
 
 # NEW: Import for simplified browser reload
@@ -5027,7 +5027,7 @@ def render_fingerprinting_page(session_manager: 'SessionManager', session: UserS
         st.session_state.fingerprint_wait_start = wait_start
     
     elapsed = current_time_float - wait_start
-    remaining = max(0, FINGERPRINT_WAIT_TIMEOUT_SECONDS - elapsed)
+    remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed)
     
     if remaining > 0:
         st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
@@ -5035,7 +5035,7 @@ def render_fingerprinting_page(session_manager: 'SessionManager', session: UserS
     else:
         st.info("🔒 **Finalizing setup...** Almost ready!")
     
-    progress_value = min(elapsed / FINGERPRINT_WAIT_TIMEOUT_SECONDS, 1.0)
+    progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
     st.progress(progress_value, text="Session Security Setup")
 
     # The controlled, gentle rerun loop
