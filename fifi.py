@@ -991,8 +991,22 @@ class DatabaseManager:
             self.MAX_CACHE_SIZE = MAX_FINGERPRINT_CACHE_SIZE
             self.MAX_ATTEMPTS = MAX_RATE_LIMIT_TRACKING # Reusing for attempts, could be a separate constant
 
+            class FingerprintingManager:
+        """Manages browser fingerprinting using external HTML component file."""
+        
+        def __init__(self):
+            self.fingerprint_cache = {}
+            self.component_attempts = defaultdict(int)
+            ## CHANGE: Memory leak fix - limit cache and attempts size
+            self.MAX_CACHE_SIZE = MAX_FINGERPRINT_CACHE_SIZE
+            self.MAX_ATTEMPTS = MAX_RATE_LIMIT_TRACKING # Reusing for attempts, could be a separate constant
+
         def render_fingerprint_component(self, session_id: str):
-            """Renders fingerprinting component using external fingerprint_component.html file."""
+            """
+            Renders fingerprinting component using external fingerprint_component.html file.
+            This method is responsible for injecting the HTML and setting up the JS callback.
+            It is called ONCE when the app_stage is 'FINGERPRINTING'.
+            """
             try:
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
@@ -1002,7 +1016,12 @@ class DatabaseManager:
                 if not os.path.exists(html_file_path):
                     logger.error(f"❌ Fingerprint component file NOT FOUND at {html_file_path}")
                     logger.info(f"📁 Current directory contents: {os.listdir(current_dir)}")
-                    return self._generate_fallback_fingerprint()
+                    # If HTML component file is missing, immediately signal failure to Python
+                    # and let Python's timeout or fallback handle it.
+                    st.session_state.fingerprint_js_completed = True
+                    st.session_state.fingerprint_id_from_js = "component_file_missing"
+                    st.session_state.fingerprint_method_from_js = "error"
+                    return 
         
                 logger.debug(f"✅ Fingerprint component file found, reading content...")
         
@@ -1011,7 +1030,7 @@ class DatabaseManager:
         
                 logger.debug(f"📄 Read {len(html_content)} characters from fingerprint component file")
         
-                ## CHANGE: JavaScript Injection Fix - Use json.dumps to safely embed session_id
+                # Use json.dumps to safely embed session_id as a JavaScript string literal
                 original_content = html_content
                 html_content = html_content.replace('{SESSION_ID}', json.dumps(session_id))
         
@@ -1020,15 +1039,69 @@ class DatabaseManager:
                 else:
                     logger.debug(f"✅ Replaced {{SESSION_ID}} placeholder with {session_id[:8]}...")
         
-                # Render with proper height for CreepJS to work
-                logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]} with visible dimensions...")
-                st.components.v1.html(html_content, height=300, width=300, scrolling=False)
+                # --- Render the HTML component ---
+                # Ensure the iframe has sufficient dimensions for its DOM content to be rendered.
+                component_html_key = f"fingerprint_iframe_{session_id}" # Unique key for the HTML iframe
+                st.components.v1.html(
+                    html_content,
+                    height=300, # Sufficient height for visual rendering
+                    width=500,  # Sufficient width
+                    scrolling=False,
+                    key=component_html_key # Use a unique key for the iframe
+                )
         
-                logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
-        
+                logger.info(f"✅ External fingerprint component (iframe) rendered for session {session_id[:8]}")
+                
+                # --- Setup the JavaScript Callback for Streamlit ---
+                # This st_javascript call creates a communication bridge from the iframe JS to Streamlit Python.
+                # The JS in the iframe will call window.parent.streamlit_javascript_callback(...)
+                # The return value of this st_javascript will then update in Streamlit's session state.
+                js_callback_setup_code = """
+                    (function() {
+                        // This function needs to be exposed in the parent window, but accessible by the iframe.
+                        // Streamlit's components.v1.html creates a sandbox, so direct parent access is tricky.
+                        // The st_javascript component bridges this for us.
+
+                        // The embedded JS in fingerprint_component.html will call this function:
+                        // window.parent.streamlit_javascript_callback(...)
+                        // Streamlit's st_javascript component listens for this return value.
+
+                        // We return an object that will get updated by the component's JS later
+                        // The `st_javascript` component automatically handles the communication.
+                        
+                        // We must return a value here for st_javascript to be initialized.
+                        // The actual signaling happens when the iframe's JS calls this with `data`.
+                        
+                        // Initial return, indicates the callback is set up but no FP data yet.
+                        return { initialized_callback: true };
+                    })()
+                """
+                # This `st_javascript` component will "listen" for the callback from the iframe.
+                # Its returned value will be stored in `js_result` on the Python side in subsequent reruns.
+                # It's given a unique key, and `call_on_update=True` is vital.
+                js_result = st_javascript(js_code=js_callback_setup_code, key=f"fingerprint_callback_listener_{session_id}", call_on_update=True)
+                
+                # If the JavaScript component calls `window.parent.streamlit_javascript_callback`
+                # (which it actually calls from within the iframe to the parent frame),
+                # `js_result` will eventually contain the `data` passed to that callback.
+                if js_result and js_result.get('completed'):
+                    logger.info(f"Python detected JS callback for {session_id[:8]}! Processing data: {js_result.get('fingerprint_id', 'None')[:8]}")
+                    # Update session state with data received from the JavaScript callback
+                    st.session_state.fingerprint_js_completed = True
+                    st.session_state.fingerprint_id_from_js = js_result.get('fingerprint_id')
+                    st.session_state.fingerprint_method_from_js = js_result.get('method')
+                    st.session_state.fingerprint_privacy_from_js = js_result.get('privacy')
+                    st.session_state.fingerprint_working_methods_from_js = js_result.get('working_methods', [])
+                    
+                logger.debug(f"Python side of FP component render finished for {session_id[:8]}. Awaiting JS signal.")
+
             except Exception as e:
-                logger.error(f"❌ Failed to render external fingerprint component: {e}", exc_info=True)
-                return self._generate_fallback_fingerprint()
+                logger.error(f"❌ Failed to render external fingerprint component or setup JS callback: {e}", exc_info=True)
+                # On Python-side error during render/setup, immediately signal failure to Python
+                st.session_state.fingerprint_js_completed = True
+                st.session_state.fingerprint_id_from_js = "render_error"
+                st.session_state.fingerprint_method_from_js = "error"
+                return # Python will then proceed to process this fallback.
         
 
         def process_fingerprint_data(self, fingerprint_data: Dict[str, Any]) -> Dict[str, Any]:
