@@ -1021,8 +1021,8 @@ class DatabaseManager:
                     logger.debug(f"✅ Replaced {{SESSION_ID}} placeholder with {session_id[:8]}...")
         
                 # Render with proper height for CreepJS to work
-                logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-                st.components.v1.html(html_content, height=1, scrolling=False)
+                logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]} with visible dimensions...")
+                st.components.v1.html(html_content, height=100, width=100, scrolling=False)
         
                 logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
         
