@@ -99,9 +99,11 @@
 <!-- 2. Load the CreepJS library from the CORRECT CDN URL (path includes /docs/) -->
 <script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
 
-<!-- 3. Your original DOM-scraping logic (corrected and refined) -->
+<!-- 3. Your original DOM-scraping logic, now robustly wrapped in DOMContentLoaded -->
 <script>
-(function () {
+document.addEventListener('DOMContentLoaded', function() {
+  console.log('🚀 DOMContentLoaded fired. Starting main script block...');
+
   const sessionId = "{SESSION_ID}"; 
   const statusEl = document.getElementById('status');
   const BEACON_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint';
@@ -115,6 +117,7 @@
 
   console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
   
+  // Use a global flag to prevent sending multiple times if Streamlit re-renders the component.
   if (window.fifiFingerprintSent) {
     console.log('✅ Fingerprint already sent for this page load. Skipping duplicate.');
     return;
@@ -122,11 +125,12 @@
   window.fifiFingerprintSent = true; 
   
   let fingerprintFound = false; 
+  let fingerprintSent = false; // Separate flag for network send status
   const startTime = Date.now();
   
   function sendFingerprint(payload) {
     if (fingerprintSent) return; 
-    fingerprintSent = true;
+    fingerprintSent = true; // Mark as sent to prevent re-sending
     
     const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`✅ Fingerprint obtained after ${elapsedSeconds}s:`, payload.fingerprint_id);
@@ -159,6 +163,7 @@
     }
   }
   
+  // DOM scraping function to get the fingerprint ID that CreepJS writes to the HTML
   function tryDomScrape() {
     const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
     const fuzzyEl = document.querySelector('#fuzzy-fingerprint .fuzzy-fp');
@@ -199,7 +204,7 @@
   function attemptFingerprint() {
     attempts++;
     
-    if (fingerprintFound) {
+    if (fingerprintFound) { 
         return;
     }
 
@@ -208,8 +213,7 @@
     }
     
     if (attempts < maxAttempts) {
-      // MODIFIED: Increase polling interval for DOM scraping
-      const delay = attempts < 10 ? 500 : 1000; // 0.5s for first 10, then 1s
+      const delay = attempts < 10 ? 500 : 1000; 
       setTimeout(attemptFingerprint, delay);
     } else {
       console.error('❌ Max attempts reached for DOM scraping. Fingerprint not found in DOM.');
@@ -228,8 +232,8 @@
   setTimeout(() => {
     console.log('🚀 Starting fingerprint detection (DOM polling)...');
     attemptFingerprint();
-  }, 2000); // 2 second initial delay
-})();
+  }, 2000); 
+}); // End DOMContentLoaded
 </script>
 </body>
 </html>
