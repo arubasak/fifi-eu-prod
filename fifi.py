@@ -985,16 +985,7 @@ class DatabaseManager:
         """Manages browser fingerprinting using external HTML component file."""
         
         def __init__(self):
-            self.fingerprint_cache = {}
-            self.component_attempts = defaultdict(int)
-            ## CHANGE: Memory leak fix - limit cache and attempts size
-            self.MAX_CACHE_SIZE = MAX_FINGERPRINT_CACHE_SIZE
-            self.MAX_ATTEMPTS = MAX_RATE_LIMIT_TRACKING # Reusing for attempts, could be a separate constant
-
-            class FingerprintingManager:
-        """Manages browser fingerprinting using external HTML component file."""
-        
-        def __init__(self):
+            # This is the corrected indentation for the __init__ method
             self.fingerprint_cache = {}
             self.component_attempts = defaultdict(int)
             ## CHANGE: Memory leak fix - limit cache and attempts size
