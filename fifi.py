@@ -5006,10 +5006,12 @@ def handle_fingerprint_requests_from_query():
 # =============================================================================
 
 ## CHANGE: NEW - Stage 2: The minimal page dedicated to fingerprinting
+## NEW - Stage 2: The *absolute minimal* page dedicated to fingerprinting
 def render_fingerprinting_page(session_manager: 'SessionManager', session: UserSession):
     """
     Renders an *extremely minimal* Streamlit page that contains ONLY the fingerprinting component.
-    All visual feedback (status, progress) is now handled *inside* the HTML component.
+    All visual feedback (status, progress) is handled *inside* the HTML component.
+    Python will only check the DB every 5 seconds (not rerun aggressively).
     """
     st.set_page_config(
         page_title="FiFi AI Assistant - Securing Session",
@@ -5022,36 +5024,44 @@ def render_fingerprinting_page(session_manager: 'SessionManager', session: UserS
 
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
     
+    # Only render the HTML component ONCE per Streamlit session lifecycle if it hasn't been rendered.
     if not st.session_state.get(fingerprint_key, False):
         # Render the component with generous, full-width/height to ensure it's the primary content
         # The component's own CSS will center its content.
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
         st.session_state[fingerprint_key] = True
     else:
-        # If already rendered, just ensure it's present (no direct Streamlit output here)
+        # If already rendered, ensure it's present (no direct Streamlit output here)
         pass # The component's iframe will persist across reruns if rendered once.
 
-    # --- Python-side timeout and polling logic (remains mostly the same) ---
+    # --- Python-side timeout and polling logic ---
     current_time_float = time.time()
     wait_start = st.session_state.get('fingerprint_wait_start', current_time_float)
     if 'fingerprint_wait_start' not in st.session_state:
         st.session_state.fingerprint_wait_start = wait_start
     
     elapsed = current_time_float - wait_start
-    # No `st.info` or `st.progress` here. The HTML component handles its own progress bar.
     
     # Python needs to periodically check the DB to see if the Beacon has updated the FP ID.
-    if (elapsed % 5) == 0 or elapsed == 0: 
-        updated_session = session_manager.db.load_session(session.session_id)
-        if updated_session and updated_session.fingerprint_id and \
-           not updated_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-            
-            logger.info(f"✅ Fingerprint detected in DB for {updated_session.session_id[:8]}! Transitioning to CHAT.")
-            st.session_state.app_stage = 'CHAT'
-            if 'fingerprint_wait_start' in st.session_state:
-                del st.session_state['fingerprint_wait_start']
-            st.rerun() 
-            return
+    # We will ONLY load from DB on specific intervals, not every single rerun.
+    
+    # The `time.sleep(0.5); st.rerun()` at the end of the function is REMOVED.
+    # Instead, we will rely on Streamlit's natural reruns (e.g., from user interaction)
+    # or a browser refresh, combined with a manual `st.rerun()` only for specific timeouts.
+
+    # Load the session fresh from the database to check for FP update
+    # This check happens on every rerun where this function is called.
+    updated_session = session_manager.db.load_session(session.session_id)
+    
+    if updated_session and updated_session.fingerprint_id and \
+       not updated_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+        
+        logger.info(f"✅ Fingerprint detected in DB for {updated_session.session_id[:8]}! Transitioning to CHAT.")
+        st.session_state.app_stage = 'CHAT'
+        if 'fingerprint_wait_start' in st.session_state:
+            del st.session_state['fingerprint_wait_start']
+        st.rerun() # Trigger a rerun to go to the chat page (once only)
+        return
 
     # If timeout is reached and FP isn't done, force a transition with a fallback FP.
     if elapsed >= FINGERPRINT_TIMEOUT_SECONDS and st.session_state.app_stage != 'CHAT':
@@ -5064,10 +5074,20 @@ def render_fingerprinting_page(session_manager: 'SessionManager', session: UserS
         st.session_state.app_stage = 'CHAT'
         if 'fingerprint_wait_start' in st.session_state:
             del st.session_state['fingerprint_wait_start']
-        # The HTML component will show the "timed out" message in its own status div
-        st.rerun() 
+        st.error("⚠️ Device recognition timed out. Continuing with basic session security.")
+        st.rerun() # Trigger rerun to go to chat page (once only)
         return
 
+    # If we are still waiting and neither the FP is found nor timeout has occurred,
+    # we DO NOT call st.rerun() here. We simply let Streamlit re-render passively
+    # (e.g., when a user moves their mouse, or implicitly by the browser).
+    # The progress bar/status in the HTML component will update itself.
+    # Python will keep checking on every natural rerun.
+    
+    # To provide some visual feedback on the Streamlit page itself (not in the iframe),
+    # you could add a very simple, static Streamlit progress bar here that only
+    # updates on natural reruns, but it won't be "vigorous".
+    st.markdown(f"Status: Waiting for device recognition... (Elapsed: {elapsed:.0f}s)")
     # If still waiting and not timed out, trigger a gentle rerun to check DB again later.
     if st.session_state.app_stage != 'CHAT':
         time.sleep(0.5) 
