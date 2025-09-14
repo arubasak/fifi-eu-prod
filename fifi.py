@@ -5008,40 +5008,70 @@ def handle_fingerprint_requests_from_query():
 ## CHANGE: NEW - Stage 2: The minimal page dedicated to fingerprinting
 def render_fingerprinting_page(session_manager: 'SessionManager', session: UserSession):
     """
-    Renders a minimal, stable page whose ONLY purpose is to collect the fingerprint.
+    Renders an *extremely minimal* Streamlit page that contains ONLY the fingerprinting component.
+    All visual feedback (status, progress) is now handled *inside* the HTML component.
     """
-    st.title("🤖 FiFi AI Assistant")
-    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
-    st.markdown("---")
+    st.set_page_config(
+        page_title="FiFi AI Assistant - Securing Session",
+        page_icon="🔒", 
+        layout="centered"
+    )
+    
+    # NO Streamlit title, st.info, st.progress, etc., in this function body.
+    # The HTML component will fill the entire content area with its own UI.
 
-    # Render the component that generates the fingerprint
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+    
     if not st.session_state.get(fingerprint_key, False):
+        # Render the component with generous, full-width/height to ensure it's the primary content
+        # The component's own CSS will center its content.
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
         st.session_state[fingerprint_key] = True
+    else:
+        # If already rendered, just ensure it's present (no direct Streamlit output here)
+        pass # The component's iframe will persist across reruns if rendered once.
 
-    # Show the waiting message and progress bar
+    # --- Python-side timeout and polling logic (remains mostly the same) ---
     current_time_float = time.time()
     wait_start = st.session_state.get('fingerprint_wait_start', current_time_float)
     if 'fingerprint_wait_start' not in st.session_state:
         st.session_state.fingerprint_wait_start = wait_start
     
     elapsed = current_time_float - wait_start
-    remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed)
+    # No `st.info` or `st.progress` here. The HTML component handles its own progress bar.
     
-    if remaining > 0:
-        st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
-        st.caption("FiFi is setting up device recognition for security and session management.")
-    else:
-        st.info("🔒 **Finalizing setup...** Almost ready!")
-    
-    progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
-    st.progress(progress_value, text="Session Security Setup")
+    # Python needs to periodically check the DB to see if the Beacon has updated the FP ID.
+    if (elapsed % 5) == 0 or elapsed == 0: 
+        updated_session = session_manager.db.load_session(session.session_id)
+        if updated_session and updated_session.fingerprint_id and \
+           not updated_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+            
+            logger.info(f"✅ Fingerprint detected in DB for {updated_session.session_id[:8]}! Transitioning to CHAT.")
+            st.session_state.app_stage = 'CHAT'
+            if 'fingerprint_wait_start' in st.session_state:
+                del st.session_state['fingerprint_wait_start']
+            st.rerun() 
+            return
 
-    # The controlled, gentle rerun loop
-    time.sleep(1) # CRITICAL: Give the browser time to run JS
-    st.rerun()    # CRITICAL: Trigger a rerun to update the timer and check for FP data
+    # If timeout is reached and FP isn't done, force a transition with a fallback FP.
+    if elapsed >= FINGERPRINT_TIMEOUT_SECONDS and st.session_state.app_stage != 'CHAT':
+        logger.warning(f"FINGERPRINTING TIMEOUT: FP not received within {FINGERPRINT_TIMEOUT_SECONDS}s. Applying fallback FP and transitioning to CHAT.")
+        session.fingerprint_id = f"fallback_py_timeout_{session.session_id[:8]}"
+        session.fingerprint_method = "python_fallback_timeout"
+        session.browser_privacy_level = "high_privacy" 
+        session_manager.db.save_session(session) 
+        
+        st.session_state.app_stage = 'CHAT'
+        if 'fingerprint_wait_start' in st.session_state:
+            del st.session_state['fingerprint_wait_start']
+        # The HTML component will show the "timed out" message in its own status div
+        st.rerun() 
+        return
 
+    # If still waiting and not timed out, trigger a gentle rerun to check DB again later.
+    if st.session_state.app_stage != 'CHAT':
+        time.sleep(0.5) 
+        st.rerun()
 ## CHANGE: NEW - Stage 3: The full application UI
 def render_full_chat_ui(session_manager: 'SessionManager', session: UserSession):
     """
