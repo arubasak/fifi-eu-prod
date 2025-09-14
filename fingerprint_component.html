@@ -2,273 +2,99 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>FiFi Fingerprinting - Debug Test</title>
+  <title>FiFi Fingerprinting</title>
   <style>
-    body { 
-      margin: 0; 
-      padding: 20px; 
-      font-family: Arial, sans-serif; 
-      background: #f5f5f5;
-    }
-    #status { 
-      margin-top: 10px; 
-      font-size: 14px; 
-      color: #666; 
-      padding: 10px;
-      background: white;
-      border-radius: 5px;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    .test-result {
-      margin: 5px 0;
-      padding: 5px 10px;
-      border-radius: 3px;
-    }
-    .success { background: #d4edda; color: #155724; }
-    .error { background: #f8d7da; color: #721c24; }
-    .info { background: #d1ecf1; color: #0c5460; }
-    .warning { background: #fff3cd; color: #856404; }
+    body { margin: 0; padding: 10px; font-family: Arial, sans-serif; }
+    #status { margin-top: 10px; font-size: 12px; color: #666; }
   </style>
 </head>
 <body>
-<h2>CreepJS Loading Test</h2>
-<div id="status">
-  <div class="test-result info">Starting tests...</div>
-</div>
+<div id="status">Initializing CreepJS...</div>
 
+<!-- Block ServiceWorker registration BEFORE loading CreepJS -->
 <script>
-console.log('🟦 =================================');
-console.log('🟦 CREEPJS DEBUG TEST STARTING');
-console.log('🟦 =================================');
-console.log('🟦 Page loaded at:', new Date().toISOString());
-
-// Helper function to add status messages
-function addStatus(message, type) {
-  if (!type) type = 'info';
-  console.log('[' + type.toUpperCase() + '] ' + message);
-  const statusEl = document.getElementById('status');
-  const div = document.createElement('div');
-  div.className = 'test-result ' + type;
-  div.textContent = '[' + new Date().toLocaleTimeString() + '] ' + message;
-  statusEl.appendChild(div);
-}
-
-addStatus('HTML loaded, preparing tests...', 'info');
-
-// Block ServiceWorker first
-addStatus('Blocking ServiceWorker registration...', 'warning');
 (function() {
+  console.log('🚫 Blocking ServiceWorker registration...');
   if ('serviceWorker' in navigator) {
     const originalRegister = navigator.serviceWorker.register;
     navigator.serviceWorker.register = function() {
-      console.log('🚫 ServiceWorker registration blocked');
-      addStatus('ServiceWorker registration blocked successfully', 'success');
-      return Promise.reject(new Error('ServiceWorker disabled'));
+      console.log('🚫 ServiceWorker registration blocked for Streamlit iframe compatibility');
+      return Promise.reject(new Error('ServiceWorker registration disabled in iframe'));
     };
     Object.defineProperty(navigator.serviceWorker, 'controller', {
       get: function() { return null; }
     });
-    addStatus('ServiceWorker blocking initialized', 'success');
-  } else {
-    addStatus('ServiceWorker not available in this browser', 'info');
   }
+  console.log('✅ ServiceWorker blocking initialized');
 })();
-
-// Test multiple possible URLs
-addStatus('Testing CreepJS URLs...', 'info');
-
-// List of URLs to test
-const urlsToTest = [
-  'https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/creep.js',
-  'https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/dist/creep.js',
-  'https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js',
-  'https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/build/creep.js',
-  'https://abrahamjuliot.github.io/creepjs/creep.js',
-  'https://abrahamjuliot.github.io/creepjs/docs/creep.js'
-];
-
-let creepJsLoaded = false;
-let currentUrlIndex = 0;
-
-function tryNextUrl() {
-  if (currentUrlIndex >= urlsToTest.length) {
-    addStatus('All URLs tested. None worked!', 'error');
-    runFallbackTest();
-    return;
-  }
-  
-  const url = urlsToTest[currentUrlIndex];
-  addStatus('Testing URL ' + (currentUrlIndex + 1) + '/' + urlsToTest.length + ': ' + url, 'info');
-  
-  const script = document.createElement('script');
-  script.src = url;
-  
-  script.onload = function() {
-    creepJsLoaded = true;
-    addStatus('✅ SUCCESS! CreepJS loaded from: ' + url, 'success');
-    console.log('✅ CreepJS loaded successfully from:', url);
-    
-    // Check what's available
-    setTimeout(function() {
-      console.log('🔍 Checking available objects:');
-      console.log('window.creep:', typeof window.creep);
-      console.log('window.CreepJS:', typeof window.CreepJS);
-      console.log('window.fingerprint:', typeof window.fingerprint);
-      
-      // Check all window properties that might be CreepJS
-      console.log('🔍 All window properties containing "creep" or "finger":');
-      for (let prop in window) {
-        if (prop.toLowerCase().includes('creep') || prop.toLowerCase().includes('finger')) {
-          console.log('Found:', prop, '=', typeof window[prop]);
-        }
-      }
-      
-      if (typeof window.creep !== 'undefined') {
-        addStatus('window.creep object is available', 'success');
-        console.log('window.creep methods:', Object.keys(window.creep));
-      }
-      
-      // Run the fingerprinting test
-      runFingerprintTest();
-    }, 1000);
-  };
-  
-  script.onerror = function() {
-    addStatus('❌ Failed to load from: ' + url, 'error');
-    console.error('❌ Failed to load CreepJS from:', url);
-    currentUrlIndex++;
-    
-    // Remove the failed script tag
-    script.remove();
-    
-    // Try next URL
-    setTimeout(tryNextUrl, 500);
-  };
-  
-  document.head.appendChild(script);
-}
-
-// Start testing URLs
-setTimeout(function() {
-  tryNextUrl();
-}, 100);
-
-// Fallback test if no URLs work
-function runFallbackTest() {
-  addStatus('Running fallback fingerprint test...', 'warning');
-  
-  const parts = [
-    navigator.userAgent || 'unknown',
-    screen.width + 'x' + screen.height + 'x' + screen.colorDepth,
-    Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-    navigator.language || 'en',
-    (navigator.languages || []).join(','),
-    navigator.platform || 'unknown',
-    String(navigator.hardwareConcurrency || 0),
-    String(navigator.deviceMemory || 0)
-  ];
-  
-  try {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    ctx.font = '14px Arial';
-    ctx.fillText('fifi-fp-fallback', 2, 15);
-    parts.push(canvas.toDataURL().slice(-50));
-    addStatus('Canvas fingerprint: Success', 'success');
-  } catch (e) {
-    parts.push('canvas_blocked');
-    addStatus('Canvas fingerprint: Blocked', 'warning');
-  }
-  
-  const combined = parts.join('|');
-  let hash = 0;
-  for (let i = 0; i < combined.length; i++) {
-    hash = ((hash << 5) - hash) + combined.charCodeAt(i);
-    hash = hash & hash;
-  }
-  
-  const fallbackId = 'fallback_' + Math.abs(hash).toString(16) + '_' + Date.now().toString(36);
-  addStatus('Fallback fingerprint generated: ' + fallbackId, 'success');
-}
-
-// Run fingerprint test with CreepJS
-function runFingerprintTest() {
-  addStatus('Running CreepJS fingerprint test...', 'info');
-  
-  // IMPORTANT: Handle session ID properly
-  // The {SESSION_ID} replacement might not include quotes
-  let sessionId = '';
-  try {
-    // This will work whether {SESSION_ID} is replaced with or without quotes
-    sessionId = String('{SESSION_ID}');
-  } catch (e) {
-    // If there's any error, use a fallback
-    sessionId = 'test-session-' + Date.now();
-    addStatus('Warning: Could not get session ID, using fallback', 'warning');
-  }
-  
-  const BEACON_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint';
-  
-  console.log('🔍 Starting fingerprint detection for session:', sessionId.substring(0, 8));
-  addStatus('Session ID: ' + sessionId.substring(0, 8) + '...', 'info');
-  
-  // Create the DOM structure CreepJS expects
-  if (!document.querySelector('#fp-app')) {
-    const fpDiv = document.createElement('div');
-    fpDiv.id = 'fp-app';
-    fpDiv.innerHTML = '<fingerprint><div id="fingerprint-data"><div class="fingerprint-header-container"><div class="fingerprint-header"><div class="ellipsis-all">FP ID: Computing...</div><div id="fuzzy-fingerprint"><div class="ellipsis-all fuzzy-fp">Fuzzy: <span class="blurred">0000000000000000000000000000000000000000000000000000000000000000</span></div></div><div><span class="time">0 ms</span></div></div></div></div></fingerprint>';
-    document.body.appendChild(fpDiv);
-    addStatus('Created DOM structure for CreepJS', 'info');
-  }
-  
-  // Try to get fingerprint using API if available
-  if (window.creep && typeof window.creep.get === 'function') {
-    addStatus('Trying creep.get() API...', 'info');
-    window.creep.get().then(function(fp) {
-      addStatus('✅ API Success! Fingerprint: ' + fp.visitorId, 'success');
-      console.log('Full fingerprint data:', fp);
-    }).catch(function(err) {
-      addStatus('API failed: ' + err.message, 'error');
-      tryDomScraping();
-    });
-  } else {
-    addStatus('creep.get() not available, trying DOM scraping...', 'warning');
-    tryDomScraping();
-  }
-  
-  function tryDomScraping() {
-    let attempts = 0;
-    const maxAttempts = 10;
-    
-    function attemptScrape() {
-      attempts++;
-      addStatus('DOM scrape attempt ' + attempts + '/' + maxAttempts + '...', 'info');
-      
-      const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
-      if (header) {
-        const fpText = header.textContent || '';
-        addStatus('Found header text: "' + fpText + '"', 'info');
-        
-        if (fpText && !fpText.includes('Computing...')) {
-          const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
-          if (fpMatch) {
-            addStatus('✅ DOM Scrape Success! Fingerprint: ' + fpMatch[1], 'success');
-            return;
-          }
-        }
-      }
-      
-      if (attempts < maxAttempts) {
-        setTimeout(attemptScrape, 1000);
-      } else {
-        addStatus('DOM scraping failed after max attempts', 'error');
-      }
-    }
-    
-    setTimeout(attemptScrape, 2000);
-  }
-}
 </script>
 
+<!-- Load CreepJS from the WORKING URL -->
+<script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
+
+<script>
+(function () {
+  const sessionId = "{SESSION_ID}";
+  const statusEl = document.getElementById('status');
+  const BEACON_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint';
+  
+  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
+  
+  // Wait a bit for CreepJS to initialize
+  setTimeout(function() {
+    console.log('🔍 Checking if CreepJS loaded...');
+    console.log('typeof window.creep:', typeof window.creep);
+    
+    if (window.creep && typeof window.creep.get === 'function') {
+      console.log('✅ CreepJS API available, attempting to get fingerprint...');
+      
+      window.creep.get().then(function(fp) {
+        console.log('✅ Fingerprint obtained:', fp);
+        statusEl.textContent = 'Fingerprint detected: ' + fp.visitorId.substring(0, 12) + '...';
+        
+        // Send to your server
+        const data = JSON.stringify({
+          session_id: sessionId,
+          fingerprint_id: fp.visitorId,
+          method: 'creepjs_api',
+          privacy: fp.confidence ? fp.confidence.score : 'unknown',
+          working_methods: Object.keys(fp).filter(function(key) { return fp[key] !== undefined; })
+        });
+        
+        if (navigator.sendBeacon) {
+          const sent = navigator.sendBeacon(BEACON_URL, new Blob([data], {type: 'application/json'}));
+          if (sent) {
+            console.log('✅ Fingerprint sent via beacon');
+            statusEl.textContent = 'Secure connection established.';
+          } else {
+            console.log('⚠️ Beacon failed, trying fetch...');
+            fetch(BEACON_URL, { 
+              method: 'POST', 
+              body: data, 
+              headers: {'Content-Type': 'application/json'}, 
+              keepalive: true 
+            });
+          }
+        }
+      }).catch(function(err) {
+        console.error('❌ CreepJS API error:', err);
+        statusEl.textContent = 'Fingerprinting error: ' + err.message;
+        // Fall back to your existing DOM scraping method
+        fallbackToScraping();
+      });
+    } else {
+      console.log('⚠️ CreepJS API not available, falling back to DOM scraping...');
+      fallbackToScraping();
+    }
+  }, 2000); // Give CreepJS 2 seconds to initialize
+  
+  // Your existing DOM scraping fallback
+  function fallbackToScraping() {
+    console.log('🔄 Starting DOM scraping fallback...');
+    // Your existing scraping code here
+    statusEl.textContent = 'Using fallback fingerprinting...';
+  }
+})();
+</script>
 </body>
 </html>
