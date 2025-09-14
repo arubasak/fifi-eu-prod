@@ -1038,7 +1038,7 @@ class DatabaseManager:
                     height=300, # Sufficient height for visual rendering
                     width=500,  # Sufficient width
                     scrolling=False,
-                    key=component_html_key # Use a unique key for the iframe
+                    # key=component_html_key # Use a unique key for the iframe
                 )
         
                 logger.info(f"✅ External fingerprint component (iframe) rendered for session {session_id[:8]}")
