@@ -77,7 +77,7 @@ addStatus('Blocking ServiceWorker registration...', 'warning');
 // Test multiple possible URLs
 addStatus('Testing CreepJS URLs...', 'info');
 
-// List of URLs to test - FIXED SYNTAX
+// List of URLs to test
 const urlsToTest = [
   'https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/creep.js',
   'https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/dist/creep.js',
@@ -195,11 +195,22 @@ function runFallbackTest() {
 function runFingerprintTest() {
   addStatus('Running CreepJS fingerprint test...', 'info');
   
-  // Your original fingerprinting code
-  const sessionId = "{SESSION_ID}";
+  // IMPORTANT: Handle session ID properly
+  // The {SESSION_ID} replacement might not include quotes
+  let sessionId = '';
+  try {
+    // This will work whether {SESSION_ID} is replaced with or without quotes
+    sessionId = String('{SESSION_ID}');
+  } catch (e) {
+    // If there's any error, use a fallback
+    sessionId = 'test-session-' + Date.now();
+    addStatus('Warning: Could not get session ID, using fallback', 'warning');
+  }
+  
   const BEACON_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint';
   
   console.log('🔍 Starting fingerprint detection for session:', sessionId.substring(0, 8));
+  addStatus('Session ID: ' + sessionId.substring(0, 8) + '...', 'info');
   
   // Create the DOM structure CreepJS expects
   if (!document.querySelector('#fp-app')) {
