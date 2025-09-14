@@ -1069,9 +1069,6 @@ class DatabaseManager:
                         // We return an object that will get updated by the component's JS later
                         // The `st_javascript` component automatically handles the communication.
                         
-                        // We must return a value here for st_javascript to be initialized.
-                        // The actual signaling happens when the iframe's JS calls this with `data`.
-                        
                         // Initial return, indicates the callback is set up but no FP data yet.
                         return { initialized_callback: true };
                     })()
