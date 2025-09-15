@@ -5037,10 +5037,13 @@ def handle_fingerprint_requests_from_query(session_manager: 'SessionManager'):
 
 ## MODIFIED: render_fingerprinting_page (Stable version without flickering)
 ## MODIFIED: render_fingerprinting_page (With 10-second grace period)
+## MODIFIED: render_fingerprinting_page (FINAL - with stable grace period)
 def render_fingerprinting_page(session_manager: 'SessionManager', session: UserSession):
     """
     Renders a dedicated page to collect the fingerprint.
-    Includes a 10-second grace period for the JS to initialize before Python starts polling.
+    This version uses a single st.progress bar to create a stable two-phase wait:
+    1. A 10-second grace period for JS to initialize.
+    2. A subsequent polling period to check the database.
     """
     st.set_page_config(
         page_title="FiFi AI Assistant - Securing Session",
@@ -5048,79 +5051,76 @@ def render_fingerprinting_page(session_manager: 'SessionManager', session: UserS
         layout="centered"
     )
     st.title("🔒 Securing Your Session...")
-    st.markdown("Please wait while we set up secure device recognition. This may take up to 25 seconds.")
+    st.markdown("Please wait while we set up secure device recognition. This may take a moment.")
 
-    # --- Step 1: Render the HTML component iframe ---
-    # This is always rendered so the JS can start working immediately.
+    # --- Step 1: Render the HTML component iframe ONCE ---
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
     if not st.session_state.get(fingerprint_key, False):
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
         st.session_state[fingerprint_key] = True
 
-    # --- Step 2: Implement the 10-second Python-side grace period ---
+    # --- Step 2: Implement a stable two-phase wait using a single timer ---
     GRACE_PERIOD_SECONDS = 10
+    # The polling duration starts AFTER the grace period.
+    POLLING_DURATION_SECONDS = FINGERPRINT_TIMEOUT_SECONDS 
     
-    grace_start_time = st.session_state.get('grace_period_start', time.time())
-    if 'grace_period_start' not in st.session_state:
-        st.session_state.grace_period_start = grace_start_time
+    current_time = time.time()
+    start_time = st.session_state.get('fingerprint_process_start', current_time)
+    if 'fingerprint_process_start' not in st.session_state:
+        st.session_state.fingerprint_process_start = start_time
     
-    elapsed_grace = time.time() - grace_start_time
+    total_elapsed = current_time - start_time
 
-    # During the grace period, just show a spinner and wait.
-    if elapsed_grace < GRACE_PERIOD_SECONDS:
-        with st.spinner("Initializing device recognition... Please wait."):
-            # This allows the iframe's "Initializing..." message to be the primary focus.
-            time.sleep(1) # Rerun every second to check the timer
+    # --- Phase 1: Grace Period (First 10 seconds) ---
+    if total_elapsed < GRACE_PERIOD_SECONDS:
+        # Show a static progress bar to indicate waiting, giving JS time to run.
+        st.progress(0, text="Initializing device recognition... Please wait.")
+        # Rerun to check the timer, but the UI remains stable.
+        time.sleep(1)
+        st.rerun()
+        return
+
+    # --- Phase 2: Polling Period (After 10 seconds) ---
+    else:
+        polling_elapsed = total_elapsed - GRACE_PERIOD_SECONDS
+        
+        # Display an animating progress bar for user feedback.
+        progress_value = min(polling_elapsed / POLLING_DURATION_SECONDS, 1.0)
+        st.progress(progress_value, text=f"Verifying security signature... ({int(polling_elapsed)}s / {POLLING_DURATION_SECONDS}s)")
+        
+        # Check the database for the fingerprint ID.
+        updated_session = session_manager.db.load_session(session.session_id)
+        
+        if updated_session and updated_session.fingerprint_id and \
+           not updated_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+            
+            logger.info(f"✅ Fingerprint detected in DB for {updated_session.session_id[:8]}! Transitioning.")
+            st.session_state.app_stage = 'CHAT'
+            if 'fingerprint_process_start' in st.session_state:
+                del st.session_state['fingerprint_process_start']
             st.rerun()
-        return # Important to exit here and not proceed to polling logic yet
+            return
 
-    # --- Step 3: Start the progress bar and DB polling (AFTER grace period) ---
-    current_time_float = time.time()
-    # The polling timer starts *after* the grace period is over.
-    wait_start = st.session_state.get('fingerprint_wait_start', current_time_float)
-    if 'fingerprint_wait_start' not in st.session_state:
-        st.session_state.fingerprint_wait_start = wait_start
-    
-    elapsed_polling = current_time_float - wait_start
-    
-    # Display a progress bar for user feedback.
-    # The timeout for polling is now effectively 15 seconds (FINGERPRINT_TIMEOUT_SECONDS)
-    # Total wait time for user is 10s (grace) + 15s (polling) = 25s max.
-    progress_value = min(elapsed_polling / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
-    st.progress(progress_value, text=f"Session Security Setup in progress... ({int(elapsed_polling)}s / {FINGERPRINT_TIMEOUT_SECONDS}s)")
-    
-    # Python periodically checks the DB to see if the Beacon has updated the FP ID.
-    updated_session = session_manager.db.load_session(session.session_id)
-    
-    if updated_session and updated_session.fingerprint_id and \
-       not updated_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-        
-        logger.info(f"✅ Fingerprint detected in DB for {updated_session.session_id[:8]}! Transitioning to CHAT.")
-        st.session_state.app_stage = 'CHAT'
-        if 'fingerprint_wait_start' in st.session_state: del st.session_state['fingerprint_wait_start']
-        if 'grace_period_start' in st.session_state: del st.session_state['grace_period_start']
+        # If polling times out, apply a fallback fingerprint.
+        if polling_elapsed >= POLLING_DURATION_SECONDS:
+            logger.warning(f"FINGERPRINTING TIMEOUT: Polling timed out after {POLLING_DURATION_SECONDS}s. Applying fallback.")
+            if session:
+                session.fingerprint_id = f"fallback_py_timeout_{session.session_id[:8]}"
+                session.fingerprint_method = "python_fallback_timeout"
+                session.browser_privacy_level = "high_privacy"
+                session_manager.db.save_session(session)
+            
+            st.session_state.app_stage = 'CHAT'
+            if 'fingerprint_process_start' in st.session_state:
+                del st.session_state['fingerprint_process_start']
+            st.error("⚠️ Device recognition timed out. Continuing with basic session security.")
+            st.rerun()
+            return
+
+        # If still polling, rerun to update the progress bar and re-check the DB.
+        time.sleep(1)
         st.rerun()
-        return
-
-    # If timeout is reached, force a transition with a Python-side fallback FP.
-    if elapsed_polling >= FINGERPRINT_TIMEOUT_SECONDS:
-        logger.warning(f"FINGERPRINTING TIMEOUT: FP not received within {FINGERPRINT_TIMEOUT_SECONDS}s of polling. Applying fallback.")
-        if session:
-            session.fingerprint_id = f"fallback_py_timeout_{session.session_id[:8]}"
-            session.fingerprint_method = "python_fallback_timeout"
-            session.browser_privacy_level = "high_privacy"
-            session_manager.db.save_session(session)
-        
-        st.session_state.app_stage = 'CHAT'
-        if 'fingerprint_wait_start' in st.session_state: del st.session_state['fingerprint_wait_start']
-        if 'grace_period_start' in st.session_state: del st.session_state['grace_period_start']
-        st.error("⚠️ Device recognition timed out. Continuing with basic session security.")
-        st.rerun()
-        return
-
-    # If still waiting, trigger a gentle rerun to update the progress bar.
-    time.sleep(1)
-    st.rerun()
+    
 ## CHANGE: NEW - Stage 3: The full application UI
 def render_full_chat_ui(session_manager: 'SessionManager', session: UserSession):
     """
