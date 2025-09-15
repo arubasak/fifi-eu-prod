@@ -4,63 +4,14 @@
   <meta charset="utf-8" />
   <title>FiFi Fingerprinting Component</title>
   <style>
-    body {
-      margin: 0;
-      padding: 10px;
-      font-family: Arial, sans-serif;
-      background-color: #f0f2f6;
-      color: #333;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
-      min-height: 100vh;
-      overflow: hidden;
-    }
-    #status {
-      margin-top: 20px;
-      font-size: 14px;
-      color: #333;
-      text-align: center;
-      font-weight: bold;
-    }
-    #fp-app {
-      border: 1px solid #ccc;
-      padding: 15px;
-      border-radius: 8px;
-      background-color: #fff;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-      width: 90%;
-      max-width: 450px;
-      margin-bottom: 20px;
-    }
-    /* Hide the verbose DOM output from the user, but keep it for scraping */
-    #fp-app {
-      display: none !important;
-      visibility: hidden !important;
-    }
+    /* ... (your styles) ... */
   </style>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
 </head>
 <body>
 
-<!-- This DOM structure is CRUCIAL for CreepJS to write its output to. -->
 <div id="fp-app">
-  <fingerprint>
-    <div id="fingerprint-data">
-      <div class="fingerprint-header-container">
-        <div class="fingerprint-header">
-          <div class="ellipsis-all">FP ID: Computing...</div>
-          <div id="fuzzy-fingerprint">
-            <div class="ellipsis-all fuzzy-fp">Fuzzy:
-              <span>0000000000000000000000000000000000000000000000000000000000000000</span>
-            </div>
-          </div>
-          <div><span class="time">0 ms</span></div>
-        </div>
-      </div>
-    </div>
-  </fingerprint>
+  <!-- ... (CreepJS DOM structure) ... -->
 </div>
 
 <div id="status">Initializing...</div>
@@ -83,21 +34,28 @@
 document.addEventListener('DOMContentLoaded', function() {
   console.log('🚀 DOMContentLoaded fired. Starting main script block...');
 
-  // --- CRITICAL FIX: Ensure sessionId is a plain string literal ---
-  const sessionId = {SESSION_ID}; // NO quotes here. Python's json.dumps will provide them.
-  // Example: Python provides "my-session-id", so JS sees: const sessionId = "my-session-id";
+  // --- CRITICAL FIX: Decode base64 encoded sessionId ---
+  // The Python code will inject something like: const encodedSessionId = 'YOUR_BASE64_ENCODED_SESSION_ID';
+  const encodedSessionId = {SESSION_ID}; // Placeholder, Python injects string with quotes
+  let sessionId = '';
+  try {
+      sessionId = atob(encodedSessionId); // Decode from base64
+  } catch (e) {
+      console.error("CRITICAL: Failed to decode session ID:", e);
+      statusEl.textContent = 'Error: Invalid session identifier.';
+      return;
+  }
+  // --- END CRITICAL FIX ---
   
   const statusEl = document.getElementById('status');
   const BEACON_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint';
   
-  // After the above fix, sessionId should be a string directly.
-  if (!sessionId || typeof sessionId !== 'string' || sessionId.includes("{SESSION_ID}")) {
-      console.error("CRITICAL: Session ID missing or invalid type. Aborting. Actual value:", sessionId);
+  if (!sessionId || typeof sessionId !== 'string' || sessionId.length < 10) { // Check length to be safe
+      console.error("CRITICAL: Session ID missing or invalid after decode. Aborting. Actual value:", sessionId);
       statusEl.textContent = 'Error: Missing session identifier.';
       return; 
   }
 
-  // --- CORRECTION: sessionId is now a direct string, use substring(0,8) ---
   console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
   
   if (window.fifiFingerprintSent) return;
@@ -115,8 +73,7 @@ document.addEventListener('DOMContentLoaded', function() {
     statusEl.textContent = `Session secured.`;
     
     const data = JSON.stringify({
-      // --- CORRECTION: sessionId is now a direct string, no JSON.parse needed ---
-      session_id: sessionId, 
+      session_id: sessionId, // Use the decoded sessionId
       fingerprint_id: payload.fingerprint_id,
       method: payload.method,
       privacy: payload.privacy || 'standard', 
@@ -170,8 +127,7 @@ document.addEventListener('DOMContentLoaded', function() {
       console.error('❌ Max attempts reached for DOM scraping.');
       statusEl.textContent = 'Fingerprinting failed. Using fallback.';
       sendFingerprint({
-          // --- CORRECTION: sessionId is a direct string here too ---
-          fingerprint_id: `fallback_dom_fail_${sessionId.substring(0,8)}_${Date.now().toString(36)}`, 
+          fingerprint_id: `fallback_dom_fail_${sessionId.substring(0,8)}_${Date.now().toString(36)}`,
           method: 'creepjs_dom_fallback'
       });
     }
