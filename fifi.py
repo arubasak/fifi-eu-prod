@@ -5076,8 +5076,8 @@ def render_fingerprinting_page(session_manager: 'SessionManager', session: UserS
         # Show a static progress bar to indicate waiting, giving JS time to run.
         st.progress(0, text="Initializing device recognition... Please wait.")
         # Rerun to check the timer, but the UI remains stable.
-        time.sleep(1)
-        st.rerun()
+        time.sleep(10)
+        # st.rerun()
         return
 
     # --- Phase 2: Polling Period (After 10 seconds) ---
