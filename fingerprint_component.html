@@ -6,16 +6,23 @@
   <style>
     body {
       margin: 0;
-      padding: 20px; 
+      padding: 10px;
       font-family: Arial, sans-serif;
-      background-color: #f0f2f6; 
+      background-color: #f0f2f6;
       color: #333;
       display: flex;
       flex-direction: column;
       justify-content: center;
       align-items: center;
-      min-height: 100vh; /* Fill full browser window */
-      box-sizing: border-box; 
+      min-height: 100vh;
+      overflow: hidden;
+    }
+    #status {
+      margin-top: 20px;
+      font-size: 14px;
+      color: #333;
+      text-align: center;
+      font-weight: bold;
     }
     #fp-app {
       border: 1px solid #ccc;
@@ -24,41 +31,20 @@
       background-color: #fff;
       box-shadow: 0 2px 4px rgba(0,0,0,0.1);
       width: 90%;
-      max-width: 400px; 
-      text-align: center;
+      max-width: 450px;
       margin-bottom: 20px;
     }
-    #status {
-      margin-top: 15px;
-      font-size: 14px;
-      color: #333;
-      font-weight: bold;
+    /* Hide the verbose DOM output from the user, but keep it for scraping */
+    #fp-app {
+      display: none !important;
+      visibility: hidden !important;
     }
-    .progress-bar-container {
-      width: 90%;
-      max-width: 400px;
-      background-color: #e0e0e0;
-      border-radius: 5px;
-      height: 10px;
-      overflow: hidden;
-      margin-top: 10px;
-    }
-    .progress-bar {
-      height: 100%;
-      width: 0%;
-      background-color: #ff6b6b; /* FiFi red color */
-      border-radius: 5px;
-      transition: width 0.5s ease-in-out;
-    }
-    /* Hide CreepJS's verbose logs for cleaner display to user */
-    .fingerprint-header-container { display: none; }
-    .fuzzy-fp { display: none; }
-    .time { display: none; }
   </style>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
 </head>
 <body>
 
+<!-- This DOM structure is CRUCIAL for CreepJS to write its output to. -->
 <div id="fp-app">
   <fingerprint>
     <div id="fingerprint-data">
@@ -77,24 +63,17 @@
   </fingerprint>
 </div>
 
-<div id="status">Initializing CreepJS...</div>
-<div class="progress-bar-container">
-  <div id="inner-progress-bar" class="progress-bar"></div>
-</div>
+<div id="status">Initializing...</div>
 
 <script>
 (function() {
   console.log('🚫 Blocking ServiceWorker registration...');
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register = function() {
-      console.log('🚫 ServiceWorker registration blocked for client-side environment (not HTTPS).');
-      return Promise.reject(new Error('ServiceWorker registration disabled.'));
+      console.log('🚫 ServiceWorker registration blocked for Streamlit iframe compatibility');
+      return Promise.reject(new Error('ServiceWorker registration disabled in iframe'));
     };
-    Object.defineProperty(navigator.serviceWorker, 'controller', {
-      get: function() { return null; }
-    });
   }
-  console.log('✅ ServiceWorker blocking initialized');
 })();
 </script>
 
@@ -106,191 +85,96 @@ document.addEventListener('DOMContentLoaded', function() {
 
   const sessionId = "{SESSION_ID}"; 
   const statusEl = document.getElementById('status');
-  const progressBar = document.getElementById('inner-progress-bar');
-  // MODIFIED: Beacon POST URL is now a placeholder from server
-  const BEACON_POST_URL = "{BEACON_POST_URL}"; 
-  // MODIFIED: Streamlit App URL is now a placeholder for redirecting back
-  const STREAMLIT_APP_URL = "{STREAMLIT_APP_URL_FOR_REDIRECT}";
-
-  const FINGERPRINT_SCRAPE_TIMEOUT_SECONDS = 30; // Max time for JS to scrape FP
-
-  // --- Redirects the browser back to Streamlit with data ---
-  function redirectToStreamlit(success, fingerprintData) {
-      console.log('⚡ Redirecting browser back to Streamlit:', success, fingerprintData);
-      
-      const queryParams = new URLSearchParams();
-      queryParams.set('event', 'fingerprint_complete'); // Main event for Streamlit
-      queryParams.set('session_id', sessionId);
-      queryParams.set('fingerprint_id', fingerprintData.fingerprint_id);
-      queryParams.set('method', fingerprintData.method);
-      queryParams.set('privacy', fingerprintData.privacy);
-      queryParams.set('working_methods', fingerprintData.working_methods.join(','));
-      
-      const targetUrl = `${STREAMLIT_APP_URL}?${queryParams.toString()}`;
-      console.log('Final redirect URL:', targetUrl);
-      window.location.href = targetUrl; // Redirect the full browser window
-  }
-
-
-  // --- CRITICAL SESSION ID VALIDATION ---
-  if (!sessionId || sessionId.includes("{SESSION_ID}") || sessionId.length < 5) {
-      console.error("CRITICAL: Session ID was not provided or is a placeholder/too short. Aborting fingerprinting.");
-      statusEl.textContent = 'Error: Missing session identifier. Cannot secure session.';
-      redirectToStreamlit(false, { fingerprint_id: 'no_session_id', method: 'error', privacy: 'unknown', working_methods: [] });
+  const BEACON_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint';
+  
+  if (!sessionId || sessionId.includes("{SESSION_ID}")) {
+      console.error("CRITICAL: Session ID missing. Aborting.");
+      statusEl.textContent = 'Error: Missing session identifier.';
       return; 
   }
 
-  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
+  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(1, 9)); // Use substring(1,9) because of quotes
   
-  if (window.fifiFingerprintSent) {
-    console.log('✅ Fingerprint already sent for this page load. Skipping duplicate.');
-    return;
-  }
+  if (window.fifiFingerprintSent) return;
   window.fifiFingerprintSent = true; 
   
   let fingerprintFound = false; 
-  let fingerprintBeaconSent = false; 
-  const initialClientStartTime = Date.now(); 
-
-  function updateProgressBar(progress) {
-    progressBar.style.width = `${progress * 100}%`;
-  }
-
-  // --- Sends FP to Beacon and then signals Streamlit ---
-  async function sendFingerprintAndRedirect(payload) {
-    if (fingerprintBeaconSent) return; 
-    fingerprintBeaconSent = true; 
+  let fingerprintSent = false;
+  const startTime = Date.now();
+  
+  function sendFingerprint(payload) {
+    if (fingerprintSent) return;
+    fingerprintSent = true;
     
-    const elapsedSeconds = ((Date.now() - initialClientStartTime) / 1000).toFixed(1);
-    console.log(`✅ Fingerprint obtained after ${elapsedSeconds}s:`, payload.fingerprint_id);
-    statusEl.textContent = `Session secured! ID: ${(payload.fingerprint_id || 'unknown').substring(0, 12)}... Redirecting...`;
-    updateProgressBar(1.0); 
-
+    console.log(`✅ Fingerprint obtained:`, payload.fingerprint_id);
+    statusEl.textContent = `Session secured.`;
+    
     const data = JSON.stringify({
-      session_id: sessionId,
+      session_id: JSON.parse(sessionId), // Parse the JSON string from Python
       fingerprint_id: payload.fingerprint_id,
       method: payload.method,
       privacy: payload.privacy || 'standard', 
-      working_methods: payload.working_methods || [],
-      timestamp: new Date().toISOString()
+      working_methods: payload.working_methods || []
     });
     
-    // --- Send to Beacon FastAPI (POST endpoint) ---
-    try {
-        if (navigator.sendBeacon) {
-            const sent = navigator.sendBeacon(BEACON_POST_URL, new Blob([data], {type: 'application/json'}));
-            if (sent) {
-                console.log('✅ Fingerprint data queued for sending via beacon successfully.');
-            } else {
-                console.error('❌ navigator.sendBeacon failed. Trying fetch fallback for beacon POST.');
-                 // If beacon fails, immediately try fetch. Then redirect to Streamlit.
-                await fetch(BEACON_POST_URL, { method: 'POST', body: data, headers: {'Content-Type': 'application/json'}, keepalive: true })
-                      .then(() => console.log('✅ Fingerprint data sent to Beacon via fetch fallback.'))
-                      .catch(err => console.error('❌ Fetch fallback to Beacon POST failed:', err));
-            }
-        } else {
-            console.warn('⚠️ navigator.sendBeacon not supported. Using fetch for beacon POST.');
-            await fetch(BEACON_POST_URL, { method: 'POST', body: data, headers: {'Content-Type': 'application/json'}, keepalive: true })
-                  .then(() => console.log('✅ Fingerprint data sent to Beacon via fetch.'))
-                  .catch(err => console.error('❌ Fetch to Beacon POST failed:', err));
-        }
-    } catch (e) {
-        console.error('❌ Critical error during Beacon POST:', e);
-        // If Beacon POST itself fails, we still need to redirect to Streamlit with failure info
-        redirectToStreamlit(false, { fingerprint_id: `beacon_post_fail_${sessionId.substring(0,8)}`, method: 'beacon_error', privacy: 'unknown', working_methods: [] });
-        return;
+    if (navigator.sendBeacon) {
+      const sent = navigator.sendBeacon(BEACON_URL, new Blob([data], {type: 'application/json'}));
+      if (sent) console.log('✅ Fingerprint data sent via beacon.');
+      else console.error('❌ Beacon send failed.');
+    } else {
+      console.warn('⚠️ sendBeacon not supported. Using fetch fallback.');
+      fetch(BEACON_URL, { method: 'POST', body: data, headers: {'Content-Type': 'application/json'}, keepalive: true });
     }
-    
-    // --- Redirect to Streamlit Python after Beacon POST is attempted ---
-    redirectToStreamlit(true, payload);
   }
   
-  // DOM scraping function to get the fingerprint ID that CreepJS writes to the HTML
   function tryDomScrape() {
     const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
-    const fuzzyEl = document.querySelector('#fuzzy-fingerprint .fuzzy-fp');
-    
-    if (!header || !fuzzyEl) {
-      console.warn('⚠️ Expected CreepJS output DOM elements not found in page for scraping.');
-      return false; 
-    }
+    if (!header) return false;
     
     const fpText = header.textContent || '';
-    const fuzzyTxt = fuzzyEl.textContent || '';
-    
     const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
-    const fuzzyMatch = fuzzyTxt.match(/Fuzzy:\s*([a-f0-9]{32,64})/i);
-    
     const fpId = fpMatch ? fpMatch[1] : null;
-    const fuzzy = fuzzyMatch ? fuzzyMatch[1] : null;
     
-    if (fpId && fpId !== 'Computing...' && /^[a-f0-9]{32,64}$/i.test(fpId)) {
+    if (fpId && fpId !== 'Computing...') {
       console.log('✅ Found fingerprint via DOM scrape:', fpId);
-      fingerprintFound = true; 
-      sendFingerprintAndRedirect({
+      fingerprintFound = true;
+      sendFingerprint({
         fingerprint_id: fpId,
-        fuzzy: fuzzy || '',
-        method: 'creepjs_dom', 
-        privacy: 'standard', 
+        method: 'creepjs_dom',
         working_methods: ['creepjs_dom_scrape']
       });
-      return true; 
+      return true;
     }
-    
-    return false; 
+    return false;
   }
   
   let attempts = 0;
-  const maxAttempts = FINGERPRINT_SCRAPE_TIMEOUT_SECONDS / 5; 
+  const maxAttempts = 5; // 5 attempts at 5s interval = 25s total
   
   function attemptFingerprint() {
     attempts++;
     
-    if (fingerprintFound) { 
-        return;
-    }
-
-    if (Date.now() - initialClientStartTime > FINGERPRINT_SCRAPE_TIMEOUT_SECONDS * 1000) {
-        console.error(`❌ Client-side scraping timed out after ${FINGERPRINT_SCRAPE_TIMEOUT_SECONDS}s.`);
-        statusEl.textContent = 'Fingerprinting failed (timed out). Redirecting with fallback.';
-        updateProgressBar(1.0); 
-        sendFingerprintAndRedirect({
-            fingerprint_id: `fallback_dom_timeout_${sessionId.substring(0,8)}_${Date.now().toString(36)}`,
-            fuzzy: '',
-            method: 'creepjs_dom_timeout_fallback',
-            privacy: 'high_privacy',
-            working_methods: []
-        });
-        return;
-    }
-
-    if (tryDomScrape()) {
-      return; 
-    }
+    if (fingerprintFound) return;
+    if (tryDomScrape()) return;
     
     if (attempts < maxAttempts) {
-      const delay = 5000; // Fixed 5-second polling interval
-      setTimeout(attemptFingerprint, delay);
+      statusEl.textContent = `Securing session... (Attempt ${attempts}/${maxAttempts})`;
+      setTimeout(attemptFingerprint, 5000); // Poll every 5 seconds
     } else {
-      console.error(`❌ Max attempts (${maxAttempts}) reached for DOM scraping. Fingerprint not found in DOM.`);
-      statusEl.textContent = 'Fingerprinting failed (DOM not updated or elements missing). Redirecting with fallback.';
-      updateProgressBar(1.0); 
-      sendFingerprintAndRedirect({
-          fingerprint_id: `fallback_dom_max_attempts_${sessionId.substring(0,8)}_${Date.now().toString(36)}`,
-          fuzzy: '',
-          method: 'creepjs_dom_max_attempts_fallback',
-          privacy: 'high_privacy',
-          working_methods: []
+      console.error('❌ Max attempts reached for DOM scraping.');
+      statusEl.textContent = 'Fingerprinting failed. Using fallback.';
+      sendFingerprint({
+          fingerprint_id: `fallback_dom_fail_${JSON.parse(sessionId).substring(0,8)}_${Date.now().toString(36)}`,
+          method: 'creepjs_dom_fallback'
       });
     }
-    updateProgressBar(Math.min(attempts / maxAttempts, (Date.now() - initialClientStartTime) / (FINGERPRINT_SCRAPE_TIMEOUT_SECONDS * 1000)));
   }
   
   setTimeout(() => {
     console.log('🚀 Starting fingerprint detection (DOM polling)...');
-    statusEl.textContent = 'Checking device characteristics...';
+    statusEl.textContent = 'Securing session... (Attempt 1/5)';
     attemptFingerprint();
-  }, 2000); 
+  }, 10000); // Wait a full 10 seconds before the first check
 });
 </script>
 </body>
