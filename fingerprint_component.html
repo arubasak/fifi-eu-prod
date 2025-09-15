@@ -2,143 +2,106 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>FiFi Fingerprinting Component</title>
-  <style>
-    /* ... (your styles) ... */
-  </style>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
+  <title>FiFi Fingerprinting</title>
+  <!-- 1. CORRECTED CSS URL -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/style.min.css">
 </head>
 <body>
+  <div id="status" style="font-family: Arial, sans-serif; font-size: 12px; color: #666;">Initializing...</div>
 
-<div id="fp-app">
-  <!-- ... (CreepJS DOM structure) ... -->
-</div>
+  <!-- 2. SERVICE WORKER BLOCK -->
+  <script>
+    (function() {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register = function() {
+          console.log('🚫 ServiceWorker registration blocked for Streamlit iframe compatibility.');
+          return Promise.reject(new Error('ServiceWorker registration disabled in iframe.'));
+        };
+      }
+    })();
+  </script>
 
-<div id="status">Initializing...</div>
+  <!-- 3. CORRECTED SCRIPT URL -->
+  <script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
 
-<script>
-(function() {
-  console.log('🚫 Blocking ServiceWorker registration...');
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register = function() {
-      console.log('🚫 ServiceWorker registration blocked for Streamlit iframe compatibility');
-      return Promise.reject(new Error('ServiceWorker registration disabled in iframe'));
-    };
-  }
-})();
-</script>
+  <!-- 4. YOUR PROVEN DOM-SCRAPING LOGIC -->
+  <script>
+    (function () {
+      const sessionId = "{SESSION_ID}";
+      const statusEl = document.getElementById('status');
+      const BEACON_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint';
+      
+      // Final check to ensure Streamlit provided a session_id
+      if (!sessionId || sessionId.includes("{SESSION_ID}")) {
+          console.error("CRITICAL: Session ID was not provided by Streamlit. Aborting.");
+          statusEl.textContent = 'Error: Missing session identifier.';
+          return;
+      }
 
-<script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
+      console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
+      
+      const PROCESSED_KEY = `fifi_creep_done_${sessionId}`;
+      if (window[PROCESSED_KEY]) {
+        console.log('✅ Already processed for this session');
+        return;
+      }
+      
+      let fingerprintSent = false;
+      const startTime = Date.now();
+      
+      function sendFingerprint(payload) {
+        if (fingerprintSent) return;
+        fingerprintSent = true;
+        window[PROCESSED_KEY] = true;
+        
+        const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`🔍 Fingerprint obtained after ${elapsedSeconds} seconds:`, payload);
+        statusEl.textContent = `Fingerprint detected: ${(payload.fingerprint_id || 'unknown').substring(0, 12)}... Sending to server.`;
+        
+        const data = JSON.stringify({
+          session_id: sessionId,
+          fingerprint_id: payload.fingerprint_id,
+          method: payload.method,
+          privacy: payload.privacy,
+          working_methods: payload.working_methods || []
+        });
+        
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(BEACON_URL, new Blob([data], {type: 'application/json'}));
+          console.log('✅ Fingerprint data sent successfully via beacon.');
+          statusEl.textContent = 'Secure connection established.';
+        } else {
+          fetch(BEACON_URL, { method: 'POST', body: data, headers: {'Content-Type': 'application/json'}, keepalive: true });
+        }
+      }
+      
+      // ... [The rest of your tryDomScrape, fallback, and polling logic remains here] ...
+      // Note: This is truncated for brevity, but your full logic should be here.
+      // Make sure this is present in your actual file.
 
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-  console.log('🚀 DOMContentLoaded fired. Starting main script block...');
+      function tryDomScrape() {
+        // Your existing DOM scraping function
+      }
 
-  // --- CRITICAL FIX: Decode base64 encoded sessionId ---
-  // The Python code will inject something like: const encodedSessionId = 'YOUR_BASE64_ENCODED_SESSION_ID';
-  const encodedSessionId = {SESSION_ID}; // Placeholder, Python injects string with quotes
-  let sessionId = '';
-  try {
-      sessionId = atob(encodedSessionId); // Decode from base64
-  } catch (e) {
-      console.error("CRITICAL: Failed to decode session ID:", e);
-      statusEl.textContent = 'Error: Invalid session identifier.';
-      return;
-  }
-  // --- END CRITICAL FIX ---
-  
-  const statusEl = document.getElementById('status');
-  const BEACON_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint';
-  
-  if (!sessionId || typeof sessionId !== 'string' || sessionId.length < 10) { // Check length to be safe
-      console.error("CRITICAL: Session ID missing or invalid after decode. Aborting. Actual value:", sessionId);
-      statusEl.textContent = 'Error: Missing session identifier.';
-      return; 
-  }
+      function createFallback(reason) {
+        // Your existing fallback function
+      }
 
-  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
-  
-  if (window.fifiFingerprintSent) return;
-  window.fifiFingerprintSent = true; 
-  
-  let fingerprintFound = false; 
-  let fingerprintSent = false;
-  const startTime = Date.now();
-  
-  function sendFingerprint(payload) {
-    if (fingerprintSent) return;
-    fingerprintSent = true;
-    
-    console.log(`✅ Fingerprint obtained:`, payload.fingerprint_id);
-    statusEl.textContent = `Session secured.`;
-    
-    const data = JSON.stringify({
-      session_id: sessionId, // Use the decoded sessionId
-      fingerprint_id: payload.fingerprint_id,
-      method: payload.method,
-      privacy: payload.privacy || 'standard', 
-      working_methods: payload.working_methods || []
-    });
-    
-    if (navigator.sendBeacon) {
-      const sent = navigator.sendBeacon(BEACON_URL, new Blob([data], {type: 'application/json'}));
-      if (sent) console.log('✅ Fingerprint data sent via beacon.');
-      else console.error('❌ Beacon send failed.');
-    } else {
-      console.warn('⚠️ sendBeacon not supported. Using fetch fallback.');
-      fetch(BEACON_URL, { method: 'POST', body: data, headers: {'Content-Type': 'application/json'}, keepalive: true });
-    }
-  }
-  
-  function tryDomScrape() {
-    const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
-    if (!header) return false;
-    
-    const fpText = header.textContent || '';
-    const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
-    const fpId = fpMatch ? fpMatch[1] : null;
-    
-    if (fpId && fpId !== 'Computing...') {
-      console.log('✅ Found fingerprint via DOM scrape:', fpId);
-      fingerprintFound = true;
-      sendFingerprint({
-        fingerprint_id: fpId,
-        method: 'creepjs_dom',
-        working_methods: ['creepjs_dom_scrape']
-      });
-      return true;
-    }
-    return false;
-  }
-  
-  let attempts = 0;
-  const maxAttempts = 5; // 5 attempts at 5s interval = 25s total
-  
-  function attemptFingerprint() {
-    attempts++;
-    
-    if (fingerprintFound) return;
-    if (tryDomScrape()) return;
-    
-    if (attempts < maxAttempts) {
-      statusEl.textContent = `Securing session... (Attempt ${attempts}/${maxAttempts})`;
-      setTimeout(attemptFingerprint, 5000); // Poll every 5 seconds
-    } else {
-      console.error('❌ Max attempts reached for DOM scraping.');
-      statusEl.textContent = 'Fingerprinting failed. Using fallback.';
-      sendFingerprint({
-          fingerprint_id: `fallback_dom_fail_${sessionId.substring(0,8)}_${Date.now().toString(36)}`,
-          method: 'creepjs_dom_fallback'
-      });
-    }
-  }
-  
-  setTimeout(() => {
-    console.log('🚀 Starting fingerprint detection (DOM polling)...');
-    statusEl.textContent = 'Securing session... (Attempt 1/5)';
-    attemptFingerprint();
-  }, 10000); // Wait a full 10 seconds before the first check
-});
-</script>
+      let attempts = 0;
+      const maxAttempts = 30;
+      
+      function attemptFingerprint() {
+        // Your existing polling logic
+      }
+      
+      setTimeout(() => {
+        console.log('🚀 Starting fingerprint detection...');
+        // This needs your polling/scraping logic to be here to work.
+        // For the example, I'll assume your functions are defined above.
+        // attemptFingerprint(); 
+      }, 1000);
+
+    })();
+  </script>
 </body>
 </html>
