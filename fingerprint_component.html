@@ -83,17 +83,24 @@
 document.addEventListener('DOMContentLoaded', function() {
   console.log('🚀 DOMContentLoaded fired. Starting main script block...');
 
-  const sessionId = "{SESSION_ID}"; 
+  // --- FIX START ---
+  const sessionId = {SESSION_ID}; // CORRECTED: Removed quotes around {SESSION_ID}
+  // --- FIX END ---
+  
   const statusEl = document.getElementById('status');
   const BEACON_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint';
   
-  if (!sessionId || sessionId.includes("{SESSION_ID}")) {
-      console.error("CRITICAL: Session ID missing. Aborting.");
+  // Now sessionId should directly contain the string, e.g., 'a32ff1bf-...'
+  if (!sessionId || sessionId.includes("{SESSION_ID}")) { // Keep the includes check for debug
+      console.error("CRITICAL: Session ID missing or placeholder not replaced. Aborting.");
       statusEl.textContent = 'Error: Missing session identifier.';
       return; 
   }
 
-  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(1, 9)); // Use substring(1,9) because of quotes
+  // --- FIX START ---
+  // Adjusted substring as sessionId no longer has surrounding quotes
+  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8)); 
+  // --- FIX END ---
   
   if (window.fifiFingerprintSent) return;
   window.fifiFingerprintSent = true; 
@@ -110,7 +117,9 @@ document.addEventListener('DOMContentLoaded', function() {
     statusEl.textContent = `Session secured.`;
     
     const data = JSON.stringify({
-      session_id: JSON.parse(sessionId), // Parse the JSON string from Python
+      // --- FIX START ---
+      session_id: sessionId, // CORRECTED: No need for JSON.parse, sessionId is already a string
+      // --- FIX END ---
       fingerprint_id: payload.fingerprint_id,
       method: payload.method,
       privacy: payload.privacy || 'standard', 
@@ -164,7 +173,9 @@ document.addEventListener('DOMContentLoaded', function() {
       console.error('❌ Max attempts reached for DOM scraping.');
       statusEl.textContent = 'Fingerprinting failed. Using fallback.';
       sendFingerprint({
-          fingerprint_id: `fallback_dom_fail_${JSON.parse(sessionId).substring(0,8)}_${Date.now().toString(36)}`,
+          // --- FIX START ---
+          fingerprint_id: `fallback_dom_fail_${sessionId.substring(0,8)}_${Date.now().toString(36)}`, // Adjusted substring
+          // --- FIX END ---
           method: 'creepjs_dom_fallback'
       });
     }
