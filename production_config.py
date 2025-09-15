@@ -47,3 +47,10 @@ FASTAPI_EMERGENCY_SAVE_TIMEOUT = 5 # seconds
 # Create timedelta objects for easy use
 DAILY_RESET_WINDOW = timedelta(hours=DAILY_RESET_WINDOW_HOURS)
 SESSION_TIMEOUT_DELTA = timedelta(minutes=SESSION_TIMEOUT_MINUTES)
+
+# =============================================================================
+# NEW: URLs for Fingerprinting Redirect Strategy
+# =============================================================================
+# IMPORTANT: These must be the full, correct URLs of your deployed services.
+STREAMLIT_APP_URL = "https://fifi-eu.streamlit.app"
+FASTAPI_BEACON_BASE_URL = "https://fifi-beacon-fastapi-121263692901.europe-west4.run.app"
