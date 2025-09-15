@@ -40,7 +40,7 @@ from production_config import (
     CRM_SAVE_MIN_QUESTIONS, EVASION_BAN_HOURS,
     FASTAPI_EMERGENCY_SAVE_URL, FASTAPI_EMERGENCY_SAVE_TIMEOUT,
     DAILY_RESET_WINDOW, SESSION_TIMEOUT_DELTA,
-    FINGERPRINT_TIMEOUT_SECONDS 
+    FINGERPRINT_TIMEOUT_SECONDS # <--- ADDED FINGERPRINT_TIMEOUT_SECONDS
 )
 
 # NEW: Import for simplified browser reload
@@ -2833,7 +2833,7 @@ class SessionManager:
         session = UserSession(session_id=session_id, last_activity=None)
         
         # For new sessions, always start with a temporary fingerprint
-        # This will be replaced by a real one for Guests, or marked as 'not_collected_registered_user' for Registered Users later.
+        # This will be replaced by a real one for Guests, or marked as 'not_collected_registered' for Registered Users later.
         session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
         session.fingerprint_method = "temporary_fallback_python"
         
@@ -3742,16 +3742,16 @@ class SessionManager:
                     ## CHANGE: Do NOT invalidate all previous sessions to prevent future inheritance confusion
                     ## The multi-device sync and email-based inheritance should handle this better.
 
+                    ## CHANGE: Enable chat immediately for registered users
+                    st.session_state.is_chat_ready = True
+                    st.session_state.fingerprint_wait_start = None # Ensure any FP wait is cleared for this user
+
                     # Save the updated session
                     try:
                         self.db.save_session(current_session)
                         ## CHANGE: Use constant in log message
                         logger.info(f"✅ REGISTERED_USER setup complete: {user_email}, {current_session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT} questions. Chat enabled immediately.")
                         
-                        ## CHANGE: Set app_stage directly to CHAT for registered user
-                        st.session_state.app_stage = 'CHAT'
-                        st.session_state.is_chat_ready = True # Ensure chat is ready
-                        st.session_state.fingerprint_wait_start = None # Clear any FP wait state
                     except Exception as e:
                         logger.error(f"Failed to save authenticated session: {e}")
                         st.error("Authentication succeeded but session could not be saved. Please try again.")
@@ -4850,12 +4850,10 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
         if session.user_type == UserType.REGISTERED_USER:
             logger.warning(f"Attempted to process fingerprint from query for REGISTERED_USER {session.session_id[:8]}. Ignoring as fingerprint is not collected for this user type.")
             # Ensure chat is ready and clear any FP wait if this happens for a registered user
-            st.session_state.is_chat_ready = True # This ensures the session can transition to CHAT stage
+            st.session_state.is_chat_ready = True
             st.session_state.fingerprint_status = 'not_applicable'
             if 'fingerprint_wait_start' in st.session_state:
                 del st.session_state['fingerprint_wait_start']
-            # After processing, explicitly set app_stage to CHAT for registered user
-            st.session_state.app_stage = 'CHAT' 
             return False # Indicate that fingerprint was not applied
         
         logger.info(f"✅ Processing fingerprint for session '{session_id[:8]}': ID={fingerprint_id[:8]}, Method={method}, Privacy={privacy}")
@@ -4879,11 +4877,8 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
             # --- NEW: Ensure fingerprint_wait_start is cleared on successful completion ---
             if 'fingerprint_wait_start' in st.session_state:
                 del st.session_state['fingerprint_wait_start']
-            
-            # After successful fingerprint for guest, transition to CHAT stage
-            st.session_state.app_stage = 'CHAT'
-            
-            logger.info(f"Chat input unlocked for session {session.session_id[:8]} after successful JS fingerprinting. Transitioning to CHAT stage.")
+            st.session_state.fingerprint_just_completed = True # NEW: Flag for a final clean rerun in main_fixed
+            logger.info(f"Chat input unlocked for session {session.session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
             logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
@@ -4892,10 +4887,6 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
             st.session_state.fingerprint_status = 'failed'
             if 'fingerprint_wait_start' in st.session_state: # Clear on failure too
                 del st.session_state['fingerprint_wait_start']
-            
-            # If fingerprint failed for guest, transition to CHAT stage anyway (with fallback FP)
-            st.session_state.app_stage = 'CHAT'
-            
             return False
         
     except Exception as e:
@@ -4987,11 +4978,12 @@ def handle_fingerprint_requests_from_query():
             return
         
         try:
-            # Process_fingerprint_from_query now handles setting app_stage to CHAT
             success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
             logger.info(f"✅ Silent fingerprint processing: {success}")
             
-            # A rerun is needed to transition to the next stage
+            # This reruns the script, and since `process_fingerprint_from_query` now explicitly checks
+            # for REGISTERED_USER and returns False, this block ensures the state is correctly updated.
+            # No need for st.stop() here as the rerun is desired to update the UI with FP status.
             st.rerun() 
             
         except Exception as e:
@@ -5005,60 +4997,6 @@ def handle_fingerprint_requests_from_query():
 # UI COMPONENTS
 # =============================================================================
 
-## CHANGE: NEW - Stage 2: The minimal page dedicated to fingerprinting
-def render_fingerprinting_page(session_manager: 'SessionManager', session: UserSession):
-    """
-    Renders a minimal, stable page whose ONLY purpose is to collect the fingerprint.
-    """
-    st.title("🤖 FiFi AI Assistant")
-    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
-    st.markdown("---")
-
-    # Render the component that generates the fingerprint
-    fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-    if not st.session_state.get(fingerprint_key, False):
-        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-        st.session_state[fingerprint_key] = True
-
-    # Show the waiting message and progress bar
-    current_time_float = time.time()
-    wait_start = st.session_state.get('fingerprint_wait_start', current_time_float)
-    if 'fingerprint_wait_start' not in st.session_state:
-        st.session_state.fingerprint_wait_start = wait_start
-    
-    elapsed = current_time_float - wait_start
-    remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed)
-    
-    if remaining > 0:
-        st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
-        st.caption("FiFi is setting up device recognition for security and session management.")
-    else:
-        st.info("🔒 **Finalizing setup...** Almost ready!")
-    
-    progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
-    st.progress(progress_value, text="Session Security Setup")
-
-    # The controlled, gentle rerun loop
-    time.sleep(1) # CRITICAL: Give the browser time to run JS
-    st.rerun()    # CRITICAL: Trigger a rerun to update the timer and check for FP data
-
-## CHANGE: NEW - Stage 3: The full application UI
-def render_full_chat_ui(session_manager: 'SessionManager', session: UserSession):
-    """
-    Renders the complete chat interface, including sidebar and activity tracking.
-    This is only called AFTER fingerprinting is complete or bypassed.
-    """
-    # Activity tracking and timeout checks are part of the full UI
-    activity_data_from_js = render_simple_activity_tracker(session.session_id)
-    timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
-    if timeout_triggered:
-        return
-
-    # Render the main UI components
-    render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-    render_chat_interface_simplified(session_manager, session, activity_data_from_js)
-
-
 # Modified render_welcome_page function
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock."""
@@ -5069,6 +5007,27 @@ def render_welcome_page(session_manager: 'SessionManager'):
     # Show loading overlay if in loading state
     if show_loading_overlay():
         return
+    
+    session = session_manager.get_session() if st.session_state.get('current_session_id') else None
+    
+    ## CHANGE: Only show fingerprint loading for non-REGISTERED users
+    if session and session.user_type != UserType.REGISTERED_USER and \
+       not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
+        
+        current_time_float = time.time()
+        wait_start = st.session_state.get('fingerprint_wait_start')
+        elapsed = current_time_float - wait_start
+        remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed)
+        
+        if remaining > 0:
+            st.info(f"🔒 **Initializing secure session...** ({remaining:.0f}s remaining)")
+            st.caption("Setting up device recognition and security features.")
+        else:
+            st.info("🔒 **Finalizing setup...** Almost ready!")
+        
+        # Add progress bar
+        progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
+        st.progress(progress_value, text="Initializing FiFi AI Assistant")
     
     st.markdown("---")
     
@@ -5109,8 +5068,8 @@ def render_welcome_page(session_manager: 'SessionManager'):
         **Continue as a guest** to get a quick start and try FiFi AI Assistant without signing in.
         
         ℹ️ **What to expect as a Guest:**
-        - You get an initial allowance of **{GUEST_QUESTION_LIMIT} questions** to explore FiFi AI's capabilities.
-        - After these {GUEST_QUESTION_LIMIT} questions, **email verification will be required** to continue (unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day).
+        - You get an initial allowance of **{GUEST_QUESTION_LIMIT} questions** to explore FiFi AI's capabilities. ## CHANGE: Use constant
+        - After these {GUEST_QUESTION_LIMIT} questions, **email verification will be required** to continue (unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day). ## CHANGE: Use constant
         - Our system utilizes **universal device fingerprinting** for security and to track usage across sessions.
         - You can always choose to **upgrade to a full registration** later for extended benefits.
         """)
@@ -5131,21 +5090,21 @@ def render_welcome_page(session_manager: 'SessionManager'):
     col1, col2, col3 = st.columns(3)
     with col1:
         st.success("👤 **Guest Users**")
-        st.markdown(f"• **{GUEST_QUESTION_LIMIT} questions** to try FiFi AI")
+        st.markdown(f"• **{GUEST_QUESTION_LIMIT} questions** to try FiFi AI") ## CHANGE: Use constant
         st.markdown("• Email verification required to continue")
         st.markdown("• Quick start, no registration needed")
     
     with col2:
         st.info("📧 **Email Verified Guest**")
-        st.markdown(f"• **{EMAIL_VERIFIED_QUESTION_LIMIT} questions per day** (rolling {DAILY_RESET_WINDOW_HOURS}-hour period)")
+        st.markdown(f"• **{EMAIL_VERIFIED_QUESTION_LIMIT} questions per day** (rolling {DAILY_RESET_WINDOW_HOURS}-hour period)") ## CHANGE: Use constant
         st.markdown("• Email verification for access")
         st.markdown("• No full registration required")
     
     with col3:
         st.warning("🔐 **Registered Users**")
-        st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** with tier system:")
-        st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break")
-        st.markdown(f"  - **Tier 2**: Questions {REGISTERED_USER_TIER_1_LIMIT + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset")
+        st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** with tier system:") ## CHANGE: Use constant
+        st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break") ## CHANGE: Use constant
+        st.markdown(f"  - **Tier 2**: Questions {REGISTERED_USER_TIER_1_LIMIT + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset") ## CHANGE: Use constant
         st.markdown("• Cross-device tracking & chat saving")
         st.markdown("• Priority access during high usage")
         
@@ -5162,39 +5121,39 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.markdown(f"**Email:** {session.email}")
             
             # ENHANCED: Show tier progression
-            st.markdown(f"**Daily Questions:** {session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT}")
+            st.markdown(f"**Daily Questions:** {session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT}") ## CHANGE: Use constant
             
-            if session.daily_question_count < REGISTERED_USER_TIER_1_LIMIT:
-                st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0), 
-                           text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions")
-                remaining_tier1 = REGISTERED_USER_TIER_1_LIMIT - session.daily_question_count
+            if session.daily_question_count < REGISTERED_USER_TIER_1_LIMIT: ## CHANGE: Use constant
+                st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0), ## CHANGE: Use constant
+                           text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions") ## CHANGE: Use constant
+                remaining_tier1 = REGISTERED_USER_TIER_1_LIMIT - session.daily_question_count ## CHANGE: Use constant
                 if remaining_tier1 > 0:
-                    st.caption(f"⏰ {remaining_tier1} questions until {TIER_1_BAN_HOURS}-hour break")
-            elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
+                    st.caption(f"⏰ {remaining_tier1} questions until {TIER_1_BAN_HOURS}-hour break") ## CHANGE: Use constant
+            elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT: ## CHANGE: Use constant
                 # Check if there's an active ban
                 if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
                     st.progress(1.0, text="Tier 1 Complete")
-                    st.caption(f"🚫 {TIER_1_BAN_HOURS}-hour break required to access Tier 2")
+                    st.caption(f"🚫 {TIER_1_BAN_HOURS}-hour break required to access Tier 2") ## CHANGE: Use constant
                 else:
                     # Ban has expired or not yet applied
                     st.progress(1.0, text="Tier 1 Complete ✅")
                     st.caption("📈 Ready to proceed to Tier 2!")
             else: # daily_question_count > REGISTERED_USER_TIER_1_LIMIT
-                tier2_progress = min((session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT) / (REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT), 1.0)
-                st.progress(tier2_progress, text=f"Tier 2: {session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT}/{REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT} questions")
-                remaining_tier2 = REGISTERED_USER_QUESTION_LIMIT - session.daily_question_count
+                tier2_progress = min((session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT) / (REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT), 1.0) ## CHANGE: Use constant
+                st.progress(tier2_progress, text=f"Tier 2: {session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT}/{REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT} questions") ## CHANGE: Use constant
+                remaining_tier2 = REGISTERED_USER_QUESTION_LIMIT - session.daily_question_count ## CHANGE: Use constant
                 if remaining_tier2 > 0:
-                    st.caption(f"⏰ {remaining_tier2} questions until {TIER_2_BAN_HOURS}-hour reset")
+                    st.caption(f"⏰ {remaining_tier2} questions until {TIER_2_BAN_HOURS}-hour reset") ## CHANGE: Use constant
                 else:
-                    st.caption(f"🚫 Daily limit reached - {TIER_2_BAN_HOURS}-hour reset required")
+                    st.caption(f"🚫 Daily limit reached - {TIER_2_BAN_HOURS}-hour reset required") ## CHANGE: Use constant
                     
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             st.info("📧 **Email Verified Guest**")
             if session.email:
                 st.markdown(f"**Email:** {session.email}")
             
-            st.markdown(f"**Daily Questions:** {session.daily_question_count}/{EMAIL_VERIFIED_QUESTION_LIMIT}")
-            st.progress(min(session.daily_question_count / EMAIL_VERIFIED_QUESTION_LIMIT, 1.0))
+            st.markdown(f"**Daily Questions:** {session.daily_question_count}/{EMAIL_VERIFIED_QUESTION_LIMIT}") ## CHANGE: Use constant
+            st.progress(min(session.daily_question_count / EMAIL_VERIFIED_QUESTION_LIMIT, 1.0)) ## CHANGE: Use constant
             
             # Check if banned
             if session.ban_status == BanStatus.TWENTY_FOUR_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
@@ -5204,7 +5163,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.error(f"🚫 Daily limit reached")
                 st.caption(f"Resets in: {hours}h {minutes}m")
             elif session.last_question_time:
-                next_reset = session.last_question_time + timedelta(hours=EMAIL_VERIFIED_BAN_HOURS)
+                next_reset = session.last_question_time + timedelta(hours=EMAIL_VERIFIED_BAN_HOURS) ## CHANGE: Use constant
                 time_to_reset = next_reset - datetime.now()
                 if time_to_reset.total_seconds() > 0:
                     hours = int(time_to_reset.total_seconds() // 3600)
@@ -5215,9 +5174,9 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             
         else: # Guest User
             st.warning("👤 **Guest User**")
-            st.markdown(f"**Questions:** {session.daily_question_count}/{GUEST_QUESTION_LIMIT}")
-            st.progress(min(session.daily_question_count / GUEST_QUESTION_LIMIT, 1.0))
-            st.caption(f"Email verification unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day.")
+            st.markdown(f"**Questions:** {session.daily_question_count}/{GUEST_QUESTION_LIMIT}") ## CHANGE: Use constant
+            st.progress(min(session.daily_question_count / GUEST_QUESTION_LIMIT, 1.0)) ## CHANGE: Use constant
+            st.caption(f"Email verification unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day.") ## CHANGE: Use constant
             if session.reverification_pending:
                 st.info("💡 An account is available for this device. Re-verify email to reclaim it!")
             elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]: # Check for this state
@@ -5245,11 +5204,11 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             minutes_inactive = time_since_activity.total_seconds() / 60
             st.caption(f"Last activity: {int(minutes_inactive)} minutes ago")
             
-            timeout_duration = SESSION_TIMEOUT_MINUTES
+            timeout_duration = SESSION_TIMEOUT_MINUTES ## CHANGE: Use constant
 
             if minutes_inactive >= (timeout_duration - 1) and minutes_inactive < timeout_duration:
                 minutes_remaining = timeout_duration - minutes_inactive
-                st.warning(f"⚠️ Session expires in {minutes_remaining:.1f} minutes!")
+                st.warning(f"⚠️ Session expires in {minutes_remaining:.1f} minutes!") ## CHANGE: Use constant
             elif minutes_inactive >= timeout_duration:
                 st.error(f"🚫 Session is likely expired. Type a question to check.")
         else:
@@ -5844,6 +5803,27 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     st.title("🤖 FiFi AI Assistant")
     st.caption("Your intelligent food & beverage sourcing companion.")
 
+    # NEW: Show fingerprint waiting status ONLY for non-registered users
+    ## CHANGE: Only show fingerprint wait for non-registered users
+    if session.user_type != UserType.REGISTERED_USER and \
+       not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
+        
+        current_time_float = time.time() # Use float for direct comparison with time.time()
+        wait_start = st.session_state.get('fingerprint_wait_start')
+        elapsed = current_time_float - wait_start
+        remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed) ## CHANGE: Use constant
+        
+        if remaining > 0:
+            st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
+            st.caption("FiFi is setting up device recognition for security and session management.")
+        else:
+            st.info("🔒 **Finalizing setup...** Almost ready!")
+        
+        # Add a subtle progress bar
+        progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0) ## CHANGE: Use constant
+        st.progress(progress_value, text="Session Security Setup")
+        st.markdown("---")
+
     # Simple activity tracking
     if activity_result:
         js_last_activity_timestamp = activity_result.get('last_activity')
@@ -5885,9 +5865,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             )
             
             if tier == 2 and remaining <= 3:
-                st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until {TIER_2_BAN_HOURS}-hour reset!")
+                st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until {TIER_2_BAN_HOURS}-hour reset!") ## CHANGE: Use constant
             elif tier == 1 and remaining <= 2 and remaining > 0:
-                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until {TIER_1_BAN_HOURS}-hour break.")
+                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until {TIER_1_BAN_HOURS}-hour break.") ## CHANGE: Use constant
+            ## CHANGE: Use REGISTERED_USER_TIER_1_LIMIT constant
             elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
                 # At exactly 10 questions - check ban status
                 if has_active_tier1_ban:
@@ -5895,14 +5876,15 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     minutes = int(time_remaining.total_seconds() / 60)
                     hours = int(time_remaining.total_seconds() / 3600)
                     if hours >= 1:
-                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {hours} hour(s) remaining")
+                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {hours} hour(s) remaining") ## CHANGE: Use constant
                     else:
-                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {minutes} minutes remaining")
+                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {minutes} minutes remaining") ## CHANGE: Use constant
                 elif session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() >= session.ban_end_time:
                     # Ban has expired
                     st.info("✅ **Tier 1 Complete**: You can now proceed to Tier 2!")
                 else:
-                    st.info(f"ℹ️ **Tier 1 Complete**: Your next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.")
+                    # No ban yet
+                    st.info(f"ℹ️ **Tier 1 Complete**: Your next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.") ## CHANGE: Use constant
 
         # Display chat messages (respects soft clear offset)
         visible_messages = session.messages[session.display_message_offset:]
@@ -5944,8 +5926,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     if 'rate_limit_hit' in st.session_state:
         rate_limit_info = st.session_state.rate_limit_hit
         time_until_next = rate_limit_info.get('time_until_next', 0)
-        max_requests = RATE_LIMIT_REQUESTS
-        window_seconds = RATE_LIMIT_WINDOW_SECONDS
+        max_requests = RATE_LIMIT_REQUESTS ## CHANGE: Use constant
+        window_seconds = RATE_LIMIT_WINDOW_SECONDS ## CHANGE: Use constant
         
         # Calculate remaining time dynamically
         current_time = datetime.now()
@@ -6026,6 +6008,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         user_type = session.user_type.value
         current_count = session.daily_question_count
         
+        ## CHANGE: Use constants for warnings
         if user_type == UserType.GUEST.value and current_count == GUEST_QUESTION_LIMIT - 1:
             st.warning(f"⚠️ **Final Guest Question Coming Up!** Your next question will be your last before email verification is required.")
             
@@ -6051,7 +6034,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             # and a message/ban has been displayed.
             # For guest limit, we specifically set the verification stage.
             if session.user_type.value == UserType.GUEST.value and \
-               session.daily_question_count >= GUEST_QUESTION_LIMIT:
+               session.daily_question_count >= GUEST_QUESTION_LIMIT: ## CHANGE: Use constant
                 st.session_state.verification_stage = 'email_entry'
                 st.session_state.chat_blocked_by_dialog = True
                 st.session_state.final_answer_acknowledged = True # Acknowledge the 'final answer' to trigger dialog
@@ -6153,7 +6136,8 @@ def ensure_initialization_fixed():
                     'save_session': lambda self, session: None,
                     'load_session': lambda self, session_id: None,
                     'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
-                    'find_sessions_by_email': lambda self, email: []
+                    'find_sessions_by_email': lambda self, email: [],
+                    'cleanup_old_inactive_sessions': lambda self: None # Add dummy method
                 })()
             
             try:
@@ -6227,108 +6211,269 @@ def ensure_initialization_fixed():
 
 # Modified main function with proper loading state handling (from prompt)
 def main_fixed():
-    """Main application entry point with the new three-stage architecture."""
-    st.set_page_config(
-        page_title="FiFi AI Assistant", 
-        page_icon="🤖", 
-        layout="wide"
-    )
+    """Main application entry point with optimized fingerprint handling."""
+    try:
+        st.set_page_config(
+            page_title="FiFi AI Assistant", 
+            page_icon="🤖", 
+            layout="wide"
+        )
+    except Exception as e:
+        logger.error(f"Failed to set page config: {e}")
 
+    # NEW: Check for expired session flag and force welcome page
+    if st.session_state.get('session_expired', False):
+        logger.info("Session expired flag detected - forcing welcome page")
+        st.session_state['page'] = None
+        if 'session_expired' in st.session_state:
+            del st.session_state['session_expired']
+        st.info("⏰ Your session expired. Please start a new session.")
+
+    # Initialize loading state if not already set (for first run)
+    if 'is_loading' not in st.session_state:
+        st.session_state.is_loading = False
+        st.session_state.loading_message = ""
+    # NEW: Ensure is_chat_ready is always present and initially False
+    if 'is_chat_ready' not in st.session_state:
+        st.session_state.is_chat_ready = False
+
+    # Initialize session state if needed
     if 'initialized' not in st.session_state:
-        # Initialize all necessary session state keys on first run
+        # Initialize all session state at once
         defaults = {
-            "initialized": False, "app_stage": "WELCOME",
-            "is_loading": False, "loading_message": "",
+            "initialized": False,
+            "is_loading": False,
+            "loading_message": "",
             "is_chat_ready": False,
-            "page": None # 'page' is now deprecated in favor of 'app_stage'
+            "fingerprint_complete": False,
+            "chat_blocked_by_dialog": False,
+            "verification_stage": None,
+            "guest_continue_active": False,
+            "final_answer_acknowledged": False,
+            "gentle_prompt_shown": False,
+            "email_verified_final_answer_acknowledged": False,
+            "must_verify_email_immediately": False, # NEW
+            "skip_email_allowed": True, # NEW
+            "page": None
         }
+        
         for key, value in defaults.items():
             if key not in st.session_state:
                 st.session_state[key] = value
         
+        # Quick initialization without spinner
         try:
             init_success = ensure_initialization_fixed()
             if not init_success:
-                st.error("⚠️ Application failed to initialize properly. Please refresh.")
+                st.error("⚠️ Application failed to initialize properly.")
+                st.info("Please refresh the page to try again.")
                 return
             st.session_state.initialized = True
+            logger.info("✅ Application initialized successfully")
+            
         except Exception as e:
             logger.error(f"Initialization failed: {e}", exc_info=True)
             st.error("⚠️ Application failed to initialize. Please refresh.")
             return
 
-    # Handle only emergency saves from URL now
+    # Handle emergency saves and fingerprint data EARLY
     handle_emergency_save_requests_from_query()
+    handle_fingerprint_requests_from_query()
 
+    # Get session manager
     session_manager = st.session_state.get('session_manager')
     if not session_manager:
         st.error("❌ Session Manager not available. Please refresh the page.")
         return
 
-    # Handle loading state for page transitions (e.g., login, start guest)
-    if st.session_state.get('is_loading', False):
-        show_loading_overlay()
+    # Handle loading states
+    loading_state = st.session_state.get('is_loading', False)
+    
+    # If we're in loading state, handle the actual initialization
+    if loading_state:
+        # Show the loading overlay
+        if show_loading_overlay():
+            pass  # Overlay is shown
         
-        loading_reason = st.session_state.get('loading_reason')
-        
-        if loading_reason == 'start_guest':
-            session = session_manager.get_session()
-            if session:
-                st.session_state.app_stage = 'FINGERPRINTING'
-        
-        elif loading_reason == 'authenticate':
-            username = st.session_state.get('temp_username', '')
-            password = st.session_state.get('temp_password', '')
-            if username and password:
-                authenticated_session = session_manager.authenticate_with_wordpress(username, password)
-                if authenticated_session:
-                    # The authenticate function now handles setting the app_stage and rerunning
-                    pass
+        # Perform the actual operations based on what triggered the loading
+        try:
+            # Handle different loading scenarios
+            loading_reason = st.session_state.get('loading_reason', 'unknown')
+            
+            session = None
+            if loading_reason == 'start_guest':
+                # Create guest session
+                session = session_manager.get_session()
+                if session and session.last_activity is None:
+                    session.last_activity = datetime.now()
+                    session_manager.db.save_session(session)
+                st.session_state.page = "chat"
+                if 'loading_reason' in st.session_state:
+                    del st.session_state['loading_reason']
+                
+            elif loading_reason == 'authenticate':
+                # Handle authentication
+                username = st.session_state.get('temp_username', '')
+                password = st.session_state.get('temp_password', '')
+                
+                if username and password:
+                    authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                    if authenticated_session:
+                        session = authenticated_session
+                        st.session_state.current_session_id = authenticated_session.session_id
+                        st.session_state.page = "chat"
+                        ## CHANGE: Set chat ready immediately for registered users
+                        st.session_state.is_chat_ready = True
+                        st.session_state.fingerprint_wait_start = None
+                        
+                        # Clear temporary credentials
+                        if 'temp_username' in st.session_state:
+                            del st.session_state['temp_username']
+                        if 'temp_password' in st.session_state:
+                            del st.session_state['temp_password']
+                        if 'loading_reason' in st.session_state:
+                            del st.session_state['loading_reason']
+                        st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
+                        st.balloons()
+                        st.rerun() # Rerun immediately after successful auth and chat ready
+                    else:
+                        set_loading_state(False)
+                        return
                 else:
                     set_loading_state(False)
+                    st.error("Authentication failed: Missing username or password.")
                     return
+
+            # Determine chat readiness based on user type and fingerprint status
+            if session:
+                if session.user_type == UserType.REGISTERED_USER:
+                    st.session_state.is_chat_ready = True # Always ready for registered users
+                    logger.info(f"Chat input unlocked for REGISTERED_USER {session.session_id[:8]} (email primary).")
+                else:
+                    # For non-registered users, fingerprint is still required
+                    fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                    inheritance_checked = st.session_state.get(f'fingerprint_checked_for_inheritance_{session.session_id}', False)
+
+                    if fingerprint_is_stable or inheritance_checked:
+                        st.session_state.is_chat_ready = True
+                        logger.info(f"Chat input unlocked for non-registered session {session.session_id[:8]} after initial session/fingerprint setup.")
+                    else:
+                        st.session_state.is_chat_ready = False
+                        logger.info(f"Chat input remains locked for non-registered session {session.session_id[:8]} pending JS fingerprinting.")
             else:
-                set_loading_state(False)
-                st.error("Authentication failed: Missing credentials.")
+                st.session_state.is_chat_ready = False
 
-        set_loading_state(False)
-        st.rerun()
-        return
 
-    # --- MAIN ROUTER ---
-    current_stage = st.session_state.get('app_stage', 'WELCOME')
-    session = session_manager.get_session() if st.session_state.get('current_session_id') else None
-
-    # This logic ensures that even on a full browser refresh, the app returns to the correct stage.
-    if session and current_stage != 'WELCOME':
-        if session.user_type == UserType.REGISTERED_USER:
-            st.session_state.app_stage = 'CHAT'
-        else:
-            is_stable_fp = not (session.fingerprint_id is None or session.fingerprint_id.startswith("temp_"))
-            if is_stable_fp:
-                st.session_state.app_stage = 'CHAT'
-            else:
-                st.session_state.app_stage = 'FINGERPRINTING'
-
-    # Render the determined stage
-    current_stage = st.session_state.app_stage # Re-fetch after potential override
-    
-    if current_stage == 'CHAT':
-        if session and session.active:
-            render_full_chat_ui(session_manager, session)
-        else:
-            st.session_state.app_stage = 'WELCOME'
+            # Clear loading state and rerun to show the actual page
+            set_loading_state(False)
             st.rerun()
+            return
             
-    elif current_stage == 'FINGERPRINTING':
-        if session and session.active:
-            render_fingerprinting_page(session_manager, session)
-        else:
-            st.session_state.app_stage = 'WELCOME'
-            st.rerun()
+        except Exception as e:
+            set_loading_state(False)
+            st.error(f"⚠️ Error during loading: {str(e)}")
+            logger.error(f"Loading state error: {e}", exc_info=True)
+            return
 
-    else: # Default to WELCOME
+    # Normal page rendering (when not in loading state)
+    current_page = st.session_state.get('page')
+    
+    if current_page != "chat":
         render_welcome_page(session_manager)
+    else:
+        # Get existing session
+        session = session_manager.get_session()
+        
+        if session is None or not session.active:
+            logger.warning(f"Expected active session for 'chat' page but got None or inactive. Forcing welcome page.")
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.session_state['page'] = None
+            st.rerun()
+            return
+        
+        ## CHANGE: Conditionally render fingerprinting component only for non-registered users
+        if session.user_type != UserType.REGISTERED_USER:
+            fingerprint_needed = (
+                not session.fingerprint_id or
+                session.fingerprint_method == "temporary_fallback_python" or
+                session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+            )
+            
+            if fingerprint_needed:
+                fingerprint_key = f"fingerprint_rendered_{session.session_id}"
+                if not st.session_state.get(fingerprint_key, False):
+                    session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+                    st.session_state[fingerprint_key] = True
+                    logger.info(f"✅ Fingerprint component rendered for session {session.session_id[:8]}")
+
+        # NOW DO TIMEOUT LOGIC AFTER JAVASCRIPT IS RENDERED (ONLY FOR NON-REGISTERED)
+        if session:
+            if session.user_type == UserType.REGISTERED_USER:
+                st.session_state.is_chat_ready = True # Always ready for registered users
+                if 'fingerprint_wait_start' in st.session_state:
+                    del st.session_state['fingerprint_wait_start']
+                logger.info(f"✅ Registered user {session.email} - chat enabled immediately (fingerprint not applicable).")
+            else: # Non-registered users still wait for fingerprint
+                fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                
+                if fingerprint_is_stable:
+                    # Real fingerprint already obtained, enable chat immediately
+                    st.session_state.is_chat_ready = True
+                    if 'fingerprint_wait_start' in st.session_state:
+                        del st.session_state['fingerprint_wait_start']  # Clear timeout
+                else:
+                    # Still waiting for JS fingerprinting (only for non-registered)
+                    current_time_float = time.time()
+                    wait_start = st.session_state.get('fingerprint_wait_start')
+                    
+                    if wait_start is None:
+                        # First time seeing temp fingerprint, start timeout
+                        st.session_state.fingerprint_wait_start = current_time_float
+                        st.session_state.is_chat_ready = False
+                        logger.info(f"Starting fingerprint wait timer for non-registered session {session.session_id[:8]}")
+                    ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant
+                    elif current_time_float - wait_start > FINGERPRINT_TIMEOUT_SECONDS:  # Timeout
+                        # Timeout reached, enable chat with fallback fingerprint
+                        st.session_state.is_chat_ready = True
+                        logger.warning(f"Fingerprint timeout ({FINGERPRINT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
+                    else:
+                        # Still waiting within timeout period
+                        st.session_state.is_chat_ready = False
+        else:
+            st.session_state.is_chat_ready = False
+
+        # Right after timeout logic
+        ## CHANGE: Use FINGERPRINT_TIMEOUT_SECONDS constant for condition
+        # This condition now correctly ensures only non-registered users (who are not yet chat_ready and are still waiting for FP) trigger reruns.
+        if session and session.user_type != UserType.REGISTERED_USER and \
+           not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start') and \
+           (time.time() - st.session_state.get('fingerprint_wait_start', 0) < FINGERPRINT_TIMEOUT_SECONDS):
+            # Just rerun to keep the UI updating
+            st.rerun()
+            return  # Stop execution to allow rerun
+        
+        # Render activity tracker and check for timeout
+        activity_data_from_js = None
+        if session and session.session_id:
+            activity_tracker_state_key = f'has_activity_tracker_for_{session.session_id.replace("-", "_")}'
+            if activity_tracker_state_key not in st.session_state or \
+               st.session_state.get(f'{activity_tracker_state_key}_session_id_check') != session.session_id:
+                
+                logger.info(f"Rendering activity tracker component for session {session.session_id[:8]} at top level.")
+                activity_data_from_js = render_simple_activity_tracker(session.session_id)
+                st.session_state[activity_tracker_state_key] = True
+                st.session_state[f'{activity_tracker_state_key}_session_id_check'] = session.session_id
+                st.session_state.latest_activity_data_from_js = activity_data_from_js
+            else:
+                activity_data_from_js = st.session_state.latest_activity_data_from_js
+        
+        timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+        if timeout_triggered:
+            return
+
+        render_sidebar(session_manager, session, st.session_state.pdf_exporter)
+        render_chat_interface_simplified(session_manager, session, activity_data_from_js)
 
 if __name__ == "__main__":
     main_fixed()
