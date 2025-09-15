@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from collections import defaultdict
 import requests
+import base64
 import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript # Still needed for eval-based redirect in Python
 
@@ -1014,7 +1015,8 @@ class DatabaseManager:
                     html_content = f.read()
 
                 # Use json.dumps to safely embed the session_id as a JavaScript string literal
-                html_content = html_content.replace('{SESSION_ID}', json.dumps(session_id))
+                encoded_session_id = base64.b64encode(session_id.encode('utf-8')).decode('utf-8')
+
                 
                 # --- RENDER THE HTML COMPONENT ---
                 # This is the only part needed. We render the iframe and that's it.
@@ -5056,7 +5058,37 @@ def render_fingerprinting_page(session_manager: 'SessionManager', session: UserS
     # --- Step 1: Render the HTML component iframe ONCE ---
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
     if not st.session_state.get(fingerprint_key, False):
-        session_manager.fingerprinting.render_fingerprint_component(session.session_id)
+        # --- MODIFIED BLOCK FOR BASE64 ENCODING ---
+        import base64
+        
+        # Ensure the session_id is encoded before passing to HTML
+        # The Python code explicitly adds quotes for JS string literal
+        encoded_session_id = base64.b64encode(session.session_id.encode('utf-8')).decode('utf-8')
+        
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
+
+        if not os.path.exists(html_file_path):
+            logger.error(f"❌ Fingerprint component file NOT FOUND at {html_file_path}")
+            # If the component is missing, the Python polling will simply time out, which is the desired fallback.
+            return
+
+        with open(html_file_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+
+        # Replace the placeholder with the base64 encoded session ID, wrapped in single quotes
+        # This will result in JS like: const encodedSessionId = 'base64string';
+        html_content = html_content.replace('{SESSION_ID}', f"'{encoded_session_id}'")
+        
+        # --- END MODIFIED BLOCK ---
+
+        st.components.v1.html(
+            html_content,
+            height=300, # Adjusted height for better visibility of creepjs output if needed for debugging
+            width=500,
+            scrolling=False
+        )
+        logger.info(f"✅ External fingerprint component (iframe) rendered for session {session.session_id[:8]}")
         st.session_state[fingerprint_key] = True
 
     # --- Step 2: Implement a stable two-phase wait using a single timer ---
@@ -5076,7 +5108,7 @@ def render_fingerprinting_page(session_manager: 'SessionManager', session: UserS
         # Show a static progress bar to indicate waiting, giving JS time to run.
         st.progress(0, text="Initializing device recognition... Please wait.")
         # Rerun to check the timer, but the UI remains stable.
-        time.sleep(10)
+        time.sleep(1) # Rerun every second during grace period for responsiveness
         st.rerun()
         return
 
@@ -5108,7 +5140,7 @@ def render_fingerprinting_page(session_manager: 'SessionManager', session: UserS
                 session.fingerprint_id = f"fallback_py_timeout_{session.session_id[:8]}"
                 session.fingerprint_method = "python_fallback_timeout"
                 session.browser_privacy_level = "high_privacy"
-                session_manager.db.save_session(session)
+                session_manager.db.save_session(session) # Save the fallback FP
             
             st.session_state.app_stage = 'CHAT'
             if 'fingerprint_process_start' in st.session_state:
