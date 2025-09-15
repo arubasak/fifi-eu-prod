@@ -33,8 +33,20 @@
       
       // Final check to ensure Streamlit provided a session_id
       if (!sessionId || sessionId.includes("{SESSION_ID}")) {
-          console.error("CRITICAL: Session ID was not provided by Streamlit. Aborting.");
+          console.error("CRITICAL: Session ID was not provided by Streamlit. Aborting fingerprinting.");
           statusEl.textContent = 'Error: Missing session identifier.';
+          
+          // Redirect with error to unlock chat if session_id is critical
+          const currentUrl = new URL(window.location.href);
+          currentUrl.searchParams.set('event', 'fingerprint_complete');
+          currentUrl.searchParams.set('session_id', 'invalid_session_id');
+          currentUrl.searchParams.set('fingerprint_id', 'fallback_error');
+          currentUrl.searchParams.set('method', 'error');
+          currentUrl.searchParams.set('privacy', 'high_privacy');
+          currentUrl.searchParams.set('working_methods', 'none');
+          currentUrl.searchParams.set('timestamp', Date.now());
+          window.parent.location.href = currentUrl.toString();
+
           return;
       }
 
@@ -66,40 +78,112 @@
           working_methods: payload.working_methods || []
         });
         
+        // Option 1: Send to FastAPI beacon
         if (navigator.sendBeacon) {
           navigator.sendBeacon(BEACON_URL, new Blob([data], {type: 'application/json'}));
-          console.log('✅ Fingerprint data sent successfully via beacon.');
-          statusEl.textContent = 'Secure connection established.';
+          console.log('✅ Fingerprint data sent to FastAPI via beacon.');
         } else {
-          fetch(BEACON_URL, { method: 'POST', body: data, headers: {'Content-Type': 'application/json'}, keepalive: true });
+          // Fallback to fetch with keepalive for non-beacon support
+          fetch(BEACON_URL, { 
+            method: 'POST', 
+            body: data, 
+            headers: {'Content-Type': 'application/json'}, 
+            keepalive: true 
+          }).then(response => {
+            if (response.ok) {
+              console.log('✅ Fingerprint data sent to FastAPI via fetch.');
+            } else {
+              console.warn('⚠️ FastAPI fetch response not OK:', response.status);
+            }
+          }).catch(error => {
+            console.error('❌ FastAPI fetch failed:', error);
+          });
         }
+
+        // Option 2: Send back to Streamlit via URL query parameters for immediate update and robustness
+        const currentUrl = new URL(window.location.href);
+        currentUrl.searchParams.set('event', 'fingerprint_complete');
+        currentUrl.searchParams.set('session_id', sessionId);
+        currentUrl.searchParams.set('fingerprint_id', payload.fingerprint_id);
+        currentUrl.searchParams.set('method', payload.method);
+        currentUrl.searchParams.set('privacy', payload.privacy);
+        currentUrl.searchParams.set('working_methods', (payload.working_methods || []).join(','));
+        currentUrl.searchParams.set('timestamp', Date.now()); // Add timestamp to make URL unique and force rerun
+
+        // Redirect the parent window to update Streamlit state
+        // This is safe as it just modifies URL, Streamlit handles parsing.
+        window.parent.location.href = currentUrl.toString();
+        
+        statusEl.textContent = 'Secure connection established. Redirecting...';
       }
       
-      // ... [The rest of your tryDomScrape, fallback, and polling logic remains here] ...
-      // Note: This is truncated for brevity, but your full logic should be here.
-      // Make sure this is present in your actual file.
-
-      function tryDomScrape() {
-        // Your existing DOM scraping function
-      }
+      // The rest of your tryDomScrape, fallback, and polling logic remains here
+      // This is the CRITICAL MISSING SECTION from your original snippet.
 
       function createFallback(reason) {
-        // Your existing fallback function
+        console.warn(`⚠️ Creating fallback fingerprint: ${reason}`);
+        return {
+          fingerprint_id: `fallback_js_${sessionId.substring(0,8)}_${Date.now()}`,
+          method: 'fallback_js',
+          privacy: 'high_privacy',
+          working_methods: []
+        };
+      }
+
+      function attemptCreep() {
+        console.log('🔄 Attempting CreepJS fingerprint...');
+        try {
+          const creep = new Creep();
+          const data = creep.get();
+
+          if (data && data.fingerprint && data.fingerprint.hash) {
+            console.log('✅ CreepJS succeeded:', data.fingerprint.hash.substring(0, 8));
+            return {
+              fingerprint_id: data.fingerprint.hash,
+              method: 'creepjs',
+              privacy: data.privacy.level,
+              working_methods: data.methods.map(m => m.name)
+            };
+          } else {
+            console.warn('⚠️ CreepJS data missing hash:', data);
+            return createFallback('creep_no_hash');
+          }
+        } catch (e) {
+          console.error('❌ CreepJS execution failed:', e);
+          return createFallback(`creep_exception: ${e.message}`);
+        }
       }
 
       let attempts = 0;
-      const maxAttempts = 30;
-      
-      function attemptFingerprint() {
-        // Your existing polling logic
+      const maxAttempts = 50; // Increased attempts for robustness
+      const pollInterval = 200; // milliseconds
+
+      function pollForCreep() {
+        if (fingerprintSent || attempts >= maxAttempts) {
+          if (!fingerprintSent) {
+            console.error('❌ Max attempts reached, CreepJS timed out. Sending fallback.');
+            sendFingerprint(createFallback('timeout_max_attempts'));
+          }
+          return;
+        }
+
+        attempts++;
+        const payload = attemptCreep();
+
+        if (payload && payload.fingerprint_id && payload.method !== 'fallback_js') {
+          console.log(`🎉 Fingerprint found on attempt ${attempts}.`);
+          sendFingerprint(payload);
+        } else {
+          statusEl.textContent = `Initializing... (attempt ${attempts}/${maxAttempts})`;
+          setTimeout(pollForCreep, pollInterval);
+        }
       }
       
+      // Start the polling after a short delay to ensure DOM is ready
       setTimeout(() => {
-        console.log('🚀 Starting fingerprint detection...');
-        // This needs your polling/scraping logic to be here to work.
-        // For the example, I'll assume your functions are defined above.
-        // attemptFingerprint(); 
-      }, 1000);
+        console.log('🚀 Starting fingerprint detection polling...');
+        pollForCreep(); 
+      }, 500); // 500ms delay
 
     })();
   </script>
