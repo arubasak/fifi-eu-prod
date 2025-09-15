@@ -8,9 +8,6 @@ enableXsrfProtection = false
 [client]
 showErrorDetails = true
 
-[runner]
-magicEnabled = true
-
 # Enable CORS and explicitly set the CSP header for maximum compatibility.
 enableCORS = true
 corsAllowedOrigins = ['https://www.12taste.com/', 'https://12taste.com/', 'https://cdn.jsdelivr.net/', 'https://fpjscdn.net/']
