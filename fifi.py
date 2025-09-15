@@ -5860,7 +5860,7 @@ def main_fixed():
         st.error("❌ Session Manager not available. Please refresh the page.")
         return
     
-    handle_fingerprint_requests_from_query() # Removed session_manager argument as it's not needed
+    handle_fingerprint_requests_from_query(session_manager) # Removed session_manager argument as it's not needed
     handle_emergency_save_requests_from_query()
 
     if st.session_state.get('is_loading', False):
