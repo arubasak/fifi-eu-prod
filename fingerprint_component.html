@@ -6,16 +6,16 @@
   <style>
     body {
       margin: 0;
-      padding: 20px; /* Increased padding */
+      padding: 20px; 
       font-family: Arial, sans-serif;
-      background-color: #f0f2f6; /* Streamlit's default background */
+      background-color: #f0f2f6; 
       color: #333;
       display: flex;
       flex-direction: column;
       justify-content: center;
       align-items: center;
-      min-height: 100%; /* Fill component's iframe height */
-      box-sizing: border-box; /* Include padding in height */
+      min-height: 100vh; /* Fill full browser window */
+      box-sizing: border-box; 
     }
     #fp-app {
       border: 1px solid #ccc;
@@ -24,7 +24,7 @@
       background-color: #fff;
       box-shadow: 0 2px 4px rgba(0,0,0,0.1);
       width: 90%;
-      max-width: 400px; /* Slightly smaller for aesthetics */
+      max-width: 400px; 
       text-align: center;
       margin-bottom: 20px;
     }
@@ -87,8 +87,8 @@
   console.log('🚫 Blocking ServiceWorker registration...');
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register = function() {
-      console.log('🚫 ServiceWorker registration blocked for Streamlit iframe compatibility');
-      return Promise.reject(new Error('ServiceWorker registration disabled in iframe'));
+      console.log('🚫 ServiceWorker registration blocked for client-side environment (not HTTPS).');
+      return Promise.reject(new Error('ServiceWorker registration disabled.'));
     };
     Object.defineProperty(navigator.serviceWorker, 'controller', {
       get: function() { return null; }
@@ -102,61 +102,41 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-  console.log('🚀 DOMContentLoaded fired. Starting main script block in iframe...');
+  console.log('🚀 DOMContentLoaded fired. Starting main script block...');
 
   const sessionId = "{SESSION_ID}"; 
   const statusEl = document.getElementById('status');
   const progressBar = document.getElementById('inner-progress-bar');
-  const BEACON_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint';
-  // MODIFIED: Increase client-side timeout to accommodate longer polling
+  // MODIFIED: Beacon POST URL is now a placeholder from server
+  const BEACON_POST_URL = "{BEACON_POST_URL}"; 
+  // MODIFIED: Streamlit App URL is now a placeholder for redirecting back
+  const STREAMLIT_APP_URL = "{STREAMLIT_APP_URL_FOR_REDIRECT}";
+
   const FINGERPRINT_SCRAPE_TIMEOUT_SECONDS = 30; // Max time for JS to scrape FP
 
-  // --- Streamlit Callback Function (exposed by st_javascript) ---
-  function signalStreamlitCompletion(success, fingerprintData) {
-      console.log('⚡ Signaling Streamlit completion:', success, fingerprintData);
-      try {
-          if (window.parent && window.parent.streamlit_javascript_callback) {
-              window.parent.streamlit_javascript_callback({
-                  completed: true,
-                  success: success,
-                  fingerprint_id: fingerprintData.fingerprint_id,
-                  method: fingerprintData.method,
-                  privacy: fingerprintData.privacy,
-                  working_methods: fingerprintData.working_methods
-              });
-              console.log('✅ Streamlit callback invoked.');
-          } else {
-              console.error('❌ Streamlit callback not found. Could not signal completion.');
-              sendDataViaQuery(fingerprintData); // Fallback to URL redirect
-          }
-      } catch (e) {
-          console.error('❌ Error invoking Streamlit callback:', e);
-          sendDataViaQuery(fingerprintData); // Fallback to URL redirect
-      }
-  }
-
-  // --- Fallback if Streamlit callback fails (sends data via URL parameters) ---
-  function sendDataViaQuery(fingerprintData) {
-      console.warn('⚠️ Attempting to signal completion via URL query parameters (fallback).');
+  // --- Redirects the browser back to Streamlit with data ---
+  function redirectToStreamlit(success, fingerprintData) {
+      console.log('⚡ Redirecting browser back to Streamlit:', success, fingerprintData);
+      
       const queryParams = new URLSearchParams();
-      queryParams.set('event', 'fingerprint_complete_fallback'); 
+      queryParams.set('event', 'fingerprint_complete'); // Main event for Streamlit
       queryParams.set('session_id', sessionId);
       queryParams.set('fingerprint_id', fingerprintData.fingerprint_id);
       queryParams.set('method', fingerprintData.method);
       queryParams.set('privacy', fingerprintData.privacy);
       queryParams.set('working_methods', fingerprintData.working_methods.join(','));
       
-      const targetUrl = window.location.origin + window.location.pathname + '?' + queryParams.toString();
-      console.log('Attempting redirect with query params:', targetUrl);
-      window.parent.location.replace(targetUrl); 
+      const targetUrl = `${STREAMLIT_APP_URL}?${queryParams.toString()}`;
+      console.log('Final redirect URL:', targetUrl);
+      window.location.href = targetUrl; // Redirect the full browser window
   }
 
 
   // --- CRITICAL SESSION ID VALIDATION ---
   if (!sessionId || sessionId.includes("{SESSION_ID}") || sessionId.length < 5) {
-      console.error("CRITICAL: Session ID was not provided by Streamlit or is a placeholder/too short. Aborting fingerprinting.");
+      console.error("CRITICAL: Session ID was not provided or is a placeholder/too short. Aborting fingerprinting.");
       statusEl.textContent = 'Error: Missing session identifier. Cannot secure session.';
-      signalStreamlitCompletion(false, { fingerprint_id: 'no_session_id', method: 'error', privacy: 'unknown', working_methods: [] });
+      redirectToStreamlit(false, { fingerprint_id: 'no_session_id', method: 'error', privacy: 'unknown', working_methods: [] });
       return; 
   }
 
@@ -177,13 +157,13 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   // --- Sends FP to Beacon and then signals Streamlit ---
-  async function sendFingerprintAndSignal(payload) {
+  async function sendFingerprintAndRedirect(payload) {
     if (fingerprintBeaconSent) return; 
     fingerprintBeaconSent = true; 
     
     const elapsedSeconds = ((Date.now() - initialClientStartTime) / 1000).toFixed(1);
     console.log(`✅ Fingerprint obtained after ${elapsedSeconds}s:`, payload.fingerprint_id);
-    statusEl.textContent = `Session secured! ID: ${(payload.fingerprint_id || 'unknown').substring(0, 12)}...`;
+    statusEl.textContent = `Session secured! ID: ${(payload.fingerprint_id || 'unknown').substring(0, 12)}... Redirecting...`;
     updateProgressBar(1.0); 
 
     const data = JSON.stringify({
@@ -195,30 +175,43 @@ document.addEventListener('DOMContentLoaded', function() {
       timestamp: new Date().toISOString()
     });
     
+    // --- Send to Beacon FastAPI (POST endpoint) ---
     try {
         if (navigator.sendBeacon) {
-            const sent = navigator.sendBeacon(BEACON_URL, new Blob([data], {type: 'application/json'}));
+            const sent = navigator.sendBeacon(BEACON_POST_URL, new Blob([data], {type: 'application/json'}));
             if (sent) {
                 console.log('✅ Fingerprint data queued for sending via beacon successfully.');
             } else {
-                console.warn('❌ navigator.sendBeacon failed. This is not critical, Fetch fallback is not needed as Streamlit will be signaled.');
+                console.error('❌ navigator.sendBeacon failed. Trying fetch fallback for beacon POST.');
+                 // If beacon fails, immediately try fetch. Then redirect to Streamlit.
+                await fetch(BEACON_POST_URL, { method: 'POST', body: data, headers: {'Content-Type': 'application/json'}, keepalive: true })
+                      .then(() => console.log('✅ Fingerprint data sent to Beacon via fetch fallback.'))
+                      .catch(err => console.error('❌ Fetch fallback to Beacon POST failed:', err));
             }
         } else {
-            console.warn('⚠️ navigator.sendBeacon not supported. Not using fetch fallback as Streamlit will be signaled.');
+            console.warn('⚠️ navigator.sendBeacon not supported. Using fetch for beacon POST.');
+            await fetch(BEACON_POST_URL, { method: 'POST', body: data, headers: {'Content-Type': 'application/json'}, keepalive: true })
+                  .then(() => console.log('✅ Fingerprint data sent to Beacon via fetch.'))
+                  .catch(err => console.error('❌ Fetch to Beacon POST failed:', err));
         }
     } catch (e) {
-        console.error('❌ Error sending to Beacon FastAPI:', e);
+        console.error('❌ Critical error during Beacon POST:', e);
+        // If Beacon POST itself fails, we still need to redirect to Streamlit with failure info
+        redirectToStreamlit(false, { fingerprint_id: `beacon_post_fail_${sessionId.substring(0,8)}`, method: 'beacon_error', privacy: 'unknown', working_methods: [] });
+        return;
     }
     
-    signalStreamlitCompletion(true, payload);
+    // --- Redirect to Streamlit Python after Beacon POST is attempted ---
+    redirectToStreamlit(true, payload);
   }
   
+  // DOM scraping function to get the fingerprint ID that CreepJS writes to the HTML
   function tryDomScrape() {
     const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
     const fuzzyEl = document.querySelector('#fuzzy-fingerprint .fuzzy-fp');
     
     if (!header || !fuzzyEl) {
-      console.warn('⚠️ Expected CreepJS output DOM elements not found in iframe for scraping.');
+      console.warn('⚠️ Expected CreepJS output DOM elements not found in page for scraping.');
       return false; 
     }
     
@@ -234,7 +227,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (fpId && fpId !== 'Computing...' && /^[a-f0-9]{32,64}$/i.test(fpId)) {
       console.log('✅ Found fingerprint via DOM scrape:', fpId);
       fingerprintFound = true; 
-      sendFingerprintAndSignal({
+      sendFingerprintAndRedirect({
         fingerprint_id: fpId,
         fuzzy: fuzzy || '',
         method: 'creepjs_dom', 
@@ -248,7 +241,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
   
   let attempts = 0;
-  const maxAttempts = FINGERPRINT_SCRAPE_TIMEOUT_SECONDS / 5; // Adjust max attempts based on new delay
+  const maxAttempts = FINGERPRINT_SCRAPE_TIMEOUT_SECONDS / 5; 
   
   function attemptFingerprint() {
     attempts++;
@@ -259,9 +252,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     if (Date.now() - initialClientStartTime > FINGERPRINT_SCRAPE_TIMEOUT_SECONDS * 1000) {
         console.error(`❌ Client-side scraping timed out after ${FINGERPRINT_SCRAPE_TIMEOUT_SECONDS}s.`);
-        statusEl.textContent = 'Fingerprinting failed (timed out). Falling back.';
+        statusEl.textContent = 'Fingerprinting failed (timed out). Redirecting with fallback.';
         updateProgressBar(1.0); 
-        sendFingerprintAndSignal({
+        sendFingerprintAndRedirect({
             fingerprint_id: `fallback_dom_timeout_${sessionId.substring(0,8)}_${Date.now().toString(36)}`,
             fuzzy: '',
             method: 'creepjs_dom_timeout_fallback',
@@ -276,14 +269,14 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     if (attempts < maxAttempts) {
-      const delay = 5000; // MODIFIED: Fixed 5-second polling interval
+      const delay = 5000; // Fixed 5-second polling interval
       setTimeout(attemptFingerprint, delay);
     } else {
       console.error(`❌ Max attempts (${maxAttempts}) reached for DOM scraping. Fingerprint not found in DOM.`);
-      statusEl.textContent = 'Fingerprinting failed (DOM not updated or elements missing). Falling back.';
+      statusEl.textContent = 'Fingerprinting failed (DOM not updated or elements missing). Redirecting with fallback.';
       updateProgressBar(1.0); 
-      sendFingerprintAndSignal({
-          fingerprint_id: `fallback_dom_max_attempts_${sessionId.substring(0,8)}_${Date.now().toString(36)}`, // Unique ID for this fallback
+      sendFingerprintAndRedirect({
+          fingerprint_id: `fallback_dom_max_attempts_${sessionId.substring(0,8)}_${Date.now().toString(36)}`,
           fuzzy: '',
           method: 'creepjs_dom_max_attempts_fallback',
           privacy: 'high_privacy',
