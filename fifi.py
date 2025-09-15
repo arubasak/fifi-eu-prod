@@ -999,98 +999,36 @@ class DatabaseManager:
         def render_fingerprint_component(self, session_id: str):
             """
             Renders fingerprinting component using external fingerprint_component.html file.
-            This method is responsible for injecting the HTML and setting up the JS callback.
-            It is called ONCE when the app_stage is 'FINGERPRINTING'.
+            In the DB Polling model, this function's ONLY job is to render the HTML.
             """
             try:
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
-        
-                logger.debug(f"🔍 Looking for fingerprint component at: {html_file_path}")
-        
+
                 if not os.path.exists(html_file_path):
                     logger.error(f"❌ Fingerprint component file NOT FOUND at {html_file_path}")
-                    logger.info(f"📁 Current directory contents: {os.listdir(current_dir)}")
-                    # If HTML component file is missing, immediately signal failure to Python
-                    # and let Python's timeout or fallback handle it.
-                    st.session_state.fingerprint_js_completed = True
-                    st.session_state.fingerprint_id_from_js = "component_file_missing"
-                    st.session_state.fingerprint_method_from_js = "error"
-                    return 
-        
-                logger.debug(f"✅ Fingerprint component file found, reading content...")
-        
+                    # If the component is missing, the Python polling will simply time out, which is the desired fallback.
+                    return
+
                 with open(html_file_path, 'r', encoding='utf-8') as f:
                     html_content = f.read()
-        
-                logger.debug(f"📄 Read {len(html_content)} characters from fingerprint component file")
-        
-                # Use json.dumps to safely embed session_id as a JavaScript string literal
-                # And other URLs
-                original_html_content = html_content
+
+                # Use json.dumps to safely embed the session_id as a JavaScript string literal
                 html_content = html_content.replace('{SESSION_ID}', json.dumps(session_id))
-                html_content = html_content.replace('{BEACON_POST_URL}', json.dumps(st.session_state.session_manager.config.FASTAPI_BEACON_BASE_URL + "/fingerprint"))
-                html_content = html_content.replace('{STREAMLIT_APP_URL_FOR_REDIRECT}', json.dumps(st.session_state.session_manager.config.STREAMLIT_APP_URL))
-
-
-                if original_html_content == html_content: # Check if any replacements happened
-                    logger.warning(f"⚠️ No {{SESSION_ID}}, {{BEACON_POST_URL}}, or {{STREAMLIT_APP_URL_FOR_REDIRECT}} placeholder found in HTML content!")
-                else:
-                    logger.debug(f"✅ Replaced placeholders in fingerprint component HTML...")
-        
-                # --- Render the HTML component ---
-                # Ensure the iframe has sufficient dimensions for its DOM content to be rendered.
-                component_html_key = f"fingerprint_iframe_{session_id}" # Unique key for the HTML iframe
+                
+                # --- RENDER THE HTML COMPONENT ---
+                # This is the only part needed. We render the iframe and that's it.
+                # All callback logic has been removed as it's not part of the DB Polling strategy.
                 st.components.v1.html(
                     html_content,
-                    height=300, # Sufficient height for visual rendering
-                    width=500,  # Sufficient width
+                    height=300,
+                    width=500,
                     scrolling=False
-                    # key=component_html_key # REMOVED: This argument is not supported for st.components.v1.html
                 )
-        
                 logger.info(f"✅ External fingerprint component (iframe) rendered for session {session_id[:8]}")
-                
-                # --- Setup the JavaScript Callback for Streamlit ---
-                # This st_javascript call creates a communication bridge from the iframe JS to Streamlit Python.
-                # The JS in the iframe will call window.parent.streamlit_javascript_callback(...)
-                js_callback_setup_code = """
-                    (function() {
-                        // This function needs to be exposed in the parent window, but accessible by the iframe.
-                        // Streamlit's st_javascript component listens for this return value.
-                        // The embedded JS in fingerprint_component.html will call this function:
-                        // window.parent.streamlit_javascript_callback(...)
-
-                        // Initial return, indicates the callback is set up but no FP data yet.
-                        // This allows st_javascript to initialize.
-                        return { initialized_callback: true };
-                    })()
-                """
-                # This `st_javascript` component will "listen" for the callback from the iframe.
-                # Its returned value will be stored in `js_result` on the Python side in subsequent reruns.
-                # It's given a unique key, and `call_on_update=True` is vital.
-                js_result = st_javascript(js_code=js_callback_setup_code, key=f"fingerprint_callback_listener_{session_id}", call_on_update=True)
-                
-                # If the JavaScript component calls `window.parent.streamlit_javascript_callback`
-                # `js_result` will eventually contain the `data` passed to that callback.
-                if js_result and js_result.get('completed'):
-                    logger.info(f"Python detected JS callback for {session_id[:8]}! Processing data: {js_result.get('fingerprint_id', 'None')[:8]}")
-                    # Update session state with data received from the JavaScript callback
-                    st.session_state.fingerprint_js_completed = True
-                    st.session_state.fingerprint_id_from_js = js_result.get('fingerprint_id')
-                    st.session_state.fingerprint_method_from_js = js_result.get('method')
-                    st.session_state.fingerprint_privacy_from_js = js_result.get('privacy')
-                    st.session_state.fingerprint_working_methods_from_js = js_result.get('working_methods', [])
-                    
-                logger.debug(f"Python side of FP component render finished for {session_id[:8]}. Awaiting JS signal.")
 
             except Exception as e:
-                logger.error(f"❌ Failed to render external fingerprint component or setup JS callback: {e}", exc_info=True)
-                # On Python-side error during render/setup, immediately signal failure to Python
-                st.session_state.fingerprint_js_completed = True
-                st.session_state.fingerprint_id_from_js = "render_error"
-                st.session_state.fingerprint_method_from_js = "error"
-                return # Python will then proceed to process this fallback.
+                logger.error(f"❌ Failed to render external fingerprint component: {e}", exc_info=True)
         
 
         def process_fingerprint_data(self, fingerprint_data: Dict[str, Any]) -> Dict[str, Any]:
