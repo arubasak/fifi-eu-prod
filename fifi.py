@@ -1,3 +1,8 @@
+Here are the complete, final code blocks for `fifi.py` and `fingerprint_component.html`, incorporating all the specified changes.
+
+### 1. Final fifi.py (Streamlit App)
+
+```python
 import streamlit as st
 import os
 import uuid
@@ -4981,73 +4986,95 @@ def handle_emergency_save_requests_from_query():
         if fallback == "true":
             logger.warning("⚠️ THIS IS A FALLBACK SAVE - FastAPI beacon likely failed!")
         logger.info("=" * 80)
-        
+
         st.error("🚨 **Emergency Save Detected** - Processing browser close save...")
         if fallback == "true":
             st.warning("⚠️ Using backup save method (primary method failed)")
         st.info("Please wait, your conversation is being saved...")
-        
+
         # Clear query parameters to prevent re-triggering on rerun
         params_to_clear = ["event", "session_id", "reason", "fallback"]
         for param in params_to_clear:
             if param in st.query_params:
                 del st.query_params[param]
-        
+
         try:
             save_reason = f"{reason}_fallback" if fallback == "true" else reason
-            # Call process_emergency_save_from_query which handles the actual saving and active status.
-            # This is a Streamlit-level save, intended as a fallback if the beacon failed.
-            success = process_emergency_save_from_query(session_id, save_reason)
+            # This function is called as a fallback when the primary FastAPI beacon fails.
+            # It loads the session, checks CRM eligibility, saves to Zoho, and marks the session inactive.
             
-            if success:
-                st.success("✅ Emergency save completed successfully!")
-                logger.info("✅ Emergency save completed via query parameter successfully.")
+            session_manager = st.session_state.get('session_manager')
+            if not session_manager:
+                raise ValueError("Session Manager not available for emergency save.")
+
+            session = session_manager.db.load_session(session_id)
+            if not session:
+                logger.error(f"Emergency Save: Session {session_id} not found.")
+                # Since we are stopping execution, we can return early.
+                st.error("Session could not be found for saving.")
+                st.stop()
+                return
+
+            if session_manager._is_crm_save_eligible(session, save_reason):
+                logger.info(f"Performing emergency CRM save for session {session_id}...")
+                session_manager.zoho.save_chat_transcript_sync(session, save_reason)
+                session.timeout_saved_to_crm = True
             else:
-                st.info("ℹ️ Emergency save completed (no CRM save needed or failed).")
-                logger.info("ℹ️ Emergency save completed via query parameter (not eligible for CRM save or internal error).")
-                
+                logger.info(f"Session {session_id} not eligible for emergency CRM save.")
+
+            # Mark session as inactive
+            session.active = False
+            session.last_activity = datetime.now()
+            session.timeout_reason = f"Emergency save triggered by Streamlit fallback: {save_reason}"
+            session.timeout_detected_at = datetime.now()
+            session_manager.db.save_session(session)
+            
+            st.success("✅ Emergency save completed successfully!")
+            logger.info("✅ Emergency save completed via query parameter successfully.")
+
         except Exception as e:
             st.error(f"❌ An unexpected error occurred during emergency save: {str(e)}")
             logger.critical(f"Emergency save processing crashed from query parameter: {e}", exc_info=True)
-        
+
         st.stop()
     else:
         logger.debug("ℹ️ No emergency save requests found in current URL query parameters.")
 
+
 def handle_fingerprint_requests_from_query(session_manager: 'SessionManager'):
     """Checks for and processes fingerprint data sent via URL query parameters."""
     logger.info("🔍 FINGERPRINT HANDLER: Checking for query parameter fingerprint data...")
-    
+
     query_params = st.query_params
     event = query_params.get("event")
     session_id = query_params.get("session_id")
-    
+
     if (event == "fingerprint_complete" or event == "fingerprint_complete_fallback") and session_id:
         logger.info("=" * 80)
         logger.info(f"🔍 FINGERPRINT DATA DETECTED VIA URL QUERY PARAMETERS (event: {event})!")
         logger.info(f"Session ID: {session_id}")
         logger.info("=" * 80)
-        
+
         # Store the received FP data directly into session_state for Python to pick up
         st.session_state.fingerprint_id_from_js = query_params.get("fingerprint_id")
         st.session_state.fingerprint_method_from_js = query_params.get("method")
         st.session_state.fingerprint_privacy_from_js = query_params.get("privacy")
         st.session_state.fingerprint_working_methods_from_js = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
-        
+
         logger.info(f"Extracted - ID: {st.session_state.fingerprint_id_from_js}, Method: {st.session_state.fingerprint_method_from_js}, Privacy: {st.session_state.fingerprint_privacy_from_js}, Working Methods: {st.session_state.fingerprint_working_methods_from_js}")
-        
+
         # Clear query parameters AFTER extraction to prevent re-processing
         params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
         for param in params_to_clear:
             if param in st.query_params:
                 del st.query_params[param]
-        
+
         if not st.session_state.fingerprint_id_from_js or not st.session_state.fingerprint_method_from_js:
             st.error("❌ **Fingerprint Error** - Missing required data in redirect")
             logger.error(f"Missing fingerprint data: ID={st.session_state.fingerprint_id_from_js}, Method={st.session_state.fingerprint_method_from_js}")
             st.rerun()
             return
-        
+
         try:
             # Reconstruct the fingerprint data dictionary
             fingerprint_data = {
@@ -5056,18 +5083,17 @@ def handle_fingerprint_requests_from_query(session_manager: 'SessionManager'):
                 'browser_privacy_level': st.session_state.fingerprint_privacy_from_js,
                 'working_methods': st.session_state.fingerprint_working_methods_from_js
             }
-            # process_fingerprint_from_query is now deprecated in favor of apply_fingerprinting
-            # We call apply_fingerprinting directly.
+            # Call apply_fingerprinting directly.
             success = session_manager.apply_fingerprinting(session_manager.get_session(), fingerprint_data)
-            
+
             logger.info(f"✅ Silent fingerprint processing from query: {success}")
-            
+
             # A rerun is needed to transition to the next stage
-            st.rerun() 
-            
+            st.rerun()
+
         except Exception as e:
             logger.error(f"Silent fingerprint processing from query failed: {e}", exc_info=True)
-        
+
         return
     else:
         logger.debug("ℹ️ No fingerprint requests found in current URL query parameters.")
@@ -5086,15 +5112,14 @@ def render_fingerprinting_page(session_manager: 'SessionManager', session: UserS
     """
     st.set_page_config(
         page_title="FiFi AI Assistant - Securing Session",
-        page_icon="🔒", 
+        page_icon="🔒",
         layout="centered"
     )
     st.title("🔒 Securing Your Session...")
-    st.markdown("Please wait while we set up secure device recognition.")
-    st.info("This process enhances security and improves your session management.")
-    
+    st.markdown("Please wait while we set up secure device recognition. This may take up to 15 seconds.")
+
     fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-    
+
     # Render the HTML component ONCE per Streamlit session to ensure a stable iframe.
     if not st.session_state.get(fingerprint_key, False):
         session_manager.fingerprinting.render_fingerprint_component(session.session_id)
@@ -5105,48 +5130,50 @@ def render_fingerprinting_page(session_manager: 'SessionManager', session: UserS
     wait_start = st.session_state.get('fingerprint_wait_start', current_time_float)
     if 'fingerprint_wait_start' not in st.session_state:
         st.session_state.fingerprint_wait_start = wait_start
-    
+
     elapsed = current_time_float - wait_start
-    
+
     # Display a progress bar for user feedback
     progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
     st.progress(progress_value, text=f"Session Security Setup in progress... ({int(elapsed)}s / {FINGERPRINT_TIMEOUT_SECONDS}s)")
-    
+
     # Python periodically checks the DB to see if the Beacon has updated the FP ID.
-    # We load the session fresh from the database to check for the update.
     updated_session = session_manager.db.load_session(session.session_id)
-    
+
     if updated_session and updated_session.fingerprint_id and \
        not updated_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-        
+
         logger.info(f"✅ Fingerprint detected in DB for {updated_session.session_id[:8]}! Transitioning to CHAT.")
         st.session_state.app_stage = 'CHAT'
         if 'fingerprint_wait_start' in st.session_state:
             del st.session_state['fingerprint_wait_start']
-        st.rerun()
+        st.rerun() # Trigger a single, final rerun to go to the chat page
         return
 
     # If timeout is reached and FP isn't done, force a transition with a Python-side fallback FP.
     if elapsed >= FINGERPRINT_TIMEOUT_SECONDS and st.session_state.app_stage != 'CHAT':
         logger.warning(f"FINGERPRINTING TIMEOUT: FP not received within {FINGERPRINT_TIMEOUT_SECONDS}s. Applying fallback FP and transitioning to CHAT.")
-        session.fingerprint_id = f"fallback_py_timeout_{session.session_id[:8]}"
-        session.fingerprint_method = "python_fallback_timeout"
-        session.browser_privacy_level = "high_privacy" 
-        session_manager.db.save_session(session) 
-        
+        if session:
+            session.fingerprint_id = f"fallback_py_timeout_{session.session_id[:8]}"
+            session.fingerprint_method = "python_fallback_timeout"
+            session.browser_privacy_level = "high_privacy"
+            session_manager.db.save_session(session)
+        else:
+            logger.error("Session object was None during fingerprint timeout, cannot save fallback.")
+
         st.session_state.app_stage = 'CHAT'
         if 'fingerprint_wait_start' in st.session_state:
             del st.session_state['fingerprint_wait_start']
         st.error("⚠️ Device recognition timed out. Continuing with basic session security.")
-        st.rerun()
+        st.rerun() # Trigger a single, final rerun to go to the chat page
         return
 
-    # If still waiting and not timed out, trigger a GENTLE rerun to update the progress bar.
-    # This replaces the aggressive 0.5s rerun. We can use a slightly longer sleep.
+    # If still waiting and not timed out, trigger a GENTLE rerun to update the progress bar and re-check the DB.
     if st.session_state.app_stage != 'CHAT':
-        time.sleep(1) # Rerun every 1 second to update the progress bar visually
+        time.sleep(1) # Rerun every 1 second. This is the main loop control.
         st.rerun()
 
+## CHANGE: NEW - Stage 3: The full application UI
 def render_full_chat_ui(session_manager: 'SessionManager', session: UserSession):
     """
     Renders the complete chat interface, including sidebar and activity tracking.
@@ -5160,8 +5187,6 @@ def render_full_chat_ui(session_manager: 'SessionManager', session: UserSession)
     render_sidebar(session_manager, session, st.session_state.pdf_exporter)
     render_chat_interface_simplified(session_manager, session, activity_data_from_js)
 
-# ... (The rest of your code, like render_welcome_page, render_sidebar, etc., remains exactly the same as you provided) ...
-# I will regenerate the full remaining part of the file from the last known good state.
 
 # Modified render_welcome_page function
 def render_welcome_page(session_manager: 'SessionManager'):
@@ -6000,7 +6025,7 @@ def main_fixed():
         st.error("❌ Session Manager not available. Please refresh the page.")
         return
     
-    handle_fingerprint_requests_from_query(session_manager) # Removed session_manager argument as it's not needed
+    handle_fingerprint_requests_from_query(session_manager)
     handle_emergency_save_requests_from_query()
 
     if st.session_state.get('is_loading', False):
@@ -6038,7 +6063,8 @@ def main_fixed():
         if session.user_type == UserType.REGISTERED_USER:
             st.session_state.app_stage = 'CHAT'
         else:
-            is_stable_fp = not (session.fingerprint_id is None or session.fingerprint_id.startswith("temp_"))
+            # Check if fingerprinting is complete by looking for a stable FP ID
+            is_stable_fp = session.fingerprint_id and not session.fingerprint_id.startswith(("temp_", "fallback_"))
             if is_stable_fp:
                 st.session_state.app_stage = 'CHAT'
             else:
