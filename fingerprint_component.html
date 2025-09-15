@@ -83,24 +83,22 @@
 document.addEventListener('DOMContentLoaded', function() {
   console.log('🚀 DOMContentLoaded fired. Starting main script block...');
 
-  // --- FIX START ---
-  const sessionId = {SESSION_ID}; // CORRECTED: Removed quotes around {SESSION_ID}
-  // --- FIX END ---
+  // --- CRITICAL FIX: Ensure sessionId is a plain string literal ---
+  const sessionId = {SESSION_ID}; // NO quotes here. Python's json.dumps will provide them.
+  // Example: Python provides "my-session-id", so JS sees: const sessionId = "my-session-id";
   
   const statusEl = document.getElementById('status');
   const BEACON_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint';
   
-  // Now sessionId should directly contain the string, e.g., 'a32ff1bf-...'
-  if (!sessionId || sessionId.includes("{SESSION_ID}")) { // Keep the includes check for debug
-      console.error("CRITICAL: Session ID missing or placeholder not replaced. Aborting.");
+  // After the above fix, sessionId should be a string directly.
+  if (!sessionId || typeof sessionId !== 'string' || sessionId.includes("{SESSION_ID}")) {
+      console.error("CRITICAL: Session ID missing or invalid type. Aborting. Actual value:", sessionId);
       statusEl.textContent = 'Error: Missing session identifier.';
       return; 
   }
 
-  // --- FIX START ---
-  // Adjusted substring as sessionId no longer has surrounding quotes
-  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8)); 
-  // --- FIX END ---
+  // --- CORRECTION: sessionId is now a direct string, use substring(0,8) ---
+  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
   
   if (window.fifiFingerprintSent) return;
   window.fifiFingerprintSent = true; 
@@ -117,9 +115,8 @@ document.addEventListener('DOMContentLoaded', function() {
     statusEl.textContent = `Session secured.`;
     
     const data = JSON.stringify({
-      // --- FIX START ---
-      session_id: sessionId, // CORRECTED: No need for JSON.parse, sessionId is already a string
-      // --- FIX END ---
+      // --- CORRECTION: sessionId is now a direct string, no JSON.parse needed ---
+      session_id: sessionId, 
       fingerprint_id: payload.fingerprint_id,
       method: payload.method,
       privacy: payload.privacy || 'standard', 
@@ -173,9 +170,8 @@ document.addEventListener('DOMContentLoaded', function() {
       console.error('❌ Max attempts reached for DOM scraping.');
       statusEl.textContent = 'Fingerprinting failed. Using fallback.';
       sendFingerprint({
-          // --- FIX START ---
-          fingerprint_id: `fallback_dom_fail_${sessionId.substring(0,8)}_${Date.now().toString(36)}`, // Adjusted substring
-          // --- FIX END ---
+          // --- CORRECTION: sessionId is a direct string here too ---
+          fingerprint_id: `fallback_dom_fail_${sessionId.substring(0,8)}_${Date.now().toString(36)}`, 
           method: 'creepjs_dom_fallback'
       });
     }
