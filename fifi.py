@@ -4826,7 +4826,6 @@ def render_simplified_browser_close_detection(session_id: str):
         }})();
         </script>
         """
-        
         try:
             st.components.v1.html(enhanced_close_js, height=1, width=0)
         except Exception as e:
