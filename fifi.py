@@ -1035,7 +1035,7 @@ class DatabaseManager:
                 component_html_key = f"fingerprint_iframe_{session_id}" # Unique key for the HTML iframe
                 st.components.v1.html(
                     html_content,
-                    height=300, # Sufficient height for visual rendering
+                    height=500, # Sufficient height for visual rendering
                     width=500,  # Sufficient width
                     scrolling=False,
                     # key=component_html_key # Use a unique key for the iframe
