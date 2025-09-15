@@ -1,8 +1,3 @@
-Here are the complete, final code blocks for `fifi.py` and `fingerprint_component.html`, incorporating all the specified changes.
-
-### 1. Final fifi.py (Streamlit App)
-
-```python
 import streamlit as st
 import os
 import uuid
