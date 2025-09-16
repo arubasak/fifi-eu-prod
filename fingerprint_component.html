@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <title>FiFi Fingerprinting</title>
   <style>
-    /* Minimal styling, keeping the component hidden and unobtrusive */
+    /* Minimal styling to keep the component hidden and unobtrusive */
     body { margin: 0; overflow: hidden; }
     #fp-app { display: none; } /* Hide the CreepJS UI as it's not for the end-user */
     #status { position: absolute; top: 5px; left: 5px; font-family: Arial, sans-serif; font-size: 10px; color: #aaa; }
@@ -31,17 +31,18 @@
 <!-- Load the CreepJS library -->
 <script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
 
-<!-- Main logic using MutationObserver for efficiency -->
+<!-- Main logic using MutationObserver for speed and reliability -->
 <script>
 (function () {
-  const sessionId = "{SESSION_ID}"; // This placeholder is replaced by your Python script
+  // This placeholder is replaced by Python with the raw session ID string
+  const sessionId = "{SESSION_ID}";
   const statusEl = document.getElementById('status');
   
   // --- Robustness Check ---
   if (!sessionId || sessionId.includes("{SESSION_ID}")) {
-      console.error("CRITICAL: Session ID was not provided by Streamlit. Cannot proceed.");
+      console.error("CRITICAL: Session ID was not injected correctly by Python. Cannot proceed.");
       statusEl.textContent = 'Error: Missing session ID.';
-      redirectToStreamlit('error_js_no_session'); // Send an error back immediately
+      redirectToStreamlit('error_js_no_session');
       return;
   }
 
@@ -69,7 +70,7 @@
           const parentUrl = new URL(window.parent.location.href);
           baseUrl = parentUrl.origin + parentUrl.pathname;
         }
-      } catch (e) { /* Fallback to self origin */ }
+      } catch (e) { /* Fallback to self origin if parent is inaccessible */ }
 
       const url = new URL(baseUrl);
       url.searchParams.set('event', 'fingerprint_complete');
@@ -87,52 +88,50 @@
       }
   }
   
-  // Helper to validate the hash format
+  // Helper to validate the scraped hash format
   function asHex(s) {
     return (typeof s === 'string' && /^[a-f0-9]{32,64}$/i.test(s)) ? s : null;
   }
   
-  // --- The Core Logic: MutationObserver ---
+  // --- The Core Logic: Using MutationObserver for instant reaction ---
   const targetNode = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
 
   if (!targetNode) {
-    console.error("CRITICAL: CreepJS target node not found in DOM.");
+    console.error("CRITICAL: CreepJS target DOM node not found. Check the HTML structure.");
     redirectToStreamlit('fallback_dom_error');
     return;
   }
 
-  // This function will be called ONLY when the targetNode's content changes
+  // This function is triggered *by the browser* the moment the fingerprint ID appears
   const observerCallback = function(mutationsList, observer) {
     for(const mutation of mutationsList) {
-      if (mutation.type === 'childList' || mutation.type === 'characterData') {
         const fpText = targetNode.textContent || '';
         const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
-        const stable = fpMatch ? asHex(fpMatch[1]) : null;
+        const stableId = fpMatch ? asHex(fpMatch[1]) : null;
 
-        if (stable) {
-          console.log('✅ Fingerprint detected by MutationObserver:', stable.substring(0, 8));
-          // Once we have a valid ID, send it and stop watching
+        if (stableId) {
+          console.log('✅ Fingerprint detected by MutationObserver:', stableId.substring(0, 8));
+          // Once we have a valid ID, send it and immediately stop watching
           redirectToStreamlit('creepjs_observer', {
-            fingerprint_id: stable,
+            fingerprint_id: stableId,
             method: 'creepjs_observer',
-            privacy: 'standard',
+            privacy: 'standard', // CreepJS success implies standard privacy level
             working_methods: ['creepjs']
           });
-          observer.disconnect(); // Crucial: Stop observing to prevent multiple triggers
-          break; // Exit the loop
+          observer.disconnect(); // Crucial: Stop observing to prevent future triggers
+          return;
         }
-      }
     }
   };
 
-  // Create and start the observer
+  // Create and start the observer to watch for changes
   const observer = new MutationObserver(observerCallback);
-  observer.observe(targetNode, { childList: true, characterData: true, subtree: true });
+  observer.observe(targetNode, { childList: true, subtree: true });
   statusEl.textContent = 'Waiting for fingerprint...';
   console.log('👀 MutationObserver is now watching for CreepJS to complete...');
 
   // --- Safety Net: Absolute Timeout ---
-  // A fallback in case CreepJS crashes or the observer never fires.
+  // A fallback in case CreepJS crashes or the observer never fires for some reason.
   setTimeout(() => {
     if (!fingerprintSent) {
       console.error('⏰ Absolute timeout reached (7s). CreepJS likely failed. Sending fallback.');
