@@ -5476,8 +5476,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 tier2_limit = REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT
                 
                 tier2_progress = min(tier2_questions_asked / tier2_limit, 1.0)
-                st.progress(tier2_progress, text=f"Tier 2: {tier2_questions_asked}/{tier2_limit} questions",
-                           key=f"{progress_bar_key}_tier2")
+                st.progress(tier2_progress, text=f"Tier 2: {tier2_questions_asked}/{tier2_limit} questions")
                 
                 remaining_tier2 = REGISTERED_USER_QUESTION_LIMIT - session.daily_question_count
                 if remaining_tier2 > 0:
