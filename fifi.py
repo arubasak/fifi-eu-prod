@@ -2895,7 +2895,6 @@ class SessionManager:
             logger.error(f"Error checking manual CRM eligibility for {session.session_id[:8]}: {e}")
             return False
 
-    ## CHANGE: Modified inheritance logic to prioritize email for REGISTERED_USER, and handle fingerprint for others
     def _attempt_fingerprint_inheritance(self, session: UserSession):
         """
         Attempts to inherit session data with EMAIL as primary identifier for registered users.
@@ -2913,7 +2912,7 @@ class SessionManager:
                 email_sessions = [s for s in email_sessions if s.session_id != session.session_id]
                 
                 if email_sessions:
-                    # Find most recent session with same email
+                    # Find most recent session with same email to inherit counts from
                     most_recent = max(email_sessions, key=lambda s: s.last_question_time or s.last_activity or s.created_at)
                     
                     now = datetime.now()
@@ -2940,15 +2939,8 @@ class SessionManager:
                     session.last_question_time = None
                     logger.info(f"🆕 REGISTERED_USER no same-email history found, starting fresh")
                 
-                # Always clear bans for registered users (they just logged in successfully)
-                session.ban_status = BanStatus.NONE
-                session.ban_start_time = None
-                session.ban_end_time = None
-                session.ban_reason = None
-                session.question_limit_reached = False
-                session.evasion_count = 0
-                session.current_penalty_hours = 0
-                session.escalation_level = 0
+                # Removed: Unconditional clearing of bans for registered users.
+                # The ban status will now be managed by `authenticate_with_wordpress` or `get_session`'s expiration check.
                 
                 return  # Exit early for registered users, email is primary and fingerprint is not collected
 
@@ -3018,7 +3010,7 @@ class SessionManager:
 
             # --- Apply multiple email detection for recognition purposes ---
             if len(unique_emails_in_history) > 1:
-                logger.info(f"🚨 Multiple emails ({len(unique_emails_in_history)}) detected for fingerprint - disabling explicit recognition prompt.")
+                logger.info(f"🚨 Multiple emails ({len(unique_emails)}) detected for fingerprint - disabling explicit recognition prompt.")
                 session.recognition_response = "multiple_emails_detected"
                 session.reverification_pending = False
                 session.pending_user_type = None
