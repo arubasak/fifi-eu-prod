@@ -1,4 +1,4 @@
-<!-- fingerprint_component.html - Corrected Minimal Version -->
+<!-- fingerprint_component.html - Final Attempt -->
 
 <style>
   /* Minimal styling, only apply to the content *within* this component */
@@ -8,7 +8,7 @@
       overflow: hidden;
       height: 100%;
       width: 100%;
-      position: relative; /* Needed for absolute positioning of status */
+      position: relative; 
   }
   #fp-app { display: none; } /* Hide the CreepJS UI */
   #status { 
@@ -25,7 +25,7 @@
   }
 </style>
 
-<!-- Load CreepJS CSS (it's safe to load here) -->
+<!-- Load CreepJS CSS first for consistent rendering -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
 
 <div class="fifi-fingerprint-container">
@@ -44,21 +44,21 @@
 
     <div id="status">Initializing fingerprint (component)...</div>
 
-    <!-- Load the CreepJS library. It MUST be here for its scope. -->
+    <!-- Load the CreepJS library. It MUST be here inside the iframe. -->
     <script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
 
     <!-- Main logic: Polling for CreepJS completion -->
     <script>
     (function () {
-      const sessionId = "{SESSION_ID}"; // Python replaces this with the raw session ID string
+      // Attempt to read session ID from Python-injected global variable first
+      const sessionId = window.FIFI_SESSION_ID || "{SESSION_ID}"; // Fallback to placeholder if global var fails
       const statusEl = document.getElementById('status');
       
       // --- Robustness Check: Session ID Injection ---
       if (!sessionId || sessionId.includes("{SESSION_ID}")) {
-          console.error("CRITICAL (component): Session ID was NOT correctly injected by Python. Aborting JS.");
+          console.error("CRITICAL (component): Session ID still NOT correctly detected. Aborting iframe JS.");
           statusEl.textContent = 'Error: Session ID missing.';
-          // Send an error back immediately, this will trigger a fallback in Streamlit
-          redirectToStreamlit('error_js_no_session_injection'); 
+          redirectToStreamlit('error_js_no_session_detected'); 
           return;
       }
 
@@ -70,21 +70,20 @@
         console.log('✅ (component): Already processed for this session. Exiting early.');
         return;
       }
-      let fingerprintSent = false; // Flag to ensure only one redirect occurs
-      const startTime = Date.now(); // Record start time for logging elapsed time
+      let fingerprintSent = false; 
+      const startTime = Date.now(); 
 
       // --- Centralized Redirect Function ---
       function redirectToStreamlit(reason, payload = {}) {
-          if (fingerprintSent) return; // Only send once
+          if (fingerprintSent) return; 
           fingerprintSent = true;
-          window[PROCESSED_KEY] = true; // Mark as processed for this session
+          window[PROCESSED_KEY] = true; 
           
           const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
           console.log(`🚀 (component) Redirecting to Streamlit after ${elapsedSeconds}s. Reason: ${reason}. FP ID: ${(payload.fingerprint_id || 'N/A').substring(0,8)}`);
           
           let baseUrl = window.location.origin + window.location.pathname;
           try {
-            // Attempt to get the parent's base URL for robust redirection
             if (window.parent && window.parent !== window && window.parent.location.href) {
               const parentUrl = new URL(window.parent.location.href);
               baseUrl = parentUrl.origin + parentUrl.pathname;
@@ -107,46 +106,40 @@
           }
       }
       
-      // Helper to validate a string as a hex hash (simplified)
+      // Helper to validate a string as a hex hash
       function asHex(s) {
         return (typeof s === 'string' && /^[a-f0-9]{32,64}$/i.test(s)) ? s : null;
       }
       
-      // --- DOM Scraping Function ---
-      function tryDomScrape() {
-        const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
-        
-        if (!header || header.textContent === 'FP ID: Computing...') {
-          return false; // CreepJS is still working or element not ready
-        }
-        
-        const fpText = header.textContent || '';
+      // --- Polling Mechanism (from your working old version, slightly refined) ---
+      const targetNode = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
+
+      if (!targetNode) {
+        console.error("CRITICAL (component): CreepJS target DOM node not found. Check HTML structure.");
+        redirectToStreamlit('fallback_dom_node_missing_polling');
+        return;
+      }
+
+      let attempts = 0;
+      const maxAttempts = 50; // Give CreepJS plenty of time
+      const pollDelay = 150; // Check every 150ms
+
+      function attemptFingerprintPolling() {
+        if (fingerprintSent) return; 
+
+        const fpText = targetNode.textContent || '';
         const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
         const stableId = fpMatch ? asHex(fpMatch[1]) : null;
 
         if (stableId) {
-          console.log('✅ (component) Found fingerprint via DOM scrape:', stableId.substring(0, 8));
-          redirectToStreamlit('creepjs_dom_success', {
+          console.log('✅ (component) Fingerprint detected by Polling:', stableId.substring(0, 8));
+          redirectToStreamlit('creepjs_polling_success', {
             fingerprint_id: stableId,
-            method: 'creepjs_dom',
+            method: 'creepjs_polling',
             privacy: 'standard', 
             working_methods: ['creepjs']
           });
-          return true;
-        }
-        return false;
-      }
-      
-      // --- Polling Mechanism ---
-      let attempts = 0;
-      const maxAttempts = 30; // Max polling attempts (at 200ms/attempt, this is 6 seconds)
-      const pollDelay = 200; // Delay between polling attempts (200ms is a good balance)
-      
-      function attemptFingerprintPolling() {
-        if (fingerprintSent) return; 
-
-        if (tryDomScrape()) {
-          return; // Success, tryDomScrape handled the redirect
+          return;
         }
         
         attempts++;
@@ -155,11 +148,11 @@
           setTimeout(attemptFingerprintPolling, pollDelay);
         } else {
           console.warn(`⚠️ (component) Max polling attempts reached (${maxAttempts}). CreepJS did not update DOM. Sending fallback.`);
-          redirectToStreamlit('fallback_max_polling_attempts');
+          redirectToStreamlit('fallback_max_polling_attempts_component');
         }
       }
       
-      // Start the polling after a small initial delay to ensure CreepJS has initialized
+      // Start the polling after a small initial delay
       setTimeout(() => {
         console.log('🚀 (component) Starting fingerprint polling...');
         attemptFingerprintPolling();
@@ -168,10 +161,10 @@
       // --- Safety Net: Absolute Timeout ---
       setTimeout(() => {
         if (!fingerprintSent) {
-          console.error('⏰ (component) Absolute timeout reached (10s). Sending fallback.');
+          console.error('⏰ (component) Absolute timeout reached (15s). Sending fallback.');
           redirectToStreamlit('fallback_absolute_timeout_component');
         }
-      }, 10000); // 10-second maximum wait time in the iframe
+      }, 15000); // Increased absolute timeout to 15 seconds to allow CreepJS time
     })();
     </script>
 </div>
