@@ -1295,7 +1295,7 @@ class DatabaseManager:
                     ban_reason = f"Registered user Tier 1 limit reached ({REGISTERED_USER_TIER_1_LIMIT} questions)"
                     ban_duration_hours = TIER_1_BAN_HOURS
                     ban_applied = True
-                 elif session.daily_question_count == REGISTERED_USER_QUESTION_LIMIT:  # Currently at 20
+                elif session.daily_question_count == REGISTERED_USER_QUESTION_LIMIT:  # Currently at 20
                     ban_type = BanStatus.TWENTY_FOUR_HOUR
                     ban_reason = f"Registered user daily limit reached ({REGISTERED_USER_QUESTION_LIMIT} questions)"
                     ban_duration_hours = TIER_2_BAN_HOURS
