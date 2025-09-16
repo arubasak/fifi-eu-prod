@@ -1,25 +1,3 @@
-The `ValueError: invalid literal for int() with base 10: b'essages+6'` indicates a critical issue within the `sqlitecloud` library's communication when trying to read data from the SQLite Cloud server. This error suggests that the library expects to receive an integer (likely representing data length) over the network socket, but instead, it's receiving unexpected bytes like `b'essages+6'`, which cannot be converted to an integer.
-
-This is not a direct error in your Python code's logic for building SQL queries or handling sessions, but rather an issue at a lower level within the `sqlitecloud` driver or the network connection to the SQLite Cloud server. Possible causes include:
-
-1.  **Network Corruption/Interference:** Data being corrupted during transmission to or from the SQLite Cloud server.
-2.  **SQLite Cloud Server Issue:** The SQLite Cloud server might be sending malformed responses or experiencing an internal fault.
-3.  **`sqlitecloud` Library Bug:** A bug in the `sqlitecloud` Python driver itself that misinterprets the data stream.
-4.  **Connection State:** The database connection might have entered an inconsistent state, leading to out-of-sync communication.
-
-Since this error is occurring during the `DatabaseManager`'s initialization within `ensure_initialization_fixed`, it's causing a critical failure and preventing the entire Streamlit application from starting gracefully.
-
-**Solution:**
-
-To address this, we need to make the `DatabaseManager`'s initialization more robust by explicitly catching this type of low-level communication error (specifically `ValueError` and general `Exception`) during its connection and schema setup. If such an error occurs, the `DatabaseManager` should gracefully fallback to using in-memory storage, preventing the Streamlit app from crashing during startup.
-
-This will not resolve the underlying `sqlitecloud` communication problem, but it will ensure your application remains operational by degrading gracefully to a non-persistent, in-memory database.
-
-**Changes made to `fifi.py`:**
-
-The `DatabaseManager.__init__` method has been updated with a `try-except` block to catch `ValueError` specifically (for the `sqlitecloud` issue) and a general `Exception` during the initial connection and schema initialization. If any of these errors occur, the database connection is explicitly set to `None`, the `db_type` is set to `"memory"`, and `local_sessions` is initialized, effectively forcing a fallback to in-memory storage and logging a critical message, allowing the Streamlit app to continue running.
-
-```python
 import streamlit as st
 import os
 import uuid
