@@ -2,170 +2,63 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>FiFi Fingerprinting</title>
+  <title>Debug Fingerprinting</title>
   <style>
-    /* Minimal styling to keep the component hidden and unobtrusive */
-    body { margin: 0; padding: 0; overflow: hidden; height: 100%; width: 100%; }
-    #fp-app { display: none; } /* Hide the CreepJS UI, it's not for users */
-    #status { position: absolute; top: 5px; left: 5px; font-family: Arial, sans-serif; font-size: 10px; color: #aaa; }
+    body { margin: 0; padding: 10px; font-family: Arial, sans-serif; background-color: #f0f0f0; }
+    #debug-output { font-size: 14px; color: #333; white-space: pre-wrap; word-wrap: break-word; }
   </style>
-  <!-- Load CreepJS CSS first for consistent rendering -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
 </head>
 <body>
 
-<!-- Required DOM structure for CreepJS to inject its data into -->
-<div id="fp-app">
-  <fingerprint>
-    <div id="fingerprint-data">
-      <div class="fingerprint-header-container">
-        <div class="fingerprint-header">
-          <div class="ellipsis-all">FP ID: Computing...</div>
-          <!-- Removed fuzzy-fingerprint, as Python does not process this field currently -->
-        </div>
-      </div>
-    </div>
-  </fingerprint>
-</div>
+  <h1>Debug Output (iframe)</h1>
+  <div id="debug-output">Loading...</div>
 
-<div id="status">Initializing fingerprint (iframe)...</div>
-
-<!-- Load the CreepJS library. It MUST be here inside the iframe. -->
-<script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
-
-<!-- Main logic: Polling for CreepJS completion -->
-<script>
-(function () {
-  const sessionId = "{SESSION_ID}"; // Python replaces this with the raw session ID string
-  const statusEl = document.getElementById('status');
-  
-  // --- Robustness Check: Session ID Injection ---
-  if (!sessionId || sessionId.includes("{SESSION_ID}")) {
-      console.error("CRITICAL (iframe): Session ID was NOT correctly injected by Python. Aborting iframe JS.");
-      statusEl.textContent = 'Error: Session ID missing from Python.';
-      // Send an error back immediately, this will trigger a fallback in Streamlit
-      redirectToStreamlit('error_js_no_session_injection'); 
-      return;
-  }
-
-  console.log('🔍 FiFi CreepJS iframe script started for session:', sessionId.substring(0, 8));
-
-  // --- State Management: Prevent multiple sends/runs ---
-  const PROCESSED_KEY = `fifi_creep_done_${sessionId}`;
-  if (window[PROCESSED_KEY]) {
-    console.log('✅ (iframe): Already processed for this session. Exiting early.');
-    return;
-  }
-  let fingerprintSent = false; // Flag to ensure only one redirect occurs
-  const startTime = Date.now(); // Record start time for logging elapsed time
-
-  // --- Centralized Redirect Function ---
-  // Sends the fingerprint data back to the Streamlit parent window via URL parameters.
-  function redirectToStreamlit(reason, payload = {}) {
-      if (fingerprintSent) return; // Only send once
-      fingerprintSent = true;
-      window[PROCESSED_KEY] = true; // Mark as processed for this session
+  <script>
+    (function () {
+      const sessionIdInHtml = "{SESSION_ID}";
+      const rawSessionIdFromPython = window.parent.location.href.split('session_id=')[1]?.split('&')[0] || 'NOT_FOUND_IN_URL';
       
-      const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.log(`🚀 (iframe) Redirecting to Streamlit after ${elapsedSeconds}s. Reason: ${reason}. FP ID: ${(payload.fingerprint_id || 'N/A').substring(0,8)}`);
+      let debugMessage = "--- iframe JavaScript Started ---\n";
+      debugMessage += `Attempted to inject: "{SESSION_ID}"\n`; // This is the literal placeholder
+      debugMessage += `sessionIdInHtml (from template): "${sessionIdInHtml}"\n`;
+      debugMessage += `Is placeholder present? ${sessionIdInHtml.includes("{SESSION_ID}")}\n`;
+      debugMessage += `Type of sessionIdInHtml: ${typeof sessionIdInHtml}\n`;
+      debugMessage += `Length of sessionIdInHtml: ${sessionIdInHtml.length}\n`;
+      debugMessage += `Raw Session ID from Parent URL: "${rawSessionIdFromPython}"\n`;
+      debugMessage += `Parent URL: ${window.parent.location.href}\n`;
+      debugMessage += "--- End iframe JavaScript ---";
+
+      document.getElementById('debug-output').textContent = debugMessage;
+      console.log(debugMessage);
+
+      // Attempt to immediately redirect with a dummy fingerprint, just to see if redirection works
+      // This will trigger a Streamlit rerun
+      setTimeout(() => {
+          let baseUrl = window.location.origin + window.location.pathname;
+          try {
+            if (window.parent && window.parent !== window && window.parent.location.href) {
+              const parentUrl = new URL(window.parent.location.href);
+              baseUrl = parentUrl.origin + parentUrl.pathname;
+            }
+          } catch (e) { /* Cross-origin, use self origin as fallback */ }
+
+          const url = new URL(baseUrl);
+          url.searchParams.set('event', 'fingerprint_complete');
+          url.searchParams.set('session_id', sessionIdInHtml.includes("{SESSION_ID}") ? 'debug_injection_failed' : sessionIdInHtml);
+          url.searchParams.set('fingerprint_id', 'debug_test_fp');
+          url.searchParams.set('method', 'debug_injection_test');
+          url.searchParams.set('privacy', 'debug');
+          url.searchParams.set('working_methods', 'none');
+          url.searchParams.set('timestamp', Date.now());
+
+          if (window.parent && window.parent !== window) {
+            window.parent.location.replace(url.toString());
+          } else {
+            window.location.replace(url.toString());
+          }
+      }, 500); // Small delay to allow console.log to appear
       
-      let baseUrl = window.location.origin + window.location.pathname;
-      try {
-        // Attempt to get the parent's base URL for robust redirection
-        if (window.parent && window.parent !== window && window.parent.location.href) {
-          const parentUrl = new URL(window.parent.location.href);
-          baseUrl = parentUrl.origin + parentUrl.pathname;
-        }
-      } catch (e) { /* Cross-origin, use self origin as fallback */ }
-
-      const url = new URL(baseUrl);
-      url.searchParams.set('event', 'fingerprint_complete');
-      url.searchParams.set('session_id', sessionId);
-      url.searchParams.set('fingerprint_id', payload.fingerprint_id || `fallback_js_${sessionId.substring(0,8)}_${Date.now().toString(36)}`);
-      url.searchParams.set('method', payload.method || reason);
-      url.searchParams.set('privacy', payload.privacy || 'high_privacy');
-      url.searchParams.set('working_methods', (payload.working_methods || []).join(','));
-      url.searchParams.set('timestamp', Date.now()); // Unique timestamp to force Streamlit rerun
-
-      // Use window.parent.location.replace() for a cleaner browser history (no back button entry)
-      if (window.parent && window.parent !== window) {
-        window.parent.location.replace(url.toString());
-      } else {
-        window.location.replace(url.toString());
-      }
-  }
-  
-  // Helper to validate a string as a hex hash (simplified)
-  function asHex(s) {
-    return (typeof s === 'string' && /^[a-f0-9]{32,64}$/i.test(s)) ? s : null;
-  }
-  
-  // --- DOM Scraping Function ---
-  // Reads the fingerprint ID from the DOM
-  function tryDomScrape() {
-    const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
-    
-    if (!header || header.textContent === 'FP ID: Computing...') {
-      return false; // CreepJS is still working or element not ready
-    }
-    
-    const fpText = header.textContent || '';
-    const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
-    const stableId = fpMatch ? asHex(fpMatch[1]) : null;
-
-    if (stableId) {
-      console.log('✅ (iframe) Found fingerprint via DOM scrape:', stableId.substring(0, 8));
-      // Valid ID found, send it back
-      redirectToStreamlit('creepjs_dom_success', {
-        fingerprint_id: stableId,
-        method: 'creepjs_dom',
-        privacy: 'standard', 
-        working_methods: ['creepjs']
-      });
-      return true;
-    }
-    return false;
-  }
-  
-  // --- Polling Mechanism ---
-  // Repeatedly tries to scrape the DOM until a fingerprint is found or max attempts reached.
-  let attempts = 0;
-  const maxAttempts = 30; // Max polling attempts (at 200ms/attempt, this is 6 seconds)
-  const pollDelay = 200; // Delay between polling attempts (200ms is a good balance)
-  
-  function attemptFingerprintPolling() {
-    if (fingerprintSent) return; // Stop if data already sent
-
-    if (tryDomScrape()) {
-      return; // Success, tryDomScrape handled the redirect
-    }
-    
-    attempts++;
-    if (attempts < maxAttempts) {
-      statusEl.textContent = `Waiting for fingerprint (iframe, attempt ${attempts}/${maxAttempts})...`;
-      setTimeout(attemptFingerprintPolling, pollDelay);
-    } else {
-      // If max attempts reached, generate a fallback
-      console.warn(`⚠️ (iframe) Max polling attempts reached (${maxAttempts}). CreepJS did not update DOM. Sending fallback.`);
-      redirectToStreamlit('fallback_max_polling_attempts');
-    }
-  }
-  
-  // Start the polling after a small initial delay to ensure CreepJS has initialized
-  setTimeout(() => {
-    console.log('🚀 (iframe) Starting fingerprint polling...');
-    attemptFingerprintPolling();
-  }, 500); // 500ms initial delay
-
-  // --- Safety Net: Absolute Timeout ---
-  // A final fallback in case the polling mechanism gets stuck or CreepJS fails silently.
-  setTimeout(() => {
-    if (!fingerprintSent) {
-      console.error('⏰ (iframe) Absolute timeout reached (10s). Sending fallback.');
-      redirectToStreamlit('fallback_absolute_timeout_iframe');
-    }
-  }, 10000); // 10-second maximum wait time in the iframe
-})();
-</script>
+    })();
+  </script>
 </body>
 </html>
