@@ -4,29 +4,22 @@
   <meta charset="utf-8" />
   <title>FiFi Fingerprinting</title>
   <style>
-    /* Basic styling to keep the component unobtrusive */
-    body { margin: 0; padding: 5px; font-family: Arial, sans-serif; overflow: hidden; }
-    #status { font-size: 10px; color: #888; }
-    /* The CreepJS UI is not needed for the user, so we hide it */
-    #fp-app { display: none; }
+    /* Minimal styling, keeping the component hidden and unobtrusive */
+    body { margin: 0; overflow: hidden; }
+    #fp-app { display: none; } /* Hide the CreepJS UI as it's not for the end-user */
+    #status { position: absolute; top: 5px; left: 5px; font-family: Arial, sans-serif; font-size: 10px; color: #aaa; }
   </style>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
 </head>
 <body>
 
-<!-- This is the required DOM structure for CreepJS to inject its data -->
+<!-- Required DOM structure for CreepJS to inject its data into -->
 <div id="fp-app">
   <fingerprint>
     <div id="fingerprint-data">
       <div class="fingerprint-header-container">
         <div class="fingerprint-header">
           <div class="ellipsis-all">FP ID: Computing...</div>
-          <div id="fuzzy-fingerprint">
-            <div class="ellipsis-all fuzzy-fp">Fuzzy:
-              <span class="blurred">0000000000000000000000000000000000000000000000000000000000000000</span>
-            </div>
-          </div>
-          <div><span class="time">0 ms</span></div>
         </div>
       </div>
     </div>
@@ -38,52 +31,45 @@
 <!-- Load the CreepJS library -->
 <script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
 
-<!-- Main logic for extraction and redirection -->
+<!-- Main logic using MutationObserver for efficiency -->
 <script>
 (function () {
-  // This placeholder will be replaced by your Python script
-  const sessionId = "{SESSION_ID}";
+  const sessionId = "{SESSION_ID}"; // This placeholder is replaced by your Python script
   const statusEl = document.getElementById('status');
   
-  // 1. --- ROBUSTNESS CHECK ---
-  // Ensure Streamlit provided a valid session ID before starting.
+  // --- Robustness Check ---
   if (!sessionId || sessionId.includes("{SESSION_ID}")) {
       console.error("CRITICAL: Session ID was not provided by Streamlit. Cannot proceed.");
       statusEl.textContent = 'Error: Missing session ID.';
-      // Immediately send an error back to unblock the Streamlit app
-      redirectToStreamlit('error_js_no_session');
+      redirectToStreamlit('error_js_no_session'); // Send an error back immediately
       return;
   }
 
-  console.log('🔍 FiFi CreepJS starting in iframe for session:', sessionId.substring(0, 8));
+  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
 
-  // Prevent this script from running more than once per component load
+  // --- State Management ---
   const PROCESSED_KEY = `fifi_creep_done_${sessionId}`;
   if (window[PROCESSED_KEY]) {
-    console.log('✅ Already processed for this session in iframe. Exiting.');
+    console.log('✅ Already processed for this session. Exiting.');
     return;
   }
-  
   let fingerprintSent = false;
-  const startTime = Date.now();
 
-  // 2. --- CENTRALIZED REDIRECT FUNCTION ---
-  // This function handles sending data back to Streamlit via URL parameters.
+  // --- Centralized Redirect Function ---
   function redirectToStreamlit(reason, payload = {}) {
-      if (fingerprintSent) return; // Prevent multiple redirects
+      if (fingerprintSent) return;
       fingerprintSent = true;
-      window[PROCESSED_KEY] = true; // Mark as processed
+      window[PROCESSED_KEY] = true;
       
-      console.warn(`🚀 Redirecting to Streamlit. Reason: ${reason}`);
+      console.log(`🚀 Redirecting to Streamlit. Reason: ${reason}`);
       
       let baseUrl = window.location.origin + window.location.pathname;
       try {
-        // Use parent URL if available for robustness
         if (window.parent && window.parent !== window && window.parent.location.href) {
           const parentUrl = new URL(window.parent.location.href);
           baseUrl = parentUrl.origin + parentUrl.pathname;
         }
-      } catch (e) { /* Cross-origin, use self origin as fallback */ }
+      } catch (e) { /* Fallback to self origin */ }
 
       const url = new URL(baseUrl);
       url.searchParams.set('event', 'fingerprint_complete');
@@ -92,84 +78,68 @@
       url.searchParams.set('method', payload.method || reason);
       url.searchParams.set('privacy', payload.privacy || 'high_privacy');
       url.searchParams.set('working_methods', (payload.working_methods || []).join(','));
-      url.searchParams.set('timestamp', Date.now()); // Unique timestamp forces Streamlit rerun
+      url.searchParams.set('timestamp', Date.now());
 
-      // Use location.replace() for a cleaner browser history (no back button entry for the redirect)
       if (window.parent && window.parent !== window) {
-        try {
-          window.parent.location.replace(url.toString());
-        } catch (e) {
-          window.location.replace(url.toString());
-        }
+        window.parent.location.replace(url.toString());
       } else {
         window.location.replace(url.toString());
       }
   }
   
-  // Helper to validate the scraped hash
-  function asHex(s, min = 32, max = 64) {
-    return (typeof s === 'string' && new RegExp(`^[a-f0-9]{${min},${max}}$`, 'i').test(s)) ? s : null;
+  // Helper to validate the hash format
+  function asHex(s) {
+    return (typeof s === 'string' && /^[a-f0-9]{32,64}$/i.test(s)) ? s : null;
   }
   
-  // 3. --- DOM SCRAPING LOGIC ---
-  // This function reads the fingerprint ID from the DOM once CreepJS writes it.
-  function tryDomScrape() {
-    const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
-    
-    if (!header || header.textContent === 'FP ID: Computing...') {
-      return false; // CreepJS is still working
-    }
-    
-    const fpText = header.textContent || '';
-    const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
-    const stable = fpMatch ? asHex(fpMatch[1], 32, 64) : null;
-    
-    if (stable) {
-      console.log('✅ Found fingerprint via DOM scrape:', stable.substring(0, 8));
-      redirectToStreamlit('creepjs_dom', {
-        fingerprint_id: stable,
-        method: 'creepjs_dom',
-        privacy: 'standard', // Assuming standard if CreepJS succeeds
-        working_methods: ['creepjs']
-      });
-      return true;
-    }
-    return false;
-  }
-  
-  // 4. --- POLLING AND TIMEOUT MECHANISM ---
-  let attempts = 0;
-  const maxAttempts = 20;   // Try 20 times (total 1 second of polling)
-  const pollInterval = 50;  // Poll every 50 milliseconds (very fast)
-  
-  function attemptFingerprint() {
-    if (fingerprintSent) return; // Stop if we've already sent the data
+  // --- The Core Logic: MutationObserver ---
+  const targetNode = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
 
-    if (tryDomScrape()) {
-      return; // Success, scraping function handled the redirect
-    }
-    
-    attempts++;
-    if (attempts < maxAttempts) {
-      statusEl.textContent = `Initializing... (attempt ${attempts}/${maxAttempts})`;
-      setTimeout(attemptFingerprint, pollInterval);
-    } else {
-      // If we've tried 20 times and failed, generate a fallback
-      redirectToStreamlit('fallback_max_attempts');
-    }
+  if (!targetNode) {
+    console.error("CRITICAL: CreepJS target node not found in DOM.");
+    redirectToStreamlit('fallback_dom_error');
+    return;
   }
-  
-  // Start the process after a very short delay to let the DOM settle
-  setTimeout(attemptFingerprint, 100);
-  
-  // Absolute timeout: A safety net to ensure we always send *something* back.
-  // If after 5 seconds nothing has happened, CreepJS has likely failed critically.
+
+  // This function will be called ONLY when the targetNode's content changes
+  const observerCallback = function(mutationsList, observer) {
+    for(const mutation of mutationsList) {
+      if (mutation.type === 'childList' || mutation.type === 'characterData') {
+        const fpText = targetNode.textContent || '';
+        const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
+        const stable = fpMatch ? asHex(fpMatch[1]) : null;
+
+        if (stable) {
+          console.log('✅ Fingerprint detected by MutationObserver:', stable.substring(0, 8));
+          // Once we have a valid ID, send it and stop watching
+          redirectToStreamlit('creepjs_observer', {
+            fingerprint_id: stable,
+            method: 'creepjs_observer',
+            privacy: 'standard',
+            working_methods: ['creepjs']
+          });
+          observer.disconnect(); // Crucial: Stop observing to prevent multiple triggers
+          break; // Exit the loop
+        }
+      }
+    }
+  };
+
+  // Create and start the observer
+  const observer = new MutationObserver(observerCallback);
+  observer.observe(targetNode, { childList: true, characterData: true, subtree: true });
+  statusEl.textContent = 'Waiting for fingerprint...';
+  console.log('👀 MutationObserver is now watching for CreepJS to complete...');
+
+  // --- Safety Net: Absolute Timeout ---
+  // A fallback in case CreepJS crashes or the observer never fires.
   setTimeout(() => {
     if (!fingerprintSent) {
-      console.error('⏰ Absolute timeout reached after 5 seconds. Sending fallback.');
+      console.error('⏰ Absolute timeout reached (7s). CreepJS likely failed. Sending fallback.');
+      observer.disconnect(); // Stop observing
       redirectToStreamlit('fallback_absolute_timeout');
     }
-  }, 5000); // 5-second absolute maximum wait time
+  }, 7000); // A generous but reasonable 7-second maximum wait time.
 
 })();
 </script>
