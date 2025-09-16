@@ -407,48 +407,32 @@ class DatabaseManager:
         self._max_reconnect_attempts = 3 ## CHANGE: Added for better reconnect logic
         logger.info("🔄 INITIALIZING DATABASE MANAGER")
         
-        try: # Added try-except block for robust initialization
-            # Prioritize SQLite Cloud if configured and available
-            if connection_string and SQLITECLOUD_AVAILABLE:
-                self.conn, self.db_type = self._try_sqlite_cloud(connection_string)
-            
-            # Fallback to local SQLite if cloud connection failed or not attempted
-            if not self.conn:
-                self.conn, self.db_type = self._try_local_sqlite()
-            
-            # Final fallback to in-memory if all else fails
-            if not self.conn:
-                logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED. FALLING BACK TO NON-PERSISTENT IN-MEMORY STORAGE.")
-                self.db_type = "memory"
+        # Prioritize SQLite Cloud if configured and available
+        if connection_string and SQLITECLOUD_AVAILABLE:
+            self.conn, self.db_type = self._try_sqlite_cloud(connection_string)
+        
+        # Fallback to local SQLite
+        if not self.conn:
+            self.conn, self.db_type = self._try_local_sqlite()
+        
+        # Final fallback to in-memory if all else fails
+        if not self.conn:
+            logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED. FALLING BACK TO NON-PERSISTENT IN-MEMORY STORAGE.")
+            self.db_type = "memory"
+            self.local_sessions = {}
+        
+        # Initialize database schema
+        if self.conn:
+            try:
+                self._init_complete_database()
+                logger.info("✅ Database initialization completed successfully")
+                error_handler.mark_component_healthy("Database")
+            except Exception as e:
+                logger.error(f"Database initialization failed: {e}", exc_info=True)
+                self.conn = None
+                self.db_type = "memory" 
                 self.local_sessions = {}
-            
-            # Initialize database schema if a connection was established
-            if self.conn:
-                try:
-                    self._init_complete_database()
-                    logger.info("✅ Database schema ready and indexes created.")
-                    error_handler.mark_component_healthy("Database")
-                except Exception as e:
-                    logger.error(f"Database schema initialization failed: {e}", exc_info=True)
-                    # If schema init fails, invalidate connection and fall back to memory
-                    self.conn = None
-                    self.db_type = "memory"
-                    self.local_sessions = {}
-                    logger.critical("🚨 DATABASE SCHEMA INITIALIZATION FAILED. FALLING BACK TO NON-PERSISTENT IN-MEMORY STORAGE.")
-
-        except ValueError as e: # Catch the specific ValueError from sqlitecloud here
-            logger.critical(f"🚨 CRITICAL SQLITECLOUD COMMUNICATION ERROR DURING DATABASE INIT: {e}", exc_info=True)
-            self.conn = None
-            self.db_type = "memory"
-            self.local_sessions = {}
-            logger.critical("🚨 FORCE FALLBACK TO NON-PERSISTENT IN-MEMORY STORAGE DUE TO SQLITECLOUD ERROR.")
-        except Exception as e: # Catch any other unexpected errors during init
-            logger.critical(f"🚨 UNEXPECTED ERROR DURING DATABASE MANAGER INIT: {e}", exc_info=True)
-            self.conn = None
-            self.db_type = "memory"
-            self.local_sessions = {}
-            logger.critical("🚨 FORCE FALLBACK TO NON-PERSISTENT IN-MEMORY STORAGE DUE TO UNEXPECTED ERROR.")
-
+        
     def _try_sqlite_cloud(self, cs: str):
         try:
             conn = sqlitecloud.connect(cs)
@@ -574,56 +558,7 @@ class DatabaseManager:
             logger.error(f"Database health check failed: {e}")
             return False
     
-    # ADDITION: New method for explicit SQLiteCloud reconnection
-    def _reconnect_cloud(self):
-        """Force close and recreate SQLiteCloud connection"""
-        if self.conn and self.db_type == "cloud":
-            try:
-                self.conn.close()
-            except Exception as e:
-                logger.debug(f"Error closing existing SQLiteCloud connection: {e}")
-            
-            # Wait briefly to ensure socket cleanup
-            time.sleep(0.5)
-            
-            try:
-                self.conn = sqlitecloud.connect(self._connection_string)
-                # Test with simple query
-                self.conn.execute("SELECT 1").fetchone()
-                logger.info("✅ SQLiteCloud reconnection successful")
-                return True
-            except (ValueError, Exception) as e: # Catch ValueError too
-                logger.error(f"❌ SQLiteCloud reconnection failed: {e}")
-                return False
-        return False
-
-    # ADDITION: New method for explicit SQLiteCloud validation
-    def _validate_cloud_connection(self):
-        """Validate SQLiteCloud connection is healthy"""
-        if self.db_type != "cloud":
-            return True
-        
-        try:
-            # Use a lightweight query to test connection
-            result = self.conn.execute("SELECT 1").fetchone()
-            return result == (1,)
-        except (ValueError, Exception) as e: # Catch ValueError too
-            logger.warning(f"⚠️ SQLiteCloud validation failed: {e}")
-            return False
-
-    # ADDITION: Helper to fallback to in-memory
-    def _fallback_to_local(self):
-        """Switches to in-memory storage if cloud/file DB fails."""
-        if self.conn:
-            try:
-                self.conn.close()
-            except Exception as e:
-                logger.debug(f"Error closing failed DB connection: {e}")
-        self.db_type = "memory"
-        self.local_sessions = {}
-        logger.critical("🚨 FALLBACK: Switched to non-persistent in-memory storage due to cloud/file DB failure.")
-
-    ## CHANGE: Improved reconnect logic to use _reconnect_cloud
+    ## CHANGE: Improved reconnect logic
     def _reconnect(self):
         """Reconnect with exponential backoff"""
         for attempt in range(self._max_reconnect_attempts):
@@ -631,50 +566,38 @@ class DatabaseManager:
                 if self.conn:
                     try:
                         self.conn.close()
-                    except Exception as e:
-                        logger.debug(f"Error closing existing DB connection during reconnect: {e}")
+                    except:
+                        pass
                 
                 if self._connection_string and SQLITECLOUD_AVAILABLE:
-                    if self._reconnect_cloud(): # Try cloud reconnect
-                        self.db_type = "cloud"
-                        self._init_complete_database()
-                        logger.info(f"Database (Cloud) reconnected on attempt {attempt + 1}")
-                        return
+                    self.conn = sqlitecloud.connect(self._connection_string)
+                    self.db_type = "cloud"
+                else:
+                    self.conn = sqlite3.connect("fifi_sessions_v2.db", check_same_thread=False)
+                    self.db_type = "file"
                 
-                # Fallback to local SQLite if cloud reconnect fails or not applicable
-                self.conn = sqlite3.connect("fifi_sessions_v2.db", check_same_thread=False)
-                self.db_type = "file"
                 self._init_complete_database() # Re-init schema in case of changes
-                logger.info(f"Database (File) reconnected on attempt {attempt + 1}")
+                logger.info(f"Database reconnected on attempt {attempt + 1}")
                 return
-
-            except (ValueError, Exception) as e: # Catch ValueError too
+            except Exception as e:
                 wait_time = 2 ** attempt  # Exponential backoff
-                logger.error(f"Reconnect attempt {attempt + 1} failed, waiting {wait_time}s: {e}", exc_info=True)
+                logger.error(f"Reconnect attempt {attempt + 1} failed, waiting {wait_time}s: {e}")
                 time.sleep(wait_time)
         
-        # Final fallback to in-memory if all attempts fail
-        logger.critical("🚨 ALL RECONNECTION ATTEMPTS FAILED. FALLING BACK TO IN-MEMORY STORAGE")
-        self._fallback_to_local()
-
+        # Final fallback to in-memory
+        logger.critical("🚨 All reconnection attempts failed, falling back to in-memory storage")
+        self.db_type = "memory"
+        self.local_sessions = {}
 
     ## CHANGE: Simplified _ensure_connection_healthy to use _reconnect
     def _ensure_connection_healthy(self):
         """Ensure database connection is healthy, reconnect if needed"""
-        if self.db_type == "cloud" and not self._validate_cloud_connection():
-            logger.warning("SQLiteCloud connection unhealthy, attempting reconnection...")
+        if not self._check_connection_health():
+            logger.warning("Database connection unhealthy, attempting reconnection...")
             self._reconnect()
             if not self.conn: # If reconnect failed, ensure in-memory is ready
                 if not hasattr(self, 'local_sessions'):
                     self.local_sessions = {}
-        elif self.db_type == "file" and not self._check_connection_health(): # Use old check for file
-             logger.warning("Local SQLite connection unhealthy, attempting reconnection...")
-             self._reconnect()
-             if not self.conn:
-                if not hasattr(self, 'local_sessions'):
-                    self.local_sessions = {}
-        elif self.db_type == "memory":
-            pass # No external connection to manage
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
@@ -723,7 +646,7 @@ class DatabaseManager:
                  session.zoho_contact_id, session.created_at.isoformat(),
                  last_activity_iso, json_messages, int(session.active),
                  session.wp_token, int(session.timeout_saved_to_crm), session.fingerprint_id,
-                 session.fingerprint_method, session.visitor_type,
+                 session.fingerprint_method, session.visitor_type, # This is the corrected line for fingerprint_method
                  session.daily_question_count,
                  session.total_question_count, 
                  session.last_question_time.isoformat() if session.last_question_time else None,
@@ -738,154 +661,22 @@ class DatabaseManager:
                  session.pending_user_type.value if session.pending_user_type else None,
                  session.pending_email, session.pending_full_name,
                  session.pending_zoho_contact_id, session.pending_wp_token,
-                 declined_recognized_email_at_iso,
-                 timeout_detected_at_iso,
-                 session.timeout_reason)
-            )
+                 declined_recognized_email_at_iso, ## CHANGE: NEW field
+                 timeout_detected_at_iso, ## CHANGE: NEW field
+                 session.timeout_reason)) ## CHANGE: NEW field
             self.conn.commit()
             
             logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}")
             
-        except (ValueError, Exception) as e: # Catch ValueError during save operation too
+        except Exception as e:
             logger.error(f"Failed to save session {session.session_id[:8]}: {e}", exc_info=True)
             # Try to fallback to in-memory on save failure
-            self._fallback_to_local()
-            # After fallback, save to local_sessions
-            if self.db_type == "memory":
-                self.local_sessions[session.session_id] = copy.deepcopy(session)
-                logger.info(f"Fallback: Saved session {session.session_id[:8]} to in-memory storage")
+            if not hasattr(self, 'local_sessions'):
+                self.local_sessions = {}
+            self.local_sessions[session.session_id] = copy.deepcopy(session)
+            logger.info(f"Fallback: Saved session {session.session_id[:8]} to in-memory storage")
             raise
 
-    @handle_api_errors("Database", "Load Session")
-    def load_session(self, session_id: str) -> Optional[UserSession]:
-        """Load session with complete SQLite Cloud compatibility and connection health check"""
-        self._ensure_connection_healthy() ## CHANGE: Simplified call
-
-        if self.db_type == "memory":
-            session = self.local_sessions.get(session_id)
-            if session and isinstance(session.user_type, str):
-                try:
-                    session.user_type = UserType(session.user_type)
-                except ValueError:
-                    session.user_type = UserType.GUEST
-            
-            # Ensure backward compatibility for in-memory sessions too
-            if session and not hasattr(session, 'display_message_offset'):
-                session.display_message_offset = 0
-            if session and not hasattr(session, 'reverification_pending'):
-                session.reverification_pending = False
-                session.pending_user_type = None
-                session.pending_email = None
-                session.pending_full_name = None
-                session.pending_zoho_contact_id = None
-                session.pending_wp_token = None
-                logger.debug(f"Added missing re-verification fields to in-memory session {session_id[:8]}")
-            if session and not hasattr(session, 'declined_recognized_email_at'): # NEW field
-                session.declined_recognized_email_at = None
-            ## CHANGE: Add compatibility for new timeout tracking fields
-            if session and not hasattr(session, 'timeout_detected_at'):
-                session.timeout_detected_at = None
-            if session and not hasattr(session, 'timeout_reason'):
-                session.timeout_reason = None
-            
-            return copy.deepcopy(session)
-        
-        try:
-            # NEVER set row_factory for cloud connections - always use raw tuples
-            if hasattr(self.conn, 'row_factory'):
-                self.conn.row_factory = None
-            
-            ## CHANGE: Update SELECT statement to include new fields (timeout_detected_at, timeout_reason)
-            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
-            row = cursor.fetchone()
-            
-            if not row: 
-                logger.debug(f"No active session found for ID {session_id[:8]}.")
-                return None
-            
-            ## CHANGE: Update expected columns for new fields (now 41)
-            expected_min_cols = 41
-            if len(row) < expected_min_cols:
-                logger.error(f"Row has insufficient columns: {len(row)} (expected at least {expected_min_cols}). Data corruption suspected or old schema.")
-                pass 
-                
-            try:
-                # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
-                loaded_display_message_offset = row[31] if len(row) > 31 else 0
-                
-                # NEW: Safely get re-verification fields, defaulting if columns are missing
-                loaded_reverification_pending = bool(row[32]) if len(row) > 32 else False
-                loaded_pending_user_type = UserType(row[33]) if len(row) > 33 and row[33] else None
-                loaded_pending_email = row[34] if len(row) > 34 else None
-                loaded_pending_full_name = row[35] if len(row) > 35 else None
-                loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
-                loaded_pending_wp_token = row[37] if len(row) > 37 else None
-                # NEW: Safely get declined_recognized_email_at
-                loaded_declined_recognized_email_at = datetime.fromisoformat(row[38]) if len(row) > 38 and row[38] else None
-                ## CHANGE: Safely get timeout tracking fields
-                loaded_timeout_detected_at = datetime.fromisoformat(row[39]) if len(row) > 39 and row[39] else None
-                loaded_timeout_reason = row[40] if len(row) > 40 else None
-
-
-                loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
-
-                user_session = UserSession(
-                    session_id=row[0], 
-                    user_type=UserType(row[1]) if row[1] else UserType.GUEST,
-                    email=row[2], 
-                    full_name=row[3],
-                    zoho_contact_id=row[4],
-                    created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
-                    last_activity=loaded_last_activity, # Use the safely loaded value
-                    messages=safe_json_loads(row[7], default_value=[]),
-                    active=bool(row[8]), 
-                    wp_token=row[9],
-                    timeout_saved_to_crm=bool(row[10]),
-                    fingerprint_id=row[11],
-                    fingerprint_method=row[12],
-                    visitor_type=row[13] or 'new_visitor',
-                    daily_question_count=row[14] or 0,
-                    total_question_count=row[15] or 0,
-                    last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
-                    question_limit_reached=bool(row[17]),
-                    ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
-                    ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
-                    ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
-                    ban_reason=row[21],
-                    evasion_count=row[22] or 0,
-                    current_penalty_hours=row[23] or 0,
-                    escalation_level=row[24] or 0,
-                    email_addresses_used=safe_json_loads(row[25], default_value=[]),
-                    email_switches_count=row[26] or 0,
-                    browser_privacy_level=row[27],
-                    registration_prompted=bool(row[28]),
-                    registration_link_clicked=bool(row[29]),
-                    recognition_response=row[30],
-                    display_message_offset=loaded_display_message_offset, # Use the safely loaded value
-                    reverification_pending=loaded_reverification_pending, # NEW
-                    pending_user_type=loaded_pending_user_type, # NEW
-                    pending_email=loaded_pending_email, # NEW
-                    pending_full_name=loaded_pending_full_name, # NEW
-                    pending_zoho_contact_id=loaded_pending_zoho_contact_id, # NEW
-                    pending_wp_token=loaded_pending_wp_token, # NEW
-                    declined_recognized_email_at=loaded_declined_recognized_email_at, # NEW
-                    timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
-                    timeout_reason=loaded_timeout_reason ## CHANGE: NEW field
-                )
-                
-                logger.debug(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
-                return user_session
-                
-            except (ValueError, Exception) as e: # Catch ValueError during row parsing
-                logger.error(f"Failed to create UserSession object from row for session {session_id[:8]}: {e}", exc_info=True)
-                logger.error(f"Problematic row data (truncated): {str(row)[:200]}")
-                self._fallback_to_local() # Fallback if data parsing is an issue
-                return None
-                
-        except (ValueError, Exception) as e: # Catch ValueError during execute too
-            logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
-            self._fallback_to_local() # Fallback if load itself fails
-            return None
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
         """Load session with complete SQLite Cloud compatibility and connection health check"""
@@ -1006,15 +797,13 @@ class DatabaseManager:
                 logger.debug(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
                 return user_session
                 
-            except (ValueError, Exception) as e: # Catch ValueError during row parsing
+            except Exception as e:
                 logger.error(f"Failed to create UserSession object from row for session {session_id[:8]}: {e}", exc_info=True)
                 logger.error(f"Problematic row data (truncated): {str(row)[:200]}")
-                self._fallback_to_local() # Fallback if data parsing is an issue
                 return None
                 
-        except (ValueError, Exception) as e: # Catch ValueError during execute too
+        except Exception as e:
             logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
-            self._fallback_to_local() # Fallback if load itself fails
             return None
 
     @handle_api_errors("Database", "Find by Fingerprint")
@@ -1123,16 +912,15 @@ class DatabaseManager:
                         timeout_reason=loaded_timeout_reason ## CHANGE: NEW field
                     )
                     sessions.append(s)
-                except (ValueError, Exception) as e: # Catch ValueError during row parsing
+                except Exception as e:
                     logger.error(f"Error converting row to UserSession in find_sessions_by_fingerprint: {e}", exc_info=True)
                     continue
             logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (DB): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
             for s in sessions:
                 logger.debug(f"  - {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}, active={s.active}, rev_pending={s.reverification_pending}")
             return sessions
-        except (ValueError, Exception) as e: # Catch ValueError during execute too
+        except Exception as e:
             logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
-            self._fallback_to_local() # Fallback if search fails
             return []
 
     def find_sessions_by_email(self, email: str) -> List[UserSession]:
@@ -1165,9 +953,8 @@ class DatabaseManager:
                     
             return sessions
             
-        except (ValueError, Exception) as e: # Catch ValueError during execute too
-            logger.error(f"Failed to find sessions by email '{email}': {e}", exc_info=True)
-            self._fallback_to_local() # Fallback if search fails
+        except Exception as e:
+            logger.error(f"Failed to find sessions by email '{email}': {e}")
             return []
     
     ## CHANGE: Added cleanup for old inactive sessions
@@ -1187,9 +974,8 @@ class DatabaseManager:
                 """, (cutoff_date,))
                 self.conn.commit()
                 logger.info("✅ Cleaned up old inactive sessions.")
-        except (ValueError, Exception) as e: # Catch ValueError during cleanup too
-            logger.error(f"❌ Failed to clean up old sessions: {e}", exc_info=True)
-            self._fallback_to_local() # Fallback if cleanup fails
+        except Exception as e:
+            logger.error(f"❌ Failed to clean up old sessions: {e}")
 
     # =============================================================================
     # FEATURE MANAGERS (nested within DatabaseManager as they access self.db)
@@ -1851,7 +1637,9 @@ class ZohoCRMManager:
                 else:
                     logger.error(f"Zoho attachment upload failed with response: {data}")
                         
-            except Exception as e: # Catch all exceptions here
+            except requests.exceptions.Timeout:
+                logger.error(f"Zoho upload timeout (attempt {attempt + 1}/{max_retries})")
+            except Exception as e:
                 logger.error(f"Error uploading Zoho attachment (attempt {attempt + 1}/{max_retries}): {e}", exc_info=True)
                     
             if attempt < max_retries - 1:
@@ -1969,7 +1757,7 @@ class ZohoCRMManager:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
                 if attempt_note < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
                     return False
@@ -2311,7 +2099,7 @@ OUTPUT: Only the optimized search query, nothing else."""
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are a search query optimizer. Respond only with valid JSON."},
+                    {"role": "system", "content": "You are a search query optimizer. Respond only with the optimized search query."},
                     {"role": "user", "content": reformulation_prompt}
                 ],
                 max_tokens=30, # Keep very low for cost efficiency
@@ -2674,7 +2462,6 @@ class EnhancedAI:
             "cannot find information",
             "no information about",
             "not available in my knowledge base",
-            "not available in my knowledge base", # Corrected duplicate entry
             "don't have information about",
             "couldn't find information",
             "do not provide specific information",
@@ -2874,7 +2661,7 @@ Respond with ONLY a JSON object in this exact format:
         )
         
         response_content = response.choices[0].message.content.strip()
-        response_content = response_content.replace('```json', '').replace('```', '').strip() # Changed from response.content to response.choices[0].message.content
+        response_content = response_content.replace('```json', '').replace('```', '').strip()
         
         result = json.loads(response_content)
         
@@ -2896,19 +2683,19 @@ Respond with ONLY a JSON object in this exact format:
 class SessionManager:
     """Main orchestrator class that manages user sessions, integrates all managers, and provides the primary interface for the application."""
     
-    def __init__(self, _config: Config, _db_manager: DatabaseManager, # Changed to underscore
-                 _zoho_manager: ZohoCRMManager, _ai_system: EnhancedAI, # Changed to underscore
-                 _rate_limiter: RateLimiter, _fingerprinting_manager: DatabaseManager.FingerprintingManager, # Changed to underscore
-                 _email_verification_manager: DatabaseManager.EmailVerificationManager, # Changed to underscore
-                 _question_limit_manager: DatabaseManager.QuestionLimitManager): # Changed to underscore
-        self.config = _config
-        self.db = _db_manager
-        self.zoho = _zoho_manager
-        self.ai = _ai_system
-        self.rate_limiter = _rate_limiter
-        self.fingerprinting = _fingerprinting_manager
-        self.email_verification = _email_verification_manager
-        self.question_limits = _question_limit_manager
+    def __init__(self, config: Config, db_manager: DatabaseManager, 
+                 zoho_manager: ZohoCRMManager, ai_system: EnhancedAI, 
+                 rate_limiter: RateLimiter, fingerprinting_manager: DatabaseManager.FingerprintingManager, # Corrected type hint
+                 email_verification_manager: DatabaseManager.EmailVerificationManager, # Corrected type hint
+                 question_limit_manager: DatabaseManager.QuestionLimitManager): # Corrected type hint
+        self.config = config
+        self.db = db_manager
+        self.zoho = zoho_manager
+        self.ai = ai_system
+        self.rate_limiter = rate_limiter
+        self.fingerprinting = fingerprinting_manager
+        self.email_verification = email_verification_manager
+        self.question_limits = question_limit_manager
         self._cleanup_interval = timedelta(hours=1)
         self._last_cleanup = datetime.now()
         
@@ -3980,7 +3767,15 @@ class SessionManager:
                 st.error("Invalid username or password.")
                 return None
                 
-        except Exception as e: # Catch general exceptions for authentication
+        except requests.exceptions.Timeout as e:
+            logger.error(f"WordPress authentication timed out: {e}")
+            st.error("Authentication service timed out. Please try again.")
+            return None
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"WordPress authentication connection error: {e}")
+            st.error("Could not connect to authentication service. Check your internet connection or try again later.")
+            return None
+        except Exception as e:
             logger.error(f"An unexpected error occurred during WordPress authentication: {e}", exc_info=True)
             st.error("An unexpected error occurred during authentication. Please try again later.")
             return None
@@ -4415,9 +4210,10 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
             if not limit_check['allowed']:
                 ban_message = limit_check.get("message", 'Access restricted.')
 
-                # For newly applied bans by record_question_and_check_ban, the logic below handles the immediate ban return.
-                # This `if not limit_check['allowed']` block primarily catches already-active bans from previous reruns.
+                ## CHANGE: Atomic question recording and ban application
                 if limit_check.get('reason') == 'registered_user_tier1_limit':
+                    # The ban should already be applied by record_question_and_check_ban if user has exceeded.
+                    # This branch should now primarily be for displaying the existing ban.
                     logger.info(f"Registered User Tier 1 ({REGISTERED_USER_TIER_1_LIMIT} questions) limit previously reached, displaying ban for session {session.session_id[:8]}.")
                     return {
                         'banned': True,
@@ -5399,11 +5195,8 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT: ## CHANGE: Use constant
                 # Check if there's an active ban
                 if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
-                    time_remaining = session.ban_end_time - datetime.now()
-                    hours = int(time_remaining.total_seconds() // 3600)
-                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                    st.error(f"🚫 Daily limit reached") # Corrected message for active ban
-                    st.caption(f"Resets in: {hours}h {minutes}m")
+                    st.progress(1.0, text="Tier 1 Complete")
+                    st.caption(f"🚫 {TIER_1_BAN_HOURS}-hour break required to access Tier 2") ## CHANGE: Use constant
                 else:
                     # Ban has expired or not yet applied
                     st.progress(1.0, text="Tier 1 Complete ✅")
@@ -5572,7 +5365,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         with col1:
             clear_chat_help = "Hides all messages from the current conversation display. Messages are preserved in the database and new messages can still be added."
             
-            if st.button("🗑️️ Clear Chat", use_container_width=True, help=clear_chat_help):
+            if st.button("🗑️ Clear Chat", use_container_width=True, help=clear_chat_help):
                 session_manager.clear_chat_history(session)
                 st.success("🗑️ Chat display cleared! Messages preserved in database.")
                 st.rerun()
@@ -5712,6 +5505,9 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.info(f"Take your time to read this answer. When you're ready, verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions per day + chat history saving!") ## CHANGE: Use constant
         
         with st.expander("📧 Ready to Unlock More Questions?", expanded=False):
+            st.markdown("### 🚀 What You'll Get After Email Verification:")
+            st.markdown(f"• **{EMAIL_VERIFIED_QUESTION_LIMIT} questions per day** • **Chat history saving** • **Cross-device sync**") ## CHANGE: Use constant
+            
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("📧 Yes, Let's Verify My Email!", use_container_width=True, key="gentle_verify_btn"):
@@ -5741,6 +5537,9 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.info(f"Take your time to read this answer. Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!") ## CHANGE: Use constant
         
         with st.expander("🚀 Want More Questions Daily?", expanded=False):
+            st.markdown("### 📈 Upgrade Benefits:")
+            st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** • **Tier system** • **Priority support**") ## CHANGE: Use constant
+            
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
@@ -6380,103 +6179,88 @@ class PersistentState:
             del st.session_state[f'_persistent_{key}']
 
 
-# --- CACHED GETTER FUNCTIONS FOR HEAVY RESOURCES ---
-
-@st.cache_resource(ttl=3600) # Cache for 1 hour
-def get_config():
-    logger.info("Initializing Config (cached)")
-    return Config()
-
-@st.cache_resource(ttl=3600) # Cache for 1 hour
-def get_pdf_exporter():
-    logger.info("Initializing PDFExporter (cached)")
-    return PDFExporter()
-
-@st.cache_resource(ttl=3600) # Cache for 1 hour
-def get_db_manager(connection_string: Optional[str]):
-    logger.info("Initializing DatabaseManager (cached)")
-    return DatabaseManager(connection_string)
-
-@st.cache_resource(ttl=3600) # Cache for 1 hour
-def get_zoho_manager(_config: Config, _pdf_exporter: PDFExporter): # Changed to underscore
-    logger.info("Initializing ZohoCRMManager (cached)")
-    return ZohoCRMManager(_config, _pdf_exporter)
-
-@st.cache_resource(ttl=3600) # Cache for 1 hour
-def get_ai_system(_config: Config): # Changed to underscore
-    logger.info("Initializing EnhancedAI (cached)")
-    return EnhancedAI(_config)
-
-@st.cache_resource(ttl=3600) # Cache for 1 hour
-def get_rate_limiter(max_requests: int, window_seconds: int):
-    logger.info("Initializing RateLimiter (cached)")
-    return RateLimiter(max_requests=max_requests, window_seconds=window_seconds)
-
-@st.cache_resource(ttl=3600) # Cache for 1 hour
-def get_fingerprinting_manager():
-    logger.info("Initializing FingerprintingManager (cached)")
-    return DatabaseManager.FingerprintingManager()
-
-@st.cache_resource(ttl=3600) # Cache for 1 hour
-def get_email_verification_manager(_config: Config): # Changed to underscore
-    logger.info("Initializing EmailVerificationManager (cached)")
-    return DatabaseManager.EmailVerificationManager(_config)
-
-@st.cache_resource(ttl=3600) # Cache for 1 hour
-def get_question_limit_manager():
-    logger.info("Initializing QuestionLimitManager (cached)")
-    return DatabaseManager.QuestionLimitManager()
-
-@st.cache_resource(ttl=3600) # Cache for 1 hour
-def get_session_manager():
-    logger.info("Initializing SessionManager (cached)")
-    config = get_config()
-    pdf_exporter = get_pdf_exporter()
-    db_manager = get_db_manager(config.SQLITE_CLOUD_CONNECTION)
-    zoho_manager = get_zoho_manager(config, pdf_exporter)
-    ai_system = get_ai_system(config)
-    rate_limiter = get_rate_limiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS)
-    fingerprinting_manager = get_fingerprinting_manager()
-    email_verification_manager = get_email_verification_manager(config)
-    question_limit_manager = get_question_limit_manager()
-
-    return SessionManager(
-        config, db_manager, zoho_manager, ai_system,
-        rate_limiter, fingerprinting_manager, email_verification_manager,
-        question_limit_manager
-    )
-
 def ensure_initialization_fixed():
     """Fixed version without duplicate spinner since we have loading overlay"""
     if 'initialized' not in st.session_state or not st.session_state.initialized:
         logger.info("Starting application initialization sequence (no spinner shown, overlay is active)...")
         
         try:
-            # Use cached getters for all components
-            st.session_state.config = get_config()
-            st.session_state.pdf_exporter = get_pdf_exporter()
-            st.session_state.db_manager = get_db_manager(st.session_state.config.SQLITE_CLOUD_CONNECTION)
-            # Pass cached objects with underscore to prevent hashing issues
-            st.session_state.zoho_manager = get_zoho_manager(st.session_state.config, st.session_state.pdf_exporter)
-            st.session_state.ai_system = get_ai_system(st.session_state.config)
-            st.session_state.rate_limiter = get_rate_limiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS)
-            st.session_state.fingerprinting_manager = get_fingerprinting_manager()
-            st.session_state.email_verification_manager = get_email_verification_manager(st.session_state.config)
-            st.session_state.question_limit_manager = get_question_limit_manager()
-
-            # The main SessionManager also needs to be cached if all its dependencies are cached
-            # It's safer to just call the `get_session_manager` function that uses all the other cached getters
-            st.session_state.session_manager = get_session_manager()
-
-            st.session_state.error_handler = error_handler # This is a global instance, no need to cache
+            config = Config()
+            pdf_exporter = PDFExporter()
+            
+            try:
+                db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+                st.session_state.db_manager = db_manager
+            except Exception as db_e:
+                logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
+                st.session_state.db_manager = type('FallbackDB', (), {
+                    'db_type': 'memory',
+                    'local_sessions': {},
+                    'save_session': lambda self, session: None,
+                    'load_session': lambda self, session_id: None,
+                    'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
+                    'find_sessions_by_email': lambda self, email: [],
+                    'cleanup_old_inactive_sessions': lambda self: None # Add dummy method
+                })()
+            
+            try:
+                zoho_manager = ZohoCRMManager(config, pdf_exporter)
+            except Exception as e:
+                logger.error(f"Zoho manager failed: {e}")
+                zoho_manager = type('FallbackZoho', (), {
+                    'config': config,
+                    'save_chat_transcript_sync': lambda self, session, reason: False
+                })()
+            
+            try:
+                ai_system = EnhancedAI(config)
+            except Exception as e:
+                logger.error(f"AI system failed: {e}")
+                ai_system = type('FallbackAI', (), {
+                    "openai_client": None,
+                    'get_response': lambda self, prompt, history=None: {
+                        "content": "AI system temporarily unavailable.",
+                        "success": False
+                    }
+                })()
+            
+            ## CHANGE: Use constants for RateLimiter initialization
+            rate_limiter = RateLimiter(max_requests=RATE_LIMIT_REQUESTS, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
+            fingerprinting_manager = DatabaseManager.FingerprintingManager()
+            
+            try:
+                email_verification_manager = DatabaseManager.EmailVerificationManager(config)
+                if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
+                    email_verification_manager = type('DummyEmail', (), {
+                        'send_verification_code': lambda self, email: False,
+                        'verify_code': lambda self, email, code: False
+                    })()
+            except Exception as e:
+                logger.error(f"Email verification failed: {e}")
+                email_verification_manager = type('DummyEmail', (), {
+                    'send_verification_code': lambda self, email: False,
+                    'verify_code': lambda self, email, code: False
+                })()
+            
+            question_limit_manager = DatabaseManager.QuestionLimitManager()
+            
+            st.session_state.session_manager = SessionManager(
+                config, st.session_state.db_manager, zoho_manager, ai_system, 
+                rate_limiter, fingerprinting_manager, email_verification_manager, 
+                question_limit_manager
+            )
+            
+            st.session_state.pdf_exporter = pdf_exporter
+            st.session_state.error_handler = error_handler
+            st.session_state.fingerprinting_manager = fingerprinting_manager
+            st.session_state.email_verification_manager = email_verification_manager
+            st.session_state.question_limit_manager = question_limit_manager
 
             st.session_state.chat_blocked_by_dialog = False
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
             # NEW: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
-            # NEW: Flag to indicate fingerprint processing just completed
-            st.session_state.fingerprint_just_completed = False
             
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
@@ -6517,8 +6301,7 @@ def main_fixed():
             "guest_continue_active": False, "final_answer_acknowledged": False,
             "gentle_prompt_shown": False, "email_verified_final_answer_acknowledged": False,
             "must_verify_email_immediately": False, "skip_email_allowed": True,
-            "page": None, "fingerprint_processed_for_session": {},
-            "fingerprint_just_completed": False # NEW: Initialize this flag
+            "page": None, "fingerprint_processed_for_session": {}
         }
         for key, value in defaults.items():
             if key not in st.session_state:
@@ -6637,12 +6420,7 @@ def main_fixed():
                 if 'fingerprint_wait_start' not in st.session_state:
                     st.session_state.fingerprint_wait_start = time.time()
                 
-                # Check for explicit completion flag (from query handler)
-                if st.session_state.get('fingerprint_just_completed', False):
-                    st.session_state.is_chat_ready = True
-                    logger.info(f"Chat enabled immediately due to fingerprint_just_completed flag for {session.session_id[:8]}.")
-                    st.session_state.fingerprint_just_completed = False # Consume flag
-                elif time.time() - st.session_state.fingerprint_wait_start > FINGERPRINT_TIMEOUT_SECONDS:
+                if time.time() - st.session_state.fingerprint_wait_start > FINGERPRINT_TIMEOUT_SECONDS:
                     st.session_state.is_chat_ready = True
                     logger.warning(f"Fingerprint timeout ({FINGERPRINT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
                 else:
