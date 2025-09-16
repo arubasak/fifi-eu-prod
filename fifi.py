@@ -1278,64 +1278,65 @@ class DatabaseManager:
             
             return {'allowed': True}
         
-        ## CHANGE: Atomic record_question_and_check_ban for QuestionLimitManager
+        ## START <<<<<<<<<<<<<<<< REPLACEMENT 1 OF 3
         def record_question_and_check_ban(self, session: UserSession, session_manager: 'SessionManager') -> Dict[str, Any]:
             """Atomically check for ban trigger BEFORE recording question."""
-        try:
-            # CHECK FOR BAN TRIGGER FIRST (before incrementing)
-            ban_applied = False
-            ban_type = BanStatus.NONE
-            ban_reason = ""
-            ban_duration_hours = 0
-        
-            if session.user_type == UserType.REGISTERED_USER:
-                if session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:  # Currently at 10
-                    # Next question WOULD BE 11, which triggers Tier 1 ban
-                    ban_type = BanStatus.ONE_HOUR
-                    ban_reason = f"Registered user Tier 1 limit reached ({REGISTERED_USER_TIER_1_LIMIT} questions)"
-                    ban_duration_hours = TIER_1_BAN_HOURS
-                    ban_applied = True
-                elif session.daily_question_count == REGISTERED_USER_QUESTION_LIMIT:  # Currently at 20
-                    ban_type = BanStatus.TWENTY_FOUR_HOUR
-                    ban_reason = f"Registered user daily limit reached ({REGISTERED_USER_QUESTION_LIMIT} questions)"
-                    ban_duration_hours = TIER_2_BAN_HOURS
-                    ban_applied = True
-            elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
-                if session.daily_question_count == EMAIL_VERIFIED_QUESTION_LIMIT:  # Currently at 10
-                    ban_type = BanStatus.TWENTY_FOUR_HOUR
-                    ban_reason = f"Email-verified daily limit reached ({EMAIL_VERIFIED_QUESTION_LIMIT} questions)"
-                    ban_duration_hours = EMAIL_VERIFIED_BAN_HOURS
-                    ban_applied = True
-        
-            # If ban should be applied, apply it WITHOUT incrementing the count
-            if ban_applied:
-                self._apply_ban(session, ban_type, ban_reason)
-                logger.info(f"✅ Ban applied WITHOUT counting question: {session.session_id[:8]} -> {ban_type.value} for {ban_duration_hours}h")
-            
-                # Save session with ban but WITHOUT incrementing question count
+            try:
+                # CHECK FOR BAN TRIGGER FIRST (before incrementing)
+                ban_applied = False
+                ban_type = BanStatus.NONE
+                ban_reason = ""
+                ban_duration_hours = 0
+                
+                if session.user_type == UserType.REGISTERED_USER:
+                    if session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:  # Currently at 10
+                        # Next question WOULD BE 11, which triggers Tier 1 ban
+                        ban_type = BanStatus.ONE_HOUR
+                        ban_reason = f"Registered user Tier 1 limit reached ({REGISTERED_USER_TIER_1_LIMIT} questions)"
+                        ban_duration_hours = TIER_1_BAN_HOURS
+                        ban_applied = True
+                    elif session.daily_question_count == REGISTERED_USER_QUESTION_LIMIT:  # Currently at 20
+                        ban_type = BanStatus.TWENTY_FOUR_HOUR
+                        ban_reason = f"Registered user daily limit reached ({REGISTERED_USER_QUESTION_LIMIT} questions)"
+                        ban_duration_hours = TIER_2_BAN_HOURS
+                        ban_applied = True
+                elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
+                    if session.daily_question_count == EMAIL_VERIFIED_QUESTION_LIMIT:  # Currently at 10
+                        ban_type = BanStatus.TWENTY_FOUR_HOUR
+                        ban_reason = f"Email-verified daily limit reached ({EMAIL_VERIFIED_QUESTION_LIMIT} questions)"
+                        ban_duration_hours = EMAIL_VERIFIED_BAN_HOURS
+                        ban_applied = True
+                
+                # If ban should be applied, apply it WITHOUT incrementing the count
+                if ban_applied:
+                    self._apply_ban(session, ban_type, ban_reason)
+                    logger.info(f"✅ Ban applied WITHOUT counting question: {session.session_id[:8]} -> {ban_type.value} for {ban_duration_hours}h")
+                    
+                    # Save session with ban but WITHOUT incrementing question count
+                    session_manager._save_session_with_retry(session)
+                    
+                    return {"recorded": False, "ban_applied": True, "ban_type": ban_type.value}
+                
+                # No ban needed, NOW record the question
+                session.daily_question_count += 1
+                session.total_question_count += 1
+                session.last_question_time = datetime.now()
+                
+                # Sync counts for registered users
+                if session.user_type == UserType.REGISTERED_USER and session.email:
+                    session_manager.sync_registered_user_sessions(session.email, session.session_id)
+                
+                # Save session with updated counts
                 session_manager._save_session_with_retry(session)
-            
-                return {"recorded": False, "ban_applied": True, "ban_type": ban_type.value}
-        
-            # No ban needed, NOW record the question
-            session.daily_question_count += 1
-            session.total_question_count += 1
-            session.last_question_time = datetime.now()
-        
-            # Sync counts for registered users
-            if session.user_type == UserType.REGISTERED_USER and session.email:
-                session_manager.sync_registered_user_sessions(session.email, session.session_id)
-        
-            # Save session with updated counts
-            session_manager._save_session_with_retry(session)
-        
-            logger.debug(f"Question recorded for {session.session_id[:8]}: daily={session.daily_question_count}, total={session.total_question_count}")
-        
-            return {"recorded": True, "ban_applied": False}
-        
-        except Exception as e:
-            logger.error(f"Failed to check ban and record question for {session.session_id[:8]}: {e}", exc_info=True)
-            raise
+                
+                logger.debug(f"Question recorded for {session.session_id[:8]}: daily={session.daily_question_count}, total={session.total_question_count}")
+                
+                return {"recorded": True, "ban_applied": False}
+                
+            except Exception as e:
+                logger.error(f"Failed to check ban and record question for {session.session_id[:8]}: {e}", exc_info=True)
+                raise
+        ## END <<<<<<<<<<<<<<<< REPLACEMENT 1 OF 3
         
         ## CHANGE: Removed original record_question method
 
@@ -1760,7 +1761,7 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries - 1:
+                if attempt_note < max_retries_note - 1:
                     time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
@@ -3632,6 +3633,7 @@ class SessionManager:
                 'message': 'Verification failed. Please try again.'
             }
         
+    ## START <<<<<<<<<<<<<<<< REPLACEMENT 2 OF 3
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
         """Authenticates user with WordPress and creates/updates session with conditional reset logic."""
         if not self.config.WORDPRESS_URL:
@@ -3717,12 +3719,21 @@ class SessionManager:
                         current_session.last_question_time = None
                         logger.info(f"🆕 No email history found for {user_email}, starting fresh")
 
-                    # Always clear bans for REGISTERED_USER (they logged in successfully)
-                    current_session.ban_status = BanStatus.NONE
-                    current_session.ban_start_time = None
-                    current_session.ban_end_time = None
-                    current_session.ban_reason = None
-                    current_session.question_limit_reached = False
+                    # Only clear EXPIRED bans, not active ones
+                    if current_session.ban_status != BanStatus.NONE:
+                        if current_session.ban_end_time and datetime.now() >= current_session.ban_end_time:
+                            # Ban has expired, safe to clear
+                            current_session.ban_status = BanStatus.NONE
+                            current_session.ban_start_time = None
+                            current_session.ban_end_time = None
+                            current_session.ban_reason = None
+                            current_session.question_limit_reached = False
+                            logger.info(f"Cleared expired ban for {current_session.session_id[:8]}")
+                        else:
+                            # Ban is still active, keep it
+                            logger.info(f"Keeping active ban for {current_session.session_id[:8]} until {current_session.ban_end_time}")
+                    
+                    # Clear evasion tracking (these can always be cleared on successful login)
                     current_session.evasion_count = 0
                     current_session.current_penalty_hours = 0
                     current_session.escalation_level = 0
@@ -3742,9 +3753,6 @@ class SessionManager:
                     current_session.pending_zoho_contact_id = None
                     current_session.pending_wp_token = None
                     current_session.declined_recognized_email_at = None
-
-                    ## CHANGE: Do NOT invalidate all previous sessions to prevent future inheritance confusion
-                    ## The multi-device sync and email-based inheritance should handle this better.
 
                     ## CHANGE: Enable chat immediately for registered users
                     st.session_state.is_chat_ready = True
@@ -3783,6 +3791,7 @@ class SessionManager:
             logger.error(f"An unexpected error occurred during WordPress authentication: {e}", exc_info=True)
             st.error("An unexpected error occurred during authentication. Please try again later.")
             return None
+    ## END <<<<<<<<<<<<<<<< REPLACEMENT 2 OF 3
 
     # CHANGE 10: Pricing/Stock Question Handler
     def detect_pricing_stock_question(self, prompt: str) -> bool:
@@ -5180,6 +5189,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
+        ## START <<<<<<<<<<<<<<<< REPLACEMENT 3 OF 3
         if session.user_type.value == UserType.REGISTERED_USER.value:
             st.success("✅ **Registered User**")
             if session.full_name: 
@@ -5188,31 +5198,35 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.markdown(f"**Email:** {session.email}")
             
             # ENHANCED: Show tier progression
-            st.markdown(f"**Daily Questions:** {session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT}") ## CHANGE: Use constant
+            st.markdown(f"**Daily Questions:** {session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT}")
             
-            if session.daily_question_count < REGISTERED_USER_TIER_1_LIMIT: ## CHANGE: Use constant
-                st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0), ## CHANGE: Use constant
-                           text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions") ## CHANGE: Use constant
-                remaining_tier1 = REGISTERED_USER_TIER_1_LIMIT - session.daily_question_count ## CHANGE: Use constant
+            if session.daily_question_count < REGISTERED_USER_TIER_1_LIMIT:
+                st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0),
+                           text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions")
+                remaining_tier1 = REGISTERED_USER_TIER_1_LIMIT - session.daily_question_count
                 if remaining_tier1 > 0:
-                    st.caption(f"⏰ {remaining_tier1} questions until {TIER_1_BAN_HOURS}-hour break") ## CHANGE: Use constant
-            elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT: ## CHANGE: Use constant
+                    st.caption(f"⏰ {remaining_tier1} questions until {TIER_1_BAN_HOURS}-hour break")
+            elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
                 # Check if there's an active ban
                 if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
                     st.progress(1.0, text="Tier 1 Complete")
-                    st.caption(f"🚫 {TIER_1_BAN_HOURS}-hour break required to access Tier 2") ## CHANGE: Use constant
+                    time_remaining = session.ban_end_time - datetime.now()
+                    hours = int(time_remaining.total_seconds() // 3600)
+                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                    st.caption(f"⏳ Tier 1 break: {hours}h {minutes}m remaining until Tier 2")
                 else:
                     # Ban has expired or not yet applied
                     st.progress(1.0, text="Tier 1 Complete ✅")
                     st.caption("📈 Ready to proceed to Tier 2!")
             else: # daily_question_count > REGISTERED_USER_TIER_1_LIMIT
-                tier2_progress = min((session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT) / (REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT), 1.0) ## CHANGE: Use constant
-                st.progress(tier2_progress, text=f"Tier 2: {session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT}/{REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT} questions") ## CHANGE: Use constant
-                remaining_tier2 = REGISTERED_USER_QUESTION_LIMIT - session.daily_question_count ## CHANGE: Use constant
+                tier2_progress = min((session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT) / (REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT), 1.0)
+                st.progress(tier2_progress, text=f"Tier 2: {session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT}/{REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT} questions")
+                remaining_tier2 = REGISTERED_USER_QUESTION_LIMIT - session.daily_question_count
                 if remaining_tier2 > 0:
-                    st.caption(f"⏰ {remaining_tier2} questions until {TIER_2_BAN_HOURS}-hour reset") ## CHANGE: Use constant
+                    st.caption(f"⏰ {remaining_tier2} questions until {TIER_2_BAN_HOURS}-hour reset")
                 else:
-                    st.caption(f"🚫 Daily limit reached - {TIER_2_BAN_HOURS}-hour reset required") ## CHANGE: Use constant
+                    st.caption(f"🚫 Daily limit reached - {TIER_2_BAN_HOURS}-hour reset required")
+        ## END <<<<<<<<<<<<<<<< REPLACEMENT 3 OF 3
                     
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             st.info("📧 **Email Verified Guest**")
