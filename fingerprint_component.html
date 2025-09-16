@@ -60,8 +60,8 @@
     console.log(`🔍 Fingerprint obtained after ${elapsedSeconds} seconds:`, payload);
     statusEl.textContent = `Fingerprint detected: ${(payload.fingerprint_id || 'unknown').substring(0, 12)}...`;
     
-    // OPTIMIZATION: Reduced delay from 500ms to 100ms
-    setTimeout(() => {
+    // OPTIMIZATION: Reduced delay from 500ms to 0ms
+    setTimeout(() => { // CHANGE: Reduced to 0ms
       try {
         // Get the parent window URL if in iframe, otherwise use current
         let baseUrl = window.location.origin + window.location.pathname;
@@ -103,7 +103,7 @@
         console.error('❌ Redirect failed:', e);
         statusEl.textContent = 'Error: Could not send fingerprint to server';
       }
-    }, 100); // REDUCED from 500ms
+    }, 0); // CHANGE: Reduced from 100ms to 0ms
   }
   
   function asHex(s, min = 32, max = 64) {
