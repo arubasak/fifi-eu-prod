@@ -5,10 +5,11 @@
   <title>FiFi Fingerprinting</title>
   <style>
     /* Minimal styling to keep the component hidden and unobtrusive */
-    body { margin: 0; overflow: hidden; }
-    #fp-app { display: none; } /* Hide the CreepJS UI as it's not for the end-user */
+    body { margin: 0; padding: 0; overflow: hidden; height: 100%; width: 100%; }
+    #fp-app { display: none; } /* Hide the CreepJS UI, it's not for users */
     #status { position: absolute; top: 5px; left: 5px; font-family: Arial, sans-serif; font-size: 10px; color: #aaa; }
   </style>
+  <!-- Load CreepJS CSS first for consistent rendering -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
 </head>
 <body>
@@ -26,51 +27,54 @@
   </fingerprint>
 </div>
 
-<div id="status">Initializing...</div>
+<div id="status">Initializing fingerprint (iframe)...</div>
 
-<!-- Load the CreepJS library -->
+<!-- Load the CreepJS library. It MUST be here inside the iframe. -->
 <script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
 
 <!-- Main logic using MutationObserver for speed and reliability -->
 <script>
 (function () {
-  // This placeholder is replaced by Python with the raw session ID string
+  // This placeholder is replaced by Python with the raw session ID string, e.g., "my-session-id"
   const sessionId = "{SESSION_ID}";
   const statusEl = document.getElementById('status');
   
-  // --- Robustness Check ---
+  // --- Robustness Check: Session ID Injection ---
+  // If Python failed to replace {SESSION_ID}, this check catches it.
   if (!sessionId || sessionId.includes("{SESSION_ID}")) {
-      console.error("CRITICAL: Session ID was not injected correctly by Python. Cannot proceed.");
-      statusEl.textContent = 'Error: Missing session ID.';
-      redirectToStreamlit('error_js_no_session');
+      console.error("CRITICAL (iframe): Session ID was NOT correctly injected by Python. Aborting iframe JS.");
+      statusEl.textContent = 'Error: Session ID missing from Python.';
+      redirectToStreamlit('error_js_no_session_injection'); // Send error back to Streamlit
       return;
   }
 
-  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
+  console.log('🔍 FiFi CreepJS iframe script started for session:', sessionId.substring(0, 8));
 
-  // --- State Management ---
+  // --- State Management: Prevent multiple sends/runs ---
   const PROCESSED_KEY = `fifi_creep_done_${sessionId}`;
   if (window[PROCESSED_KEY]) {
-    console.log('✅ Already processed for this session. Exiting.');
+    console.log('✅ (iframe): Already processed for this session. Exiting early.');
     return;
   }
-  let fingerprintSent = false;
+  let fingerprintSent = false; // Flag to ensure only one redirect occurs
 
   // --- Centralized Redirect Function ---
+  // Sends the fingerprint data back to the Streamlit parent window via URL parameters.
   function redirectToStreamlit(reason, payload = {}) {
-      if (fingerprintSent) return;
+      if (fingerprintSent) return; // Only send once
       fingerprintSent = true;
-      window[PROCESSED_KEY] = true;
+      window[PROCESSED_KEY] = true; // Mark as processed
       
-      console.log(`🚀 Redirecting to Streamlit. Reason: ${reason}`);
+      console.log(`🚀 (iframe): Redirecting to Streamlit. Reason: ${reason}. FP ID: ${(payload.fingerprint_id || 'N/A').substring(0,8)}`);
       
       let baseUrl = window.location.origin + window.location.pathname;
       try {
+        // Attempt to get the parent's base URL for robust redirection
         if (window.parent && window.parent !== window && window.parent.location.href) {
           const parentUrl = new URL(window.parent.location.href);
           baseUrl = parentUrl.origin + parentUrl.pathname;
         }
-      } catch (e) { /* Fallback to self origin if parent is inaccessible */ }
+      } catch (e) { /* Cross-origin, use self origin as fallback */ }
 
       const url = new URL(baseUrl);
       url.searchParams.set('event', 'fingerprint_complete');
@@ -79,8 +83,9 @@
       url.searchParams.set('method', payload.method || reason);
       url.searchParams.set('privacy', payload.privacy || 'high_privacy');
       url.searchParams.set('working_methods', (payload.working_methods || []).join(','));
-      url.searchParams.set('timestamp', Date.now());
+      url.searchParams.set('timestamp', Date.now()); // Unique timestamp to force Streamlit rerun
 
+      // Use window.parent.location.replace() for a cleaner browser history (no back button entry)
       if (window.parent && window.parent !== window) {
         window.parent.location.replace(url.toString());
       } else {
@@ -88,58 +93,60 @@
       }
   }
   
-  // Helper to validate the scraped hash format
+  // Helper to validate a string as a hex hash (simplified)
   function asHex(s) {
     return (typeof s === 'string' && /^[a-f0-9]{32,64}$/i.test(s)) ? s : null;
   }
   
-  // --- The Core Logic: Using MutationObserver for instant reaction ---
+  // --- Core Logic: MutationObserver for CreepJS completion ---
   const targetNode = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
 
   if (!targetNode) {
-    console.error("CRITICAL: CreepJS target DOM node not found. Check the HTML structure.");
-    redirectToStreamlit('fallback_dom_error');
+    console.error("CRITICAL (iframe): CreepJS target DOM node '#fingerprint-data .fingerprint-header .ellipsis-all' not found. Check CreepJS integration/HTML structure.");
+    redirectToStreamlit('fallback_dom_node_missing');
     return;
   }
 
-  // This function is triggered *by the browser* the moment the fingerprint ID appears
+  // This function is triggered by the browser whenever the observed node's content changes
   const observerCallback = function(mutationsList, observer) {
     for(const mutation of mutationsList) {
+      if (mutation.type === 'childList' || mutation.type === 'characterData') {
         const fpText = targetNode.textContent || '';
         const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
         const stableId = fpMatch ? asHex(fpMatch[1]) : null;
 
         if (stableId) {
-          console.log('✅ Fingerprint detected by MutationObserver:', stableId.substring(0, 8));
-          // Once we have a valid ID, send it and immediately stop watching
-          redirectToStreamlit('creepjs_observer', {
+          console.log('✅ (iframe): Fingerprint detected by MutationObserver:', stableId.substring(0, 8));
+          // Valid ID found, send it back and stop observing
+          redirectToStreamlit('creepjs_observer_success', {
             fingerprint_id: stableId,
             method: 'creepjs_observer',
-            privacy: 'standard', // CreepJS success implies standard privacy level
+            privacy: 'standard', 
             working_methods: ['creepjs']
           });
-          observer.disconnect(); // Crucial: Stop observing to prevent future triggers
-          return;
+          observer.disconnect(); // IMPORTANT: Stop observing to prevent multiple triggers
+          return; // Exit function early
         }
+      }
     }
   };
 
-  // Create and start the observer to watch for changes
+  // Create and start the MutationObserver
   const observer = new MutationObserver(observerCallback);
-  observer.observe(targetNode, { childList: true, subtree: true });
-  statusEl.textContent = 'Waiting for fingerprint...';
-  console.log('👀 MutationObserver is now watching for CreepJS to complete...');
+  // Observe for changes to child elements or text content within the target node
+  observer.observe(targetNode, { childList: true, characterData: true, subtree: true });
+  statusEl.textContent = 'Waiting for fingerprint (iframe process)...';
+  console.log('👀 (iframe): MutationObserver is now watching for CreepJS completion...');
 
   // --- Safety Net: Absolute Timeout ---
-  // A fallback in case CreepJS crashes or the observer never fires for some reason.
+  // A final fallback in case CreepJS crashes or the observer never fires.
   setTimeout(() => {
     if (!fingerprintSent) {
-      console.error('⏰ Absolute timeout reached (7s). CreepJS likely failed. Sending fallback.');
-      observer.disconnect(); // Stop observing
-      redirectToStreamlit('fallback_absolute_timeout');
+      console.error('⏰ (iframe): Absolute timeout reached (7s). CreepJS likely failed or got stuck. Sending fallback.');
+      observer.disconnect(); // Ensure observer is stopped
+      redirectToStreamlit('fallback_absolute_timeout_iframe');
     }
-  }, 7000); // A generous but reasonable 7-second maximum wait time.
-
+  }, 7000); // 7-second maximum wait time in the iframe
 })();
 </script>
 </body>
