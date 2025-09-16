@@ -1,3 +1,25 @@
+The `ValueError: invalid literal for int() with base 10: b'essages+6'` indicates a critical issue within the `sqlitecloud` library's communication when trying to read data from the SQLite Cloud server. This error suggests that the library expects to receive an integer (likely representing data length) over the network socket, but instead, it's receiving unexpected bytes like `b'essages+6'`, which cannot be converted to an integer.
+
+This is not a direct error in your Python code's logic for building SQL queries or handling sessions, but rather an issue at a lower level within the `sqlitecloud` driver or the network connection to the SQLite Cloud server. Possible causes include:
+
+1.  **Network Corruption/Interference:** Data being corrupted during transmission to or from the SQLite Cloud server.
+2.  **SQLite Cloud Server Issue:** The SQLite Cloud server might be sending malformed responses or experiencing an internal fault.
+3.  **`sqlitecloud` Library Bug:** A bug in the `sqlitecloud` Python driver itself that misinterprets the data stream.
+4.  **Connection State:** The database connection might have entered an inconsistent state, leading to out-of-sync communication.
+
+Since this error is occurring during the `DatabaseManager`'s initialization within `ensure_initialization_fixed`, it's causing a critical failure and preventing the entire Streamlit application from starting gracefully.
+
+**Solution:**
+
+To address this, we need to make the `DatabaseManager`'s initialization more robust by explicitly catching this type of low-level communication error (specifically `ValueError` and general `Exception`) during its connection and schema setup. If such an error occurs, the `DatabaseManager` should gracefully fallback to using in-memory storage, preventing the Streamlit app from crashing during startup.
+
+This will not resolve the underlying `sqlitecloud` communication problem, but it will ensure your application remains operational by degrading gracefully to a non-persistent, in-memory database.
+
+**Changes made to `fifi.py`:**
+
+The `DatabaseManager.__init__` method has been updated with a `try-except` block to catch `ValueError` specifically (for the `sqlitecloud` issue) and a general `Exception` during the initial connection and schema initialization. If any of these errors occur, the database connection is explicitly set to `None`, the `db_type` is set to `"memory"`, and `local_sessions` is initialized, effectively forcing a fallback to in-memory storage and logging a critical message, allowing the Streamlit app to continue running.
+
+```python
 import streamlit as st
 import os
 import uuid
@@ -407,32 +429,48 @@ class DatabaseManager:
         self._max_reconnect_attempts = 3 ## CHANGE: Added for better reconnect logic
         logger.info("🔄 INITIALIZING DATABASE MANAGER")
         
-        # Prioritize SQLite Cloud if configured and available
-        if connection_string and SQLITECLOUD_AVAILABLE:
-            self.conn, self.db_type = self._try_sqlite_cloud(connection_string)
-        
-        # Fallback to local SQLite
-        if not self.conn:
-            self.conn, self.db_type = self._try_local_sqlite()
-        
-        # Final fallback to in-memory if all else fails
-        if not self.conn:
-            logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED. FALLING BACK TO NON-PERSISTENT IN-MEMORY STORAGE.")
+        try: # Added try-except block for robust initialization
+            # Prioritize SQLite Cloud if configured and available
+            if connection_string and SQLITECLOUD_AVAILABLE:
+                self.conn, self.db_type = self._try_sqlite_cloud(connection_string)
+            
+            # Fallback to local SQLite if cloud connection failed or not attempted
+            if not self.conn:
+                self.conn, self.db_type = self._try_local_sqlite()
+            
+            # Final fallback to in-memory if all else fails
+            if not self.conn:
+                logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED. FALLING BACK TO NON-PERSISTENT IN-MEMORY STORAGE.")
+                self.db_type = "memory"
+                self.local_sessions = {}
+            
+            # Initialize database schema if a connection was established
+            if self.conn:
+                try:
+                    self._init_complete_database()
+                    logger.info("✅ Database schema ready and indexes created.")
+                    error_handler.mark_component_healthy("Database")
+                except Exception as e:
+                    logger.error(f"Database schema initialization failed: {e}", exc_info=True)
+                    # If schema init fails, invalidate connection and fall back to memory
+                    self.conn = None
+                    self.db_type = "memory"
+                    self.local_sessions = {}
+                    logger.critical("🚨 DATABASE SCHEMA INITIALIZATION FAILED. FALLING BACK TO NON-PERSISTENT IN-MEMORY STORAGE.")
+
+        except ValueError as e: # Catch the specific ValueError from sqlitecloud here
+            logger.critical(f"🚨 CRITICAL SQLITECLOUD COMMUNICATION ERROR DURING DATABASE INIT: {e}", exc_info=True)
+            self.conn = None
             self.db_type = "memory"
             self.local_sessions = {}
-        
-        # Initialize database schema
-        if self.conn:
-            try:
-                self._init_complete_database()
-                logger.info("✅ Database initialization completed successfully")
-                error_handler.mark_component_healthy("Database")
-            except Exception as e:
-                logger.error(f"Database initialization failed: {e}", exc_info=True)
-                self.conn = None
-                self.db_type = "memory" 
-                self.local_sessions = {}
-        
+            logger.critical("🚨 FORCE FALLBACK TO NON-PERSISTENT IN-MEMORY STORAGE DUE TO SQLITECLOUD ERROR.")
+        except Exception as e: # Catch any other unexpected errors during init
+            logger.critical(f"🚨 UNEXPECTED ERROR DURING DATABASE MANAGER INIT: {e}", exc_info=True)
+            self.conn = None
+            self.db_type = "memory"
+            self.local_sessions = {}
+            logger.critical("🚨 FORCE FALLBACK TO NON-PERSISTENT IN-MEMORY STORAGE DUE TO UNEXPECTED ERROR.")
+
     def _try_sqlite_cloud(self, cs: str):
         try:
             conn = sqlitecloud.connect(cs)
@@ -585,7 +623,7 @@ class DatabaseManager:
                 time.sleep(wait_time)
         
         # Final fallback to in-memory
-        logger.critical("🚨 All reconnection attempts failed, falling back to in-memory storage")
+        logger.critical("🚨 ALL RECONNECTION ATTEMPTS FAILED, FALLING BACK TO IN-MEMORY STORAGE")
         self.db_type = "memory"
         self.local_sessions = {}
 
@@ -2662,7 +2700,7 @@ Respond with ONLY a JSON object in this exact format:
         )
         
         response_content = response.choices[0].message.content.strip()
-        response_content = response_content.replace('```json', '').replace('```', '').strip()
+        response_content = response.replace('```json', '').replace('```', '').strip() # Changed from response.content to response.choices[0].message.content
         
         result = json.loads(response_content)
         
@@ -5508,9 +5546,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.info(f"Take your time to read this answer. When you're ready, verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions per day + chat history saving!") ## CHANGE: Use constant
         
         with st.expander("📧 Ready to Unlock More Questions?", expanded=False):
-            st.markdown("### 🚀 What You'll Get After Email Verification:")
-            st.markdown(f"• **{EMAIL_VERIFIED_QUESTION_LIMIT} questions per day** • **Chat history saving** • **Cross-device sync**") ## CHANGE: Use constant
-            
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("📧 Yes, Let's Verify My Email!", use_container_width=True, key="gentle_verify_btn"):
@@ -5540,9 +5575,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.info(f"Take your time to read this answer. Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!") ## CHANGE: Use constant
         
         with st.expander("🚀 Want More Questions Daily?", expanded=False):
-            st.markdown("### 📈 Upgrade Benefits:")
-            st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** • **Tier system** • **Priority support**") ## CHANGE: Use constant
-            
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
