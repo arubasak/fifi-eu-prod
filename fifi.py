@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import os
 import uuid
@@ -2928,7 +2929,6 @@ class SessionManager:
 
         try:
             # PRIORITY 1: For REGISTERED_USER, use EMAIL-based inheritance ONLY
-            ## CHANGE: Removed fingerprint related updates for REGISTERED_USERs here, as FP is not collected.
             if session.user_type == UserType.REGISTERED_USER and session.email:
                 logger.info(f"📧 Using EMAIL-based inheritance for registered user {session.email}")
                 
@@ -2940,9 +2940,8 @@ class SessionManager:
                     most_recent = max(email_sessions, key=lambda s: s.last_question_time or s.last_activity or s.created_at)
                     
                     now = datetime.now()
-                    ## CHANGE: Use DAILY_RESET_WINDOW constant
                     if (most_recent.last_question_time and (now - most_recent.last_question_time) < DAILY_RESET_WINDOW) or \
-                       (not most_recent.last_question_time and most_recent.last_activity and (now - most_recent.last_activity) < DAILY_RESET_WINDOW): # If last_question_time is None, use last_activity for reset check
+                       (not most_recent.last_question_time and most_recent.last_activity and (now - most_recent.last_activity) < DAILY_RESET_WINDOW):
                         # Inherit counts
                         session.daily_question_count = most_recent.daily_question_count
                         session.total_question_count = max(session.total_question_count, most_recent.total_question_count)
@@ -2963,25 +2962,20 @@ class SessionManager:
                     session.last_question_time = None
                     logger.info(f"🆕 REGISTERED_USER no same-email history found, starting fresh")
                 
-                # Removed: Unconditional clearing of bans for registered users.
-                # The ban status will now be managed by `authenticate_with_wordpress` or `get_session`'s expiration check.
-                
-                return  # Exit early for registered users, email is primary and fingerprint is not collected
+                return
 
-            # PRIORITY 2: For non-registered users (Guest/Email Verified), use fingerprint (existing logic)
+            # PRIORITY 2: For non-registered users (Guest/Email Verified), use fingerprint
             if not session.fingerprint_id or session.fingerprint_id.startswith(("temp_", "fallback_")):
                 logger.info("No valid fingerprint yet or temporary, skipping fingerprint-based inheritance for non-registered.")
-                session.visitor_type = "new_visitor" # Default to new if no solid FP
-                return # Don't inherit anything complex without a reliable FP
+                session.visitor_type = "new_visitor"
+                return
 
             historical_fp_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
-            # Filter out the current session itself
             historical_fp_sessions = [s for s in historical_fp_sessions if s.session_id != session.session_id]
 
             if not historical_fp_sessions:
                 session.visitor_type = "new_visitor"
                 logger.info(f"Inheritance complete for new visitor {session.session_id[:8]}. No historical sessions found for fingerprint.")
-                # Clear any pending re-verification from a prior fingerprint if no history for this one
                 session.reverification_pending = False
                 session.pending_user_type = None
                 session.pending_email = None
@@ -2989,7 +2983,7 @@ class SessionManager:
                 session.pending_zoho_contact_id = None
                 session.pending_wp_token = None
                 session.declined_recognized_email_at = None
-                return # Nothing to inherit
+                return
 
             session.visitor_type = "returning_visitor"
             
@@ -2997,23 +2991,32 @@ class SessionManager:
             
             # Separate identity inheritance from count inheritance
             all_sessions_for_identity = [session] + historical_fp_sessions
-            same_email_sessions_for_counts = []
+            sessions_for_count_inheritance = []
             
+            # UPDATED LOGIC: For count inheritance
             if current_email:
-                same_email_sessions_for_counts = [
+                # If current session has email, inherit from same email sessions
+                sessions_for_count_inheritance = [
                     s for s in historical_fp_sessions 
                     if s.email and s.email.lower() == current_email
                 ]
+            else:
+                # NEW: If current session is GUEST (no email), inherit from other GUEST sessions
+                sessions_for_count_inheritance = [
+                    s for s in historical_fp_sessions 
+                    if s.user_type == UserType.GUEST and not s.email
+                ]
+                logger.info(f"🎯 GUEST inheriting from {len(sessions_for_count_inheritance)} previous GUEST sessions with same fingerprint")
             
             # --- Initialize values for merging ---
             merged_total_question_count = session.total_question_count
             merged_last_question_time = session.last_question_time
             merged_daily_question_count = session.daily_question_count
-            source_for_identity = session # Start with current session as identity source
+            source_for_identity = session
             most_recent_ban_session = None
             now = datetime.now()
 
-            # --- Pass 1: Find the highest privilege identity from ALL sessions (for identity) ---
+            # --- Pass 1: Find the highest privilege identity from ALL sessions ---
             unique_emails_in_history = set()
             highest_user_type_seen = UserType.GUEST
             
@@ -3021,11 +3024,9 @@ class SessionManager:
                 if s.email:
                     unique_emails_in_history.add(s.email.lower())
 
-                # Track highest user type ever seen for this fingerprint
                 if self._get_privilege_level(s.user_type) > self._get_privilege_level(highest_user_type_seen):
                     highest_user_type_seen = s.user_type
 
-                # Find the most authoritative session for identity
                 if self._get_privilege_level(s.user_type) > self._get_privilege_level(source_for_identity.user_type):
                     source_for_identity = s
                 elif self._get_privilege_level(s.user_type) == self._get_privilege_level(source_for_identity.user_type):
@@ -3043,9 +3044,8 @@ class SessionManager:
                 session.pending_zoho_contact_id = None
                 session.pending_wp_token = None
             
-            # --- UPDATED: User type precedence - always offer highest seen type ---
+            # --- User type precedence - always offer highest seen type ---
             if highest_user_type_seen == UserType.REGISTERED_USER and session.user_type != UserType.REGISTERED_USER:
-                # This fingerprint has been used as REGISTERED_USER before, offer re-verification
                 registered_session = next((s for s in all_sessions_for_identity if s.user_type == UserType.REGISTERED_USER), None)
                 if registered_session and registered_session.email:
                     session.reverification_pending = True
@@ -3055,56 +3055,52 @@ class SessionManager:
                     session.pending_zoho_contact_id = registered_session.zoho_contact_id
                     session.pending_wp_token = registered_session.wp_token
                     logger.info(f"🔄 Offering REGISTERED_USER re-verification for {session.session_id[:8]} (highest precedence)")
-                    return  # Skip further inheritance for now, let user decide
+                    return
             
-            # --- Pass 2: Find ban and count info from SAME EMAIL sessions only (for non-REGISTERED users) ---
-            for s in same_email_sessions_for_counts:
-                # Find the single most recent ban to evaluate (same email only)
+            # --- Pass 2: Find ban and count info from appropriate sessions ---
+            for s in sessions_for_count_inheritance:
+                # Find the single most recent ban to evaluate
                 if s.ban_status != BanStatus.NONE and s.ban_end_time:
                     if most_recent_ban_session is None or s.ban_end_time > most_recent_ban_session.ban_end_time:
                         most_recent_ban_session = s
                 
-                # Merge total count and last question time (same email only)
+                # Merge total count and last question time
                 merged_total_question_count = max(merged_total_question_count, s.total_question_count)
                 if s.last_question_time and (not merged_last_question_time or s.last_question_time > merged_last_question_time):
                     merged_last_question_time = s.last_question_time
 
-            
-            # --- Pass 3: Determine daily count and ban status based on same-email findings ---
-            ## CHANGE: Use DAILY_RESET_WINDOW constant
+            # --- Pass 3: Determine daily count and ban status ---
             ban_is_active = most_recent_ban_session and now < most_recent_ban_session.ban_end_time
             
             if ban_is_active:
-                # The user is still under an active ban from same email
-                logger.info(f"Inheritance: Found ACTIVE ban for same email. Applying to session {session.session_id[:8]}.")
+                logger.info(f"Inheritance: Found ACTIVE ban. Applying to session {session.session_id[:8]}.")
                 session.ban_status = most_recent_ban_session.ban_status
                 session.ban_start_time = most_recent_ban_session.ban_start_time
                 session.ban_end_time = most_recent_ban_session.ban_end_time
                 session.ban_reason = most_recent_ban_session.ban_reason
                 session.question_limit_reached = True
                 
-                # Find the max daily count from same email sessions within the reset window
-                for s in same_email_sessions_for_counts:
-                     if s.daily_question_count and s.last_question_time and (now - s.last_question_time < DAILY_RESET_WINDOW): ## CHANGE: Use DAILY_RESET_WINDOW constant
-                         merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
+                # Find the max daily count from sessions within the reset window
+                for s in sessions_for_count_inheritance:
+                    if s.daily_question_count and s.last_question_time and (now - s.last_question_time < DAILY_RESET_WINDOW):
+                        merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
             else:
-                # No active ban exists
-                logger.info(f"Inheritance: No active ban found for same email. Evaluating question count reset.")
+                logger.info(f"Inheritance: No active ban found. Evaluating question count reset.")
                 session.ban_status = BanStatus.NONE
                 session.ban_start_time = None
                 session.ban_end_time = None
                 session.ban_reason = None
                 session.question_limit_reached = False
 
-                # Check if the daily count should be reset based on last question time (same email)
-                if merged_last_question_time and (now - merged_last_question_time) < DAILY_RESET_WINDOW: ## CHANGE: Use DAILY_RESET_WINDOW constant
-                    # The last question from same email was recent
-                    for s in same_email_sessions_for_counts:
-                        if s.daily_question_count and s.last_question_time and (now - s.last_question_time < DAILY_RESET_WINDOW): ## CHANGE: Use DAILY_RESET_WINDOW constant
+                # Check if the daily count should be reset based on last question time
+                if merged_last_question_time and (now - merged_last_question_time) < DAILY_RESET_WINDOW:
+                    # The last question was recent
+                    for s in sessions_for_count_inheritance:
+                        if s.daily_question_count and s.last_question_time and (now - s.last_question_time < DAILY_RESET_WINDOW):
                             merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
+                    logger.info(f"✅ Inherited daily count: {merged_daily_question_count} from previous sessions")
                 else:
-                    ## CHANGE: Updated message with constant
-                    logger.info(f"Inheritance: Last question time from same email is > {DAILY_RESET_WINDOW_HOURS}h ago OR no same-email questions. Resetting daily count to 0.")
+                    logger.info(f"Inheritance: Last question time is > {DAILY_RESET_WINDOW_HOURS}h ago OR no questions. Resetting daily count to 0.")
                     merged_daily_question_count = 0
                     merged_last_question_time = None
             
@@ -3117,7 +3113,6 @@ class SessionManager:
             if (len(unique_emails_in_history) <= 1 or 
                 self._get_privilege_level(source_for_identity.user_type) > self._get_privilege_level(session.user_type)):
                 
-                # NEW: Only apply identity inheritance if emails match OR current session has no email
                 source_email = source_for_identity.email.lower() if source_for_identity.email else None
                 session_email = session.email.lower() if session.email else None
                 
@@ -3143,12 +3138,12 @@ class SessionManager:
             else:
                 logger.info(f"Inheritance: Identity not fully transferred due to multiple emails and no privilege upgrade for {session.session_id[:8]}.")
 
-            # Update fingerprint if necessary (if current is temporary and a real one is found in history)
+            # Update fingerprint if necessary
             if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and not source_for_identity.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 session.fingerprint_id = source_for_identity.fingerprint_id
                 session.fingerprint_method = source_for_identity.fingerprint_method
             
-            logger.info(f"Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}")
+            logger.info(f"✅ Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}")
 
         except Exception as e:
             logger.error(f"Error during fingerprint inheritance for session {session.session_id[:8]}: {e}", exc_info=True)
@@ -3214,24 +3209,34 @@ class SessionManager:
                         logger.info(f"Registered user {session.session_id[:8]} fingerprint marked as not collected.")
 
 
-                    # NEW: Check if guest needs forced verification - this is the "second guest session" logic.
-                    # This check only happens if the user is a GUEST and hasn't asked any questions in THIS session.
+                    # NEW: Check if guest needs forced verification
                     if session.user_type.value == UserType.GUEST.value and session.daily_question_count == 0:
                         # Find all historical sessions for this fingerprint
                         historical_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
-                    
-                        # Check if any *other* session with this fingerprint was a GUEST and hit the limit
-                        guest_sessions_with_questions = [
+                        
+                        # UPDATED LOGIC: Check if ANY session with this fingerprint was email-verified
+                        email_verified_sessions = [
                             s for s in historical_sessions 
                             if s.session_id != session.session_id # Must be a different session
-                            and s.user_type.value == UserType.GUEST.value 
-                            and s.daily_question_count >= self.question_limits.question_limits[UserType.GUEST.value] # Must have hit guest limit
+                            and (s.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value or 
+                                 s.user_type.value == UserType.REGISTERED_USER.value or
+                                 s.email is not None) # Any session that had email
                         ]
-                    
-                        if guest_sessions_with_questions:
-                            logger.info(f"Session {session.session_id[:8]} must verify email - fingerprint already used guest questions in previous session(s)")
+                        
+                        if email_verified_sessions:
+                            # This device has been email-verified before - no more free Guest access
+                            logger.info(f"Session {session.session_id[:8]} must verify email - fingerprint previously used with email verification")
                             st.session_state.must_verify_email_immediately = True
                             st.session_state.skip_email_allowed = False # No skipping for forced verification
+                            
+                            # Get list of known emails for this device
+                            known_emails = set()
+                            for sess in email_verified_sessions:
+                                if sess.email:
+                                    known_emails.add(sess.email.lower())
+                            
+                            # Store for display in the verification prompt
+                            st.session_state.known_device_emails = list(known_emails)
 
                     # Check limits and handle bans. This is where the 24-hour reset happens.
                     limit_check = self.question_limits.is_within_limits(session)
@@ -4131,16 +4136,24 @@ class SessionManager:
             rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
             if not rate_limit_result['allowed']:
                 time_until_next = rate_limit_result.get('time_until_next', 0)
-                max_requests = RATE_LIMIT_REQUESTS
-                window_seconds = RATE_LIMIT_WINDOW_SECONDS
+                max_requests = RATE_LIMIT_REQUESTS ## CHANGE: Use constant
+                window_seconds = RATE_LIMIT_WINDOW_SECONDS ## CHANGE: Use constant
                 
-                # Store rate limit info (NO expiry timer - stays until dismissed or success)
-                st.session_state.rate_limit_hit = {
-                    'timestamp': datetime.now(),
-                    'time_until_next': time_until_next,
-                    'max_requests': max_requests,
-                    'window_seconds': window_seconds
-                }
+                # Calculate remaining time dynamically
+                current_time = datetime.now()
+                elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
+                remaining_time = max(0, int(time_until_next - elapsed))
+                
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    if remaining_time > 0:
+                        st.error(f"⏱️ **Rate limit exceeded** - Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
+                    else:
+                        st.error(f"⏱️ **Rate limit exceeded** - Please wait a moment before asking another question.")
+                with col2:
+                    if st.button("✕", key="dismiss_rate_limit", help="Dismiss this message", use_container_width=True):
+                        del st.session_state.rate_limit_hit
+                        st.rerun()
                 
                 return {
                     'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
@@ -5693,7 +5706,19 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     # NEW: Handle forced verification stage (no skip option)
     if current_stage == 'forced_verification':
         st.error("📧 **Email Verification Required**")
-        st.info("This device has already used the guest question allowance. Please verify your email to continue using FiFi AI.")
+        
+        # Check if we have known emails for this device
+        known_emails = st.session_state.get('known_device_emails', [])
+        
+        if known_emails:
+            if len(known_emails) == 1:
+                st.info(f"This device was previously verified with **{session_manager._mask_email(known_emails[0])}**. Please verify an email to continue.")
+            else:
+                st.info("This device was previously verified with multiple emails. Please verify one of your emails to continue:")
+                for email in known_emails[:3]:  # Show max 3 emails
+                    st.caption(f"• {session_manager._mask_email(email)}")
+        else:
+            st.info("This device has already been used with email verification. Please verify your email to continue using FiFi AI.")
         
         with st.form("forced_email_verification_form", clear_on_submit=False):
             st.markdown("**📧 Enter your email address to receive a verification code:**")
