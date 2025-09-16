@@ -1282,6 +1282,26 @@ class DatabaseManager:
         def record_question_and_check_ban(self, session: UserSession, session_manager: 'SessionManager') -> Dict[str, Any]:
             """Atomically check for ban trigger BEFORE recording question."""
             try:
+                # NEW: For registered users, check if ANY session with same email already has an active ban
+                if session.user_type == UserType.REGISTERED_USER and session.email:
+                    email_sessions = session_manager.db.find_sessions_by_email(session.email)
+                    now = datetime.now()
+                    
+                    for email_session in email_sessions:
+                        if (email_session.ban_status != BanStatus.NONE and 
+                            email_session.ban_end_time and 
+                            email_session.ban_end_time > now):
+                            # Active ban found - inherit it instead of creating a new one
+                            session.ban_status = email_session.ban_status
+                            session.ban_start_time = email_session.ban_start_time
+                            session.ban_end_time = email_session.ban_end_time
+                            session.ban_reason = email_session.ban_reason
+                            session.question_limit_reached = True
+                            session_manager._save_session_with_retry(session)
+                            
+                            logger.info(f"✅ Found existing ban for email {session.email}, inherited instead of creating new: {session.ban_status.value} until {session.ban_end_time}")
+                            return {"recorded": False, "ban_applied": False, "existing_ban_inherited": True, "ban_type": session.ban_status.value}
+                
                 # CHECK FOR BAN TRIGGER FIRST (before incrementing)
                 ban_applied = False
                 ban_type = BanStatus.NONE
@@ -1314,6 +1334,10 @@ class DatabaseManager:
                     
                     # Save session with ban but WITHOUT incrementing question count
                     session_manager._save_session_with_retry(session)
+                    
+                    # NEW: Also update all other sessions with same email for registered users
+                    if session.user_type == UserType.REGISTERED_USER and session.email:
+                        session_manager.sync_ban_for_registered_user(session.email, session)
                     
                     return {"recorded": False, "ban_applied": True, "ban_type": ban_type.value}
                 
@@ -3010,7 +3034,7 @@ class SessionManager:
 
             # --- Apply multiple email detection for recognition purposes ---
             if len(unique_emails_in_history) > 1:
-                logger.info(f"🚨 Multiple emails ({len(unique_emails)}) detected for fingerprint - disabling explicit recognition prompt.")
+                logger.info(f"🚨 Multiple emails ({len(unique_emails_in_history)}) detected for fingerprint - disabling explicit recognition prompt.")
                 session.recognition_response = "multiple_emails_detected"
                 session.reverification_pending = False
                 session.pending_user_type = None
@@ -3670,33 +3694,55 @@ class SessionManager:
                     ## CHANGE: Always check email-based history for registered users
                     all_email_sessions = self.db.find_sessions_by_email(user_email)
 
-                    # Find the most recent session with same email to inherit counts from
+                    # Find the most recent session with same email to inherit counts AND BANS from
+                    most_recent_ban_session = None
+                    most_recent_count_session = None
+                    
                     if all_email_sessions:
                         # Sort by last activity/question time
                         sorted_sessions = sorted(all_email_sessions, 
                                                key=lambda s: s.last_question_time or s.last_activity or s.created_at, 
                                                reverse=True)
                         
-                        most_recent = sorted_sessions[0]
+                        # Find most recent session for counts
+                        most_recent_count_session = sorted_sessions[0] if sorted_sessions else None
                         
-                        ## CHANGE: Use DAILY_RESET_WINDOW constant for inheritance check
+                        # NEW: Find any session with an ACTIVE ban
                         now = datetime.now()
-                        time_check = most_recent.last_question_time or most_recent.last_activity or most_recent.created_at
+                        for sess in sorted_sessions:
+                            if (sess.ban_status != BanStatus.NONE and 
+                                sess.ban_end_time and 
+                                sess.ban_end_time > now):
+                                most_recent_ban_session = sess
+                                logger.info(f"Found active ban in session {sess.session_id[:8]}: {sess.ban_status.value} until {sess.ban_end_time}")
+                                break
                         
-                        if time_check and (now - time_check) < DAILY_RESET_WINDOW:
-                            # Inherit question counts from most recent same-email session
-                            current_session.daily_question_count = most_recent.daily_question_count
-                            current_session.total_question_count = max(current_session.total_question_count, 
-                                                                      most_recent.total_question_count)
-                            current_session.last_question_time = most_recent.last_question_time
+                        # Inherit question counts
+                        if most_recent_count_session:
+                            time_check = most_recent_count_session.last_question_time or most_recent_count_session.last_activity or most_recent_count_session.created_at
                             
-                            logger.info(f"✅ Email-based inheritance: Inherited {most_recent.daily_question_count} questions from {most_recent.session_id[:8]} (same email: {user_email})")
-                        else:
-                            ## CHANGE: Updated log message with constant
-                            logger.info(f"🕐 Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count")
-                            current_session.daily_question_count = 0
-                            current_session.last_question_time = None
-                            
+                            if time_check and (now - time_check) < DAILY_RESET_WINDOW:
+                                # Inherit question counts from most recent same-email session
+                                current_session.daily_question_count = most_recent_count_session.daily_question_count
+                                current_session.total_question_count = max(current_session.total_question_count, 
+                                                                          most_recent_count_session.total_question_count)
+                                current_session.last_question_time = most_recent_count_session.last_question_time
+                                
+                                logger.info(f"✅ Email-based inheritance: Inherited {most_recent_count_session.daily_question_count} questions from {most_recent_count_session.session_id[:8]} (same email: {user_email})")
+                            else:
+                                logger.info(f"🕐 Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count")
+                                current_session.daily_question_count = 0
+                                current_session.last_question_time = None
+                        
+                        # NEW: Inherit active ban if found
+                        if most_recent_ban_session:
+                            current_session.ban_status = most_recent_ban_session.ban_status
+                            current_session.ban_start_time = most_recent_ban_session.ban_start_time
+                            current_session.ban_end_time = most_recent_ban_session.ban_end_time
+                            current_session.ban_reason = most_recent_ban_session.ban_reason
+                            current_session.question_limit_reached = True
+                            logger.info(f"✅ Inherited active ban: {current_session.ban_status.value} until {current_session.ban_end_time}")
+                        
                         # Also inherit Zoho contact ID if available
                         if not current_session.zoho_contact_id:
                             for sess in sorted_sessions:
@@ -3711,20 +3757,6 @@ class SessionManager:
                         current_session.last_question_time = None
                         logger.info(f"🆕 No email history found for {user_email}, starting fresh")
 
-                    # Only clear EXPIRED bans, not active ones
-                    if current_session.ban_status != BanStatus.NONE:
-                        if current_session.ban_end_time and datetime.now() >= current_session.ban_end_time:
-                            # Ban has expired, safe to clear
-                            current_session.ban_status = BanStatus.NONE
-                            current_session.ban_start_time = None
-                            current_session.ban_end_time = None
-                            current_session.ban_reason = None
-                            current_session.question_limit_reached = False
-                            logger.info(f"Cleared expired ban for {current_session.session_id[:8]}")
-                        else:
-                            # Ban is still active, keep it
-                            logger.info(f"Keeping active ban for {current_session.session_id[:8]} until {current_session.ban_end_time}")
-                    
                     # Clear evasion tracking (these can always be cleared on successful login)
                     current_session.evasion_count = 0
                     current_session.current_penalty_hours = 0
@@ -3770,7 +3802,7 @@ class SessionManager:
                 logger.warning(f"WordPress authentication failed with status: {response.status_code}. Response: {response.text[:200]}")
                 st.error("Invalid username or password.")
                 return None
-                
+            
         except requests.exceptions.Timeout as e:
             logger.error(f"WordPress authentication timed out: {e}")
             st.error("Authentication service timed out. Please try again.")
@@ -3784,6 +3816,33 @@ class SessionManager:
             st.error("An unexpected error occurred during authentication. Please try again later.")
             return None
     ## END <<<<<<<<<<<<<<<< REPLACEMENT 2 OF 3
+
+    # NEW: Add Ban Synchronization Method
+    def sync_ban_for_registered_user(self, email: str, banned_session: UserSession):
+        """Sync ban status across all active sessions for a registered user by email"""
+        try:
+            email_sessions = self.db.find_sessions_by_email(email)
+            active_registered_sessions = [s for s in email_sessions 
+                                          if s.active and s.user_type == UserType.REGISTERED_USER 
+                                          and s.session_id != banned_session.session_id]
+            
+            if not active_registered_sessions:
+                return
+            
+            # Apply the same ban to all other sessions
+            for sess in active_registered_sessions:
+                sess.ban_status = banned_session.ban_status
+                sess.ban_start_time = banned_session.ban_start_time
+                sess.ban_end_time = banned_session.ban_end_time
+                sess.ban_reason = banned_session.ban_reason
+                sess.question_limit_reached = banned_session.question_limit_reached
+                self.db.save_session(sess)
+                logger.debug(f"Synced ban to session {sess.session_id[:8]} for registered user {email}")
+            
+            logger.info(f"Synced ban across {len(active_registered_sessions)} sessions for registered user {email}")
+            
+        except Exception as e:
+            logger.error(f"Failed to sync ban for registered user {email}: {e}")
 
     # CHANGE 10: Pricing/Stock Question Handler
     def detect_pricing_stock_question(self, prompt: str) -> bool:
@@ -4010,6 +4069,10 @@ class SessionManager:
                 # Technical terms
                 if word_lower in ['formulation', 'application', 'specification', 'grade', 'purity', 'concentration']:
                     technical_terms.add(word_lower)
+
+        # Get top topics
+        key_topics = list(topic_words)[:8]
+        active_categories = {k: v for k, v in question_categories.items() if v > 0}
 
         # Build analysis
         analysis_parts = [
@@ -4289,6 +4352,16 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                                 'content': self.question_limits._get_ban_message(session, 'email_verified_guest_limit'),
                                 'time_remaining': timedelta(hours=EMAIL_VERIFIED_BAN_HOURS)
                             }
+                # NEW: If an *existing* ban was inherited, return that immediately.
+                elif question_record_status.get("existing_ban_inherited"):
+                    ban_type = question_record_status.get("ban_type")
+                    # Retrieve the existing ban details from the session itself, as it was just inherited
+                    return {
+                        'banned': True,
+                        'content': self.question_limits._get_ban_message(session, ban_type),
+                        'time_remaining': session.ban_end_time - datetime.now() if session.ban_end_time else timedelta(0)
+                    }
+
             except Exception as e:
                 logger.error(f"❌ Critical error recording question and checking ban: {e}")
                 return {
