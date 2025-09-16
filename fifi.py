@@ -5454,22 +5454,22 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
 
             if session.daily_question_count < REGISTERED_USER_TIER_1_LIMIT:
                 st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0),
-                           text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions",
-                           key=f"{progress_bar_key}_tier1")
+                           text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions")
+                           
                 remaining_tier1 = REGISTERED_USER_TIER_1_LIMIT - session.daily_question_count
                 if remaining_tier1 > 0:
                     st.caption(f"⏰ {remaining_tier1} questions until {TIER_1_BAN_HOURS}-hour break")
             elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
                 # Check if there's an active ban
                 if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
-                    st.progress(1.0, text="Tier 1 Complete", key=f"{progress_bar_key}_tier1_banned")
+                    st.progress(1.0, text="Tier 1 Complete")
                     time_remaining = session.ban_end_time - datetime.now()
                     hours = int(time_remaining.total_seconds() // 3600)
                     minutes = int((time_remaining.total_seconds() % 3600) // 60)
                     st.caption(f"⏳ Tier 1 break: {hours}h {minutes}m remaining until Tier 2")
                 else:
                     # Ban has expired or not yet applied (user is now eligible for Tier 2)
-                    st.progress(1.0, text="Tier 1 Complete ✅", key=f"{progress_bar_key}_tier1_unbanned")
+                    st.progress(1.0, text="Tier 1 Complete ✅")
                     st.caption("📈 Ready to proceed to Tier 2!")
             else: # daily_question_count > REGISTERED_USER_TIER_1_LIMIT
                 tier2_questions_asked = session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT
