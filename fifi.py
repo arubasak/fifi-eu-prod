@@ -740,7 +740,7 @@ class DatabaseManager:
                  session.pending_zoho_contact_id, session.pending_wp_token,
                  declined_recognized_email_at_iso, ## CHANGE: NEW field
                  timeout_detected_at_iso, ## CHANGE: NEW field
-                 session.timeout_reason)) ## CHANGE: NEW field
+                 session.timeout_reason) ## CHANGE: NEW field
             self.conn.commit()
             
             logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}")
