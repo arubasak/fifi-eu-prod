@@ -723,7 +723,7 @@ class DatabaseManager:
                  session.zoho_contact_id, session.created_at.isoformat(),
                  last_activity_iso, json_messages, int(session.active),
                  session.wp_token, int(session.timeout_saved_to_crm), session.fingerprint_id,
-                 session.fingerprint_method, session.visitor_type, # This is the corrected line for fingerprint_method
+                 session.fingerprint_method, session.visitor_type,
                  session.daily_question_count,
                  session.total_question_count, 
                  session.last_question_time.isoformat() if session.last_question_time else None,
@@ -738,9 +738,9 @@ class DatabaseManager:
                  session.pending_user_type.value if session.pending_user_type else None,
                  session.pending_email, session.pending_full_name,
                  session.pending_zoho_contact_id, session.pending_wp_token,
-                 declined_recognized_email_at_iso, ## CHANGE: NEW field
-                 timeout_detected_at_iso, ## CHANGE: NEW field
-                 session.timeout_reason) ## CHANGE: NEW field
+                 declined_recognized_email_at_iso,
+                 timeout_detected_at_iso,
+                 session.timeout_reason)
             )
             self.conn.commit()
             
