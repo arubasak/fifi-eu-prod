@@ -1,28 +1,3 @@
-The error message `streamlit.runtime.caching.cache_errors.UnhashableParamError: Cannot hash argument 'config' (of type '__main__.Config') in 'get_zoho_manager'` clearly indicates that the `Config` object is not hashable, which is required by `st.cache_resource` for its arguments to create a unique cache key. The traceback also directly provides the solution: prefix the argument with an underscore.
-
-This issue will likely arise for any custom class instance passed as an argument to a `@st.cache_resource` decorated function, as custom class instances are not hashable by default unless a `__hash__` method is implemented.
-
-Here's the corrected code, applying the `_` prefix to all custom class instances passed as arguments to `@st.cache_resource` functions:
-
-**Changes Made:**
-
-1.  **`get_zoho_manager` function definition:**
-    *   Changed `config` to `_config`.
-    *   Changed `pdf_exporter` to `_pdf_exporter`.
-2.  **Call to `get_zoho_manager` in `ensure_initialization_fixed`:**
-    *   Changed argument `config` to `_config`.
-    *   Changed argument `pdf_exporter` to `_pdf_exporter`.
-3.  **`get_ai_system` function definition:**
-    *   Changed `config` to `_config`.
-4.  **Call to `get_ai_system` in `ensure_initialization_fixed`:**
-    *   Changed argument `config` to `_config`.
-5.  **`get_email_verification_manager` function definition:**
-    *   Changed `config` to `_config`.
-6.  **Call to `get_email_verification_manager` in `ensure_initialization_fixed`:**
-    *   Changed argument `config` to `_config`.
-7.  **`SessionManager` `__init__` signature:** Also updated to use `_config`, `_db_manager`, etc., to explicitly mark these as not needing to be hashed by Streamlit for the `get_session_manager` cache (though `get_session_manager` directly calls other cached getters, it's safer for internal consistency and if `SessionManager` itself were ever passed to another cached function).
-
-```python
 import streamlit as st
 import os
 import uuid
