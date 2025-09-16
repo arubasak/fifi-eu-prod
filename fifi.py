@@ -397,6 +397,11 @@ class UserSession:
     timeout_detected_at: Optional[datetime] = None
     timeout_reason: Optional[str] = None
 
+    # NEW: Tier cycle tracking
+    current_tier_cycle_id: Optional[str] = None
+    tier1_completed_in_cycle: bool = False
+    tier_cycle_started_at: Optional[datetime] = None
+
 
 class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
@@ -504,7 +509,11 @@ class DatabaseManager:
                     declined_recognized_email_at TEXT,
                     -- NEW: Timeout tracking fields for FastAPI beacon to record
                     timeout_detected_at TEXT,
-                    timeout_reason TEXT
+                    timeout_reason TEXT,
+                    -- NEW: Tier cycle tracking columns
+                    current_tier_cycle_id TEXT,
+                    tier1_completed_in_cycle INTEGER DEFAULT 0,
+                    tier_cycle_started_at TEXT
                 )
             ''')
             
@@ -519,7 +528,10 @@ class DatabaseManager:
                 ("pending_wp_token", "TEXT"),
                 ("declined_recognized_email_at", "TEXT"),
                 ("timeout_detected_at", "TEXT"), ## CHANGE: Added new column
-                ("timeout_reason", "TEXT") ## CHANGE: Added new column
+                ("timeout_reason", "TEXT"), ## CHANGE: Added new column
+                ("current_tier_cycle_id", "TEXT"), # NEW
+                ("tier1_completed_in_cycle", "INTEGER DEFAULT 0"), # NEW
+                ("tier_cycle_started_at", "TEXT"), # NEW
             ]
             for col_name, col_type in new_columns:
                 try:
@@ -638,10 +650,13 @@ class DatabaseManager:
             declined_recognized_email_at_iso = session.declined_recognized_email_at.isoformat() if session.declined_recognized_email_at else None
             ## CHANGE: Handle None for new timeout tracking fields
             timeout_detected_at_iso = session.timeout_detected_at.isoformat() if session.timeout_detected_at else None
+            
+            # NEW: Handle None for new cycle tracking fields
+            tier_cycle_started_at_iso = session.tier_cycle_started_at.isoformat() if session.tier_cycle_started_at else None
 
 
             self.conn.execute(
-                '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (session.session_id, session.user_type.value, session.email, session.full_name,
                  session.zoho_contact_id, session.created_at.isoformat(),
                  last_activity_iso, json_messages, int(session.active),
@@ -663,7 +678,11 @@ class DatabaseManager:
                  session.pending_zoho_contact_id, session.pending_wp_token,
                  declined_recognized_email_at_iso, ## CHANGE: NEW field
                  timeout_detected_at_iso, ## CHANGE: NEW field
-                 session.timeout_reason)) ## CHANGE: NEW field
+                 session.timeout_reason, # NEW field
+                 session.current_tier_cycle_id, # NEW
+                 int(session.tier1_completed_in_cycle), # NEW
+                 tier_cycle_started_at_iso # NEW
+                 ))
             self.conn.commit()
             
             logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}")
@@ -708,7 +727,14 @@ class DatabaseManager:
                 session.timeout_detected_at = None
             if session and not hasattr(session, 'timeout_reason'):
                 session.timeout_reason = None
-            
+            # NEW: Add compatibility for new cycle tracking fields
+            if session and not hasattr(session, 'current_tier_cycle_id'):
+                session.current_tier_cycle_id = None
+            if session and not hasattr(session, 'tier1_completed_in_cycle'):
+                session.tier1_completed_in_cycle = False
+            if session and not hasattr(session, 'tier_cycle_started_at'):
+                session.tier_cycle_started_at = None
+
             return copy.deepcopy(session)
         
         try:
@@ -716,16 +742,16 @@ class DatabaseManager:
             if hasattr(self.conn, 'row_factory'):
                 self.conn.row_factory = None
             
-            ## CHANGE: Update SELECT statement to include new fields (timeout_detected_at, timeout_reason)
-            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+            ## CHANGE: Update SELECT statement to include new fields (timeout_detected_at, timeout_reason, cycle tracking)
+            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
             row = cursor.fetchone()
             
             if not row: 
                 logger.debug(f"No active session found for ID {session_id[:8]}.")
                 return None
             
-            ## CHANGE: Update expected columns for new fields (now 41)
-            expected_min_cols = 41
+            ## CHANGE: Update expected columns for new fields (now 44)
+            expected_min_cols = 44
             if len(row) < expected_min_cols:
                 logger.error(f"Row has insufficient columns: {len(row)} (expected at least {expected_min_cols}). Data corruption suspected or old schema.")
                 pass 
@@ -746,6 +772,10 @@ class DatabaseManager:
                 ## CHANGE: Safely get timeout tracking fields
                 loaded_timeout_detected_at = datetime.fromisoformat(row[39]) if len(row) > 39 and row[39] else None
                 loaded_timeout_reason = row[40] if len(row) > 40 else None
+                # NEW: Safely get cycle tracking fields
+                loaded_current_tier_cycle_id = row[41] if len(row) > 41 else None
+                loaded_tier1_completed_in_cycle = bool(row[42]) if len(row) > 42 else False
+                loaded_tier_cycle_started_at = datetime.fromisoformat(row[43]) if len(row) > 43 and row[43] else None
 
 
                 loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
@@ -791,7 +821,10 @@ class DatabaseManager:
                     pending_wp_token=loaded_pending_wp_token, # NEW
                     declined_recognized_email_at=loaded_declined_recognized_email_at, # NEW
                     timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
-                    timeout_reason=loaded_timeout_reason ## CHANGE: NEW field
+                    timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
+                    current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
+                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # NEW
+                    tier_cycle_started_at=loaded_tier_cycle_started_at # NEW
                 )
                 
                 logger.debug(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
@@ -832,6 +865,13 @@ class DatabaseManager:
                     session.timeout_detected_at = None
                 if not hasattr(session, 'timeout_reason'):
                     session.timeout_reason = None
+                # NEW: Add compatibility for new cycle tracking fields
+                if not hasattr(session, 'current_tier_cycle_id'):
+                    session.current_tier_cycle_id = None
+                if not hasattr(session, 'tier1_completed_in_cycle'):
+                    session.tier1_completed_in_cycle = False
+                if not hasattr(session, 'tier_cycle_started_at'):
+                    session.tier_cycle_started_at = None
             logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
             return sessions
         
@@ -839,12 +879,12 @@ class DatabaseManager:
             if hasattr(self.conn, 'row_factory'):
                 self.conn.row_factory = None
 
-            ## CHANGE: Update SELECT statement to include new fields (timeout_detected_at, timeout_reason)
-            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
+            ## CHANGE: Update SELECT statement to include new fields (timeout_detected_at, timeout_reason, cycle tracking)
+            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
             sessions = []
             for row in cursor.fetchall():
-                ## CHANGE: Update expected columns for new fields (now 41)
-                expected_min_cols = 41
+                ## CHANGE: Update expected columns for new fields (now 44)
+                expected_min_cols = 44
                 if len(row) < expected_min_cols:
                     logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected at least {expected_min_cols}). Skipping row.")
                     continue
@@ -864,6 +904,10 @@ class DatabaseManager:
                     ## CHANGE: Safely get timeout tracking fields
                     loaded_timeout_detected_at = datetime.fromisoformat(row[39]) if len(row) > 39 and row[39] else None
                     loaded_timeout_reason = row[40] if len(row) > 40 else None
+                    # NEW: Safely get cycle tracking fields
+                    loaded_current_tier_cycle_id = row[41] if len(row) > 41 else None
+                    loaded_tier1_completed_in_cycle = bool(row[42]) if len(row) > 42 else False
+                    loaded_tier_cycle_started_at = datetime.fromisoformat(row[43]) if len(row) > 43 and row[43] else None
 
 
                     loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
@@ -909,7 +953,10 @@ class DatabaseManager:
                         pending_wp_token=loaded_pending_wp_token, # NEW
                         declined_recognized_email_at=loaded_declined_recognized_email_at, # NEW
                         timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
-                        timeout_reason=loaded_timeout_reason ## CHANGE: NEW field
+                        timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
+                        current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
+                        tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # NEW
+                        tier_cycle_started_at=loaded_tier_cycle_started_at # NEW
                     )
                     sessions.append(s)
                 except Exception as e:
@@ -1194,23 +1241,49 @@ class DatabaseManager:
                     }
                 else:
                     logger.info(f"Ban for session {session.session_id[:8]} expired. Resetting status and counters.")
-                    # ENHANCED: Reset counters when ban expires
+                    
+                    # Store the previous ban type before clearing
+                    previous_ban_type = session.ban_status
+                    
+                    # Clear ban status
                     session.ban_status = BanStatus.NONE
                     session.ban_start_time = None
                     session.ban_end_time = None
                     session.ban_reason = None
                     session.question_limit_reached = False
-                    # Reset daily questions for fresh start
-                    session.daily_question_count = 0
-                    session.last_question_time = None
+                    
+                    # Handle post-ban transitions based on ban type
+                    if session.user_type == UserType.REGISTERED_USER:
+                        if previous_ban_type == BanStatus.TWENTY_FOUR_HOUR:
+                            # Coming back from Tier 2 (24-hour ban) - full reset to new cycle
+                            logger.info(f"🔄 Tier 2 ban expired for {session.session_id[:8]} - starting new tier cycle")
+                            session.daily_question_count = 0
+                            session.last_question_time = None
+                            session.current_tier_cycle_id = str(uuid.uuid4())
+                            session.tier1_completed_in_cycle = False
+                            session.tier_cycle_started_at = datetime.now()
+                        elif previous_ban_type == BanStatus.ONE_HOUR:
+                            # Coming back from Tier 1 (1-hour ban) - proceed to Tier 2
+                            logger.info(f"✅ Tier 1 ban expired for {session.session_id[:8]} - can now proceed to Tier 2")
+                            # Keep the same cycle ID and tier1_completed_in_cycle=True
+                            # Don't reset counts - they should continue from 10
+                    else:
+                        # For non-registered users, just reset daily count
+                        session.daily_question_count = 0
+                        session.last_question_time = None
             
-            ## CHANGE: Use DAILY_RESET_WINDOW constant for daily reset
+            # Check for daily reset window (only if not just cleared from ban expiry)
             if session.last_question_time:
                 time_since_last = datetime.now() - session.last_question_time
                 if time_since_last >= DAILY_RESET_WINDOW:
                     logger.info(f"Daily question count reset for session {session.session_id[:8]} due to {DAILY_RESET_WINDOW_HOURS}-hour window expiration.")
                     session.daily_question_count = 0
                     session.question_limit_reached = False
+                    # Also reset cycle for registered users
+                    if session.user_type == UserType.REGISTERED_USER:
+                        session.current_tier_cycle_id = str(uuid.uuid4())
+                        session.tier1_completed_in_cycle = False
+                        session.tier_cycle_started_at = datetime.now()
             
             # ENHANCED: Tier-based logic for registered users
             if session.user_type.value == UserType.REGISTERED_USER.value:
@@ -1235,13 +1308,14 @@ class DatabaseManager:
                         }
                     ## CHANGE: Use REGISTERED_USER_TIER_1_LIMIT for exact check
                     elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
+                        # At Q10, if ban is not active, allow them to ask it, which will trigger the ban in record_question
                         return {
                             'allowed': True,
                             'tier': 1,
                             'remaining': 0,
                             'warning': f"Next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2."
                         }
-                    else: # Questions 11-19
+                    else: # Questions 11-19 (already past Tier 1 limit, in Tier 2 progression)
                         remaining = user_limit - session.daily_question_count
                         return {
                             'allowed': True,
@@ -1280,7 +1354,7 @@ class DatabaseManager:
         
         ## START <<<<<<<<<<<<<<<< REPLACEMENT 1 OF 3
         def record_question_and_check_ban(self, session: UserSession, session_manager: 'SessionManager') -> Dict[str, Any]:
-            """Atomically check for ban trigger BEFORE recording question."""
+            """Atomically check for ban trigger BEFORE recording question with proper tier cycle tracking."""
             try:
                 # NEW: For registered users, check if ANY session with same email already has an active ban
                 if session.user_type == UserType.REGISTERED_USER and session.email:
@@ -1297,10 +1371,24 @@ class DatabaseManager:
                             session.ban_end_time = email_session.ban_end_time
                             session.ban_reason = email_session.ban_reason
                             session.question_limit_reached = True
+                            
+                            # Also inherit cycle information (CRITICAL for multi-session sync)
+                            session.current_tier_cycle_id = email_session.current_tier_cycle_id
+                            session.tier1_completed_in_cycle = email_session.tier1_completed_in_cycle
+                            session.tier_cycle_started_at = email_session.tier_cycle_started_at
+
                             session_manager._save_session_with_retry(session)
                             
                             logger.info(f"✅ Found existing ban for email {session.email}, inherited instead of creating new: {session.ban_status.value} until {session.ban_end_time}")
                             return {"recorded": False, "ban_applied": False, "existing_ban_inherited": True, "ban_type": session.ban_status.value}
+                
+                # Initialize tier cycle if needed (for registered users)
+                if session.user_type == UserType.REGISTERED_USER:
+                    if not session.current_tier_cycle_id:
+                        session.current_tier_cycle_id = str(uuid.uuid4())
+                        session.tier1_completed_in_cycle = False
+                        session.tier_cycle_started_at = datetime.now()
+                        logger.info(f"🔄 New tier cycle started for {session.session_id[:8]}: {session.current_tier_cycle_id[:8]}")
                 
                 # CHECK FOR BAN TRIGGER FIRST (before incrementing)
                 ban_applied = False
@@ -1309,17 +1397,30 @@ class DatabaseManager:
                 ban_duration_hours = 0
                 
                 if session.user_type == UserType.REGISTERED_USER:
+                    # Tier 1 ban check (at question 10)
                     if session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:  # Currently at 10
-                        # Next question WOULD BE 11, which triggers Tier 1 ban
-                        ban_type = BanStatus.ONE_HOUR
-                        ban_reason = f"Registered user Tier 1 limit reached ({REGISTERED_USER_TIER_1_LIMIT} questions)"
-                        ban_duration_hours = TIER_1_BAN_HOURS
-                        ban_applied = True
+                        if not session.tier1_completed_in_cycle:
+                            # First time hitting Tier 1 limit in this cycle - apply ban
+                            ban_type = BanStatus.ONE_HOUR
+                            ban_reason = f"Registered user Tier 1 limit reached ({REGISTERED_USER_TIER_1_LIMIT} questions)"
+                            ban_duration_hours = TIER_1_BAN_HOURS
+                            ban_applied = True
+                            session.tier1_completed_in_cycle = True # Mark that Tier 1 ban has been applied for this cycle
+                            logger.info(f"🚫 Tier 1 ban triggered for {session.session_id[:8]} in cycle {session.current_tier_cycle_id[:8]}")
+                        else:
+                            # Already completed Tier 1 in this cycle (meaning 1-hour ban was served)
+                            # Allow progression to Tier 2 without re-banning
+                            logger.debug(f"Session {session.session_id[:8]} at question 10, but Tier 1 ban already served in cycle {session.current_tier_cycle_id[:8]}. Proceeding to Tier 2.")
+                            
+                    # Tier 2 ban check (at question 20)
                     elif session.daily_question_count == REGISTERED_USER_QUESTION_LIMIT:  # Currently at 20
                         ban_type = BanStatus.TWENTY_FOUR_HOUR
                         ban_reason = f"Registered user daily limit reached ({REGISTERED_USER_QUESTION_LIMIT} questions)"
                         ban_duration_hours = TIER_2_BAN_HOURS
                         ban_applied = True
+                        # Don't reset cycle here - let it happen when the 24-hour ban expires
+                        logger.info(f"🚫 Tier 2 ban triggered for {session.session_id[:8]} in cycle {session.current_tier_cycle_id[:8]}")
+                        
                 elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
                     if session.daily_question_count == EMAIL_VERIFIED_QUESTION_LIMIT:  # Currently at 10
                         ban_type = BanStatus.TWENTY_FOUR_HOUR
@@ -1346,7 +1447,7 @@ class DatabaseManager:
                 session.total_question_count += 1
                 session.last_question_time = datetime.now()
                 
-                # Sync counts for registered users
+                # Sync counts and cycle info for registered users
                 if session.user_type == UserType.REGISTERED_USER and session.email:
                     session_manager.sync_registered_user_sessions(session.email, session.session_id)
                 
@@ -1849,7 +1950,7 @@ class RateLimiter:
             now = time.time()
             self.requests[identifier] = [t for t in self.requests[identifier] if t > now - self.window_seconds]
             
-            ## CHANGE: Memory leak fix - cleanup old identifiers
+            ## CHANGE: Memory leak fix - cleanup cache if too large
             if len(self.requests) > self.MAX_TRACKED_IDS:
                 # Find the oldest N entries to remove
                 # This heuristic sorts by the last request time of each identifier
@@ -2946,6 +3047,11 @@ class SessionManager:
                         session.total_question_count = max(session.total_question_count, most_recent.total_question_count)
                         session.last_question_time = most_recent.last_question_time
                         
+                        # NEW: Also inherit cycle information
+                        session.current_tier_cycle_id = most_recent.current_tier_cycle_id
+                        session.tier1_completed_in_cycle = most_recent.tier1_completed_in_cycle
+                        session.tier_cycle_started_at = most_recent.tier_cycle_started_at
+
                         # Inherit Zoho contact ID
                         if not session.zoho_contact_id and most_recent.zoho_contact_id:
                             session.zoho_contact_id = most_recent.zoho_contact_id
@@ -2953,13 +3059,22 @@ class SessionManager:
                         logger.info(f"✅ REGISTERED_USER EMAIL inheritance successful: {most_recent.daily_question_count} questions from {most_recent.session_id[:8]}")
                     else:
                         session.daily_question_count = 0
+                        session.total_question_count = 0
                         session.last_question_time = None
-                        logger.info(f"🕐 REGISTERED_USER Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count")
+                        # NEW: Reset cycle for an old session
+                        session.current_tier_cycle_id = str(uuid.uuid4())
+                        session.tier1_completed_in_cycle = False
+                        session.tier_cycle_started_at = datetime.now()
+                        logger.info(f"🕐 REGISTERED_USER Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count AND tier cycle")
                 else:
                     session.daily_question_count = 0
                     session.total_question_count = 0
                     session.last_question_time = None
-                    logger.info(f"🆕 REGISTERED_USER no same-email history found, starting fresh")
+                    # NEW: Always initialize cycle for a fresh start
+                    session.current_tier_cycle_id = str(uuid.uuid4())
+                    session.tier1_completed_in_cycle = False
+                    session.tier_cycle_started_at = datetime.now()
+                    logger.info(f"🆕 REGISTERED_USER no same-email history found, starting fresh (new tier cycle)")
                 
                 return
 
@@ -3173,12 +3288,31 @@ class SessionManager:
                         if session.ban_end_time and datetime.now() >= session.ban_end_time:
                             logger.info(f"Ban expired for session {session.session_id[:8]}. Clearing ban status.")
                         
+                            # Store the previous ban type before clearing
+                            previous_ban_type = session.ban_status
+
                             # Clear the ban
                             session.ban_status = BanStatus.NONE
                             session.ban_start_time = None
                             session.ban_end_time = None
                             session.ban_reason = None
                             session.question_limit_reached = False
+                            
+                            # Handle post-ban transitions for registered users
+                            if session.user_type == UserType.REGISTERED_USER:
+                                if previous_ban_type == BanStatus.TWENTY_FOUR_HOUR:
+                                    logger.info(f"🔄 Tier 2 ban expired for {session.session_id[:8]} - starting new tier cycle")
+                                    session.daily_question_count = 0
+                                    session.last_question_time = None
+                                    session.current_tier_cycle_id = str(uuid.uuid4())
+                                    session.tier1_completed_in_cycle = False
+                                    session.tier_cycle_started_at = datetime.now()
+                                elif previous_ban_type == BanStatus.ONE_HOUR:
+                                    logger.info(f"✅ Tier 1 ban expired for {session.session_id[:8]} - can now proceed to Tier 2")
+                                    # Counts and cycle info remain, as tier1_completed_in_cycle is already True
+                            else:
+                                session.daily_question_count = 0
+                                session.last_question_time = None
                         
                             # Save the updated session
                             self.db.save_session(session)
@@ -3279,7 +3413,11 @@ class SessionManager:
             else: # For newly created REGISTERED_USER, mark FP as not collected
                 new_session.fingerprint_id = "not_collected_registered_user"
                 new_session.fingerprint_method = "email_primary"
-                logger.info(f"New REGISTERED_USER session {new_session.session_id[:8]} fingerprint marked as not collected.")
+                # NEW: Initialize cycle tracking for new registered user
+                new_session.current_tier_cycle_id = str(uuid.uuid4())
+                new_session.tier1_completed_in_cycle = False
+                new_session.tier_cycle_started_at = datetime.now()
+                logger.info(f"New REGISTERED_USER session {new_session.session_id[:8]} fingerprint marked as not collected. New tier cycle started.")
 
             self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
             logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
@@ -3297,7 +3435,7 @@ class SessionManager:
     
     ## CHANGE: Sync method for registered users
     def sync_registered_user_sessions(self, email: str, current_session_id: str):
-        """Sync question counts across all active sessions for a registered user by email"""
+        """Sync question counts and tier cycle info across all active sessions for a registered user by email"""
         try:
             email_sessions = self.db.find_sessions_by_email(email)
             active_registered_sessions = [s for s in email_sessions 
@@ -3324,6 +3462,12 @@ class SessionManager:
                     sess.daily_question_count = max_count_session.daily_question_count
                     sess.total_question_count = max_count_session.total_question_count
                     sess.last_question_time = max_count_session.last_question_time
+                    
+                    # Also sync tier cycle information
+                    sess.current_tier_cycle_id = max_count_session.current_tier_cycle_id
+                    sess.tier1_completed_in_cycle = max_count_session.tier1_completed_in_cycle
+                    sess.tier_cycle_started_at = max_count_session.tier_cycle_started_at
+
                     self.db.save_session(sess) # Save immediately
                     logger.debug(f"Synced session {sess.session_id[:8]} to {max_count_session.daily_question_count} daily questions from {max_count_session.session_id[:8]}")
             
@@ -3698,18 +3842,18 @@ class SessionManager:
                     ## CHANGE: Always check email-based history for registered users
                     all_email_sessions = self.db.find_sessions_by_email(user_email)
 
-                    # Find the most recent session with same email to inherit counts AND BANS from
+                    # Find the most recent session with same email to inherit counts, BANS AND CYCLE INFO from
                     most_recent_ban_session = None
-                    most_recent_count_session = None
+                    most_recent_session_for_counts_and_cycle = None
                     
                     if all_email_sessions:
-                        # Sort by last activity/question time
+                        # Sort by last activity/question time to find the most recent
                         sorted_sessions = sorted(all_email_sessions, 
                                                key=lambda s: s.last_question_time or s.last_activity or s.created_at, 
                                                reverse=True)
                         
-                        # Find most recent session for counts
-                        most_recent_count_session = sorted_sessions[0] if sorted_sessions else None
+                        # Find most recent session for counts and cycle
+                        most_recent_session_for_counts_and_cycle = sorted_sessions[0] if sorted_sessions else None
                         
                         # NEW: Find any session with an ACTIVE ban
                         now = datetime.now()
@@ -3721,22 +3865,33 @@ class SessionManager:
                                 logger.info(f"Found active ban in session {sess.session_id[:8]}: {sess.ban_status.value} until {sess.ban_end_time}")
                                 break
                         
-                        # Inherit question counts
-                        if most_recent_count_session:
-                            time_check = most_recent_count_session.last_question_time or most_recent_count_session.last_activity or most_recent_count_session.created_at
+                        # Inherit question counts and cycle info
+                        if most_recent_session_for_counts_and_cycle:
+                            time_check = most_recent_session_for_counts_and_cycle.last_question_time or \
+                                         most_recent_session_for_counts_and_cycle.last_activity or \
+                                         most_recent_session_for_counts_and_cycle.created_at
                             
                             if time_check and (now - time_check) < DAILY_RESET_WINDOW:
-                                # Inherit question counts from most recent same-email session
-                                current_session.daily_question_count = most_recent_count_session.daily_question_count
+                                # Inherit question counts and cycle info from most recent same-email session
+                                current_session.daily_question_count = most_recent_session_for_counts_and_cycle.daily_question_count
                                 current_session.total_question_count = max(current_session.total_question_count, 
-                                                                          most_recent_count_session.total_question_count)
-                                current_session.last_question_time = most_recent_count_session.last_question_time
+                                                                          most_recent_session_for_counts_and_cycle.total_question_count)
+                                current_session.last_question_time = most_recent_session_for_counts_and_cycle.last_question_time
                                 
-                                logger.info(f"✅ Email-based inheritance: Inherited {most_recent_count_session.daily_question_count} questions from {most_recent_count_session.session_id[:8]} (same email: {user_email})")
+                                # NEW: Inherit cycle info
+                                current_session.current_tier_cycle_id = most_recent_session_for_counts_and_cycle.current_tier_cycle_id
+                                current_session.tier1_completed_in_cycle = most_recent_session_for_counts_and_cycle.tier1_completed_in_cycle
+                                current_session.tier_cycle_started_at = most_recent_session_for_counts_and_cycle.tier_cycle_started_at
+
+                                logger.info(f"✅ Email-based inheritance: Inherited {most_recent_session_for_counts_and_cycle.daily_question_count} questions from {most_recent_session_for_counts_and_cycle.session_id[:8]} (same email: {user_email})")
                             else:
-                                logger.info(f"🕐 Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count")
+                                logger.info(f"🕐 Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count AND tier cycle")
                                 current_session.daily_question_count = 0
                                 current_session.last_question_time = None
+                                # NEW: Reset cycle to a fresh start
+                                current_session.current_tier_cycle_id = str(uuid.uuid4())
+                                current_session.tier1_completed_in_cycle = False
+                                current_session.tier_cycle_started_at = datetime.now()
                         
                         # NEW: Inherit active ban if found
                         if most_recent_ban_session:
@@ -3745,6 +3900,10 @@ class SessionManager:
                             current_session.ban_end_time = most_recent_ban_session.ban_end_time
                             current_session.ban_reason = most_recent_ban_session.ban_reason
                             current_session.question_limit_reached = True
+                            # NEW: Also inherit cycle information from the banned session
+                            current_session.current_tier_cycle_id = most_recent_ban_session.current_tier_cycle_id
+                            current_session.tier1_completed_in_cycle = most_recent_ban_session.tier1_completed_in_cycle
+                            current_session.tier_cycle_started_at = most_recent_ban_session.tier_cycle_started_at
                             logger.info(f"✅ Inherited active ban: {current_session.ban_status.value} until {current_session.ban_end_time}")
                         
                         # Also inherit Zoho contact ID if available
@@ -3759,7 +3918,11 @@ class SessionManager:
                         current_session.daily_question_count = 0
                         current_session.total_question_count = 0
                         current_session.last_question_time = None
-                        logger.info(f"🆕 No email history found for {user_email}, starting fresh")
+                        # NEW: Initialize cycle for a completely fresh start
+                        current_session.current_tier_cycle_id = str(uuid.uuid4())
+                        current_session.tier1_completed_in_cycle = False
+                        current_session.tier_cycle_started_at = datetime.now()
+                        logger.info(f"🆕 No email history found for {user_email}, starting fresh (new tier cycle)")
 
                     # Clear evasion tracking (these can always be cleared on successful login)
                     current_session.evasion_count = 0
@@ -3823,7 +3986,7 @@ class SessionManager:
 
     # NEW: Add Ban Synchronization Method
     def sync_ban_for_registered_user(self, email: str, banned_session: UserSession):
-        """Sync ban status across all active sessions for a registered user by email"""
+        """Sync ban status and tier cycle info across all active sessions for a registered user by email"""
         try:
             email_sessions = self.db.find_sessions_by_email(email)
             active_registered_sessions = [s for s in email_sessions 
@@ -3833,15 +3996,21 @@ class SessionManager:
             if not active_registered_sessions:
                 return
             
-            # Apply the same ban to all other sessions
+            # Apply the same ban and cycle info to all other sessions
             for sess in active_registered_sessions:
                 sess.ban_status = banned_session.ban_status
                 sess.ban_start_time = banned_session.ban_start_time
                 sess.ban_end_time = banned_session.ban_end_time
                 sess.ban_reason = banned_session.ban_reason
                 sess.question_limit_reached = banned_session.question_limit_reached
+                
+                # Also sync tier cycle information
+                sess.current_tier_cycle_id = banned_session.current_tier_cycle_id
+                sess.tier1_completed_in_cycle = banned_session.tier1_completed_in_cycle
+                sess.tier_cycle_started_at = banned_session.tier_cycle_started_at
+                
                 self.db.save_session(sess)
-                logger.debug(f"Synced ban to session {sess.session_id[:8]} for registered user {email}")
+                logger.debug(f"Synced ban and cycle info to session {sess.session_id[:8]} for registered user {email}")
             
             logger.info(f"Synced ban across {len(active_registered_sessions)} sessions for registered user {email}")
             
@@ -4139,14 +4308,13 @@ class SessionManager:
                 window_seconds = RATE_LIMIT_WINDOW_SECONDS ## CHANGE: Use constant
                 
                 # Calculate remaining time dynamically
-                current_time = datetime.now()
-                elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
-                remaining_time = max(0, int(time_until_next - elapsed))
+                # This logic is inside the RateLimiter class, no need to re-calculate here.
+                # Just get the time_until_next from the result.
                 
                 col1, col2 = st.columns([5, 1])
                 with col1:
-                    if remaining_time > 0:
-                        st.error(f"⏱️ **Rate limit exceeded** - Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
+                    if time_until_next > 0:
+                        st.error(f"⏱️ **Rate limit exceeded** - Please wait {time_until_next} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
                     else:
                         st.error(f"⏱️ **Rate limit exceeded** - Please wait a moment before asking another question.")
                 with col2:
@@ -4468,7 +4636,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
             
             # Mark session as inactive
             session.active = False
-            session.last_activity = datetime.now()
+            session.last_activity = datetime.time() # Use time() to avoid setting datetime objects to None
             
             # Save final session state
             try:
@@ -4651,6 +4819,10 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         ## CHANGE: Update new timeout tracking fields
         session.timeout_detected_at = fresh_session_from_db.timeout_detected_at
         session.timeout_reason = fresh_session_from_db.timeout_reason
+        # NEW: Update cycle tracking fields
+        session.current_tier_cycle_id = fresh_session_from_db.current_tier_cycle_id
+        session.tier1_completed_in_cycle = fresh_session_from_db.tier1_completed_in_cycle
+        session.tier_cycle_started_at = fresh_session_from_db.tier_cycle_started_at
     else:
         logger.warning(f"Session {session.session_id[:8]} from st.session_state not found in database. Forcing reset.")
         session.active = False
@@ -5277,27 +5449,36 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             # ENHANCED: Show tier progression
             st.markdown(f"**Daily Questions:** {session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT}")
             
+            # Use a unique key for the progress bar
+            progress_bar_key = f"registered_user_progress_{session.session_id}"
+
             if session.daily_question_count < REGISTERED_USER_TIER_1_LIMIT:
                 st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0),
-                           text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions")
+                           text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions",
+                           key=f"{progress_bar_key}_tier1")
                 remaining_tier1 = REGISTERED_USER_TIER_1_LIMIT - session.daily_question_count
                 if remaining_tier1 > 0:
                     st.caption(f"⏰ {remaining_tier1} questions until {TIER_1_BAN_HOURS}-hour break")
             elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
                 # Check if there's an active ban
                 if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
-                    st.progress(1.0, text="Tier 1 Complete")
+                    st.progress(1.0, text="Tier 1 Complete", key=f"{progress_bar_key}_tier1_banned")
                     time_remaining = session.ban_end_time - datetime.now()
                     hours = int(time_remaining.total_seconds() // 3600)
                     minutes = int((time_remaining.total_seconds() % 3600) // 60)
                     st.caption(f"⏳ Tier 1 break: {hours}h {minutes}m remaining until Tier 2")
                 else:
-                    # Ban has expired or not yet applied
-                    st.progress(1.0, text="Tier 1 Complete ✅")
+                    # Ban has expired or not yet applied (user is now eligible for Tier 2)
+                    st.progress(1.0, text="Tier 1 Complete ✅", key=f"{progress_bar_key}_tier1_unbanned")
                     st.caption("📈 Ready to proceed to Tier 2!")
             else: # daily_question_count > REGISTERED_USER_TIER_1_LIMIT
-                tier2_progress = min((session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT) / (REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT), 1.0)
-                st.progress(tier2_progress, text=f"Tier 2: {session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT}/{REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT} questions")
+                tier2_questions_asked = session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT
+                tier2_limit = REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT
+                
+                tier2_progress = min(tier2_questions_asked / tier2_limit, 1.0)
+                st.progress(tier2_progress, text=f"Tier 2: {tier2_questions_asked}/{tier2_limit} questions",
+                           key=f"{progress_bar_key}_tier2")
+                
                 remaining_tier2 = REGISTERED_USER_QUESTION_LIMIT - session.daily_question_count
                 if remaining_tier2 > 0:
                     st.caption(f"⏰ {remaining_tier2} questions until {TIER_2_BAN_HOURS}-hour reset")
@@ -5321,8 +5502,9 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.error(f"🚫 Daily limit reached")
                 st.caption(f"Resets in: {hours}h {minutes}m")
             elif session.last_question_time:
-                next_reset = session.last_question_time + timedelta(hours=EMAIL_VERIFIED_BAN_HOURS) ## CHANGE: Use constant
-                time_to_reset = next_reset - datetime.now()
+                # The daily_question_count logic handles the reset, this is a fallback display for expected reset.
+                expected_reset_time = session.last_question_time + timedelta(hours=DAILY_RESET_WINDOW_HOURS)
+                time_to_reset = expected_reset_time - datetime.now()
                 if time_to_reset.total_seconds() > 0:
                     hours = int(time_to_reset.total_seconds() // 3600)
                     minutes = int((time_to_reset.total_seconds() % 3600) // 60)
@@ -6475,7 +6657,7 @@ def main_fixed():
                 if session.user_type == UserType.REGISTERED_USER:
                     st.session_state.is_chat_ready = True
                 else:
-                    fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+                    fingerprint_is_stable = not (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")))
                     if fingerprint_is_stable:
                         st.session_state.is_chat_ready = True
 
@@ -6508,7 +6690,7 @@ def main_fixed():
         
         # Conditionally render fingerprinting component only for non-registered users who need it
         if session.user_type != UserType.REGISTERED_USER:
-            fingerprint_needed = not session.fingerprint_id or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+            fingerprint_needed = session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
             if fingerprint_needed:
                 fingerprint_key = f"fingerprint_rendered_{session.session_id}"
                 if not st.session_state.get(fingerprint_key, False):
@@ -6518,7 +6700,7 @@ def main_fixed():
 
         # Set up fingerprint timeout logic ONLY for non-registered users waiting for a fingerprint
         if session.user_type != UserType.REGISTERED_USER:
-            fingerprint_is_stable = not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
+            fingerprint_is_stable = not (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")))
             if fingerprint_is_stable:
                 st.session_state.is_chat_ready = True
                 if 'fingerprint_wait_start' in st.session_state:
