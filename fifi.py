@@ -843,7 +843,7 @@ class DatabaseManager:
                     timeout_saved_to_crm=bool(row[10]),
                     fingerprint_id=row[11],
                     fingerprint_method=row[12],
-                    visitor_type=row[13] or 'new_visitor', # This line loads the *old* value from DB
+                    visitor_type=row[13] or 'new_visitor',
                     daily_question_count=row[14] or 0,
                     total_question_count=row[15] or 0,
                     last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
@@ -859,28 +859,33 @@ class DatabaseManager:
                     email_switches_count=row[26] or 0,
                     browser_privacy_level=row[27],
                     registration_prompted=bool(row[28]),
-                    int(session.registration_link_clicked), session.recognition_response, session.display_message_offset,
-                    int(session.reverification_pending), 
-                    session.pending_user_type.value if session.pending_user_type else None,
-                    session.pending_email, session.pending_full_name,
-                    session.pending_zoho_contact_id, session.pending_wp_token,
-                    declined_recognized_email_at_iso, ## CHANGE: NEW field
-                    timeout_detected_at_iso, ## CHANGE: NEW field
-                    session.timeout_reason) ## CHANGE: NEW field
-            self.conn.commit()
-            )
-            logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}")
-            
-        except (ValueError, Exception) as e: # Catch ValueError during save operation too
-            logger.error(f"Failed to save session {session.session_id[:8]}: {e}", exc_info=True)
-            # Try to fallback to in-memory on save failure
-            self._fallback_to_local()
-            # After fallback, save to local_sessions
-            if self.db_type == "memory":
-                self.local_sessions[session.session_id] = copy.deepcopy(session)
-                logger.info(f"Fallback: Saved session {session.session_id[:8]} to in-memory storage")
-            raise
-
+                    registration_link_clicked=bool(row[29]),
+                    recognition_response=row[30],
+                    display_message_offset=loaded_display_message_offset, # Use the safely loaded value
+                    reverification_pending=loaded_reverification_pending, # NEW
+                    pending_user_type=loaded_pending_user_type, # NEW
+                    pending_email=loaded_pending_email, # NEW
+                    pending_full_name=loaded_pending_full_name, # NEW
+                    pending_zoho_contact_id=loaded_pending_zoho_contact_id, # NEW
+                    pending_wp_token=loaded_pending_wp_token, # NEW
+                    declined_recognized_email_at=loaded_declined_recognized_email_at, # NEW
+                    timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
+                    timeout_reason=loaded_timeout_reason ## CHANGE: NEW field
+                )
+                
+                logger.debug(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
+                return user_session
+                
+            except (ValueError, Exception) as e: # Catch ValueError during row parsing
+                logger.error(f"Failed to create UserSession object from row for session {session_id[:8]}: {e}", exc_info=True)
+                logger.error(f"Problematic row data (truncated): {str(row)[:200]}")
+                self._fallback_to_local() # Fallback if data parsing is an issue
+                return None
+                
+        except (ValueError, Exception) as e: # Catch ValueError during execute too
+            logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
+            self._fallback_to_local() # Fallback if load itself fails
+            return None
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
         """Load session with complete SQLite Cloud compatibility and connection health check"""
