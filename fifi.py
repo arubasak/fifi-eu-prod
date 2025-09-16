@@ -1280,58 +1280,62 @@ class DatabaseManager:
         
         ## CHANGE: Atomic record_question_and_check_ban for QuestionLimitManager
         def record_question_and_check_ban(self, session: UserSession, session_manager: 'SessionManager') -> Dict[str, Any]:
-            """Atomically record question and apply ban if needed, then save to DB."""
-            try:
-                # Record question first
-                session.daily_question_count += 1
-                session.total_question_count += 1
-                session.last_question_time = datetime.now()
-                
-                ban_applied = False
-                ban_type = BanStatus.NONE
-                ban_reason = ""
-                ban_duration_hours = 0
-                
-                if session.user_type == UserType.REGISTERED_USER:
-                    ## CHANGE: Use constants for question limits for ban trigger
-                    if session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT + 1:
-                        ban_type = BanStatus.ONE_HOUR
-                        ban_reason = f"Registered user Tier 1 limit reached ({REGISTERED_USER_TIER_1_LIMIT} questions)"
-                        ban_duration_hours = TIER_1_BAN_HOURS
-                    elif session.daily_question_count == REGISTERED_USER_QUESTION_LIMIT + 1:
-                        ban_type = BanStatus.TWENTY_FOUR_HOUR
-                        ban_reason = f"Registered user daily limit reached ({REGISTERED_USER_QUESTION_LIMIT} questions)"
-                        ban_duration_hours = TIER_2_BAN_HOURS
-                elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
-                    ## CHANGE: Use constants for question limits for ban trigger
-                    if session.daily_question_count == EMAIL_VERIFIED_QUESTION_LIMIT + 1:
-                        ban_type = BanStatus.TWENTY_FOUR_HOUR
-                        ban_reason = f"Email-verified daily limit reached ({EMAIL_VERIFIED_QUESTION_LIMIT} questions)"
-                        ban_duration_hours = EMAIL_VERIFIED_BAN_HOURS
-                
-                if ban_type != BanStatus.NONE:
-                    self._apply_ban(session, ban_type, ban_reason)
+            """Atomically check for ban trigger BEFORE recording question."""
+        try:
+            # CHECK FOR BAN TRIGGER FIRST (before incrementing)
+            ban_applied = False
+            ban_type = BanStatus.NONE
+            ban_reason = ""
+            ban_duration_hours = 0
+        
+            if session.user_type == UserType.REGISTERED_USER:
+                if session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:  # Currently at 10
+                    # Next question WOULD BE 11, which triggers Tier 1 ban
+                    ban_type = BanStatus.ONE_HOUR
+                    ban_reason = f"Registered user Tier 1 limit reached ({REGISTERED_USER_TIER_1_LIMIT} questions)"
+                    ban_duration_hours = TIER_1_BAN_HOURS
                     ban_applied = True
-                    logger.info(f"✅ Atomic ban applied: {session.session_id[:8]} -> {ban_type.value} for {ban_duration_hours}h")
-
-                ## CHANGE: Sync counts for registered users
-                if session.user_type == UserType.REGISTERED_USER and session.email:
-                    session_manager.sync_registered_user_sessions(session.email, session.session_id)
-                
-                # Save session immediately after updates
+                 elif session.daily_question_count == REGISTERED_USER_QUESTION_LIMIT:  # Currently at 20
+                    ban_type = BanStatus.TWENTY_FOUR_HOUR
+                    ban_reason = f"Registered user daily limit reached ({REGISTERED_USER_QUESTION_LIMIT} questions)"
+                    ban_duration_hours = TIER_2_BAN_HOURS
+                    ban_applied = True
+            elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
+                if session.daily_question_count == EMAIL_VERIFIED_QUESTION_LIMIT:  # Currently at 10
+                    ban_type = BanStatus.TWENTY_FOUR_HOUR
+                    ban_reason = f"Email-verified daily limit reached ({EMAIL_VERIFIED_QUESTION_LIMIT} questions)"
+                    ban_duration_hours = EMAIL_VERIFIED_BAN_HOURS
+                    ban_applied = True
+        
+            # If ban should be applied, apply it WITHOUT incrementing the count
+            if ban_applied:
+                self._apply_ban(session, ban_type, ban_reason)
+                logger.info(f"✅ Ban applied WITHOUT counting question: {session.session_id[:8]} -> {ban_type.value} for {ban_duration_hours}h")
+            
+                # Save session with ban but WITHOUT incrementing question count
                 session_manager._save_session_with_retry(session)
-                
-                logger.debug(f"Question recorded for {session.session_id[:8]}: daily={session.daily_question_count}, total={session.total_question_count}")
-                
-                return {"recorded": True, "ban_applied": ban_applied, "ban_type": ban_type.value if ban_applied else None}
-                
-            except Exception as e:
-                logger.error(f"Failed to record question atomically for {session.session_id[:8]}: {e}", exc_info=True)
-                # Attempt to roll back if possible, or at least log the inconsistency
-                session.daily_question_count = max(0, session.daily_question_count - 1)
-                session.total_question_count = max(0, session.total_question_count - 1)
-                session_manager._save_session_with_retry(session) # Try saving rollback
-                raise
+            
+                return {"recorded": False, "ban_applied": True, "ban_type": ban_type.value}
+        
+            # No ban needed, NOW record the question
+            session.daily_question_count += 1
+            session.total_question_count += 1
+            session.last_question_time = datetime.now()
+        
+            # Sync counts for registered users
+            if session.user_type == UserType.REGISTERED_USER and session.email:
+                session_manager.sync_registered_user_sessions(session.email, session.session_id)
+        
+            # Save session with updated counts
+            session_manager._save_session_with_retry(session)
+        
+            logger.debug(f"Question recorded for {session.session_id[:8]}: daily={session.daily_question_count}, total={session.total_question_count}")
+        
+            return {"recorded": True, "ban_applied": False}
+        
+        except Exception as e:
+            logger.error(f"Failed to check ban and record question for {session.session_id[:8]}: {e}", exc_info=True)
+            raise
         
         ## CHANGE: Removed original record_question method
 
