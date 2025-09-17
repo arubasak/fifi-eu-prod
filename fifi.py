@@ -1039,44 +1039,59 @@ class DatabaseManager:
             self.MAX_ATTEMPTS = MAX_RATE_LIMIT_TRACKING # Reusing for attempts, could be a separate constant
 
         def render_fingerprint_component(self, session_id: str):
-            """Renders fingerprinting component using external fingerprint_component.html file."""
+            """Renders fingerprinting component using external HTML component file."""
             try:
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 html_file_path = os.path.join(current_dir, 'fingerprint_component.html')
-        
+
                 logger.debug(f"🔍 Looking for fingerprint component at: {html_file_path}")
-        
+
                 if not os.path.exists(html_file_path):
                     logger.error(f"❌ Fingerprint component file NOT FOUND at {html_file_path}")
                     logger.info(f"📁 Current directory contents: {os.listdir(current_dir)}")
                     return self._generate_fallback_fingerprint()
-        
+
                 logger.debug(f"✅ Fingerprint component file found, reading content...")
-        
+
                 with open(html_file_path, 'r', encoding='utf-8') as f:
                     html_content = f.read()
-        
+
                 logger.debug(f"📄 Read {len(html_content)} characters from fingerprint component file")
-        
+
                 ## CHANGE: JavaScript Injection Fix - Use json.dumps to safely embed session_id
                 original_content = html_content
                 html_content = html_content.replace('{SESSION_ID}', session_id)
-        
+
                 if original_content == html_content:
                     logger.warning(f"⚠️ No {{SESSION_ID}} placeholder found in HTML content!")
                 else:
                     logger.debug(f"✅ Replaced {{SESSION_ID}} placeholder with {session_id[:8]}...")
-        
-                # Render with proper height for CreepJS to work
+
+                # NEW: Wrap the component in a completely invisible container
+                # This ensures the fingerprint JavaScript runs without affecting page layout
+                hidden_wrapper = f"""
+                <div style="
+                    position: absolute;
+                    visibility: hidden;
+                    height: 0;
+                    width: 0;
+                    overflow: hidden;
+                    pointer-events: none;
+                    z-index: -9999;
+                ">
+                    {html_content}
+                </div>
+                """
+
+                # Render with zero height to ensure no visual impact
                 logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-                st.components.v1.html(html_content, height=100, scrolling=False)
-        
+                st.components.v1.html(hidden_wrapper, height=1, width=0, scrolling=False)
+
                 logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
-        
+
             except Exception as e:
                 logger.error(f"❌ Failed to render external fingerprint component: {e}", exc_info=True)
                 return self._generate_fallback_fingerprint()
-        
 
         def process_fingerprint_data(self, fingerprint_data: Dict[str, Any]) -> Dict[str, Any]:
             """Processes fingerprint data received from the custom component."""
