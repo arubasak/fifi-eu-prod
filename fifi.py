@@ -3495,6 +3495,327 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to sync registered user sessions for {email}: {e}")
 
+    def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]) -> bool:
+        """Applies fingerprinting data from custom component to the session with better validation.
+        This function will now be called only for non-registered users (Guests)."""
+        logger.debug(f"🔍 APPLYING FINGERPRINT received from JS: {fingerprint_data.get('fingerprint_id', 'None')[:8]} to session {session.session_id[:8]} (UserType: {session.user_type.value})")
+        
+        # Guard against applying fingerprint data to registered users
+        if session.user_type == UserType.REGISTERED_USER:
+            logger.warning(f"Attempted to apply fingerprint to REGISTERED_USER {session.session_id[:8]}. Ignoring.")
+            return False
+
+        try:
+            if not fingerprint_data or not isinstance(fingerprint_data, dict):
+                logger.warning("Invalid fingerprint data provided to apply_fingerprinting")
+                return False
+            
+            old_fingerprint_id = session.fingerprint_id
+            old_method = session.fingerprint_method
+            
+            # Store the *new, real* fingerprint data
+            session.fingerprint_id = fingerprint_data.get('fingerprint_id')
+            session.fingerprint_method = fingerprint_data.get('fingerprint_method')
+            # session.visitor_type is determined by apply_fingerprinting after inheritance check
+            session.browser_privacy_level = fingerprint_data.get('browser_privacy_level', 'standard')
+            session.recognition_response = None # Clear any previous recognition response
+            
+            if not session.fingerprint_id or not session.fingerprint_method:
+                logger.error("Invalid fingerprint data: missing essential fields from JS. Reverting to old fingerprint.")
+                session.fingerprint_id = old_fingerprint_id
+                session.fingerprint_method = old_method
+                return False
+            
+            # Now that the current session has its *real* fingerprint from JS,
+            # run the inheritance logic to see if this fingerprint has a history.
+            # This will update user_type, question counts, etc., based on the definitive fingerprint.
+            self._attempt_fingerprint_inheritance(session) # <--- This call will now also update visitor_type
+            
+            # Save session with new fingerprint data and inherited properties
+            try:
+                self.db.save_session(session)
+                logger.info(f"✅ Fingerprinting applied and inheritance checked for {session.session_id[:8]}: {session.fingerprint_method} (ID: {session.fingerprint_id[:8]}...), active={session.active}, rev_pending={session.reverification_pending}")
+            except Exception as e:
+                logger.error(f"Failed to save session after fingerprinting (JS data received): {e}")
+                # If save fails, revert to old fingerprint to avoid inconsistent state
+                session.fingerprint_id = old_fingerprint_id
+                session.fingerprint_method = old_method
+                return False
+        except Exception as e:
+            logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
+            return False
+        return True
+
+    def check_fingerprint_history(self, fingerprint_id: str) -> Dict[str, Any]:
+        """Check if a fingerprint has historical sessions and return relevant information, now handling multiple emails.
+        This function will primarily be used for non-registered users."""
+        
+        # For registered users, fingerprint history is not relevant for primary identification
+        # We don't have the session object here, so we assume this is only called in contexts where
+        # fingerprint is relevant (i.e., for guest recognition flows).
+
+        try:
+            existing_sessions = self.db.find_sessions_by_fingerprint(fingerprint_id)
+            
+            if not existing_sessions:
+                return {'has_history': False}
+            
+            # Get unique emails
+            unique_emails = set()
+            for s in existing_sessions:
+                if s.email:
+                    unique_emails.add(s.email.lower())
+            
+            # Multiple email detection
+            if len(unique_emails) > 1:
+                logger.info(f"🚨 Multiple emails ({len(unique_emails)}) detected for fingerprint {fingerprint_id[:8]}: {unique_emails}")
+                return {
+                    'has_history': True,
+                    'multiple_emails': True,
+                    'email_count': len(unique_emails),
+                    'skip_recognition': True  # Don't show recognition dialog
+                }
+            
+            # Single email - show recognition
+            most_privileged_session = None
+            for s in existing_sessions:
+                # Ensure we don't try to recognize a REGISTERED_USER based on FP if email is primary
+                if s.user_type == UserType.REGISTERED_USER:
+                    logger.info(f"Skipping REGISTERED_USER session {s.session_id[:8]} for fingerprint-based recognition.")
+                    continue
+
+                if s.email and (most_privileged_session is None or 
+                               self._get_privilege_level(s.user_type) > self._get_privilege_level(most_privileged_session.user_type)):
+                    most_privileged_session = s
+
+            if most_privileged_session:
+                return {
+                    'has_history': True,
+                    'multiple_emails': False,
+                    'email': most_privileged_session.email,
+                    'full_name': most_privileged_session.full_name,
+                    'user_type': most_privileged_session.user_type.value,
+                    'last_activity': most_privileged_session.last_activity,
+                    'daily_question_count': most_privileged_session.daily_question_count # Also pass the count from history
+                }
+            
+            return {'has_history': False}
+            
+        except Exception as e:
+            logger.error(f"Error checking fingerprint history: {e}")
+            return {'has_history': False}
+
+    def _mask_email(self, email: str) -> str:
+        """Masks an email address for privacy (shows first 2 chars + domain)."""
+        try:
+            local, domain = email.split('@')
+            if len(local) <= 2:
+                masked_local = local[0] + '*' * (len(local) - 1) # Mask remaining chars
+            else:
+                masked_local = local[:2] + '*' * (len(local) - 2)
+            return f"{masked_local}@{domain}"
+        except Exception:
+            return "****@****.***"
+
+    def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
+        """Email verification - allows unlimited email switches with OTP verification. No evasion penalties."""
+        try:
+            sanitized_email = sanitize_input(email).lower().strip() ## CHANGE: Use global sanitize_input
+            
+            if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', sanitized_email):
+                logger.debug(f"handle_guest_email_verification returning FAILURE: Invalid email format for {email}")
+                return {'success': False, 'message': 'Please enter a valid email address.'}
+            
+            # UPDATED: Removed evasion check as per requirement: email switching is allowed.
+            
+            # Track email usage for this session
+            if sanitized_email not in session.email_addresses_used:
+                session.email_addresses_used.append(sanitized_email)
+            
+            # Update session email (if not already set by re-verification pending)
+            if not session.reverification_pending:
+                if session.email and session.email != sanitized_email:
+                    session.email_switches_count += 1 # Increment for tracking, no penalty
+                session.email = sanitized_email
+            elif session.reverification_pending and sanitized_email != session.pending_email:
+                # If reverification is pending but they enter a different email, treat as new email path
+                session.email_switches_count += 1 # Increment for tracking, no penalty
+                session.email = sanitized_email
+                session.reverification_pending = False
+                session.pending_user_type = None
+                session.pending_email = None
+                session.pending_full_name = None
+                session.pending_zoho_contact_id = None
+                session.pending_wp_token = None
+                logger.warning(f"Session {session.session_id[:8]} switched email during pending re-verification. Resetting pending state.")
+
+            # Clear `declined_recognized_email_at` if they are now proceeding with *any* email verification
+            session.declined_recognized_email_at = None
+            
+            # Set last_activity if not already set (first time starting chat)
+            if session.last_activity is None:
+                session.last_activity = datetime.now()
+
+            # Save session before sending verification
+            try:
+                self.db.save_session(session)
+            except Exception as e:
+                logger.error(f"Failed to save session before email verification: {e}")
+                final_result = {
+                    'success': False, 
+                    'message': 'An internal error occurred saving your session. Please try again.'
+                }
+                logger.debug(f"handle_guest_email_verification returning FAILURE (DB Save): {final_result}")
+                return final_result
+            
+            # Send verification code
+            code_sent = self.email_verification.send_verification_code(sanitized_email)
+            
+            if code_sent:
+                final_result = {
+                    'success': True,
+                    'message': f'Verification code sent to {sanitized_email}. Please check your email.'
+                }
+                logger.debug(f"handle_guest_email_verification returning SUCCESS: {final_result}")
+                return final_result
+            else:
+                final_result = {
+                    'success': False, 
+                    'message': 'Failed to send verification code. Please try again later.'
+                }
+                logger.debug(f"handle_guest_email_verification returning FAILURE (Code Not Sent): {final_result}")
+                return final_result
+                
+        except Exception as e:
+            logger.error(f"Email verification handling failed with unexpected exception: {e}", exc_info=True)
+            final_result = {
+                'success': False, 
+                'message': 'An unexpected error occurred during verification. Please try again.'
+            }
+            logger.debug(f"handle_guest_email_verification returning FAILURE (Unexpected Exception): {final_result}")
+            return final_result
+
+    def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
+        """
+        Verifies the email verification code and upgrades user status.
+        Updated to preserve counts when upgrading from GUEST to EMAIL_VERIFIED_GUEST.
+        """
+        try:
+            email_to_verify = session.pending_email if session.reverification_pending else session.email
+
+            if not email_to_verify:
+                return {'success': False, 'message': 'No email address found for verification.'}
+            
+            sanitized_code = sanitize_input(code).strip() ## CHANGE: Use global sanitize_input
+            
+            if not sanitized_code:
+                return {'success': False, 'message': 'Please enter the verification code.'}
+            
+            verification_success = self.email_verification.verify_code(email_to_verify, sanitized_code)
+            
+            if verification_success:
+                # Check if this is a NEW EMAIL (different from any previous sessions for this fingerprint)
+                is_new_email = True
+                is_same_session_upgrade = False  # NEW: Track if this is same session upgrade
+                previous_emails = set()
+                
+                try:
+                    if session.fingerprint_id and session.user_type != UserType.REGISTERED_USER: # Only check FP history for non-registered
+                        historical_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+                        for old_session in historical_sessions:
+                            if old_session.email:
+                                previous_emails.add(old_session.email.lower())
+                        is_new_email = email_to_verify.lower() not in previous_emails
+                        
+                        # UPDATED: Check if this is same session upgrade (GUEST -> EMAIL_VERIFIED_GUEST)
+                        is_same_session_upgrade = (
+                        not session.reverification_pending and  # Not re-verification
+                        session.user_type == UserType.GUEST and  # Currently guest
+                        session.daily_question_count > 0  # Has asked questions in this session
+                    )
+                    
+                    logger.info(f"Email verification for {session.session_id[:8]}: is_new_email={is_new_email}, is_same_session_upgrade={is_same_session_upgrade}, previous_emails={previous_emails}")
+                except Exception as e:
+                    logger.error(f"Error checking email history for new email determination: {e}")
+                    is_new_email = True # Default to clean slate on error
+
+                if session.reverification_pending:
+                    # Reclaim existing user type and identity (keep inherited counts from _attempt_fingerprint_inheritance)
+                    session.user_type = session.pending_user_type if session.pending_user_type else UserType.EMAIL_VERIFIED_GUEST # Fallback
+                    session.email = session.pending_email
+                    session.full_name = session.pending_full_name
+                    session.zoho_contact_id = session.pending_zoho_contact_id
+                    session.wp_token = session.pending_wp_token
+                    session.reverification_pending = False
+                    session.pending_user_type = None
+                    session.pending_email = None
+                    session.pending_full_name = None
+                    session.pending_zoho_contact_id = None
+                    session.pending_wp_token = None
+                    logger.info(f"✅ User {session.session_id[:8]} reclaimed higher privilege: {session.user_type.value} via re-verification for {session.email}")
+                else:
+                    # New email verification or existing email as guest without pending higher privilege
+                    old_daily_count = session.daily_question_count  # PRESERVE current count
+                    session.user_type = UserType.EMAIL_VERIFIED_GUEST
+                
+                    # UPDATED: Preserve counts for same session upgrade (GUEST -> EMAIL_VERIFIED_GUEST)
+                    if is_same_session_upgrade:
+                        logger.info(f"🔄 SAME SESSION UPGRADE: Preserving question count {old_daily_count} from GUEST to EMAIL_VERIFIED_GUEST for {session.session_id[:8]}")
+                        # Keep existing counts - don't reset anything
+                    elif is_new_email:
+                        # CLEAN SLATE for truly new emails (shared device protection)
+                        logger.info(f"🧹 CLEAN SLATE: New email {email_to_verify} gets fresh start, resetting all counts and bans for {session.session_id[:8]}")
+                        session.daily_question_count = 0
+                        session.total_question_count = 0
+                        session.last_question_time = None
+                        session.question_limit_reached = False
+                        session.ban_status = BanStatus.NONE
+                        session.ban_start_time = None
+                        session.ban_end_time = None
+                        session.ban_reason = None
+                        session.evasion_count = 0
+                        session.current_penalty_hours = 0
+                        session.escalation_level = 0
+                    else:
+                        logger.info(f"♻️ EXISTING EMAIL: For {email_to_verify}, keeping counts as determined by inheritance.")
+                
+                    logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email} with {session.daily_question_count} questions")
+
+                session.question_limit_reached = False
+                session.declined_recognized_email_at = None 
+            
+                if session.last_activity is None:
+                    session.last_activity = datetime.now()
+
+                # NEW: Re-run inheritance after email verification for Guest -> Email Verified transitions
+                # This ensures we pick up previous session counts now that we have an email
+                if not session.reverification_pending and not is_same_session_upgrade:
+                    logger.info(f"🔄 Re-running inheritance after email verification for {session.session_id[:8]} with email {email_to_verify}")
+                    self._attempt_fingerprint_inheritance(session)
+                    logger.info(f"📊 Post-inheritance counts: daily={session.daily_question_count}, total={session.total_question_count}")
+
+                try:
+                    self.db.save_session(session)
+                except Exception as e:
+                    logger.error(f"Failed to save upgraded session: {e}")
+            
+                return {
+                    'success': True,
+                    'message': '✅ Email verified successfully!'
+                }
+            else:
+                return {
+                    'success': False,
+                    'message': 'Invalid verification code. Please check the code and try again.'
+                }
+            
+        except Exception as e:
+            logger.error(f"Email code verification failed: {e}")
+            return {
+                'success': False,
+                'message': 'Verification failed. Please try again.'
+            }
+
     ## START <<<<<<<<<<<<<<<< REPLACEMENT 2 OF 3
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
         """Authenticates user with WordPress and creates/updates session with conditional reset logic."""
