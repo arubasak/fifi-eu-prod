@@ -4642,6 +4642,12 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         st.error("⏰ **Session Timeout**")
         ## CHANGE: Use SESSION_TIMEOUT_MINUTES constant in message
         st.info(f"Your session has expired due to {SESSION_TIMEOUT_MINUTES} minutes of inactivity.")
+
+        # Show countdown before redirect
+        countdown_placeholder = st.empty()
+        for i in range(5, 0, -1):  # 5 second countdown
+            countdown_placeholder.info(f"🏠 Redirecting to home page in {i} seconds...")
+            time.sleep(1)
         
         # TRIGGER BROWSER RELOAD using streamlit_js_eval
         if JS_EVAL_AVAILABLE:
