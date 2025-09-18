@@ -234,6 +234,7 @@ class ErrorSeverity(Enum):
 class ErrorContext:
     component: str
     operation: str
+
     error_type: str
     severity: ErrorSeverity
     user_message: str
@@ -360,7 +361,7 @@ class UserSession:
     # Ban Management
     ban_status: BanStatus = BanStatus.NONE
     ban_start_time: Optional[datetime] = None
-    ban_end_time: Optional[datetime] = None
+    ban_end_time: Optional[str] = None
     ban_reason: Optional[str] = None
     
     # Evasion Tracking
@@ -2019,7 +2020,7 @@ class RateLimiter:
                 sorted_items = sorted(self.requests.items(), 
                                     key=lambda x: max(x[1]) if x[1] else 0,
                                     reverse=False) # Oldest first
-                for old_id, _ in sorted_items[:self.MAX_TRACKED_IDS // 10]: # Remove 10% of max
+                for old_id, _ in sorted_ids[:self.MAX_TRACKED_IDS // 10]: # Remove 10% of max
                     del self.requests[old_id]
             
             if len(self.requests[identifier]) < self.max_requests:
@@ -3446,7 +3447,7 @@ class SessionManager:
                         session.pending_full_name = source_for_identity.full_name
                         session.pending_zoho_contact_id = source_for_identity.zoho_contact_id
                         session.pending_wp_token = source_for_identity.wp_token
-                        logger.info(f"🔄 Re-verification set for upgrade: {source_for_identity.user_type.value} for {session.session_id[:8]}")
+                        logger.info(f"🔄 Offering REGISTERED_USER re-verification for {session.session_id[:8]} (highest precedence)")
                     else:
                         # Same or lower privilege, just inherit the details if available
                         session.user_type = source_for_identity.user_type
@@ -4922,7 +4923,7 @@ Respond ONLY with JSON:
                     'time_until_next': time_until_next
                 }
             
-            # Content moderation check
+            # 1. Content moderation check (ALWAYS FIRST for safety, uses OpenAI Moderation API)
             moderation_result = check_content_moderation(prompt, self.ai.openai_client)
             if moderation_result and moderation_result.get("flagged"):
                 categories = moderation_result.get('categories', [])
@@ -4946,52 +4947,7 @@ Respond ONLY with JSON:
                     "safety_override": False
                 }
 
-            # REMOVED: The `if should_skip_context_check(prompt):` block is removed as per the confirmed solution.
-
-            # NEW: Check if it's a meta-conversation query (LLM Driven)
-            meta_detection = self.detect_meta_conversation_query_llm(prompt)
-            if meta_detection["is_meta"]:
-                logger.info(f"LLM-driven Meta-conversation query detected: {meta_detection['type']}")
-
-                ## CHANGE: Atomic record question for meta-questions
-                try:
-                    self.question_limits.record_question_and_check_ban(session, self)
-                except Exception as e:
-                    logger.error(f"Failed to record meta-question for {session.session_id[:8]}: {e}")
-                    return {
-                        'content': 'An error occurred while tracking your question. Please try again.',
-                        'success': False,
-                        'source': 'Question Tracker'
-                    }
-
-                # Add user message to session history
-                user_message = {'role': 'user', 'content': prompt}
-                    # Ensure content is always a string for history
-                user_message['content'] = str(user_message['content']) 
-                session.messages.append(user_message)
-
-                # Handle meta-query (zero tokens used)
-                meta_response = self.handle_meta_conversation_query(
-                    session, meta_detection["type"], meta_detection.get("scope", "")
-                )
-
-                # Add assistant response to history
-                assistant_message = {
-                    'role': 'assistant',
-                    'content': meta_response.get('content', 'Analysis complete.'),
-                    'source': meta_response.get('source', 'Conversation Analytics'),
-                    'is_meta_response': True  # Flag for UI display
-                }
-                # Ensure content is always a string for history
-                assistant_message['content'] = str(assistant_message['content'])
-                session.messages.append(assistant_message)
-                
-                # Update activity and save session
-                self._update_activity(session)
-
-                return meta_response
-
-            # NEW: Check for pricing/stock questions
+            # 2. Pricing/Stock check (MOVED UP - IMMEDIATE RETURN to avoid LLM tokens/processing)
             is_pricing_stock_query = self.detect_pricing_stock_question(prompt)
             if is_pricing_stock_query:
                 # Store pricing notification info (similar to rate_limit_hit)
@@ -5005,9 +4961,7 @@ Pricing and stock availability are dynamic in nature and subject to market condi
 **For Current Information:**
 - Visit the specific product page on our marketplace at **12taste.com** for real-time pricing and availability
 - Contact our sales team at **sales-eu@12taste.com** for precise, up-to-date pricing and stock information
-- Request formal quotes for confirmed pricing based on your specific requirements
-
-Please proceed with your question, keeping in mind that any pricing or stock information provided should be verified through official channels."""
+- Request formal quotes for confirmed pricing based on your specific requirements""" # REMOVED: "Please proceed..." line
                 }
                 
                 # IMMEDIATELY RETURN the generic response, preventing further AI processing and question counting
@@ -5018,7 +4972,48 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                     'is_pricing_stock_redirect': True 
                 }
 
-            # CHANGE 2: Update the function call to pass conversation history
+            # 3. LLM-driven Meta-conversation query detection (e.g., "count my questions", "summarize chat")
+            meta_detection = self.detect_meta_conversation_query_llm(prompt)
+            if meta_detection["is_meta"]:
+                logger.info(f"LLM-driven Meta-conversation query detected: {meta_detection['type']}")
+
+                # Atomic record question for meta-questions
+                try:
+                    self.question_limits.record_question_and_check_ban(session, self)
+                except Exception as e:
+                    logger.error(f"Failed to record meta-question for {session.session_id[:8]}: {e}")
+                    return {
+                        'content': 'An error occurred while tracking your question. Please try again.',
+                        'success': False,
+                        'source': 'Question Tracker'
+                    }
+
+                # Add user message to session history
+                user_message = {'role': 'user', 'content': prompt}
+                user_message['content'] = str(user_message['content']) 
+                session.messages.append(user_message)
+
+                # Handle meta-query (zero tokens for response generation, but initial detection used LLM)
+                meta_response = self.handle_meta_conversation_query(
+                    session, meta_detection["type"], meta_detection.get("scope", "")
+                )
+
+                # Add assistant response to history
+                assistant_message = {
+                    'role': 'assistant',
+                    'content': meta_response.get('content', 'Analysis complete.'),
+                    'source': meta_response.get('source', 'Conversation Analytics'),
+                    'is_meta_response': True
+                }
+                assistant_message['content'] = str(assistant_message['content'])
+                session.messages.append(assistant_message)
+                
+                # Update activity and save session
+                self._update_activity(session)
+
+                return meta_response
+
+            # 4. LLM-driven Industry context check (identifies relevance AND greetings)
             context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
             if context_result and not context_result.get("relevant", True):
                 confidence = context_result.get("confidence", 0.0)
@@ -5032,7 +5027,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                     context_message = "I'm specialized in helping food & beverage industry professionals with ingredient sourcing, formulation, and technical questions. Could you please rephrase your question to focus on professional food ingredient needs?"
                 elif category == "unrelated_industry":
                     context_message = "I'm designed to assist with food & beverage ingredients and related industry topics. For questions outside the food industry, please try a general-purpose AI assistant."
-                elif category == "greeting_or_polite": # NEW: Handle LLM-detected greetings
+                elif category == "greeting_or_polite": # Handle LLM-detected greetings
                     # Atomic record question for greetings - now done by LLM
                     try:
                         self.question_limits.record_question_and_check_ban(session, self)
@@ -5089,10 +5084,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                     "context_confidence": confidence
                 }
 
-            # REMOVED: NEW: Check for pricing/stock questions (Moved up with immediate return)
-            # This block was moved above the context_result check and now contains an immediate return.
-
-            # Continue with regular processing for non-meta queries
+            # Continue with regular processing for non-meta/non-greeting/relevant queries
             # Check question limits (THIS IS THE PRE-QUESTION LIMIT CHECK)
             limit_check = self.question_limits.is_within_limits(session)
 
@@ -5100,15 +5092,12 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
             if not limit_check['allowed']:
                 ban_message = limit_check.get("message", 'Access restricted.')
 
-                ## CHANGE: Atomic question recording and ban application
                 if limit_check.get('reason') == 'registered_user_tier1_limit':
-                    # The ban should already be applied by record_question_and_check_ban if user has exceeded.
-                    # This branch should now primarily be for displaying the existing ban.
                     logger.info(f"Registered User Tier 1 ({REGISTERED_USER_TIER_1_LIMIT} questions) limit previously reached, displaying ban for session {session.session_id[:8]}.")
                     return {
                         'banned': True,
                         'content': ban_message,
-                        'time_remaining': timedelta(hours=TIER_1_BAN_HOURS)  ## CHANGE: Use constant
+                        'time_remaining': timedelta(hours=TIER_1_BAN_HOURS)
                     }
                     
                 elif limit_check.get('reason') == 'registered_user_tier2_limit':
@@ -5116,7 +5105,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                     return {
                         'banned': True,
                         'content': ban_message,
-                        'time_remaining': timedelta(hours=TIER_2_BAN_HOURS) ## CHANGE: Use constant
+                        'time_remaining': timedelta(hours=TIER_2_BAN_HOURS)
                     }
                     
                 elif limit_check.get('reason') == 'email_verified_guest_limit':
@@ -5124,7 +5113,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                     return {
                         'banned': True,
                         'content': ban_message,
-                        'time_remaining': timedelta(hours=EMAIL_VERIFIED_BAN_HOURS) ## CHANGE: Use constant
+                        'time_remaining': timedelta(hours=EMAIL_VERIFIED_BAN_HOURS)
                     }
                     
                 elif limit_check.get('reason') == 'guest_limit':
@@ -5141,7 +5130,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
             self._clear_error_notifications()
             
             # Sanitize input
-            sanitized_prompt = sanitize_input(prompt) ## CHANGE: Use global sanitize_input
+            sanitized_prompt = sanitize_input(prompt)
             if not sanitized_prompt:
                 return {
                     'content': 'Please enter a valid question.',
@@ -5149,7 +5138,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
                     'source': 'Input Validation'
                 }
             
-            ## CHANGE: Call atomic question recording and ban check BEFORE AI response
+            # Call atomic question recording and ban check BEFORE AI response
             try:
                 question_record_status = self.question_limits.record_question_and_check_ban(session, self)
                 if question_record_status.get("ban_applied"):
@@ -5937,7 +5926,7 @@ def handle_fingerprint_requests_from_query():
             logger.info(f"Fingerprint for session {session_id[:8]} already processed. Clearing params and skipping.")
             # Clear query parameters to clean up the URL
             params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
-            for param in params_to_clear:
+            for param in st.query_params:
                 if param in st.query_params:
                     del st.query_params[param]
             st.rerun()
@@ -5957,7 +5946,7 @@ def handle_fingerprint_requests_from_query():
         
         # Clear query parameters immediately after extraction
         params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
-        for param in params_to_clear:
+        for param in st.query_params:
             if param in st.query_params:
                 del st.query_params[param]
         
