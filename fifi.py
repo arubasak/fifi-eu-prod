@@ -6030,7 +6030,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
     with tab1:
         if not session_manager.config.WORDPRESS_URL:
             st.warning("Sign-in is currently disabled because the authentication service (WordPress URL) is not configured in application secrets.")
-        else: # This 'else' is for when WordPress URL IS configured
+        else:
             # This is the outer if/elif/else chain for the WordPress tab content
             if st.session_state.get('wordpress_error', {}).get('show_fallback', False):
                 error_info = st.session_state.wordpress_error
@@ -6050,7 +6050,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 with col1:
                     if st.button("📧 Switch to Email Login", use_container_width=True):
                         st.session_state.wordpress_fallback_active = True
-                        # CORRECTED: Changed '@''' to '@'
                         st.session_state.fallback_email = error_info.get('username', '') if '@' in error_info.get('username', '') else ''
                         st.session_state.wordpress_error['show_fallback'] = False
                         st.rerun()
@@ -6162,9 +6161,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             st.error("Error: No email address found for resend. Please restart the login process.")
                         st.rerun()
 
-            # This 'else' is for the standard WordPress login form, when no fallback UI is active.
-            # It must align with the 'if' and 'elif' statements above.
-            else: # <--- CORRECTED INDENTATION
+            else: # Standard WordPress login form
                 with st.form("login_form", clear_on_submit=True):
                     st.markdown("### 🔐 Sign In to Your Account")
                     username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
@@ -6228,9 +6225,11 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.warning("🔐 **Registered Users**")
         st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** with tier system:")
         st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break")
-        st.markdown(f"  - **Tier 2**: Questions {tier1_upper_bound + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset") # Corrected
+        # Define tier1_upper_bound here, outside the if/elif/else chain, for universal access within this block
+        tier1_upper_bound = REGISTERED_USER_TIER_1_LIMIT # This is the crucial line moved
+        st.markdown(f"  - **Tier 2**: Questions {tier1_upper_bound + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset")
         st.markdown("• Cross-device tracking & chat saving")
-        st.markdown("• Priority access during high usage")
+        st.markdown("• • Priority access during high usage")
         
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display and login status."""
