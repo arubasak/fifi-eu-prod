@@ -402,6 +402,11 @@ class UserSession:
     tier1_completed_in_cycle: bool = False
     tier_cycle_started_at: Optional[datetime] = None
 
+    # NEW: Login method tracking
+    login_method: Optional[str] = None  # 'wordpress', 'email_fallback', 'guest', 'email_verified'
+    is_degraded_login: bool = False  # True when registered user logged in via email instead of WordPress
+    degraded_login_timestamp: Optional[datetime] = None
+
 
 class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
@@ -513,7 +518,11 @@ class DatabaseManager:
                     -- NEW: Tier cycle tracking columns
                     current_tier_cycle_id TEXT,
                     tier1_completed_in_cycle INTEGER DEFAULT 0,
-                    tier_cycle_started_at TEXT
+                    tier_cycle_started_at TEXT,
+                    -- NEW: Login method tracking
+                    login_method TEXT,
+                    is_degraded_login INTEGER DEFAULT 0,
+                    degraded_login_timestamp TEXT
                 )
             ''')
             
@@ -532,6 +541,9 @@ class DatabaseManager:
                 ("current_tier_cycle_id", "TEXT"), # NEW
                 ("tier1_completed_in_cycle", "INTEGER DEFAULT 0"), # NEW
                 ("tier_cycle_started_at", "TEXT"), # NEW
+                ("login_method", "TEXT"), # NEW
+                ("is_degraded_login", "INTEGER DEFAULT 0"), # NEW
+                ("degraded_login_timestamp", "TEXT"), # NEW
             ]
             for col_name, col_type in new_columns:
                 try:
@@ -654,9 +666,11 @@ class DatabaseManager:
             # NEW: Handle None for new cycle tracking fields
             tier_cycle_started_at_iso = session.tier_cycle_started_at.isoformat() if session.tier_cycle_started_at else None
 
+            # NEW: Handle None for new login tracking fields
+            degraded_login_timestamp_iso = session.degraded_login_timestamp.isoformat() if session.degraded_login_timestamp else None
 
             self.conn.execute(
-                '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at, login_method, is_degraded_login, degraded_login_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (session.session_id, session.user_type.value, session.email, session.full_name,
                  session.zoho_contact_id, session.created_at.isoformat(),
                  last_activity_iso, json_messages, int(session.active),
@@ -681,7 +695,10 @@ class DatabaseManager:
                  session.timeout_reason, # NEW field
                  session.current_tier_cycle_id, # NEW
                  int(session.tier1_completed_in_cycle), # NEW
-                 tier_cycle_started_at_iso # NEW
+                 tier_cycle_started_at_iso, # NEW
+                 session.login_method, # NEW
+                 int(session.is_degraded_login), # NEW
+                 degraded_login_timestamp_iso # NEW
                  ))
             self.conn.commit()
             
@@ -734,6 +751,13 @@ class DatabaseManager:
                 session.tier1_completed_in_cycle = False
             if session and not hasattr(session, 'tier_cycle_started_at'):
                 session.tier_cycle_started_at = None
+            # NEW: Add compatibility for new login tracking fields
+            if session and not hasattr(session, 'login_method'):
+                session.login_method = None
+            if session and not hasattr(session, 'is_degraded_login'):
+                session.is_degraded_login = False
+            if session and not hasattr(session, 'degraded_login_timestamp'):
+                session.degraded_login_timestamp = None
 
             return copy.deepcopy(session)
         
@@ -742,16 +766,16 @@ class DatabaseManager:
             if hasattr(self.conn, 'row_factory'):
                 self.conn.row_factory = None
             
-            ## CHANGE: Update SELECT statement to include new fields (timeout_detected_at, timeout_reason, cycle tracking)
-            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
+            ## CHANGE: Update SELECT statement to include new fields (timeout_detected_at, timeout_reason, cycle tracking, login_method, is_degraded_login, degraded_login_timestamp)
+            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at, login_method, is_degraded_login, degraded_login_timestamp FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
             row = cursor.fetchone()
             
             if not row: 
                 logger.debug(f"No active session found for ID {session_id[:8]}.")
                 return None
             
-            ## CHANGE: Update expected columns for new fields (now 44)
-            expected_min_cols = 44
+            ## CHANGE: Update expected columns for new fields (now 47)
+            expected_min_cols = 47
             if len(row) < expected_min_cols:
                 logger.error(f"Row has insufficient columns: {len(row)} (expected at least {expected_min_cols}). Data corruption suspected or old schema.")
                 pass 
@@ -776,7 +800,10 @@ class DatabaseManager:
                 loaded_current_tier_cycle_id = row[41] if len(row) > 41 else None
                 loaded_tier1_completed_in_cycle = bool(row[42]) if len(row) > 42 else False
                 loaded_tier_cycle_started_at = datetime.fromisoformat(row[43]) if len(row) > 43 and row[43] else None
-
+                # NEW: Safely get login tracking fields
+                loaded_login_method = row[44] if len(row) > 44 else None
+                loaded_is_degraded_login = bool(row[45]) if len(row) > 45 else False
+                loaded_degraded_login_timestamp = datetime.fromisoformat(row[46]) if len(row) > 46 and row[46] else None
 
                 loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
 
@@ -824,7 +851,10 @@ class DatabaseManager:
                     timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
                     current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
                     tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # NEW
-                    tier_cycle_started_at=loaded_tier_cycle_started_at # NEW
+                    tier_cycle_started_at=loaded_tier_cycle_started_at, # NEW
+                    login_method=loaded_login_method, # NEW
+                    is_degraded_login=loaded_is_degraded_login, # NEW
+                    degraded_login_timestamp=loaded_degraded_login_timestamp # NEW
                 )
                 
                 logger.debug(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
@@ -872,6 +902,13 @@ class DatabaseManager:
                     session.tier1_completed_in_cycle = False
                 if not hasattr(session, 'tier_cycle_started_at'):
                     session.tier_cycle_started_at = None
+                # NEW: Add compatibility for new login tracking fields
+                if not hasattr(session, 'login_method'):
+                    session.login_method = None
+                if not hasattr(session, 'is_degraded_login'):
+                    session.is_degraded_login = False
+                if not hasattr(session, 'degraded_login_timestamp'):
+                    session.degraded_login_timestamp = None
             logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
             return sessions
         
@@ -879,12 +916,12 @@ class DatabaseManager:
             if hasattr(self.conn, 'row_factory'):
                 self.conn.row_factory = None
 
-            ## CHANGE: Update SELECT statement to include new fields (timeout_detected_at, timeout_reason, cycle tracking)
-            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
+            ## CHANGE: Update SELECT statement to include new fields (timeout_detected_at, timeout_reason, cycle tracking, login tracking)
+            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at, login_method, is_degraded_login, degraded_login_timestamp FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
             sessions = []
             for row in cursor.fetchall():
-                ## CHANGE: Update expected columns for new fields (now 44)
-                expected_min_cols = 44
+                ## CHANGE: Update expected columns for new fields (now 47)
+                expected_min_cols = 47
                 if len(row) < expected_min_cols:
                     logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected at least {expected_min_cols}). Skipping row.")
                     continue
@@ -908,7 +945,10 @@ class DatabaseManager:
                     loaded_current_tier_cycle_id = row[41] if len(row) > 41 else None
                     loaded_tier1_completed_in_cycle = bool(row[42]) if len(row) > 42 else False
                     loaded_tier_cycle_started_at = datetime.fromisoformat(row[43]) if len(row) > 43 and row[43] else None
-
+                    # NEW: Safely get login tracking fields
+                    loaded_login_method = row[44] if len(row) > 44 else None
+                    loaded_is_degraded_login = bool(row[45]) if len(row) > 45 else False
+                    loaded_degraded_login_timestamp = datetime.fromisoformat(row[46]) if len(row) > 46 and row[46] else None
 
                     loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
 
@@ -956,7 +996,10 @@ class DatabaseManager:
                         timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
                         current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
                         tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # NEW
-                        tier_cycle_started_at=loaded_tier_cycle_started_at # NEW
+                        tier_cycle_started_at=loaded_tier_cycle_started_at, # NEW
+                        login_method=loaded_login_method, # NEW
+                        is_degraded_login=loaded_is_degraded_login, # NEW
+                        degraded_login_timestamp=loaded_degraded_login_timestamp # NEW
                     )
                     sessions.append(s)
                 except Exception as e:
@@ -2200,7 +2243,7 @@ class TavilyFallbackAgent:
                 self.openai_client = None
 
     def reformulate_query_for_search(self, current_question: str, conversation_history: List[BaseMessage]) -> str:
-        """LLM-powered query reformulation for better search results."""
+        """LLM-powered query reformulation for better search results, focused on F&B industry."""
         try:
             # For very complete, specific queries, minimal reformulation needed
             if len(current_question.split()) > 10 and not any(indicator in current_question.lower() 
@@ -2227,8 +2270,8 @@ class TavilyFallbackAgent:
             
             conversation_context = "\n".join(context_parts) if context_parts else "No prior conversation"
 
-            # Optimized LLM prompt for query reformulation
-            reformulation_prompt = f"""Transform this question into an optimized web search query for food ingredient information.
+            # Optimized LLM prompt for query reformulation (UPDATED FOR F&B INDUSTRY)
+            reformulation_prompt = f"""Transform this question into an optimized web search query for the food and beverage industry.
 
 CONVERSATION CONTEXT:
 {conversation_context}
@@ -2238,11 +2281,12 @@ CURRENT QUESTION: "{current_question}"
 RULES:
 1. If follow-up question, incorporate context from conversation
 2. Make vague questions specific using context
-3. Keep query concise but searchable (3-8 words ideal)
-4. Always include "food ingredients" or related terms for industry focus
-5. For pricing questions: add "market pricing" not specific prices
-6. For supplier questions: include "suppliers" or "sourcing"
-7. For availability: include "availability" or "stock"
+3. Keep query concise but searchable (3-12 words acceptable)
+4. Always include "food beverage industry" or related terms for industry focus
+5. For pricing questions: add "market pricing B2B"
+6. For supplier questions: include "suppliers manufacturers B2B"
+7. For regulations: include "compliance standards food industry"
+8. For equipment/processing: include "food processing equipment"
 
 OUTPUT: Only the optimized search query, nothing else."""
 
@@ -2265,7 +2309,7 @@ OUTPUT: Only the optimized search query, nothing else."""
                 return self._fallback_reformulation(current_question, conversation_history)
             
             # Ensure query isn't too long (waste of tokens/poor search results)
-            if len(reformulated.split()) > 15 or len(reformulated) > 120:
+            if len(reformulated.split()) > 15 or len(reformulated) > 120: # Adjusted word limit
                 logger.warning(f"LLM reformulation too long: '{reformulated}', using fallback")
                 return self._fallback_reformulation(current_question, conversation_history)
             
@@ -2295,8 +2339,8 @@ OUTPUT: Only the optimized search query, nothing else."""
 
         if not is_likely_followup or not conversation_history:
             # Standalone query - add food ingredients context if missing
-            if "food" not in current_question_lower and "ingredient" not in current_question_lower:
-                return f"{current_question} food ingredients"
+            if "food" not in current_question_lower and "ingredient" not in current_question_lower and "beverage" not in current_question_lower: # Updated
+                return f"{current_question} food beverage industry" # Updated
             return current_question
 
         # Extract context keywords from recent messages
@@ -2311,28 +2355,28 @@ OUTPUT: Only the optimized search query, nothing else."""
         # Apply context-based reformulation
         if any(word in current_question_lower for word in ["pricing", "cost", "price"]):
             if context_keywords:
-                return f"{' '.join(context_keywords[:2])} pricing costs food ingredients"
+                return f"{' '.join(context_keywords[:2])} pricing costs food beverage industry" # Updated
             else:
-                return f"{current_question} food ingredients pricing market"
+                return f"{current_question} food beverage industry pricing market" # Updated
 
         elif any(word in current_question_lower for word in ["suppliers", "supplier", "source", "where"]):
             if context_keywords:
-                return f"{' '.join(context_keywords[:2])} suppliers food ingredients sourcing"
+                return f"{' '.join(context_keywords[:2])} suppliers food beverage industry sourcing" # Updated
             else:
-                return f"{current_question} food ingredients suppliers"
+                return f"{current_question} food beverage industry suppliers" # Updated
 
         elif any(word in current_question_lower for word in ["availability", "stock", "available"]):
             if context_keywords:
-                return f"{' '.join(context_keywords[:2])} availability food ingredients market"
+                return f"{' '.join(context_keywords[:2])} availability food beverage industry market" # Updated
             else:
-                return f"{current_question} food ingredients availability"
+                return f"{current_question} food beverage industry availability" # Updated
         
         else:
             # General follow-up
             if context_keywords:
-                return f"{current_question} {' '.join(context_keywords[:2])} food ingredients"
+                return f"{current_question} {' '.join(context_keywords[:2])} food beverage industry" # Updated
             else:
-                return f"{current_question} food ingredients"
+                return f"{current_question} food beverage industry" # Updated
 
     def add_utm_to_links(self, content: str) -> str:
         """Finds all Markdown links in a string and appends the UTM parameters."""
@@ -2406,59 +2450,96 @@ OUTPUT: Only the optimized search query, nothing else."""
         return "\n".join(response_parts)
 
     def determine_search_strategy(self, question: str, pinecone_error_type: str = None) -> Dict[str, Any]:
-        """Determine whether to use domain-restricted or worldwide search."""
-        # Simplified strategy for now, as LLM reformulation should handle context well
+        """Determine search strategy based on Pinecone status"""
+        
+        # ONLY when Pinecone is DOWN/ERROR
+        if pinecone_error_type and pinecone_error_type != "healthy" and pinecone_error_type != "recency_direct_route": # Add recency_direct_route as a special case where we don't apply 12taste.com filter
+            logger.info(f"🔒 Pinecone {pinecone_error_type} - restricting Tavily to 12taste.com domain only")
+            return {
+                "strategy": "domain_restricted_12taste",
+                "include_domains": ["12taste.com"],  # ONLY 12taste.com
+                "exclude_domains": None,
+                "reason": f"Pinecone {pinecone_error_type} - using 12taste.com as fallback source"
+            }
+        
+        # Normal operation - Pinecone is healthy or we are directly routing due to recency
+        logger.info("🌐 Using standard Tavily search with competitor exclusions")
         return {
             "strategy": "worldwide_with_exclusions",
-            "include_domains": None, 
-            "exclude_domains": DEFAULT_EXCLUDED_DOMAINS,
-            "reason": "Standard safety fallback"
+            "include_domains": None,  # Search ALL domains...
+            "exclude_domains": DEFAULT_EXCLUDED_DOMAINS,  # ...EXCEPT competitors
+            "reason": "Standard web search with competitor exclusion"
         }
 
     def query(self, prompt: str, chat_history: List[BaseMessage], pinecone_error_type: str = None) -> Dict[str, Any]:
-        """
-        Query Tavily for web search with LLM-powered query reformulation.
-        
-        Args:
-            prompt: The current user question
-            chat_history: List of previous messages for context
-            pinecone_error_type: Type of Pinecone error (if any) to determine search strategy
-        """
+        """Query Tavily with two-step fallback when Pinecone is down"""
         try:
-            # Reformulate the query for better search results
+            # Reformulate the query
             reformulated_query = self.reformulate_query_for_search(prompt, chat_history)
             logger.info(f"🔍 Original query: '{prompt}' → Reformulated: '{reformulated_query}'")
             
-            # Determine search strategy
+            # Determine initial search strategy
             strategy = self.determine_search_strategy(reformulated_query, pinecone_error_type)
             
-            # Build search parameters for direct SDK
+            # Build search parameters
             sdk_params = {
                 "query": reformulated_query,
                 "max_results": 5,
-                "include_answer": "advanced",      # ✅ Advanced for better answers
-                "search_depth": "advanced",        # ✅ Advanced for deeper search
-                "include_raw_content": "text"      # ✅ Added for better content
+                "include_answer": "advanced",
+                "search_depth": "advanced",
+                "include_raw_content": "text"
             }
             
-            # Add domain restrictions
+            # Apply domain strategy
             if strategy.get("include_domains"):
                 sdk_params["include_domains"] = strategy["include_domains"]
-                logger.info(f"🔍 Tavily domain-restricted search: {strategy['include_domains'][0]}")
+                logger.info(f"🔍 Tavily domain-restricted search: {strategy['include_domains']}")
             elif strategy.get("exclude_domains"):
                 sdk_params["exclude_domains"] = strategy["exclude_domains"]
                 logger.info(f"🌐 Tavily worldwide search excluding {len(strategy['exclude_domains'])} competitor domains")
-                
-            logger.info(f"🔍 Direct Tavily SDK call with params: {list(sdk_params.keys())}")
             
-            # Execute search using Tavily client
+            # Execute search
             search_results = self.tavily_client.search(**sdk_params)
+            
+            # NEW: Check if 12taste.com-only search returned no results
+            if (strategy["strategy"] == "domain_restricted_12taste" and 
+                (not search_results or 
+                 not search_results.get('results') or 
+                 len(search_results.get('results', [])) == 0)):
+                
+                logger.warning("⚠️ No results found on 12taste.com, falling back to regular web search")
+                
+                # Retry with standard worldwide search (excluding competitors)
+                sdk_params_fallback = {
+                    "query": reformulated_query,
+                    "max_results": 5,
+                    "include_answer": "advanced",
+                    "search_depth": "advanced",
+                    "include_raw_content": "text",
+                    "exclude_domains": DEFAULT_EXCLUDED_DOMAINS  # Exclude competitors only
+                }
+                
+                # Remove include_domains for worldwide search
+                sdk_params_fallback.pop("include_domains", None)
+                
+                logger.info(f"🌐 Retrying with worldwide search excluding {len(DEFAULT_EXCLUDED_DOMAINS)} competitor domains")
+                search_results = self.tavily_client.search(**sdk_params_fallback)
+                
+                # Update strategy for response metadata
+                strategy = {
+                    "strategy": "worldwide_with_exclusions_after_12taste_fallback",
+                    "reason": "No results from 12taste.com, expanded to worldwide search"
+                }
             
             # Synthesize the results
             synthesized_content = self.synthesize_search_results(search_results, reformulated_query)
             
             # Add UTM parameters to all links
             final_content = self.add_utm_to_links(synthesized_content)
+            
+            # Add note if we had to fallback
+            if strategy.get("strategy") == "worldwide_with_exclusions_after_12taste_fallback":
+                final_content = f"*Note: No specific information found on 12taste.com, showing results from other industry sources.*\n\n{final_content}"
             
             return {
                 "content": final_content,
@@ -2565,6 +2646,38 @@ class EnhancedAI:
         """Get current Pinecone error type for Tavily strategy determination."""
         return error_handler.component_status.get("Pinecone", "healthy")
 
+    # NEW: _needs_current_information method
+    def _needs_current_information(self, prompt: str) -> bool:
+        """Check if query needs current/updated information"""
+        prompt_lower = prompt.lower()
+        
+        # Time-based indicators
+        time_indicators = [
+            "latest", "newest", "recent", "current", "today", "yesterday",
+            "this week", "last week", "this month", "last month",
+            "2024", "2025", "2026",  # Current and near-future years
+            "update", "updates", "updated",
+            "now", "nowadays", "presently", "currently"
+        ]
+        
+        # News and market indicators  
+        market_indicators = [
+            "news", "breaking", "announcement", "announced",
+            "trend", "trends", "trending", "forecast",
+            "market price", "market report", "market update",
+            "just released"
+        ]
+        
+        # Regulatory updates
+        regulatory_indicators = [
+            "new regulation", "updated regulation", "revised",
+            "amendment", "change in law", "policy update"
+        ]
+        
+        all_indicators = time_indicators + market_indicators + regulatory_indicators
+        
+        return any(indicator in prompt_lower for indicator in all_indicators)
+
     # CHANGE 5: Updated Fallback Logic for Business Rules
     def should_use_web_fallback(self, pinecone_response: Dict[str, Any], original_question: str) -> bool:
         """
@@ -2590,13 +2703,6 @@ class EnhancedAI:
         if has_citation_markers:
             logger.warning(f"🔍 CITATION DEBUG: Found markers in content, has_citations={has_citations_flag}")
             logger.warning(f"Content preview: {content[:200]}...")
-
-        # NEW: Check original question for recency indicators
-        recency_indicators = ["latest", "newest", "recent", "current", "2024", "2025"]
-        if any(indicator in original_lower for indicator in recency_indicators):
-            logger.warning("🔄 Fallback TRIGGERED: User requested latest/current information.")
-            return True
-        logger.warning("✅ Recency check PASSED")
 
         # RULE 1: NEVER fallback if Pinecone provides the business redirect for pricing/stock.
         # This is the desired final answer for these questions.
@@ -2657,20 +2763,49 @@ class EnhancedAI:
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """
         AI response flow that prioritizes Pinecone and adheres to strict business rules for fallback.
+        Now includes direct Tavily routing for recency questions.
         """
         # Convert chat history to LangChain format
-        langchain_history = []
-        if chat_history:
-            for msg in chat_history[-10:]: # Limit to last 10 messages
-                role = msg.get("role")
-                content = msg.get("content", "")
-                if role == "user":
-                    langchain_history.append(HumanMessage(content=content))
-                elif role == "assistant":
-                    langchain_history.append(AIMessage(content=content))
+        def _convert_to_langchain_format(history: List[Dict]) -> List[BaseMessage]:
+            langchain_history_converted = []
+            if history:
+                for msg in history[-10:]: # Limit to last 10 messages
+                    role = msg.get("role")
+                    content = msg.get("content", "")
+                    if role == "user":
+                        langchain_history_converted.append(HumanMessage(content=content))
+                    elif role == "assistant":
+                        langchain_history_converted.append(AIMessage(content=content))
+            return langchain_history_converted
+        
+        langchain_history = _convert_to_langchain_format(chat_history)
         langchain_history.append(HumanMessage(content=prompt))
 
-        # --- Primary Flow: Always try Pinecone first ---
+        # NEW: Check for recency indicators FIRST (Direct Tavily Routing)
+        if self._needs_current_information(prompt):
+            logger.info("🚀 Recency keywords detected - routing directly to Tavily")
+            
+            if self.tavily_agent:
+                try:
+                    # Pass "recency_direct_route" as error type to prevent 12taste.com-only filter
+                    web_response = self.tavily_agent.query(
+                        prompt, 
+                        langchain_history,
+                        "recency_direct_route"  # Special indicator
+                    )
+                    
+                    if web_response and web_response.get("success"):
+                        logger.info("✅ Direct Tavily response successful for recency query.")
+                        error_handler.mark_component_healthy("Tavily")
+                        return web_response
+                        
+                except Exception as e:
+                    logger.error(f"Direct Tavily search for recency failed: {e}. Falling back to normal flow.")
+                    # Continue to Pinecone/Tavily fallback if direct Tavily fails
+            else:
+                logger.warning("Tavily agent not initialized, cannot handle recency query directly.")
+
+        # --- Primary Flow: Always try Pinecone first (for non-recency queries) ---
         if self.pinecone_tool:
             try:
                 logger.info("🧠 Querying Pinecone knowledge base (primary)...")
@@ -2751,6 +2886,34 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     return {"flagged": False}
 
+# NEW: Pre-filter function for obvious allowed queries
+def should_skip_context_check(prompt: str) -> bool:
+    """Skip context check for obvious allowed queries like greetings or short phrases."""
+    prompt_lower = prompt.lower().strip()
+    
+    # Greetings and polite expressions (extended based on 12taste.com context)
+    allowed_phrases = [
+        "hello", "hi", "hey", "good morning", "good afternoon", 
+        "good evening", "thanks", "thank you", "bye", "goodbye",
+        "how are you", "what's up", "greetings", "cheers",
+        "please", "sorry", "excuse me", "pardon",
+        "hi fifi", "hello fifi", "fifi"
+    ]
+    
+    # Single word or very short phrases (e.g., "OK", "Sure")
+    if len(prompt_lower.split()) <= 2:
+        return True
+        
+    # Exact greeting matches
+    if prompt_lower in allowed_phrases:
+        return True
+        
+    # Starts with greeting
+    if any(prompt_lower.startswith(phrase) for phrase in allowed_phrases):
+        return True
+    
+    return False
+
 # CHANGE 1: Enhanced Validation Function with Context
 @handle_api_errors("Industry Context Check", "Validate Question Context", show_to_user=False)
 def check_industry_context(prompt: str, chat_history: List[Dict] = None, client: Optional[openai.OpenAI] = None) -> Optional[Dict[str, Any]]:
@@ -2773,31 +2936,42 @@ def check_industry_context(prompt: str, chat_history: List[Dict] = None, client:
         conversation_context = "\n".join(context_parts)
 
     try:
-        context_check_prompt = f"""You are an industry context validator for 12taste.com, a B2B marketplace for food ingredients.
+        # UPDATED: More comprehensive prompt for 12taste.com context
+        context_check_prompt = f"""You are an industry context validator for 12taste.com, a B2B marketplace connecting food & beverage manufacturers with ingredient suppliers.
 
 **CONVERSATION HISTORY (for context):**
 {conversation_context if conversation_context else "No previous conversation."}
 
 **CURRENT USER QUESTION:** "{prompt}"
 
-**TASK:** Analyze the **CURRENT USER QUESTION**. Considering the conversation history, determine if it is a relevant B2B food & beverage industry question. A follow-up like "What about pricing?" IS relevant if the context was about an ingredient.
+**TASK:** Analyze the **CURRENT USER QUESTION**. Considering the conversation history, determine if it is a relevant B2B food & beverage industry question.
 
-**ALLOW:**
-- Food/beverage ingredients, suppliers, formulation, applications.
-- Food safety, regulations, market trends.
-- Follow-up questions that are relevant IN CONTEXT.
+**ALWAYS ALLOW:**
+- Greetings and polite expressions (hello, hi, thanks, bye, how are you)
+- Questions about food/beverage ingredients, additives, flavors, colors
+- Supplier sourcing, B2B pricing, bulk purchasing queries  
+- Food manufacturing, processing, formulation questions
+- Regulatory compliance (FDA, EU, FSSAI, Halal, Kosher)
+- Packaging, shelf life, technical specifications
+- Market trends in food & beverage industry
+- Follow-up questions that relate to previous context
 
-**FLAG:**
-- Unrelated industries (automotive, finance).
-- Personal consumer cooking, diet advice.
-- Off-topic subjects (politics, sports).
+**FLAG ONLY:**
+- Consumer/home cooking recipes or diet advice
+- Completely unrelated industries (automotive, IT, fashion)
+- Political discussions, sports, entertainment
+
+**EDGE CASES - ALLOW:**
+- Equipment for food processing
+- Logistics and supply chain for food industry
+- Sustainability in food manufacturing
 
 **INSTRUCTIONS:**
 Respond with ONLY a JSON object in this exact format:
 {{
     "relevant": true/false,
     "confidence": 0.0-1.0,
-    "category": "food_ingredients" | "supplier_sourcing" | "follow_up" | "off_topic" | "unrelated_industry",
+    "category": "food_ingredients" | "supplier_sourcing" | "follow_up" | "off_topic" | "unrelated_industry" | "greeting_or_polite",
     "reason": "Brief explanation."
 }}"""
 
@@ -2985,7 +3159,7 @@ class SessionManager:
             logger.debug(line.strip())
         
         session_id = str(uuid.uuid4())
-        session = UserSession(session_id=session_id, last_activity=None)
+        session = UserSession(session_id=session_id, last_activity=None, login_method='guest') # NEW: Default login method
         
         # For new sessions, always start with a temporary fingerprint
         # This will be replaced by a real one for Guests, or marked as 'not_collected_registered' for Registered Users later.
@@ -3486,7 +3660,7 @@ class SessionManager:
         
         except Exception as e:
             logger.error(f"Failed to get/create session: {e}", exc_info=True)
-            fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None)
+            fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None, login_method='guest')
             fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
             fallback_session.fingerprint_method = "emergency_fallback"
             st.session_state.current_session_id = fallback_session.session_id
@@ -3726,6 +3900,7 @@ class SessionManager:
                 if session.email and session.email != sanitized_email:
                     session.email_switches_count += 1 # Increment for tracking, no penalty
                 session.email = sanitized_email
+                session.login_method = 'email_verified' # NEW: Set login method for guests who verify email directly
             elif session.reverification_pending and sanitized_email != session.pending_email:
                 # If reverification is pending but they enter a different email, treat as new email path
                 session.email_switches_count += 1 # Increment for tracking, no penalty
@@ -3736,6 +3911,7 @@ class SessionManager:
                 session.pending_full_name = None
                 session.pending_zoho_contact_id = None
                 session.pending_wp_token = None
+                session.login_method = 'email_verified' # NEW: Set login method for guests who verify email directly
                 logger.warning(f"Session {session.session_id[:8]} switched email during pending re-verification. Resetting pending state.")
 
             # Clear `declined_recognized_email_at` if they are now proceeding with *any* email verification
@@ -3868,6 +4044,11 @@ class SessionManager:
                     session.pending_full_name = None
                     session.pending_zoho_contact_id = None
                     session.pending_wp_token = None
+                    
+                    session.login_method = 'email_verified' # NEW: Set login method
+                    session.is_degraded_login = False
+                    session.degraded_login_timestamp = None
+
                     logger.info(f"✅ User {session.session_id[:8]} reclaimed higher privilege: {session.user_type.value} via re-verification for {session.email}")
                 else:
                     # New email verification or upgrade from guest
@@ -3915,6 +4096,10 @@ class SessionManager:
                             session.ban_end_time = None
                             session.ban_reason = None
                     
+                    session.login_method = 'email_verified' # NEW: Set login method
+                    session.is_degraded_login = False
+                    session.degraded_login_timestamp = None
+
                     logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email} with {session.daily_question_count} questions")
 
                 session.question_limit_reached = False
@@ -3952,7 +4137,7 @@ class SessionManager:
 
     ## START <<<<<<<<<<<<<<<< REPLACEMENT 2 OF 3
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        """Authenticates user with WordPress and creates/updates session with conditional reset logic."""
+        """Enhanced WordPress authentication with Email Verified fallback option"""
         if not self.config.WORDPRESS_URL:
             st.error("WordPress authentication is not configured. Please contact support.")
             logger.warning("WordPress authentication attempted but URL not configured.")
@@ -3970,15 +4155,21 @@ class SessionManager:
                 content_type = response.headers.get('Content-Type', '').lower()
                 if 'application/json' not in content_type:
                     logger.error(f"WordPress authentication received unexpected Content-Type '{content_type}' with 200 status. Expected application/json. Response text: '{response.text[:200]}'", exc_info=True)
-                    st.error("Authentication failed: WordPress returned a webpage instead of an API response. This often means the JWT authentication plugin is not active or configured correctly on the WordPress site. Please contact support.")
-                    return None
+                    return self._handle_wordpress_error_with_fallback(
+                        "API Response Error", 
+                        "WordPress returned an unexpected response. The JWT plugin might be misconfigured.",
+                        username
+                    )
 
                 try:
                     data = response.json()
                 except requests.exceptions.JSONDecodeError as e:
                     logger.error(f"WordPress authentication received non-JSON response with 200 status, despite Content-Type possibly being JSON. Response text: '{response.text[:200]}'. Error: {e}", exc_info=True)
-                    st.error("Authentication failed: Invalid JSON response from WordPress. Please try again or contact support.")
-                    return None
+                    return self._handle_wordpress_error_with_fallback(
+                        "JSON Parse Error", 
+                        "WordPress returned invalid data. Please try again or contact support.",
+                        username
+                    )
                 
                 wp_token = data.get('token')
                 user_email = data.get('user_email')
@@ -4098,6 +4289,15 @@ class SessionManager:
                     current_session.wp_token = wp_token
                     current_session.last_activity = datetime.now()
                     
+                    # NEW: Set login method
+                    current_session.login_method = 'wordpress'
+                    current_session.is_degraded_login = False
+                    current_session.degraded_login_timestamp = None
+                    log_security_event("WORDPRESS_LOGIN_SUCCESS", current_session, {
+                        "username": username,
+                        "has_wp_token": bool(wp_token)
+                    })
+
                     # Clear ALL re-verification flags if login is successful
                     current_session.reverification_pending = False
                     current_session.pending_user_type = None
@@ -4125,26 +4325,142 @@ class SessionManager:
                     return current_session
                 else:
                     logger.error(f"WordPress authentication successful (status 200) but missing token or email in response. Response: {data}")
-                    st.error("Authentication failed: Incomplete response from WordPress. Please contact support.")
-                    return None
+                    return self._handle_wordpress_error_with_fallback(
+                        "Incomplete Response", 
+                        "WordPress returned an incomplete response (missing token/email).",
+                        username
+                    )
             else:
                 logger.warning(f"WordPress authentication failed with status: {response.status_code}. Response: {response.text[:200]}")
                 st.error("Invalid username or password.")
                 return None
             
+        except requests.exceptions.SSLError as e:
+            logger.error(f"WordPress SSL/Port 443 error: {e}")
+            return self._handle_wordpress_error_with_fallback(
+                "SSL/Connection Error", 
+                "Cannot establish secure connection to the authentication server (e.g., Port 443 issue).",
+                username  # Pass username to potentially use as email
+            )
+            
         except requests.exceptions.Timeout as e:
             logger.error(f"WordPress authentication timed out: {e}")
-            st.error("Authentication service timed out. Please try again.")
-            return None
+            return self._handle_wordpress_error_with_fallback(
+                "Timeout Error",
+                "The authentication service is not responding in time. The server may be down or overloaded.",
+                username
+            )
+            
         except requests.exceptions.ConnectionError as e:
             logger.error(f"WordPress authentication connection error: {e}")
-            st.error("Could not connect to authentication service. Check your internet connection or try again later.")
-            return None
+            return self._handle_wordpress_error_with_fallback(
+                "Connection Error",
+                "Could not connect to the authentication service. Please check your internet connection or the service may be down.",
+                username
+            )
+            
         except Exception as e:
             logger.error(f"An unexpected error occurred during WordPress authentication: {e}", exc_info=True)
-            st.error("An unexpected error occurred during authentication. Please try again later.")
-            return None
+            return self._handle_wordpress_error_with_fallback(
+                "Authentication Error",
+                "An unexpected error occurred during authentication. Please try again later.",
+                username
+            )
     ## END <<<<<<<<<<<<<<<< REPLACEMENT 2 OF 3
+
+    def _handle_wordpress_error_with_fallback(self, error_type: str, error_message: str, username: str) -> Optional[UserSession]:
+        """Handle WordPress errors with email verification fallback option."""
+        
+        # Store error info for display
+        st.session_state.wordpress_error = {
+            'type': error_type,
+            'message': error_message,
+            'username': username,
+            'show_fallback': True
+        }
+        
+        return None  # Return None to trigger the fallback UI
+
+    def _check_and_upgrade_to_registered(self, session: UserSession, email: str, 
+                                        is_fallback_from_wordpress: bool = False) -> UserSession:
+        """Check if email belongs to a registered user and upgrade if found.
+           Sets degraded login flag if originating from WordPress fallback."""
+        
+        # Find all sessions with this email
+        email_sessions = self.db.find_sessions_by_email(email)
+        
+        # Look for any registered user sessions
+        registered_sessions = [s for s in email_sessions 
+                              if s.user_type == UserType.REGISTERED_USER
+                              and s.session_id != session.session_id]
+        
+        if registered_sessions:
+            # Found registered user history - upgrade current session
+            most_recent = max(registered_sessions, 
+                             key=lambda s: s.last_activity or s.created_at)
+            
+            logger.info(f"🎯 Found registered user history for {email} - upgrading session")
+            
+            # Upgrade to registered user
+            session.user_type = UserType.REGISTERED_USER
+            session.full_name = most_recent.full_name
+            session.zoho_contact_id = most_recent.zoho_contact_id
+            
+            # NEW: Track degraded login
+            if is_fallback_from_wordpress:
+                session.is_degraded_login = True
+                session.degraded_login_timestamp = datetime.now()
+                session.login_method = 'email_fallback'
+                session.wp_token = None # Ensure no WP token is carried over for degraded login
+                log_security_event("DEGRADED_LOGIN", session, {
+                    "reason": "wordpress_auth_failure_fallback",
+                    "original_method": "wordpress",
+                    "fallback_method": "email_otp"
+                })
+                logger.warning(f"⚠️ Degraded login for registered user {email} - no WordPress token")
+            else:
+                session.login_method = 'email_verified' # This path for re-verification through fingerprint or direct guest email verification
+                session.is_degraded_login = False
+            
+            # Note: wp_token is NOT set for email-only login (handled above for is_fallback_from_wordpress)
+            
+            # Inherit question counts and ban status
+            now = datetime.now()
+            if (most_recent.last_question_time and 
+                (now - most_recent.last_question_time) < DAILY_RESET_WINDOW):
+                session.daily_question_count = most_recent.daily_question_count
+                session.total_question_count = most_recent.total_question_count
+                session.last_question_time = most_recent.last_question_time
+                
+                # Inherit tier cycle info
+                session.current_tier_cycle_id = most_recent.current_tier_cycle_id
+                session.tier1_completed_in_cycle = most_recent.tier1_completed_in_cycle
+                session.tier_cycle_started_at = most_recent.tier_cycle_started_at
+                
+                # Check for active bans
+                if (most_recent.ban_status != BanStatus.NONE and
+                    most_recent.ban_end_time and
+                    most_recent.ban_end_time > now):
+                    session.ban_status = most_recent.ban_status
+                    session.ban_start_time = most_recent.ban_start_time
+                    session.ban_end_time = most_recent.ban_end_time
+                    session.ban_reason = most_recent.ban_reason
+            
+            # Save upgraded session
+            self.db.save_session(session)
+            
+            # Sync with other registered user sessions
+            self.sync_registered_user_sessions(email, session.session_id)
+            
+            return session
+        
+        # No registered user history - remain as email verified guest
+        session.login_method = 'email_verified'
+        session.is_degraded_login = False # Ensure this is false for guests
+        session.degraded_login_timestamp = None
+        session.wp_token = None # Ensure no WP token if just email verified guest
+        logger.info(f"No registered user history found for {email} - keeping as email verified guest")
+        return session
 
     # NEW: Add Ban Synchronization Method
     def sync_ban_for_registered_user(self, email: str, banned_session: UserSession):
@@ -4256,6 +4572,7 @@ class SessionManager:
     # CHANGE 10: Pricing/Stock Question Handler
     def detect_pricing_stock_question(self, prompt: str) -> bool:
         """Detect if question is about pricing or stock availability."""
+
         prompt_lower = prompt.lower()
 
         pricing_indicators = [
@@ -4274,9 +4591,57 @@ class SessionManager:
 
         return has_pricing or has_stock
 
-    # CHANGE 11: Solution 1 - Meta-Question Detection (Token-Free)
-    def detect_meta_conversation_query(self, prompt: str) -> Dict[str, Any]:
-        """Detect if user is asking about their conversation history."""
+    # CHANGE 11: Solution 1 - Meta-Question Detection (LLM Driven)
+    def detect_meta_conversation_query_llm(self, prompt: str) -> Dict[str, Any]:
+        """LLM-powered detection of meta-conversation queries."""
+        if not self.ai.openai_client:
+            logger.warning("OpenAI client not available for LLM meta-query detection. Falling back to keyword-based.")
+            return self.detect_meta_conversation_query_keyword_fallback(prompt)
+
+        detection_prompt = f"""Analyze if this query is asking about the conversation/chat itself rather than food & beverage industry topics.
+
+QUERY: "{prompt}"
+
+META-CONVERSATION INDICATORS:
+- Asking for summaries of our chat
+- Counting questions or messages
+- Listing what was discussed
+- Analyzing conversation topics/history
+- Requesting chat statistics
+
+INDUSTRY QUESTIONS (NOT META):
+- Questions about food/beverage products, ingredients, suppliers
+- Technical queries about processing, formulation
+- Regulatory or compliance questions
+- Any actual business question
+
+Respond ONLY with JSON:
+{{"is_meta": true/false, "type": "summarize|count|list|analyze|general|none", "confidence": 0.0-1.0}}"""
+
+        try:
+            response = self.ai.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": detection_prompt}],
+                max_tokens=50,
+                temperature=0.1
+            )
+            response_content = response.choices[0].message.content.strip().replace('```json', '').replace('```', '').strip()
+            result = json.loads(response_content)
+            
+            if not isinstance(result, dict) or 'is_meta' not in result or 'type' not in result:
+                logger.warning(f"LLM meta-query detection returned invalid JSON: {response_content}. Falling back to keyword.")
+                return self.detect_meta_conversation_query_keyword_fallback(prompt)
+
+            logger.info(f"LLM Meta-query detection: {prompt} -> {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
+            return result
+
+        except Exception as e:
+            logger.error(f"LLM meta-query detection failed: {e}. Falling back to keyword-based detection.", exc_info=True)
+            return self.detect_meta_conversation_query_keyword_fallback(prompt)
+
+    # Fallback for meta-conversation detection (old static method)
+    def detect_meta_conversation_query_keyword_fallback(self, prompt: str) -> Dict[str, Any]:
+        """Detect if user is asking about conversation history using static keywords (fallback)."""
 
         prompt_lower = prompt.lower().strip()
 
@@ -4323,7 +4688,7 @@ class SessionManager:
         elif any(pattern in prompt_lower for pattern in conversation_patterns):
             return {"is_meta": True, "type": "general", "scope": "conversation"}
         
-        return {"is_meta": False}
+        return {"is_meta": False, "type": "none", "confidence": 1.0}
 
     def handle_meta_conversation_query(self, session: UserSession, query_type: str, scope: str) -> Dict[str, Any]:
         """Handle meta-conversation queries with code-based analysis (zero token cost)."""
@@ -4480,8 +4845,8 @@ class SessionManager:
                     technical_terms.add(word_lower)
 
         # Get top topics
-        key_topics = list(topic_words)[:8]
-        active_categories = {k: v for k, v in question_categories.items() if v > 0}
+        key_topics = list(topic_words)[:8] # Assuming topic_words is defined from _generate_conversation_summary context
+        active_categories = {k: v for k, v in question_categories.items() if v > 0} # Assuming question_categories from _generate_conversation_summary context
 
         # Build analysis
         analysis_parts = [
@@ -4589,10 +4954,46 @@ class SessionManager:
                     "safety_override": False
                 }
 
-            # NEW: Check if it's a meta-conversation query (Solution 1)
-            meta_detection = self.detect_meta_conversation_query(prompt)
+            # NEW: Add pre-filter for greetings/casual phrases (token-free)
+            if should_skip_context_check(prompt):
+                logger.info(f"Skipping context check for greeting/casual phrase: '{prompt}'")
+                
+                # Atomic record question for greetings
+                try:
+                    self.question_limits.record_question_and_check_ban(session, self)
+                except Exception as e:
+                    logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
+                    return {
+                        'content': 'An error occurred while tracking your question. Please try again.',
+                        'success': False,
+                        'source': 'Question Tracker'
+                    }
+
+                # Add user message to session history
+                user_message = {'role': 'user', 'content': prompt}
+                session.messages.append(user_message)
+
+                # Provide a friendly, token-free response
+                friendly_response = {
+                    "content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?",
+                    "success": True,
+                    "source": "FiFi"
+                }
+                assistant_message = {
+                    'role': 'assistant',
+                    'content': friendly_response.get('content', 'Hi there!'),
+                    'source': friendly_response.get('source', 'Greeting'),
+                    'is_meta_response': True
+                }
+                session.messages.append(assistant_message)
+                self._update_activity(session)
+                return friendly_response
+
+
+            # NEW: Check if it's a meta-conversation query (LLM Driven)
+            meta_detection = self.detect_meta_conversation_query_llm(prompt)
             if meta_detection["is_meta"]:
-                logger.info(f"Meta-conversation query detected: {meta_detection['type']}")
+                logger.info(f"LLM-driven Meta-conversation query detected: {meta_detection['type']}")
 
                 ## CHANGE: Atomic record question for meta-questions
                 try:
@@ -4607,11 +5008,13 @@ class SessionManager:
 
                 # Add user message to session history
                 user_message = {'role': 'user', 'content': prompt}
+                    # Ensure content is always a string for history
+                user_message['content'] = str(user_message['content']) 
                 session.messages.append(user_message)
 
                 # Handle meta-query (zero tokens used)
                 meta_response = self.handle_meta_conversation_query(
-                    session, meta_detection["type"], meta_detection["scope"]
+                    session, meta_detection["type"], meta_detection.get("scope", "")
                 )
 
                 # Add assistant response to history
@@ -4621,6 +5024,8 @@ class SessionManager:
                     'source': meta_response.get('source', 'Conversation Analytics'),
                     'is_meta_response': True  # Flag for UI display
                 }
+                # Ensure content is always a string for history
+                assistant_message['content'] = str(assistant_message['content'])
                 session.messages.append(assistant_message)
                 
                 # Update activity and save session
@@ -4643,7 +5048,7 @@ class SessionManager:
                 elif category == "unrelated_industry":
                     context_message = "I'm designed to assist with food & beverage ingredients and related industry topics. For questions outside the food industry, please try a general-purpose AI assistant."
                 else:
-                    context_message = "Your question doesn't seem to be related to food & beverage ingredients. I specialize in helping with ingredient sourcing, formulation, suppliers, and food industry technical questions."
+                    context_message = "Your question doesn't seem to be related to the food & beverage industry. I specialize in helping with ingredient sourcing, formulation, suppliers, and industry technical questions."
                 
                 # Store context error info in session state
                 st.session_state.context_flagged = {
@@ -4822,6 +5227,11 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
         try:
+            # Attempt CRM save if eligible, as clear chat effectively ends a "segment" of conversation
+            if self._is_manual_crm_save_eligible(session): # Using manual eligibility as this is user-initiated
+                logger.info(f"CRM Save triggered by Clear Chat for session {session.session_id[:8]}")
+                self.zoho.save_chat_transcript_sync(session, "Clear Chat")
+            
             # Soft clear: set offset to hide all current messages
             session.display_message_offset = len(session.messages)
             
@@ -4942,6 +5352,18 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
             
         return False
 
+# NEW: Log security events function
+def log_security_event(event_type: str, session: UserSession, details: Dict[str, Any]):
+    """Log security-relevant events for audit trail"""
+    logger.info(f"SECURITY_EVENT: {event_type} | "
+                f"session_id={session.session_id[:8]} | "
+                f"user_type={session.user_type.value} | "
+                f"email={session.email} | "
+                f"login_method={session.login_method} | "
+                f"is_degraded={session.is_degraded_login} | "
+                f"details={json.dumps(details)}")
+
+
 def render_simple_activity_tracker(session_id: str):
     """Renders a simple activity tracker that monitors user interactions."""
     if not session_id:
@@ -5059,6 +5481,10 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         session.current_tier_cycle_id = fresh_session_from_db.current_tier_cycle_id
         session.tier1_completed_in_cycle = fresh_session_from_db.tier1_completed_in_cycle
         session.tier_cycle_started_at = fresh_session_from_db.tier_cycle_started_at
+        # NEW: Update login tracking fields
+        session.login_method = fresh_session_from_db.login_method
+        session.is_degraded_login = fresh_session_from_db.is_degraded_login
+        session.degraded_login_timestamp = fresh_session_from_db.degraded_login_timestamp
     else:
         logger.warning(f"Session {session.session_id[:8]} from st.session_state not found in database. Forcing reset.")
         session.active = False
@@ -5567,7 +5993,7 @@ def handle_fingerprint_requests_from_query():
 
 # Modified render_welcome_page function
 def render_welcome_page(session_manager: 'SessionManager'):
-    """Enhanced welcome page with loading lock."""
+    """Enhanced welcome page with loading lock and WordPress fallback UI."""
     
     st.title("🤖 Welcome to FiFi AI Assistant")
     st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
@@ -5605,27 +6031,172 @@ def render_welcome_page(session_manager: 'SessionManager'):
         if not session_manager.config.WORDPRESS_URL:
             st.warning("Sign-in is currently disabled because the authentication service (WordPress URL) is not configured in application secrets.")
         else:
-            with st.form("login_form", clear_on_submit=True):
-                st.markdown("### 🔐 Sign In to Your Account")
-                username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
-                password = st.text_input("Password", type="password", help="Enter your WordPress password.")
+            # NEW: Handle WordPress error fallback UI
+            if st.session_state.get('wordpress_error', {}).get('show_fallback', False):
+                error_info = st.session_state.wordpress_error
                 
-                st.markdown("")
+                st.error(f"🚨 **WordPress Login Issue: {error_info['type']}**")
+                st.error(error_info['message'])
                 
-                col1, col2, col3 = st.columns(3)
+                st.info("💡 **Alternative Login Option Available**")
+                st.markdown("""
+                We can switch you to our **Email Verification** login method instead:
+                - Quick verification via email OTP (one-time password).
+                - If your email is associated with a registered account, your privileges will be automatically restored.
+                - If not, you'll gain **Email Verified Guest** access ({EMAIL_VERIFIED_QUESTION_LIMIT} questions/day).
+                """)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("📧 Switch to Email Login", use_container_width=True):
+                        # Set up for email verification flow
+                        st.session_state.wordpress_fallback_active = True
+                        st.session_state.fallback_email = error_info.get('username', '') if '@' in error_info.get('username', '') else ''
+                        st.session_state.wordpress_error['show_fallback'] = False # Hide this block
+                        st.rerun()
+                        
                 with col2:
-                    submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
+                    if st.button("🔄 Try WordPress Again", use_container_width=True):
+                        # Clear error state
+                        if 'wordpress_error' in st.session_state:
+                            del st.session_state['wordpress_error']
+                        st.rerun()
+            
+            # NEW: Show email verification for fallback
+            elif st.session_state.get('wordpress_fallback_active', False):
+                st.info("📧 **Email Verification Login (WordPress Fallback)**")
+                st.caption("Enter your email to receive a verification code. If you're a registered user, we'll restore your account.")
                 
-                if submit_button:
-                    if not username or not password:
-                        st.error("Please enter both username and password to sign in.")
+                with st.form("fallback_email_form", clear_on_submit=False):
+                    fallback_email = st.text_input(
+                        "Email Address",
+                        value=st.session_state.get('fallback_email', ''),
+                        placeholder="your@email.com",
+                        key="fallback_email_input",
+                        help="We'll send an OTP to this email to verify your identity. If it's linked to a registered account, your status will be restored."
+                    )
+                    
+                    submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+                    
+                    if submit_email:
+                        if fallback_email:
+                            # Create temporary session for verification
+                            temp_session = session_manager.get_session()
+                            result = session_manager.handle_guest_email_verification(temp_session, fallback_email)
+                            
+                            if result['success']:
+                                st.success(result['message'])
+                                st.session_state.fallback_verification_email = fallback_email
+                                st.session_state.fallback_verification_stage = "code_entry"
+                                st.session_state.fallback_session_id = temp_session.session_id
+                                st.rerun()
+                            else:
+                                st.error(result['message'])
+                        else:
+                            st.error("Please enter your email address")
+            
+            # NEW: Show code entry for fallback
+            elif st.session_state.get('fallback_verification_stage') == 'code_entry':
+                email = st.session_state.get('fallback_verification_email')
+                st.success(f"📧 Code sent to **{session_manager._mask_email(email)}**")
+                
+                # NEW: Clear warning about limitations for fallback
+                st.warning("""
+                ⚠️ **Important**: This is a recovery login method due to WordPress authentication issues.
+                Your chat access is fully functional, but WordPress profile-specific integrations might be unavailable.
+                """)
+                
+                with st.form("fallback_code_form", clear_on_submit=False):
+                    code = st.text_input(
+                        "Enter 6-Digit Code", 
+                        placeholder="123456", 
+                        max_chars=6,
+                        key="fallback_code_input",
+                        help="Enter the 6-digit code from your email. Valid for 1 minute."
+                    )
+                    verify_btn = st.form_submit_button("✅ Verify & Login", use_container_width=True)
+                    
+                    if verify_btn and code:
+                        # Load the temp session
+                        temp_session_id = st.session_state.get('fallback_session_id')
+                        temp_session = session_manager.db.load_session(temp_session_id)
+                        
+                        if temp_session:
+                            result = session_manager.verify_email_code(temp_session, code)
+                            
+                            if result['success']:
+                                # Check if this email belongs to a registered user
+                                upgraded_session = session_manager._check_and_upgrade_to_registered(
+                                    temp_session, 
+                                    email,
+                                    is_fallback_from_wordpress=True # This indicates it's a fallback path
+                                )
+                                
+                                if upgraded_session.user_type == UserType.REGISTERED_USER:
+                                    if upgraded_session.is_degraded_login:
+                                        st.info("ℹ️ Logged in as Registered User via email due to WordPress issues.")
+                                    st.success(f"✅ Welcome back! Your registered account has been restored.")
+                                    st.balloons()
+                                else:
+                                    st.success(f"✅ Email verified! You have Email Verified Guest access.")
+                                
+                                # Clean up fallback state
+                                for key in ['wordpress_fallback_active', 'fallback_email', 
+                                           'fallback_verification_email', 'fallback_verification_stage',
+                                           'fallback_session_id', 'wordpress_error']:
+                                    if key in st.session_state:
+                                        del st.session_state[key]
+                                
+                                # Set up for chat
+                                st.session_state.current_session_id = upgraded_session.session_id
+                                st.session_state.page = "chat"
+                                st.session_state.is_chat_ready = True
+                                st.rerun()
+                            else:
+                                st.error(result['message'])
+                                # No need to rerender here, form is sticky
+                else:
+                    st.error("Please enter a 6-digit code.")
+            
+            # Resend code option for fallback
+            col_resend_fallback, _ = st.columns([1,2])
+            with col_resend_fallback:
+                if st.button("🔄 Resend Code", use_container_width=True, key="resend_fallback_code"):
+                    if email:
+                        with st.spinner("Resending verification code..."):
+                            verification_sent = session_manager.email_verification.send_verification_code(email)
+                            if verification_sent:
+                                st.success("✅ New verification code sent! Check your email.")
+                            else:
+                                st.error("❌ Failed to resend code. Please try again later.")
                     else:
-                        # Store credentials temporarily and set loading state (NEW)
-                        st.session_state.temp_username = username
-                        st.session_state.temp_password = password
-                        st.session_state.loading_reason = 'authenticate'
-                        set_loading_state(True, "Authenticating and preparing your session...")
-                        st.rerun()  # Immediately show loading state (NEW)
+                        st.error("Error: No email address found for resend. Please restart the login process.")
+                    st.rerun()
+
+            
+            # Show original WordPress login form if no fallback is active
+            else: # This path is for the initial WordPress login attempt
+                with st.form("login_form", clear_on_submit=True):
+                    st.markdown("### 🔐 Sign In to Your Account")
+                    username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
+                    password = st.text_input("Password", type="password", help="Enter your WordPress password.")
+                    
+                    st.markdown("")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col2:
+                        submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
+                    
+                    if submit_button:
+                        if not username or not password:
+                            st.error("Please enter both username and password to sign in.")
+                        else:
+                            # Store credentials temporarily and set loading state (NEW)
+                            st.session_state.temp_username = username
+                            st.session_state.temp_password = password
+                            st.session_state.loading_reason = 'authenticate'
+                            set_loading_state(True, "Authenticating and preparing your session...")
+                            st.rerun()  # Immediately show loading state (NEW)
             
             st.markdown("---")
             st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
@@ -5676,13 +6247,19 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.markdown("• Priority access during high usage")
         
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
-    """Enhanced sidebar with tier progression display."""
+    """Enhanced sidebar with tier progression display and login status."""
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
         ## START <<<<<<<<<<<<<<<< REPLACEMENT 3 OF 3
         if session.user_type.value == UserType.REGISTERED_USER.value:
             st.success("✅ **Registered User**")
+            
+            # NEW: Show login method and any limitations
+            if session.is_degraded_login:
+                st.info("ℹ️ Logged in via email (WordPress was unavailable)")
+            st.caption(f"Login method: {session.login_method or 'WordPress'}")
+
             if session.full_name: 
                 st.markdown(f"**Name:** {session.full_name}")
             if session.email: 
@@ -5735,6 +6312,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             st.info("📧 **Email Verified Guest**")
+            st.caption(f"Login method: {session.login_method or 'Email Verified'}") # NEW: Display login method
             if session.email:
                 st.markdown(f"**Email:** {session.email}")
             
@@ -5761,6 +6339,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             
         else: # Guest User
             st.warning("👤 **Guest User**")
+            st.caption(f"Login method: {session.login_method or 'Guest'}") # NEW: Display login method
             st.markdown(f"**Questions:** {session.daily_question_count}/{GUEST_QUESTION_LIMIT}") ## CHANGE: Use constant
             st.progress(min(session.daily_question_count / GUEST_QUESTION_LIMIT, 1.0)) ## CHANGE: Use constant
             st.caption(f"Email verification unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day.") ## CHANGE: Use constant
@@ -6752,6 +7331,7 @@ def ensure_initialization_fixed():
                 logger.error(f"AI system failed: {e}")
                 ai_system = type('FallbackAI', (), {
                     "openai_client": None,
+                    '_needs_current_information': lambda self, prompt: False, # NEW: Add dummy for direct routing
                     'get_response': lambda self, prompt, history=None: {
                         "content": "AI system temporarily unavailable.",
                         "success": False
@@ -6796,6 +7376,15 @@ def ensure_initialization_fixed():
             # NEW: Initialize chat readiness flag
             st.session_state.is_chat_ready = False 
             
+            # NEW: Initialize WordPress fallback specific states
+            st.session_state.wordpress_error = {'show_fallback': False}
+            st.session_state.wordpress_fallback_active = False
+            st.session_state.fallback_email = ''
+            st.session_state.fallback_verification_stage = None
+            st.session_state.fallback_verification_email = ''
+            st.session_state.fallback_session_id = ''
+
+
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
             
@@ -6835,7 +7424,14 @@ def main_fixed():
             "guest_continue_active": False, "final_answer_acknowledged": False,
             "gentle_prompt_shown": False, "email_verified_final_answer_acknowledged": False,
             "must_verify_email_immediately": False, "skip_email_allowed": True,
-            "page": None, "fingerprint_processed_for_session": {}
+            "page": None, "fingerprint_processed_for_session": {},
+            # Initialize WordPress fallback states here too if they weren't in init_fixed
+            "wordpress_error": {'show_fallback': False},
+            "wordpress_fallback_active": False,
+            "fallback_email": '',
+            "fallback_verification_stage": None,
+            "fallback_verification_email": '',
+            "fallback_session_id": ''
         }
         for key, value in defaults.items():
             if key not in st.session_state:
