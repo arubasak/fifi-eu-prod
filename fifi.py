@@ -1451,9 +1451,11 @@ class DatabaseManager:
                     # Save session with ban but WITHOUT incrementing question count
                     session_manager._save_session_with_retry(session)
                     
-                    # NEW: Also update all other sessions with same email for registered users
+                    # NEW: Also update all other sessions with same email for registered users AND EMAIL_VERIFIED_GUEST
                     if session.user_type == UserType.REGISTERED_USER and session.email:
                         session_manager.sync_ban_for_registered_user(session.email, session)
+                    elif session.user_type == UserType.EMAIL_VERIFIED_GUEST and session.email:
+                        session_manager.sync_email_verified_sessions(session.email, session.session_id)
                     
                     return {"recorded": False, "ban_applied": True, "ban_type": ban_type.value}
                 
@@ -1462,9 +1464,13 @@ class DatabaseManager:
                 session.total_question_count += 1
                 session.last_question_time = datetime.now()
                 
-                # Sync counts and cycle info for registered users
-                if session.user_type == UserType.REGISTERED_USER and session.email:
-                    session_manager.sync_registered_user_sessions(session.email, session.session_id)
+                # Sync counts for registered users AND email-verified guests
+                if (session.user_type == UserType.REGISTERED_USER or 
+                    session.user_type == UserType.EMAIL_VERIFIED_GUEST) and session.email:
+                    if session.user_type == UserType.REGISTERED_USER:
+                        session_manager.sync_registered_user_sessions(session.email, session.session_id)
+                    else:
+                        session_manager.sync_email_verified_sessions(session.email, session.session_id)
                 
                 # Save session with updated counts
                 session_manager._save_session_with_retry(session)
@@ -3097,7 +3103,43 @@ class SessionManager:
                 
                 return
 
-            # PRIORITY 2: For non-registered users (Guest/Email Verified), use fingerprint
+            # PRIORITY 1.5: For EMAIL_VERIFIED_GUEST, also use EMAIL-based inheritance
+            elif session.user_type == UserType.EMAIL_VERIFIED_GUEST and session.email:
+                logger.info(f"📧 Using EMAIL-based inheritance for email-verified guest {session.email}")
+                
+                email_sessions = self.db.find_sessions_by_email(session.email)
+                email_sessions = [s for s in email_sessions if s.session_id != session.session_id]
+                
+                if email_sessions:
+                    # Find most recent session with same email to inherit counts from
+                    most_recent = max(email_sessions, key=lambda s: s.last_question_time or s.last_activity or s.created_at)
+                    
+                    now = datetime.now()
+                    if (most_recent.last_question_time and (now - most_recent.last_question_time) < DAILY_RESET_WINDOW):
+                        # Inherit counts
+                        session.daily_question_count = most_recent.daily_question_count
+                        session.total_question_count = max(session.total_question_count, most_recent.total_question_count)
+                        session.last_question_time = most_recent.last_question_time
+                        
+                        # Inherit ban if active
+                        if (most_recent.ban_status != BanStatus.NONE and 
+                            most_recent.ban_end_time and 
+                            most_recent.ban_end_time > now):
+                            session.ban_status = most_recent.ban_status
+                            session.ban_start_time = most_recent.ban_start_time
+                            session.ban_end_time = most_recent.ban_end_time
+                            session.ban_reason = most_recent.ban_reason
+                            session.question_limit_reached = True
+                        
+                        logger.info(f"✅ EMAIL_VERIFIED_GUEST EMAIL inheritance successful: {most_recent.daily_question_count} questions from {most_recent.session_id[:8]}")
+                    else:
+                        logger.info(f"🕐 EMAIL_VERIFIED_GUEST Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count")
+                        session.daily_question_count = 0
+                        session.last_question_time = None
+                
+                return  # Skip fingerprint-based inheritance for email-verified guests
+
+            # PRIORITY 2: For non-registered users (Guest), use fingerprint
             if not session.fingerprint_id or session.fingerprint_id.startswith(("temp_", "fallback_")):
                 logger.info("No valid fingerprint yet or temporary, skipping fingerprint-based inheritance for non-registered.")
                 session.visitor_type = "new_visitor"
@@ -3495,6 +3537,53 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to sync registered user sessions for {email}: {e}")
 
+    def sync_email_verified_sessions(self, email: str, current_session_id: str):
+        """Sync question counts across all active email-verified sessions with the same email"""
+        try:
+            email_sessions = self.db.find_sessions_by_email(email)
+            active_email_verified_sessions = [
+                s for s in email_sessions 
+                if s.active and s.user_type == UserType.EMAIL_VERIFIED_GUEST
+            ]
+            
+            if not active_email_verified_sessions:
+                return
+            
+            # Find the session with the highest question count within the DAILY_RESET_WINDOW
+            max_count_session = None
+            now = datetime.now()
+            for sess in active_email_verified_sessions:
+                if sess.last_question_time and (now - sess.last_question_time) < DAILY_RESET_WINDOW:
+                    if max_count_session is None or sess.daily_question_count > max_count_session.daily_question_count:
+                        max_count_session = sess
+            
+            if max_count_session is None:
+                logger.info(f"No recent active sessions for email-verified {email} to sync.")
+                return
+            
+            # Update all other sessions to match the max_count_session
+            for sess in active_email_verified_sessions:
+                if sess.session_id != max_count_session.session_id:
+                    sess.daily_question_count = max_count_session.daily_question_count
+                    sess.total_question_count = max_count_session.total_question_count
+                    sess.last_question_time = max_count_session.last_question_time
+                    
+                    # Also sync ban information if any
+                    if max_count_session.ban_status != BanStatus.NONE:
+                        sess.ban_status = max_count_session.ban_status
+                        sess.ban_start_time = max_count_session.ban_start_time
+                        sess.ban_end_time = max_count_session.ban_end_time
+                        sess.ban_reason = max_count_session.ban_reason
+                        sess.question_limit_reached = max_count_session.question_limit_reached
+                    
+                    self.db.save_session(sess)
+                    logger.debug(f"Synced session {sess.session_id[:8]} to {max_count_session.daily_question_count} daily questions from {max_count_session.session_id[:8]}")
+            
+            logger.info(f"Synced {len(active_email_verified_sessions)} email-verified sessions for {email}")
+            
+        except Exception as e:
+            logger.error(f"Failed to sync email-verified sessions for {email}: {e}")
+
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]) -> bool:
         """Applies fingerprinting data from custom component to the session with better validation.
         This function will now be called only for non-registered users (Guests)."""
@@ -3698,7 +3787,7 @@ class SessionManager:
     def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
         """
         Verifies the email verification code and upgrades user status.
-        Updated to preserve counts when upgrading from GUEST to EMAIL_VERIFIED_GUEST.
+        Updated to properly track email-verified users across devices.
         """
         try:
             email_to_verify = session.pending_email if session.reverification_pending else session.email
@@ -3706,7 +3795,7 @@ class SessionManager:
             if not email_to_verify:
                 return {'success': False, 'message': 'No email address found for verification.'}
             
-            sanitized_code = sanitize_input(code).strip() ## CHANGE: Use global sanitize_input
+            sanitized_code = sanitize_input(code).strip()
             
             if not sanitized_code:
                 return {'success': False, 'message': 'Please enter the verification code.'}
@@ -3714,34 +3803,61 @@ class SessionManager:
             verification_success = self.email_verification.verify_code(email_to_verify, sanitized_code)
             
             if verification_success:
-                # Check if this is a NEW EMAIL (different from any previous sessions for this fingerprint)
-                is_new_email = True
-                is_same_session_upgrade = False  # NEW: Track if this is same session upgrade
-                previous_emails = set()
+                # NEW: For email-verified guests, ALWAYS check global email history first
+                should_check_global_email_history = (
+                    not session.reverification_pending and  # Not reclaiming existing account
+                    session.user_type == UserType.GUEST     # Currently a guest
+                )
                 
-                try:
-                    if session.fingerprint_id and session.user_type != UserType.REGISTERED_USER: # Only check FP history for non-registered
-                        historical_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
-                        for old_session in historical_sessions:
-                            if old_session.email:
-                                previous_emails.add(old_session.email.lower())
-                        is_new_email = email_to_verify.lower() not in previous_emails
-                        
-                        # UPDATED: Check if this is same session upgrade (GUEST -> EMAIL_VERIFIED_GUEST)
-                        is_same_session_upgrade = (
-                        not session.reverification_pending and  # Not re-verification
-                        session.user_type == UserType.GUEST and  # Currently guest
-                        session.daily_question_count > 0  # Has asked questions in this session
-                    )
+                if should_check_global_email_history:
+                    # Check ALL sessions with this email across ALL devices
+                    all_email_sessions = self.db.find_sessions_by_email(email_to_verify)
+                    email_verified_sessions = [
+                        s for s in all_email_sessions 
+                        if s.user_type == UserType.EMAIL_VERIFIED_GUEST and
+                        s.session_id != session.session_id  # Exclude current session
+                    ]
                     
-                    logger.info(f"Email verification for {session.session_id[:8]}: is_new_email={is_new_email}, is_same_session_upgrade={is_same_session_upgrade}, previous_emails={previous_emails}")
-                except Exception as e:
-                    logger.error(f"Error checking email history for new email determination: {e}")
-                    is_new_email = True # Default to clean slate on error
-
+                    # Find the session with highest usage within the reset window
+                    max_daily_count = 0
+                    max_total_count = 0
+                    most_recent_question_time = None
+                    inherit_ban = False
+                    ban_info = None
+                    
+                    now = datetime.now()
+                    for email_session in email_verified_sessions:
+                        # Check if within reset window
+                        if (email_session.last_question_time and 
+                            (now - email_session.last_question_time) < DAILY_RESET_WINDOW):
+                            
+                            # Track highest daily count
+                            if email_session.daily_question_count > max_daily_count:
+                                max_daily_count = email_session.daily_question_count
+                                most_recent_question_time = email_session.last_question_time
+                            
+                            # Check for active bans
+                            if (email_session.ban_status == BanStatus.TWENTY_FOUR_HOUR and 
+                                email_session.ban_end_time and 
+                                email_session.ban_end_time > now):
+                                inherit_ban = True
+                                ban_info = {
+                                    'status': email_session.ban_status,
+                                    'start_time': email_session.ban_start_time,
+                                    'end_time': email_session.ban_end_time,
+                                    'reason': email_session.ban_reason
+                                }
+                        
+                        # Track total count regardless of reset window
+                        max_total_count = max(max_total_count, email_session.total_question_count)
+                    
+                    logger.info(f"📧 Email verification for {email_to_verify}: Found {len(email_verified_sessions)} existing email-verified sessions")
+                    logger.info(f"📊 Max daily count across all devices: {max_daily_count}, Has active ban: {inherit_ban}")
+                
+                # Handle reverification (existing flow)
                 if session.reverification_pending:
-                    # Reclaim existing user type and identity (keep inherited counts from _attempt_fingerprint_inheritance)
-                    session.user_type = session.pending_user_type if session.pending_user_type else UserType.EMAIL_VERIFIED_GUEST # Fallback
+                    # Existing reverification logic remains unchanged
+                    session.user_type = session.pending_user_type if session.pending_user_type else UserType.EMAIL_VERIFIED_GUEST
                     session.email = session.pending_email
                     session.full_name = session.pending_full_name
                     session.zoho_contact_id = session.pending_zoho_contact_id
@@ -3754,31 +3870,51 @@ class SessionManager:
                     session.pending_wp_token = None
                     logger.info(f"✅ User {session.session_id[:8]} reclaimed higher privilege: {session.user_type.value} via re-verification for {session.email}")
                 else:
-                    # New email verification or existing email as guest without pending higher privilege
-                    old_daily_count = session.daily_question_count  # PRESERVE current count
+                    # New email verification or upgrade from guest
+                    old_daily_count = session.daily_question_count  # Preserve current count
                     session.user_type = UserType.EMAIL_VERIFIED_GUEST
-                
-                    # UPDATED: Preserve counts for same session upgrade (GUEST -> EMAIL_VERIFIED_GUEST)
-                    if is_same_session_upgrade:
-                        logger.info(f"🔄 SAME SESSION UPGRADE: Preserving question count {old_daily_count} from GUEST to EMAIL_VERIFIED_GUEST for {session.session_id[:8]}")
-                        # Keep existing counts - don't reset anything
-                    elif is_new_email:
-                        # CLEAN SLATE for truly new emails (shared device protection)
-                        logger.info(f"🧹 CLEAN SLATE: New email {email_to_verify} gets fresh start, resetting all counts and bans for {session.session_id[:8]}")
-                        session.daily_question_count = 0
-                        session.total_question_count = 0
-                        session.last_question_time = None
-                        session.question_limit_reached = False
-                        session.ban_status = BanStatus.NONE
-                        session.ban_start_time = None
-                        session.ban_end_time = None
-                        session.ban_reason = None
-                        session.evasion_count = 0
-                        session.current_penalty_hours = 0
-                        session.escalation_level = 0
+                    
+                    # NEW: Apply global email-based inheritance for email-verified guests
+                    if should_check_global_email_history and (max_daily_count > 0 or inherit_ban):
+                        logger.info(f"🌍 GLOBAL EMAIL INHERITANCE: Applying cross-device limits for {email_to_verify}")
+                        
+                        # Inherit the highest daily count from any device
+                        session.daily_question_count = max_daily_count
+                        session.total_question_count = max(session.total_question_count, max_total_count)
+                        session.last_question_time = most_recent_question_time
+                        
+                        # Inherit any active ban
+                        if inherit_ban and ban_info:
+                            session.ban_status = ban_info['status']
+                            session.ban_start_time = ban_info['start_time']
+                            session.ban_end_time = ban_info['end_time']
+                            session.ban_reason = ban_info['reason']
+                            session.question_limit_reached = True
+                            logger.info(f"🚫 Inherited active ban until {ban_info['end_time']}")
                     else:
-                        logger.info(f"♻️ EXISTING EMAIL: For {email_to_verify}, keeping counts as determined by inheritance.")
-                
+                        # Check if this is same session upgrade (GUEST -> EMAIL_VERIFIED_GUEST)
+                        is_same_session_upgrade = (
+                            not session.reverification_pending and  
+                            session.user_type == UserType.GUEST and  
+                            old_daily_count > 0  # Has asked questions in this session
+                        )
+                        
+                        if is_same_session_upgrade:
+                            logger.info(f"🔄 SAME SESSION UPGRADE: Preserving question count {old_daily_count} from GUEST to EMAIL_VERIFIED_GUEST for {session.session_id[:8]}")
+                            # Keep existing counts - don't reset anything
+                            session.daily_question_count = old_daily_count
+                        else:
+                            # First time using this email anywhere - true clean slate
+                            logger.info(f"🆕 FIRST TIME EMAIL: {email_to_verify} gets fresh start")
+                            session.daily_question_count = 0
+                            session.total_question_count = 0
+                            session.last_question_time = None
+                            session.question_limit_reached = False
+                            session.ban_status = BanStatus.NONE
+                            session.ban_start_time = None
+                            session.ban_end_time = None
+                            session.ban_reason = None
+                    
                     logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email} with {session.daily_question_count} questions")
 
                 session.question_limit_reached = False
@@ -3787,15 +3923,13 @@ class SessionManager:
                 if session.last_activity is None:
                     session.last_activity = datetime.now()
 
-                # NEW: Re-run inheritance after email verification for Guest -> Email Verified transitions
-                # This ensures we pick up previous session counts now that we have an email
-                if not session.reverification_pending and not is_same_session_upgrade:
-                    logger.info(f"🔄 Re-running inheritance after email verification for {session.session_id[:8]} with email {email_to_verify}")
-                    self._attempt_fingerprint_inheritance(session)
-                    logger.info(f"📊 Post-inheritance counts: daily={session.daily_question_count}, total={session.total_question_count}")
-
                 try:
                     self.db.save_session(session)
+                    
+                    # NEW: If email-verified and has active sessions, sync the new session with others
+                    if session.user_type == UserType.EMAIL_VERIFIED_GUEST and session.email:
+                        self.sync_email_verified_sessions(session.email, session.session_id)
+                        
                 except Exception as e:
                     logger.error(f"Failed to save upgraded session: {e}")
             
@@ -4070,6 +4204,54 @@ class SessionManager:
             # Clean up lock on error
             if lock_key in self._ban_sync_locks:
                 del self._ban_sync_locks[lock_key]
+
+    # NEW: Add Ban Synchronization Method
+    def sync_email_verified_sessions(self, email: str, current_session_id: str):
+        """Sync question counts across all active email-verified sessions with the same email"""
+        try:
+            email_sessions = self.db.find_sessions_by_email(email)
+            active_email_verified_sessions = [
+                s for s in email_sessions 
+                if s.active and s.user_type == UserType.EMAIL_VERIFIED_GUEST
+            ]
+            
+            if not active_email_verified_sessions:
+                return
+            
+            # Find the session with the highest question count within the DAILY_RESET_WINDOW
+            max_count_session = None
+            now = datetime.now()
+            for sess in active_email_verified_sessions:
+                if sess.last_question_time and (now - sess.last_question_time) < DAILY_RESET_WINDOW:
+                    if max_count_session is None or sess.daily_question_count > max_count_session.daily_question_count:
+                        max_count_session = sess
+            
+            if max_count_session is None:
+                logger.info(f"No recent active sessions for email-verified {email} to sync.")
+                return
+            
+            # Update all other sessions to match the max_count_session
+            for sess in active_email_verified_sessions:
+                if sess.session_id != max_count_session.session_id:
+                    sess.daily_question_count = max_count_session.daily_question_count
+                    sess.total_question_count = max_count_session.total_question_count
+                    sess.last_question_time = max_count_session.last_question_time
+                    
+                    # Also sync ban information if any
+                    if max_count_session.ban_status != BanStatus.NONE:
+                        sess.ban_status = max_count_session.ban_status
+                        sess.ban_start_time = max_count_session.ban_start_time
+                        sess.ban_end_time = max_count_session.ban_end_time
+                        sess.ban_reason = max_count_session.ban_reason
+                        sess.question_limit_reached = max_count_session.question_limit_reached
+                    
+                    self.db.save_session(sess)
+                    logger.debug(f"Synced session {sess.session_id[:8]} to {max_count_session.daily_question_count} daily questions from {max_count_session.session_id[:8]}")
+            
+            logger.info(f"Synced {len(active_email_verified_sessions)} email-verified sessions for {email}")
+            
+        except Exception as e:
+            logger.error(f"Failed to sync email-verified sessions for {email}: {e}")
 
     # CHANGE 10: Pricing/Stock Question Handler
     def detect_pricing_stock_question(self, prompt: str) -> bool:
@@ -4690,7 +4872,7 @@ Please proceed with your question, keeping in mind that any pricing or stock inf
             
             # Mark session as inactive
             session.active = False
-            session.last_activity = datetime.time() # Use time() to avoid setting datetime objects to None
+            session.last_activity = datetime.now() # Use now() for datetime objects
             
             # Save final session state
             try:
