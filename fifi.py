@@ -6051,7 +6051,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                     if st.button("📧 Switch to Email Login", use_container_width=True):
                         # Set up for email verification flow
                         st.session_state.wordpress_fallback_active = True
-                        st.session_state.fallback_email = error_info.get('username', '') if '@'' in error_info.get('username', '') else ''
+                        st.session_state.fallback_email = error_info.get('username', '') if '@' in error_info.get('username', '') else ''
                         st.session_state.wordpress_error['show_fallback'] = False # Hide this block
                         st.rerun()
                         
