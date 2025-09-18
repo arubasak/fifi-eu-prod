@@ -2114,7 +2114,7 @@ class PineconeAssistantTool:
                 "1. Does the question ask for price or stock? -> Use the sales redirection message.\n"
                 "2. Is the information in my documents? -> Answer with citations AND product URLs.\n"
                 "3. Is the information NOT in my documents? -> Use the 'I don't have specific information...' message.\n"
-                "4. Is the product discontinued? -> Inform and provide alternatives if available.\n"
+                "4. Is the product discontinued? -> Inform and provide similar alternatives if available.\n"
                 "5. Did I mention any products? -> Ensure each has a [More details] link and all are in Sources section."
             )
             
@@ -4845,8 +4845,35 @@ Respond ONLY with JSON:
                     technical_terms.add(word_lower)
 
         # Get top topics
-        key_topics = list(topic_words)[:8] # Assuming topic_words is defined from _generate_conversation_summary context
-        active_categories = {k: v for k, v in question_categories.items() if v > 0} # Assuming question_categories from _generate_conversation_summary context
+        # Assuming topic_words is defined from _generate_conversation_summary context
+        # In a real scenario, this would be re-calculated or passed from there.
+        # For this snippet, just use a dummy or skip if not available.
+        # For simplicity, I'll re-calculate basic topic words here.
+        temp_topic_words = set()
+        for question in user_questions:
+            q_lower = question.lower()
+            words = [w for w in q_lower.split() if len(w) > 4 and w not in ['what', 'where', 'when', 'about', 'would', 'could', 'should', 'which']]
+            temp_topic_words.update(words[:3])
+
+        key_topics = list(temp_topic_words)[:8]
+        # Same for question_categories
+        temp_question_categories = {
+            'pricing': 0, 'suppliers': 0, 'technical': 0, 'regulatory': 0, 'applications': 0
+        }
+        for question in user_questions:
+            q_lower = question.lower()
+            if any(word in q_lower for word in ['price', 'pricing', 'cost', 'expensive']):
+                temp_question_categories['pricing'] += 1
+            elif any(word in q_lower for word in ['supplier', 'source', 'vendor', 'manufacturer']):
+                temp_question_categories['suppliers'] += 1
+            elif any(word in q_lower for word in ['regulation', 'compliance', 'standard', 'certification']):
+                temp_question_categories['regulatory'] += 1
+            elif any(word in q_lower for word in ['application', 'use', 'formulation', 'recipe']):
+                temp_question_categories['applications'] += 1
+            else:
+                temp_question_categories['technical'] += 1
+
+        active_categories = {k: v for k, v in temp_question_categories.items() if v > 0}
 
         # Build analysis
         analysis_parts = [
@@ -4893,14 +4920,14 @@ Respond ONLY with JSON:
             # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
             rate_limiter_id = session.fingerprint_id
             ## CHANGE: For REGISTERED_USERs, use session_id for rate limiting as FP is not collected.
-            if session.user_type == UserType.REGISTERED_USER:
-                rate_limiter_id = session.session_id
-                logger.debug(f"Rate limiter using session ID as fallback for REGISTERED_USER {session.session_id[:8]} (FP not collected).")
+            # NEW: If `session.email` exists for REGISTERED_USER or EMAIL_VERIFIED_GUEST, prioritize email for rate limiting
+            if (session.user_type == UserType.REGISTERED_USER or session.user_type == UserType.EMAIL_VERIFIED_GUEST) and session.email:
+                rate_limiter_id = f"email_{session.email.lower()}"
+                logger.debug(f"Rate limiter using email for {session.user_type.value}: {session.email}")
             elif rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 rate_limiter_id = session.session_id
-                logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
-
-
+                logger.debug(f"Rate limiter using session ID as fallback: {session.session_id[:8]}")
+            
             ## CHANGE: Use constants for rate limits
             rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
             if not rate_limit_result['allowed']:
@@ -4908,23 +4935,15 @@ Respond ONLY with JSON:
                 max_requests = RATE_LIMIT_REQUESTS ## CHANGE: Use constant
                 window_seconds = RATE_LIMIT_WINDOW_SECONDS ## CHANGE: Use constant
                 
-                # Calculate remaining time dynamically
-                # This logic is inside the RateLimiter class, no need to re-calculate here.
-                # Just get the time_until_next from the result.
-                
-                col1, col2 = st.columns([5, 1])
-                with col1:
-                    if time_until_next > 0:
-                        st.error(f"⏱️ **Rate limit exceeded** - Please wait {time_until_next} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
-                    else:
-                        st.error(f"⏱️ **Rate limit exceeded** - Please wait a moment before asking another question.")
-                with col2:
-                    if st.button("✕", key="dismiss_rate_limit", help="Dismiss this message", use_container_width=True):
-                        del st.session_state.rate_limit_hit
-                        st.rerun()
+                # Store rate limit error info in session state
+                st.session_state.rate_limit_hit = {
+                    'timestamp': datetime.now(),
+                    'time_until_next': time_until_next,
+                    'message': f"Rate limit exceeded. Please wait {time_until_next} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)"
+                }
                 
                 return {
-                    'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
+                    'content': st.session_state.rate_limit_hit['message'],
                     'success': False,
                     'source': 'Rate Limiter',
                     'time_until_next': time_until_next
@@ -7051,7 +7070,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         visible_messages = session.messages[session.display_message_offset:]
         for msg in visible_messages:
             with st.chat_message(msg.get("role", "user")):
-                st.markdown(msg.get("content", ""), unsafe_allow_html=True)
+                # OLD: st.markdown(msg.get("content", ""), unsafe_allow_html=True)
+                # NEW: Remove unsafe_allow_html=True
+                st.markdown(msg.get("content", ""))
                 
                 if msg.get("source"):
                     source_color = {
@@ -7080,7 +7101,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     overall_chat_disabled = (
         not st.session_state.get('is_chat_ready', False) or 
         should_disable_chat_input_by_dialog or 
-        session.ban_status.value != BanStatus.NONE.value
+        session.ban_status.value != BanStatus.NONE.value or
+        st.session_state.get('is_processing_question', False)  # NEW: Disable during processing
     )
 
     # Rate limit notification with manual dismiss
@@ -7165,7 +7187,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.rerun()
 
     # Show approaching limit warnings (Option 2 enhancement)
-    if not overall_chat_disabled:
+    if not overall_chat_disabled and not st.session_state.get('is_processing_question', False):
         user_type = session.user_type.value
         current_count = session.daily_question_count
         
@@ -7182,15 +7204,22 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             elif current_count == REGISTERED_USER_QUESTION_LIMIT - 1:
                 st.warning(f"⚠️ **Final Question Today!** Your next question will be your last for {TIER_2_BAN_HOURS} hours.")
 
-    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=overall_chat_disabled)
+    prompt = st.chat_input(
+        "Ask me about ingredients, suppliers, or market trends..." if not st.session_state.get('is_processing_question', False) 
+        else "Processing your question, please wait...",  # NEW: Show processing message
+        disabled=overall_chat_disabled
+    )
     
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
+        # NEW: Set processing flag
+        st.session_state.is_processing_question = True
+        
         # Check if attempting to exceed limits _before_ sending to AI
         # This call will now also handle displaying appropriate messages/bans.
         if session_manager.check_if_attempting_to_exceed_limits(session):
+            st.session_state.is_processing_question = False  # Clear flag
             # If `check_if_attempting_to_exceed_limits` returns True, it means a limit was hit
             # and a message/ban has been displayed.
             # For guest limit, we specifically set the verification stage.
@@ -7224,7 +7253,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             st.error(f"Time remaining: {hours}h {minutes}m")
                     else:
                         # Show the AI response and metadata
-                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                        # OLD: st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                        # NEW: Remove unsafe_allow_html=True
+                        st.markdown(response.get("content", "No response generated."))
                         if response.get("source"):
                             source_color = {
                                 "FiFi": "🧠", "FiFi Web Search": "🌐",
@@ -7248,6 +7279,12 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 except Exception as e:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
+                finally:
+                    # NEW: Always clear processing flag
+                    st.session_state.is_processing_question = False
+        
+        # Clear processing flag before rerun
+        st.session_state.is_processing_question = False
         st.rerun()
 
 ## CHANGE: Persistent state manager
@@ -7410,6 +7447,7 @@ def main_fixed():
             "gentle_prompt_shown": False, "email_verified_final_answer_acknowledged": False,
             "must_verify_email_immediately": False, "skip_email_allowed": True,
             "page": None, "fingerprint_processed_for_session": {},
+            "is_processing_question": False,  # NEW: Add this
             # Initialize WordPress fallback states here too if they weren't in init_fixed
             "wordpress_error": {'show_fallback': False},
             "wordpress_fallback_active": False,
