@@ -6039,7 +6039,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 st.error(error_info['message'])
                 
                 st.info("💡 **Alternative Login Option Available**")
-                st.markdown("""
+                st.markdown(f"""
                 We can switch you to our **Email Verification** login method instead:
                 - Quick verification via email OTP (one-time password).
                 - If your email is associated with a registered account, your privileges will be automatically restored.
@@ -6051,7 +6051,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                     if st.button("📧 Switch to Email Login", use_container_width=True):
                         # Set up for email verification flow
                         st.session_state.wordpress_fallback_active = True
-                        st.session_state.fallback_email = error_info.get('username', '') if '@' in error_info.get('username', '') else ''
+                        st.session_state.fallback_email = error_info.get('username', '') if '@'' in error_info.get('username', '') else ''
                         st.session_state.wordpress_error['show_fallback'] = False # Hide this block
                         st.rerun()
                         
@@ -6173,9 +6173,9 @@ def render_welcome_page(session_manager: 'SessionManager'):
                         st.error("Error: No email address found for resend. Please restart the login process.")
                     st.rerun()
 
-            
-            # Show original WordPress login form if no fallback is active
-            else: # This path is for the initial WordPress login attempt
+            # CORRECTED INDENTATION FOR THE MAIN WORDPRESS LOGIN FORM
+            # This 'else' block aligns with the 'if' and 'elif' blocks above it.
+            else: 
                 with st.form("login_form", clear_on_submit=True):
                     st.markdown("### 🔐 Sign In to Your Account")
                     username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
@@ -6196,7 +6196,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             st.session_state.temp_password = password
                             st.session_state.loading_reason = 'authenticate'
                             set_loading_state(True, "Authenticating and preparing your session...")
-                            st.rerun()  # Immediately show loading state (NEW)
+                            st.rerun()
             
             st.markdown("---")
             st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
