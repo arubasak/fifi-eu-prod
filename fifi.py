@@ -234,7 +234,6 @@ class ErrorSeverity(Enum):
 class ErrorContext:
     component: str
     operation: str
-
     error_type: str
     severity: ErrorSeverity
     user_message: str
@@ -361,7 +360,7 @@ class UserSession:
     # Ban Management
     ban_status: BanStatus = BanStatus.NONE
     ban_start_time: Optional[datetime] = None
-    ban_end_time: Optional[str] = None
+    ban_end_time: Optional[datetime] = None
     ban_reason: Optional[str] = None
     
     # Evasion Tracking
@@ -4542,7 +4541,6 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to sync email-verified sessions for {email}: {e}")
 
-    # CHANGE 10: Pricing/Stock Question Handler
     def detect_pricing_stock_question(self, prompt: str) -> bool:
         """Detect if question is about pricing or stock availability."""
 
@@ -4950,7 +4948,22 @@ Respond ONLY with JSON:
             # 2. Pricing/Stock check (MOVED UP - IMMEDIATE RETURN to avoid LLM tokens/processing)
             is_pricing_stock_query = self.detect_pricing_stock_question(prompt)
             if is_pricing_stock_query:
-                # Store pricing notification info (similar to rate_limit_hit)
+                # IMPORTANT: Record question before returning static content
+                try:
+                    self.question_limits.record_question_and_check_ban(session, self)
+                except Exception as e:
+                    logger.error(f"Failed to record pricing/stock query for {session.session_id[:8]}: {e}")
+                    return {
+                        'content': 'An error occurred while tracking your question. Please try again.',
+                        'success': False,
+                        'source': 'Question Tracker'
+                    }
+
+                # Add user message to session history
+                user_message = {'role': 'user', 'content': prompt}
+                session.messages.append(user_message)
+
+                # Store pricing notification info (for the UI pop-up)
                 st.session_state.pricing_stock_notice = {
                     'timestamp': datetime.now(),
                     'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost', 'expensive', 'cheap']) else 'stock',
@@ -4964,12 +4977,16 @@ Pricing and stock availability are dynamic in nature and subject to market condi
 - Request formal quotes for confirmed pricing based on your specific requirements""" # REMOVED: "Please proceed..." line
                 }
                 
-                # IMMEDIATELY RETURN the generic response, preventing further AI processing and question counting
+                # Update activity and save session (before returning)
+                self._update_activity(session)
+
+                # IMMEDIATELY RETURN a blank content for the chat bubble, but include the flag
                 return {
-                    'content': "Thank you for your interest. For up-to-date pricing and stock, please visit our website or contact sales directly.",
+                    'content': "", # Empty content for chat bubble
                     'success': True,
                     'source': 'Business Rules',
-                    'is_pricing_stock_redirect': True 
+                    'is_pricing_stock_redirect': True,
+                    'display_only_notice': True # NEW: Flag for UI to only show the st.info notice
                 }
 
             # 3. LLM-driven Meta-conversation query detection (e.g., "count my questions", "summarize chat")
@@ -5003,7 +5020,7 @@ Pricing and stock availability are dynamic in nature and subject to market condi
                     'role': 'assistant',
                     'content': meta_response.get('content', 'Analysis complete.'),
                     'source': meta_response.get('source', 'Conversation Analytics'),
-                    'is_meta_response': True
+                    'is_meta_response': True  # Flag for UI display
                 }
                 assistant_message['content'] = str(assistant_message['content'])
                 session.messages.append(assistant_message)
@@ -5117,10 +5134,8 @@ Pricing and stock availability are dynamic in nature and subject to market condi
                     }
                     
                 elif limit_check.get('reason') == 'guest_limit':
-                    # Guest limit (4 questions) still requires email verification, not a hard ban here.
                     return {'requires_email': True, 'content': 'Email verification required.'}
                 
-                # For any other ban reason (like evasion or active ban from `is_within_limits`)
                 return {
                     'banned': True,
                     'content': ban_message,
@@ -5142,7 +5157,6 @@ Pricing and stock availability are dynamic in nature and subject to market condi
             try:
                 question_record_status = self.question_limits.record_question_and_check_ban(session, self)
                 if question_record_status.get("ban_applied"):
-                    # If a ban was just applied, return the ban message immediately
                     ban_type = question_record_status.get("ban_type")
                     if ban_type == BanStatus.ONE_HOUR.value:
                         return {
@@ -5163,10 +5177,8 @@ Pricing and stock availability are dynamic in nature and subject to market condi
                                 'content': self.question_limits._get_ban_message(session, 'email_verified_guest_limit'),
                                 'time_remaining': timedelta(hours=EMAIL_VERIFIED_BAN_HOURS)
                             }
-                # NEW: If an *existing* ban was inherited, return that immediately.
                 elif question_record_status.get("existing_ban_inherited"):
                     ban_type = question_record_status.get("ban_type")
-                    # Retrieve the existing ban details from the session itself, as it was just inherited
                     return {
                         'banned': True,
                         'content': self.question_limits._get_ban_message(session, ban_type),
@@ -7041,9 +7053,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         visible_messages = session.messages[session.display_message_offset:]
         for msg in visible_messages:
             with st.chat_message(msg.get("role", "user")):
-                # OLD: st.markdown(msg.get("content", ""), unsafe_allow_html=True)
-                # NEW: Remove unsafe_allow_html=True
-                st.markdown(msg.get("content", ""))
+                # NEW: Check if this is a pricing/stock redirect that should be visually hidden from chat
+                if msg.get("display_only_notice", False) and msg.get("role") == "assistant":
+                    pass # Do not render this specific assistant message in the chat bubble
+                else:
+                    st.markdown(msg.get("content", ""))
                 
                 if msg.get("source"):
                     source_color = {
@@ -7228,10 +7242,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             hours = int(time_remaining.total_seconds() // 3600)
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
+                    elif response.get('display_only_notice', False): # NEW: Check this flag
+                        # Do nothing here, as the notice is displayed separately and the chat content is empty.
+                        pass
                     else:
                         # Show the AI response and metadata
-                        # OLD: st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
-                        # NEW: Remove unsafe_allow_html=True
                         st.markdown(response.get("content", "No response generated."))
                         if response.get("source"):
                             source_color = {
