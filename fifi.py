@@ -6030,8 +6030,8 @@ def render_welcome_page(session_manager: 'SessionManager'):
     with tab1:
         if not session_manager.config.WORDPRESS_URL:
             st.warning("Sign-in is currently disabled because the authentication service (WordPress URL) is not configured in application secrets.")
-        else:
-            # NEW: Handle WordPress error fallback UI
+        else: # This 'else' is for when WordPress URL IS configured
+            # This is the outer if/elif/else chain for the WordPress tab content
             if st.session_state.get('wordpress_error', {}).get('show_fallback', False):
                 error_info = st.session_state.wordpress_error
                 
@@ -6049,21 +6049,18 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("📧 Switch to Email Login", use_container_width=True):
-                        # Set up for email verification flow
                         st.session_state.wordpress_fallback_active = True
                         # CORRECTED: Changed '@''' to '@'
                         st.session_state.fallback_email = error_info.get('username', '') if '@' in error_info.get('username', '') else ''
-                        st.session_state.wordpress_error['show_fallback'] = False # Hide this block
+                        st.session_state.wordpress_error['show_fallback'] = False
                         st.rerun()
                         
                 with col2:
                     if st.button("🔄 Try WordPress Again", use_container_width=True):
-                        # Clear error state
                         if 'wordpress_error' in st.session_state:
                             del st.session_state['wordpress_error']
                         st.rerun()
             
-            # NEW: Show email verification for fallback
             elif st.session_state.get('wordpress_fallback_active', False):
                 st.info("📧 **Email Verification Login (WordPress Fallback)**")
                 st.caption("Enter your email to receive a verification code. If you're a registered user, we'll restore your account.")
@@ -6081,7 +6078,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
                     
                     if submit_email:
                         if fallback_email:
-                            # Create temporary session for verification
                             temp_session = session_manager.get_session()
                             result = session_manager.handle_guest_email_verification(temp_session, fallback_email)
                             
@@ -6096,12 +6092,10 @@ def render_welcome_page(session_manager: 'SessionManager'):
                         else:
                             st.error("Please enter your email address")
             
-            # NEW: Show code entry for fallback
             elif st.session_state.get('fallback_verification_stage') == 'code_entry':
                 email = st.session_state.get('fallback_verification_email')
                 st.success(f"📧 Code sent to **{session_manager._mask_email(email)}**")
                 
-                # NEW: Clear warning about limitations for fallback
                 st.warning("""
                 ⚠️ **Important**: This is a recovery login method due to WordPress authentication issues.
                 Your chat access is fully functional, but WordPress profile-specific integrations might be unavailable.
@@ -6118,7 +6112,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
                     verify_btn = st.form_submit_button("✅ Verify & Login", use_container_width=True)
                     
                     if verify_btn and code:
-                        # Load the temp session
                         temp_session_id = st.session_state.get('fallback_session_id')
                         temp_session = session_manager.db.load_session(temp_session_id)
                         
@@ -6126,11 +6119,10 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             result = session_manager.verify_email_code(temp_session, code)
                             
                             if result['success']:
-                                # Check if this email belongs to a registered user
                                 upgraded_session = session_manager._check_and_upgrade_to_registered(
                                     temp_session, 
                                     email,
-                                    is_fallback_from_wordpress=True # This indicates it's a fallback path
+                                    is_fallback_from_wordpress=True
                                 )
                                 
                                 if upgraded_session.user_type == UserType.REGISTERED_USER:
@@ -6141,42 +6133,38 @@ def render_welcome_page(session_manager: 'SessionManager'):
                                 else:
                                     st.success(f"✅ Email verified! You have Email Verified Guest access.")
                                 
-                                # Clean up fallback state
                                 for key in ['wordpress_fallback_active', 'fallback_email', 
                                            'fallback_verification_email', 'fallback_verification_stage',
                                            'fallback_session_id', 'wordpress_error']:
                                     if key in st.session_state:
                                         del st.session_state[key]
                                 
-                                # Set up for chat
                                 st.session_state.current_session_id = upgraded_session.session_id
                                 st.session_state.page = "chat"
                                 st.session_state.is_chat_ready = True
                                 st.rerun()
                             else:
                                 st.error(result['message'])
-                                # No need to rerender here, form is sticky
-                else:
-                    st.error("Please enter a 6-digit code.")
-            
-            # Resend code option for fallback
-            col_resend_fallback, _ = st.columns([1,2])
-            with col_resend_fallback:
-                if st.button("🔄 Resend Code", use_container_width=True, key="resend_fallback_code"):
-                    if email:
-                        with st.spinner("Resending verification code..."):
-                            verification_sent = session_manager.email_verification.send_verification_code(email)
-                            if verification_sent:
-                                st.success("✅ New verification code sent! Check your email.")
-                            else:
-                                st.error("❌ Failed to resend code. Please try again later.")
                     else:
-                        st.error("Error: No email address found for resend. Please restart the login process.")
-                    st.rerun()
+                        st.error("Please enter a 6-digit code.")
+            
+                col_resend_fallback, _ = st.columns([1,2])
+                with col_resend_fallback:
+                    if st.button("🔄 Resend Code", use_container_width=True, key="resend_fallback_code"):
+                        if email:
+                            with st.spinner("Resending verification code..."):
+                                verification_sent = session_manager.email_verification.send_verification_code(email)
+                                if verification_sent:
+                                    st.success("✅ New verification code sent! Check your email.")
+                                else:
+                                    st.error("❌ Failed to resend code. Please try again later.")
+                        else:
+                            st.error("Error: No email address found for resend. Please restart the login process.")
+                        st.rerun()
 
-            # CORRECTED INDENTATION FOR THE MAIN WORDPRESS LOGIN FORM
-            # This 'else' block aligns with the 'if' and 'elif' blocks above it.
-            else: 
+            # This 'else' is for the standard WordPress login form, when no fallback UI is active.
+            # It must align with the 'if' and 'elif' statements above.
+            else: # <--- CORRECTED INDENTATION
                 with st.form("login_form", clear_on_submit=True):
                     st.markdown("### 🔐 Sign In to Your Account")
                     username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
@@ -6192,7 +6180,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
                         if not username or not password:
                             st.error("Please enter both username and password to sign in.")
                         else:
-                            # Store credentials temporarily and set loading state (NEW)
                             st.session_state.temp_username = username
                             st.session_state.temp_password = password
                             st.session_state.loading_reason = 'authenticate'
@@ -6207,8 +6194,8 @@ def render_welcome_page(session_manager: 'SessionManager'):
         **Continue as a guest** to get a quick start and try FiFi AI Assistant without signing in.
         
         ℹ️ **What to expect as a Guest:**
-        - You get an initial allowance of **{GUEST_QUESTION_LIMIT} questions** to explore FiFi AI's capabilities. ## CHANGE: Use constant
-        - After these {GUEST_QUESTION_LIMIT} questions, **email verification will be required** to continue (unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day). ## CHANGE: Use constant
+        - You get an initial allowance of **{GUEST_QUESTION_LIMIT} questions** to explore FiFi AI's capabilities.
+        - After these {GUEST_QUESTION_LIMIT} questions, **email verification will be required** to continue (unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day).
         - Our system utilizes **universal device fingerprinting** for security and to track usage across sessions.
         - You can always choose to **upgrade to a full registration** later for extended benefits.
         """)
@@ -6217,33 +6204,31 @@ def render_welcome_page(session_manager: 'SessionManager'):
         col1, col2, col3 = st.columns(3)
         with col2:
             if st.button("👤 Start as Guest", use_container_width=True):
-                # Set loading state and reason BEFORE any session operations (NEW)
                 st.session_state.loading_reason = 'start_guest'
                 set_loading_state(True, "Setting up your session and initializing AI assistant...")
-                st.rerun()  # Immediately show loading state (NEW)
+                st.rerun()
 
-    # MOVED DOWN: Usage tiers explanation (was previously above tabs)
     st.markdown("---")
     st.subheader("🎯 Usage Tiers")
     
     col1, col2, col3 = st.columns(3)
     with col1:
         st.success("👤 **Guest Users**")
-        st.markdown(f"• **{GUEST_QUESTION_LIMIT} questions** to try FiFi AI") ## CHANGE: Use constant
+        st.markdown(f"• **{GUEST_QUESTION_LIMIT} questions** to try FiFi AI")
         st.markdown("• Email verification required to continue")
         st.markdown("• Quick start, no registration needed")
     
     with col2:
         st.info("📧 **Email Verified Guest**")
-        st.markdown(f"• **{EMAIL_VERIFIED_QUESTION_LIMIT} questions per day** (rolling {DAILY_RESET_WINDOW_HOURS}-hour period)") ## CHANGE: Use constant
+        st.markdown(f"• **{EMAIL_VERIFIED_QUESTION_LIMIT} questions per day** (rolling {DAILY_RESET_WINDOW_HOURS}-hour period)")
         st.markdown("• Email verification for access")
         st.markdown("• No full registration required")
     
     with col3:
         st.warning("🔐 **Registered Users**")
-        st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** with tier system:") ## CHANGE: Use constant
-        st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break") ## CHANGE: Use constant
-        st.markdown(f"  - **Tier 2**: Questions {REGISTERED_USER_TIER_1_LIMIT + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset") ## CHANGE: Use constant
+        st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** with tier system:")
+        st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break")
+        st.markdown(f"  - **Tier 2**: Questions {REGISTER_USER_TIER_1_LIMIT + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset")
         st.markdown("• Cross-device tracking & chat saving")
         st.markdown("• Priority access during high usage")
         
