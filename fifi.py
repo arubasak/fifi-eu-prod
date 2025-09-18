@@ -2016,12 +2016,10 @@ class RateLimiter:
             
             ## CHANGE: Memory leak fix - cleanup cache if too large
             if len(self.requests) > self.MAX_TRACKED_IDS:
-                # Find the oldest N entries to remove
-                # This heuristic sorts by the last request time of each identifier
-                sorted_ids = sorted(self.requests.items(), 
+                sorted_items = sorted(self.requests.items(), 
                                     key=lambda x: max(x[1]) if x[1] else 0,
                                     reverse=False) # Oldest first
-                for old_id, _ in sorted_ids[:self.MAX_TRACKED_IDS // 10]: # Remove 10% of max
+                for old_id, _ in sorted_items[:self.MAX_TRACKED_IDS // 10]: # Remove 10% of max
                     del self.requests[old_id]
             
             if len(self.requests[identifier]) < self.max_requests:
@@ -2886,33 +2884,7 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     return {"flagged": False}
 
-# NEW: Pre-filter function for obvious allowed queries
-def should_skip_context_check(prompt: str) -> bool:
-    """Skip context check for obvious allowed queries like greetings or short phrases."""
-    prompt_lower = prompt.lower().strip()
-    
-    # Greetings and polite expressions (extended based on 12taste.com context)
-    allowed_phrases = [
-        "hello", "hi", "hey", "good morning", "good afternoon", 
-        "good evening", "thanks", "thank you", "bye", "goodbye",
-        "how are you", "what's up", "greetings", "cheers",
-        "please", "sorry", "excuse me", "pardon",
-        "hi fifi", "hello fifi", "fifi"
-    ]
-    
-    # Single word or very short phrases (e.g., "OK", "Sure")
-    # if len(prompt_lower.split()) <= 2:
-    #    return True
-        
-    # Exact greeting matches
-    if prompt_lower in allowed_phrases:
-        return True
-        
-    # Starts with greeting
-    if any(prompt_lower.startswith(phrase) for phrase in allowed_phrases):
-        return True
-    
-    return False
+# REMOVED: The `should_skip_context_check` function is removed as per the confirmed solution.
 
 # CHANGE 1: Enhanced Validation Function with Context
 @handle_api_errors("Industry Context Check", "Validate Question Context", show_to_user=False)
@@ -4621,7 +4593,8 @@ Respond ONLY with JSON:
         try:
             response = self.ai.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "user", "content": detection_prompt}],
+                messages=[{"role": "system", "content": "You are a search query optimizer. Respond only with the optimized search query."},
+                {"role": "user", "content": detection_prompt}],
                 max_tokens=50,
                 temperature=0.1
             )
@@ -4973,41 +4946,7 @@ Respond ONLY with JSON:
                     "safety_override": False
                 }
 
-            # NEW: Add pre-filter for greetings/casual phrases (token-free)
-            if should_skip_context_check(prompt):
-                logger.info(f"Skipping context check for greeting/casual phrase: '{prompt}'")
-                
-                # Atomic record question for greetings
-                try:
-                    self.question_limits.record_question_and_check_ban(session, self)
-                except Exception as e:
-                    logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
-                    return {
-                        'content': 'An error occurred while tracking your question. Please try again.',
-                        'success': False,
-                        'source': 'Question Tracker'
-                    }
-
-                # Add user message to session history
-                user_message = {'role': 'user', 'content': prompt}
-                session.messages.append(user_message)
-
-                # Provide a friendly, token-free response
-                friendly_response = {
-                    "content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?",
-                    "success": True,
-                    "source": "FiFi"
-                }
-                assistant_message = {
-                    'role': 'assistant',
-                    'content': friendly_response.get('content', 'Hi there!'),
-                    'source': friendly_response.get('source', 'Greeting'),
-                    'is_meta_response': True
-                }
-                session.messages.append(assistant_message)
-                self._update_activity(session)
-                return friendly_response
-
+            # REMOVED: The `if should_skip_context_check(prompt):` block is removed as per the confirmed solution.
 
             # NEW: Check if it's a meta-conversation query (LLM Driven)
             meta_detection = self.detect_meta_conversation_query_llm(prompt)
@@ -5052,6 +4991,33 @@ Respond ONLY with JSON:
 
                 return meta_response
 
+            # NEW: Check for pricing/stock questions
+            is_pricing_stock_query = self.detect_pricing_stock_question(prompt)
+            if is_pricing_stock_query:
+                # Store pricing notification info (similar to rate_limit_hit)
+                st.session_state.pricing_stock_notice = {
+                    'timestamp': datetime.now(),
+                    'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost', 'expensive', 'cheap']) else 'stock',
+                    'message': """**Important Notice About Pricing & Stock Information:**
+
+Pricing and stock availability are dynamic in nature and subject to market conditions, supplier availability, and other factors that can change at any point in time. The information provided is for general reference only and may not reflect current market conditions unless confirmed through a formal order process.
+
+**For Current Information:**
+- Visit the specific product page on our marketplace at **12taste.com** for real-time pricing and availability
+- Contact our sales team at **sales-eu@12taste.com** for precise, up-to-date pricing and stock information
+- Request formal quotes for confirmed pricing based on your specific requirements
+
+Please proceed with your question, keeping in mind that any pricing or stock information provided should be verified through official channels."""
+                }
+                
+                # IMMEDIATELY RETURN the generic response, preventing further AI processing and question counting
+                return {
+                    'content': "Thank you for your interest. For up-to-date pricing and stock, please visit our website or contact sales directly.",
+                    'success': True,
+                    'source': 'Business Rules',
+                    'is_pricing_stock_redirect': True 
+                }
+
             # CHANGE 2: Update the function call to pass conversation history
             context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
             if context_result and not context_result.get("relevant", True):
@@ -5066,6 +5032,38 @@ Respond ONLY with JSON:
                     context_message = "I'm specialized in helping food & beverage industry professionals with ingredient sourcing, formulation, and technical questions. Could you please rephrase your question to focus on professional food ingredient needs?"
                 elif category == "unrelated_industry":
                     context_message = "I'm designed to assist with food & beverage ingredients and related industry topics. For questions outside the food industry, please try a general-purpose AI assistant."
+                elif category == "greeting_or_polite": # NEW: Handle LLM-detected greetings
+                    # Atomic record question for greetings - now done by LLM
+                    try:
+                        self.question_limits.record_question_and_check_ban(session, self)
+                    except Exception as e:
+                        logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
+                        return {
+                            'content': 'An error occurred while tracking your question. Please try again.',
+                            'success': False,
+                            'source': 'Question Tracker'
+                        }
+
+                    # Add user message to session history
+                    user_message = {'role': 'user', 'content': prompt}
+                    session.messages.append(user_message)
+
+                    # Provide a friendly LLM-generated greeting response
+                    friendly_response = {
+                        "content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?",
+                        "success": True,
+                        "source": "FiFi",
+                        "is_meta_response": True # Treat as meta for UI purposes
+                    }
+                    assistant_message = {
+                        'role': 'assistant',
+                        'content': friendly_response.get('content', 'Hi there!'),
+                        'source': friendly_response.get('source', 'Greeting'),
+                        'is_meta_response': True
+                    }
+                    session.messages.append(assistant_message)
+                    self._update_activity(session)
+                    return friendly_response
                 else:
                     context_message = "Your question doesn't seem to be related to the food & beverage industry. I specialize in helping with ingredient sourcing, formulation, suppliers, and industry technical questions."
                 
@@ -5091,24 +5089,8 @@ Respond ONLY with JSON:
                     "context_confidence": confidence
                 }
 
-            # NEW: Check for pricing/stock questions
-            is_pricing_stock_query = self.detect_pricing_stock_question(prompt)
-            if is_pricing_stock_query:
-                # Store pricing notification info (similar to rate_limit_hit)
-                st.session_state.pricing_stock_notice = {
-                    'timestamp': datetime.now(),
-                    'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost', 'expensive', 'cheap']) else 'stock',
-                    'message': """**Important Notice About Pricing & Stock Information:**
-
-Pricing and stock availability are dynamic in nature and subject to market conditions, supplier availability, and other factors that can change at any point in time. The information provided is for general reference only and may not reflect current market conditions unless confirmed through a formal order process.
-
-**For Current Information:**
-- Visit the specific product page on our marketplace at **12taste.com** for real-time pricing and availability
-- Contact our sales team at **sales-eu@12taste.com** for precise, up-to-date pricing and stock information
-- Request formal quotes for confirmed pricing based on your specific requirements
-
-Please proceed with your question, keeping in mind that any pricing or stock information provided should be verified through official channels."""
-                }
+            # REMOVED: NEW: Check for pricing/stock questions (Moved up with immediate return)
+            # This block was moved above the context_result check and now contains an immediate return.
 
             # Continue with regular processing for non-meta queries
             # Check question limits (THIS IS THE PRE-QUESTION LIMIT CHECK)
@@ -7079,7 +7061,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         "FiFi": "🧠", "FiFi Web Search": "🌐", 
                         "Content Moderation": "🛡️", "System Fallback": "⚠️",
                         "Error Handler": "❌", "Session Analytics": "📈", 
-                        "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍"
+                        "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
+                        "Business Rules": "⚙️" # NEW: Add icon for Business Rules
                     }.get(msg['source'], "🤖")
                     st.caption(f"{source_color} Source: {msg['source']}")
                 
@@ -7087,6 +7070,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
                 if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
                 if msg.get("is_meta_response"): indicators.append("📈 Session Analytics")
+                if msg.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
                 if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                 
                 if msg.get("safety_override"):
@@ -7157,10 +7141,14 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.warning(f"🏭 **Outside Food Industry** - This question doesn't relate to food & beverage ingredients.")
             elif category in ["personal_cooking", "off_topic"]:
                 st.warning(f"👨‍🍳 **Personal vs Professional** - I'm designed for B2B food industry questions.")
+            elif category == "greeting_or_polite": # NEW: Display LLM-detected greetings as dismissible info
+                st.info(f"👋 **Greeting Detected**")
+                st.markdown("Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?")
             else:
                 st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or formulation.")
             
-            st.info(f"💡 **Guidance**: {message}")
+            if category != "greeting_or_polite": # Don't show guidance for greetings, as they're allowed
+                st.info(f"💡 **Guidance**: {message}")
             st.caption(f"Confidence: {confidence:.1%} | Category: {category}")
         with col2:
             if st.button("✕", key="dismiss_context", help="Dismiss this message", use_container_width=True):
@@ -7261,7 +7249,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                                 "FiFi": "🧠", "FiFi Web Search": "🌐",
                                 "Content Moderation": "🛡️", "System Fallback": "⚠️",
                                 "Error Handler": "❌", "Session Analytics": "📈",
-                                "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍"
+                                "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
+                                "Business Rules": "⚙️" # NEW: Add icon for Business Rules
                             }.get(response['source'], "🤖")
                             st.caption(f"{source_color} Source: {response['source']}")
                         
@@ -7269,6 +7258,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
                         if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
                         if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
+                        if response.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
                         if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                         
                         if response.get("safety_override"): st.warning("🛡️ Safety Override: Switched to verified sources")
