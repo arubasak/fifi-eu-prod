@@ -6228,7 +6228,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.warning("🔐 **Registered Users**")
         st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** with tier system:")
         st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break")
-        st.markdown(f"  - **Tier 2**: Questions {REGISTER_USER_TIER_1_LIMIT + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset")
+        st.markdown(f"  - **Tier 2**: Questions {tier1_upper_bound + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset") # Corrected
         st.markdown("• Cross-device tracking & chat saving")
         st.markdown("• Priority access during high usage")
         
