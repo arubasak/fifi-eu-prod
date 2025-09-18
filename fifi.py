@@ -2901,8 +2901,8 @@ def should_skip_context_check(prompt: str) -> bool:
     ]
     
     # Single word or very short phrases (e.g., "OK", "Sure")
-    if len(prompt_lower.split()) <= 2:
-        return True
+    # if len(prompt_lower.split()) <= 2:
+    #    return True
         
     # Exact greeting matches
     if prompt_lower in allowed_phrases:
