@@ -199,19 +199,20 @@ def show_loading_overlay():
 
 class Config:
     def __init__(self):
-        self.JWT_SECRET = st.secrets.get("JWT_SECRET", "default-secret")
-        self.OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
-        self.TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY")
-        self.PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY")
-        self.PINECONE_ASSISTANT_NAME = st.secrets.get("PINECONE_ASSISTANT_NAME", "my-chat-assistant")
-        self.WORDPRESS_URL = self._validate_url(st.secrets.get("WORDPRESS_URL", ""))
-        self.SQLITE_CLOUD_CONNECTION = st.secrets.get("SQLITE_CLOUD_CONNECTION")
-        self.ZOHO_CLIENT_ID = st.secrets.get("ZOHO_CLIENT_ID")
-        self.ZOHO_CLIENT_SECRET = st.secrets.get("ZOHO_CLIENT_SECRET")
-        self.ZOHO_REFRESH_TOKEN = st.secrets.get("ZOHO_REFRESH_TOKEN")
+        # --- MODIFIED: Use os.getenv as fallback for all st.secrets.get() calls ---
+        self.JWT_SECRET = st.secrets.get("JWT_SECRET") or os.getenv("JWT_SECRET", "default-secret")
+        self.OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        self.TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY") or os.getenv("TAVILY_API_KEY")
+        self.PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY") or os.getenv("PINECONE_API_KEY")
+        self.PINECONE_ASSISTANT_NAME = st.secrets.get("PINECONE_ASSISTANT_NAME") or os.getenv("PINECONE_ASSISTANT_NAME", "my-chat-assistant")
+        self.WORDPRESS_URL = self._validate_url(st.secrets.get("WORDPRESS_URL") or os.getenv("WORDPRESS_URL", ""))
+        self.SQLITE_CLOUD_CONNECTION = st.secrets.get("SQLITE_CLOUD_CONNECTION") or os.getenv("SQLITE_CLOUD_CONNECTION")
+        self.ZOHO_CLIENT_ID = st.secrets.get("ZOHO_CLIENT_ID") or os.getenv("ZOHO_CLIENT_ID")
+        self.ZOHO_CLIENT_SECRET = st.secrets.get("ZOHO_CLIENT_SECRET") or os.getenv("ZOHO_CLIENT_SECRET")
+        self.ZOHO_REFRESH_TOKEN = st.secrets.get("ZOHO_REFRESH_TOKEN") or os.getenv("ZOHO_REFRESH_TOKEN")
         self.ZOHO_ENABLED = all([self.ZOHO_CLIENT_ID, self.ZOHO_CLIENT_SECRET, self.ZOHO_REFRESH_TOKEN])
-        self.SUPABASE_URL = st.secrets.get("SUPABASE_URL")
-        self.SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY")
+        self.SUPABASE_URL = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
+        self.SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_ANON_KEY")
         self.SUPABASE_ENABLED = all([SUPABASE_AVAILABLE, self.SUPABASE_URL, self.SUPABASE_ANON_KEY])
 
     def _validate_url(self, url: str) -> str:
