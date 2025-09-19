@@ -49,4 +49,6 @@ RUN chmod +x ./start.sh
 EXPOSE $PORT
 
 # Run the startup script
-CMD ["./start.sh"]
+# CMD ["./start.sh"]
+
+CMD ["streamlit", "run", "fifi.py", "--server.port=8080", "--server.address=0.0.0.0"]
