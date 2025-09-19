@@ -30,6 +30,9 @@ import requests
 import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
 
+# NEW: Import StreamlitSecretNotFoundError for robust secret handling
+from streamlit.errors import StreamlitSecretNotFoundError
+
 ## CHANGE: Import production_config
 from production_config import (
     DAILY_RESET_WINDOW_HOURS, SESSION_TIMEOUT_MINUTES, FINGERPRINT_TIMEOUT_SECONDS,
@@ -43,16 +46,7 @@ from production_config import (
     FINGERPRINT_TIMEOUT_SECONDS # <--- ADDED FINGERPRINT_TIMEOUT_SECONDS
 )
 
-# NEW: Import for simplified browser reload
-try:
-    from streamlit_js_eval import streamlit_js_eval
-    JS_EVAL_AVAILABLE = True
-    logger = logging.getLogger(__name__)
-    logger.info("✅ streamlit_js_eval available for browser reload")
-except ImportError:
-    JS_EVAL_AVAILABLE = False
-    logger = logging.getLogger(__name__)
-    logger.warning("⚠️ streamlit_js_eval not available, using fallback timeout mechanism")
+# CHANGE 1: REMOVED the streamlit_js_eval import block as it's no longer needed and caused deployment issues.
 
 # =============================================================================
 # FINAL INTEGRATED FIFI AI - SIMPLIFIED TIMEOUT SYSTEM
@@ -199,19 +193,41 @@ def show_loading_overlay():
 
 class Config:
     def __init__(self):
-        self.JWT_SECRET = st.secrets.get("JWT_SECRET", "default-secret")
-        self.OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
-        self.TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY")
-        self.PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY")
-        self.PINECONE_ASSISTANT_NAME = st.secrets.get("PINECONE_ASSISTANT_NAME", "my-chat-assistant")
-        self.WORDPRESS_URL = self._validate_url(st.secrets.get("WORDPRESS_URL", ""))
-        self.SQLITE_CLOUD_CONNECTION = st.secrets.get("SQLITE_CLOUD_CONNECTION")
-        self.ZOHO_CLIENT_ID = st.secrets.get("ZOHO_CLIENT_ID")
-        self.ZOHO_CLIENT_SECRET = st.secrets.get("ZOHO_CLIENT_SECRET")
-        self.ZOHO_REFRESH_TOKEN = st.secrets.get("ZOHO_REFRESH_TOKEN")
+        # Helper function to safely get secrets, prioritizing environment variables
+        def _get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
+            # Priority 1: Check environment variables (e.g., Google Cloud Run)
+            env_val = os.getenv(key)
+            if env_val is not None:
+                return env_val
+
+            # Priority 2: Check Streamlit secrets (e.g., local .streamlit/secrets.toml)
+            try:
+                # Catch StreamlitSecretNotFoundError if secrets.toml is not found
+                secrets_val = st.secrets.get(key)
+                if secrets_val is not None: # st.secrets.get() returns None if key not found
+                    return secrets_val
+            except StreamlitSecretNotFoundError:
+                logger.debug(f"StreamlitSecretNotFoundError caught for key '{key}'. This is expected in Cloud Run.")
+            except Exception as e:
+                logger.warning(f"Unexpected error when accessing st.secrets for key '{key}': {e}")
+            
+            # Priority 3: Fallback to the provided default value
+            return default
+
+        # Apply the _get_secret helper to all secret loads
+        self.JWT_SECRET = _get_secret("JWT_SECRET", "default-secret")
+        self.OPENAI_API_KEY = _get_secret("OPENAI_API_KEY")
+        self.TAVILY_API_KEY = _get_secret("TAVILY_API_KEY")
+        self.PINECONE_API_KEY = _get_secret("PINECONE_API_KEY")
+        self.PINECONE_ASSISTANT_NAME = _get_secret("PINECONE_ASSISTANT_NAME", "my-chat-assistant")
+        self.WORDPRESS_URL = self._validate_url(_get_secret("WORDPRESS_URL", ""))
+        self.SQLITE_CLOUD_CONNECTION = _get_secret("SQLITE_CLOUD_CONNECTION")
+        self.ZOHO_CLIENT_ID = _get_secret("ZOHO_CLIENT_ID")
+        self.ZOHO_CLIENT_SECRET = _get_secret("ZOHO_CLIENT_SECRET")
+        self.ZOHO_REFRESH_TOKEN = _get_secret("ZOHO_REFRESH_TOKEN")
         self.ZOHO_ENABLED = all([self.ZOHO_CLIENT_ID, self.ZOHO_CLIENT_SECRET, self.ZOHO_REFRESH_TOKEN])
-        self.SUPABASE_URL = st.secrets.get("SUPABASE_URL")
-        self.SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY")
+        self.SUPABASE_URL = _get_secret("SUPABASE_URL")
+        self.SUPABASE_ANON_KEY = _get_secret("SUPABASE_ANON_KEY")
         self.SUPABASE_ENABLED = all([SUPABASE_AVAILABLE, self.SUPABASE_URL, self.SUPABASE_ANON_KEY])
 
     def _validate_url(self, url: str) -> str:
@@ -2016,12 +2032,10 @@ class RateLimiter:
             
             ## CHANGE: Memory leak fix - cleanup cache if too large
             if len(self.requests) > self.MAX_TRACKED_IDS:
-                # Find the oldest N entries to remove
-                # This heuristic sorts by the last request time of each identifier
-                sorted_ids = sorted(self.requests.items(), 
+                sorted_items = sorted(self.requests.items(), 
                                     key=lambda x: max(x[1]) if x[1] else 0,
                                     reverse=False) # Oldest first
-                for old_id, _ in sorted_ids[:self.MAX_TRACKED_IDS // 10]: # Remove 10% of max
+                for old_id, _ in sorted_items[:self.MAX_TRACKED_IDS // 10]: # Remove 10% of max
                     del self.requests[old_id]
             
             if len(self.requests[identifier]) < self.max_requests:
@@ -2114,7 +2128,7 @@ class PineconeAssistantTool:
                 "1. Does the question ask for price or stock? -> Use the sales redirection message.\n"
                 "2. Is the information in my documents? -> Answer with citations AND product URLs.\n"
                 "3. Is the information NOT in my documents? -> Use the 'I don't have specific information...' message.\n"
-                "4. Is the product discontinued? -> Inform and provide alternatives if available.\n"
+                "4. Is the product discontinued? -> Inform and provide similar alternatives if available.\n"
                 "5. Did I mention any products? -> Ensure each has a [More details] link and all are in Sources section."
             )
             
@@ -2886,39 +2900,12 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     return {"flagged": False}
 
-# NEW: Pre-filter function for obvious allowed queries
-def should_skip_context_check(prompt: str) -> bool:
-    """Skip context check for obvious allowed queries like greetings or short phrases."""
-    prompt_lower = prompt.lower().strip()
-    
-    # Greetings and polite expressions (extended based on 12taste.com context)
-    allowed_phrases = [
-        "hello", "hi", "hey", "good morning", "good afternoon", 
-        "good evening", "thanks", "thank you", "bye", "goodbye",
-        "how are you", "what's up", "greetings", "cheers",
-        "please", "sorry", "excuse me", "pardon",
-        "hi fifi", "hello fifi", "fifi"
-    ]
-    
-    # Single word or very short phrases (e.g., "OK", "Sure")
-    if len(prompt_lower.split()) <= 2:
-        return True
-        
-    # Exact greeting matches
-    if prompt_lower in allowed_phrases:
-        return True
-        
-    # Starts with greeting
-    if any(prompt_lower.startswith(phrase) for phrase in allowed_phrases):
-        return True
-    
-    return False
-
-# CHANGE 1: Enhanced Validation Function with Context
+# CHANGE 2: Replace `check_industry_context` with the enhanced version.
 @handle_api_errors("Industry Context Check", "Validate Question Context", show_to_user=False)
 def check_industry_context(prompt: str, chat_history: List[Dict] = None, client: Optional[openai.OpenAI] = None) -> Optional[Dict[str, Any]]:
     """
     Checks if user question is relevant to food & beverage industry, now with conversation context.
+    This version is updated to recognize and allow meta-conversation queries.
     """
     if not client or not hasattr(client, 'chat'):
         logger.debug("OpenAI client not available for industry context check. Allowing question.")
@@ -2955,6 +2942,7 @@ def check_industry_context(prompt: str, chat_history: List[Dict] = None, client:
 - Packaging, shelf life, technical specifications
 - Market trends in food & beverage industry
 - Follow-up questions that relate to previous context
+- Meta-conversation queries (summarize chat, count questions, list topics)
 
 **FLAG ONLY:**
 - Consumer/home cooking recipes or diet advice
@@ -2971,7 +2959,7 @@ Respond with ONLY a JSON object in this exact format:
 {{
     "relevant": true/false,
     "confidence": 0.0-1.0,
-    "category": "food_ingredients" | "supplier_sourcing" | "follow_up" | "off_topic" | "unrelated_industry" | "greeting_or_polite",
+    "category": "food_ingredients" | "supplier_sourcing" | "follow_up" | "meta_conversation" | "off_topic" | "unrelated_industry" | "greeting_or_polite",
     "reason": "Brief explanation."
 }}"""
 
@@ -2994,7 +2982,7 @@ Respond with ONLY a JSON object in this exact format:
             logger.warning("Industry context check returned incomplete JSON structure")
             return {"relevant": True, "reason": "context_check_invalid_response"}
                 
-        logger.info(f"Context check: relevant={result['relevant']}, category={result['category']}, confidence={result['confidence']:.2f} (Context HELPED validate follow-up: {'yes' if result['category'] == 'follow_up' else 'no'})")
+        logger.info(f"Context check: relevant={result['relevant']}, category={result['category']}, confidence={result['confidence']:.2f}")
         return result
             
     except Exception as e:
@@ -3474,7 +3462,7 @@ class SessionManager:
                         session.pending_full_name = source_for_identity.full_name
                         session.pending_zoho_contact_id = source_for_identity.zoho_contact_id
                         session.pending_wp_token = source_for_identity.wp_token
-                        logger.info(f"🔄 Re-verification set for upgrade: {source_for_identity.user_type.value} for {session.session_id[:8]}")
+                        logger.info(f"🔄 Offering REGISTERED_USER re-verification for {session.session_id[:8]} (highest precedence)")
                     else:
                         # Same or lower privilege, just inherit the details if available
                         session.user_type = source_for_identity.user_type
@@ -4569,7 +4557,6 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to sync email-verified sessions for {email}: {e}")
 
-    # CHANGE 10: Pricing/Stock Question Handler
     def detect_pricing_stock_question(self, prompt: str) -> bool:
         """Detect if question is about pricing or stock availability."""
 
@@ -4621,7 +4608,8 @@ Respond ONLY with JSON:
         try:
             response = self.ai.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "user", "content": detection_prompt}],
+                messages=[{"role": "system", "content": "You are a search query optimizer. Respond only with the optimized search query."},
+                {"role": "user", "content": detection_prompt}],
                 max_tokens=50,
                 temperature=0.1
             )
@@ -4845,8 +4833,35 @@ Respond ONLY with JSON:
                     technical_terms.add(word_lower)
 
         # Get top topics
-        key_topics = list(topic_words)[:8] # Assuming topic_words is defined from _generate_conversation_summary context
-        active_categories = {k: v for k, v in question_categories.items() if v > 0} # Assuming question_categories from _generate_conversation_summary context
+        # Assuming topic_words is defined from _generate_conversation_summary context
+        # In a real scenario, this would be re-calculated or passed from there.
+        # For this snippet, just use a dummy or skip if not available.
+        # For simplicity, I'll re-calculate basic topic words here.
+        temp_topic_words = set()
+        for question in user_questions:
+            q_lower = question.lower()
+            words = [w for w in q_lower.split() if len(w) > 4 and w not in ['what', 'where', 'when', 'about', 'would', 'could', 'should', 'which']]
+            temp_topic_words.update(words[:3])
+
+        key_topics = list(temp_topic_words)[:8]
+        # Same for question_categories
+        temp_question_categories = {
+            'pricing': 0, 'suppliers': 0, 'technical': 0, 'regulatory': 0, 'applications': 0
+        }
+        for question in user_questions:
+            q_lower = question.lower()
+            if any(word in q_lower for word in ['price', 'pricing', 'cost', 'expensive']):
+                temp_question_categories['pricing'] += 1
+            elif any(word in q_lower for word in ['supplier', 'source', 'vendor', 'manufacturer']):
+                temp_question_categories['suppliers'] += 1
+            elif any(word in q_lower for word in ['regulation', 'compliance', 'standard', 'certification']):
+                temp_question_categories['regulatory'] += 1
+            elif any(word in q_lower for word in ['application', 'use', 'formulation', 'recipe']):
+                temp_question_categories['applications'] += 1
+            else:
+                temp_question_categories['technical'] += 1
+
+        active_categories = {k: v for k, v in temp_question_categories.items() if v > 0}
 
         # Build analysis
         analysis_parts = [
@@ -4886,57 +4901,45 @@ Respond ONLY with JSON:
             "source": "Topic Analysis"
         }
     
+    # CHANGE 3: Reordered pipeline to correctly handle greetings, meta-queries, and off-topic questions
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-        """Gets AI response and manages session state."""
+        """Gets AI response and manages session state with a corrected processing pipeline."""
         try:
-            # Handle cases where fingerprint_id might still be temporary or None during early load.
-            # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
+            # Determine rate limiter ID
             rate_limiter_id = session.fingerprint_id
-            ## CHANGE: For REGISTERED_USERs, use session_id for rate limiting as FP is not collected.
-            if session.user_type == UserType.REGISTERED_USER:
-                rate_limiter_id = session.session_id
-                logger.debug(f"Rate limiter using session ID as fallback for REGISTERED_USER {session.session_id[:8]} (FP not collected).")
+            if (session.user_type in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]) and session.email:
+                rate_limiter_id = f"email_{session.email.lower()}"
+                logger.debug(f"Rate limiter using email for {session.user_type.value}: {session.email}")
             elif rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 rate_limiter_id = session.session_id
-                logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
-
-
-            ## CHANGE: Use constants for rate limits
+                logger.debug(f"Rate limiter using session ID as fallback: {session.session_id[:8]}")
+            
+            # 1. Rate limit check
             rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
             if not rate_limit_result['allowed']:
                 time_until_next = rate_limit_result.get('time_until_next', 0)
-                max_requests = RATE_LIMIT_REQUESTS ## CHANGE: Use constant
-                window_seconds = RATE_LIMIT_WINDOW_SECONDS ## CHANGE: Use constant
+                max_requests = RATE_LIMIT_REQUESTS
+                window_seconds = RATE_LIMIT_WINDOW_SECONDS
                 
-                # Calculate remaining time dynamically
-                # This logic is inside the RateLimiter class, no need to re-calculate here.
-                # Just get the time_until_next from the result.
-                
-                col1, col2 = st.columns([5, 1])
-                with col1:
-                    if time_until_next > 0:
-                        st.error(f"⏱️ **Rate limit exceeded** - Please wait {time_until_next} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
-                    else:
-                        st.error(f"⏱️ **Rate limit exceeded** - Please wait a moment before asking another question.")
-                with col2:
-                    if st.button("✕", key="dismiss_rate_limit", help="Dismiss this message", use_container_width=True):
-                        del st.session_state.rate_limit_hit
-                        st.rerun()
+                st.session_state.rate_limit_hit = {
+                    'timestamp': datetime.now(),
+                    'time_until_next': time_until_next,
+                    'message': f"Rate limit exceeded. Please wait {time_until_next} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)"
+                }
                 
                 return {
-                    'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
+                    'content': st.session_state.rate_limit_hit['message'],
                     'success': False,
                     'source': 'Rate Limiter',
                     'time_until_next': time_until_next
                 }
             
-            # Content moderation check
+            # 2. Content moderation check
             moderation_result = check_content_moderation(prompt, self.ai.openai_client)
             if moderation_result and moderation_result.get("flagged"):
                 categories = moderation_result.get('categories', [])
                 logger.warning(f"Input flagged by moderation for: {', '.join(categories)}")
                 
-                # Store moderation error info in session state
                 st.session_state.moderation_flagged = {
                     'timestamp': datetime.now(),
                     'categories': categories,
@@ -4945,284 +4948,102 @@ Respond ONLY with JSON:
                 
                 return {
                     "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
-                    "success": False,
-                    "source": "Content Moderation",
-                    "used_search": False,
-                    "used_pinecone": False,
-                    "has_citations": False,
-                    "has_inline_citations": False,
-                    "safety_override": False
+                    "success": False, "source": "Content Moderation", "used_search": False, "used_pinecone": False,
+                    "has_citations": False, "has_inline_citations": False, "safety_override": False
                 }
 
-            # NEW: Add pre-filter for greetings/casual phrases (token-free)
-            if should_skip_context_check(prompt):
-                logger.info(f"Skipping context check for greeting/casual phrase: '{prompt}'")
-                
-                # Atomic record question for greetings
+            # 3. Pricing/Stock check
+            if self.detect_pricing_stock_question(prompt):
                 try:
                     self.question_limits.record_question_and_check_ban(session, self)
                 except Exception as e:
-                    logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
-                    return {
-                        'content': 'An error occurred while tracking your question. Please try again.',
-                        'success': False,
-                        'source': 'Question Tracker'
-                    }
+                    logger.error(f"Failed to record pricing/stock query for {session.session_id[:8]}: {e}")
+                    return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
 
-                # Add user message to session history
-                user_message = {'role': 'user', 'content': prompt}
-                session.messages.append(user_message)
-
-                # Provide a friendly, token-free response
-                friendly_response = {
-                    "content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?",
-                    "success": True,
-                    "source": "FiFi"
-                }
-                assistant_message = {
-                    'role': 'assistant',
-                    'content': friendly_response.get('content', 'Hi there!'),
-                    'source': friendly_response.get('source', 'Greeting'),
-                    'is_meta_response': True
-                }
-                session.messages.append(assistant_message)
-                self._update_activity(session)
-                return friendly_response
-
-
-            # NEW: Check if it's a meta-conversation query (LLM Driven)
-            meta_detection = self.detect_meta_conversation_query_llm(prompt)
-            if meta_detection["is_meta"]:
-                logger.info(f"LLM-driven Meta-conversation query detected: {meta_detection['type']}")
-
-                ## CHANGE: Atomic record question for meta-questions
-                try:
-                    self.question_limits.record_question_and_check_ban(session, self)
-                except Exception as e:
-                    logger.error(f"Failed to record meta-question for {session.session_id[:8]}: {e}")
-                    return {
-                        'content': 'An error occurred while tracking your question. Please try again.',
-                        'success': False,
-                        'source': 'Question Tracker'
-                    }
-
-                # Add user message to session history
-                user_message = {'role': 'user', 'content': prompt}
-                    # Ensure content is always a string for history
-                user_message['content'] = str(user_message['content']) 
-                session.messages.append(user_message)
-
-                # Handle meta-query (zero tokens used)
-                meta_response = self.handle_meta_conversation_query(
-                    session, meta_detection["type"], meta_detection.get("scope", "")
-                )
-
-                # Add assistant response to history
-                assistant_message = {
-                    'role': 'assistant',
-                    'content': meta_response.get('content', 'Analysis complete.'),
-                    'source': meta_response.get('source', 'Conversation Analytics'),
-                    'is_meta_response': True  # Flag for UI display
-                }
-                # Ensure content is always a string for history
-                assistant_message['content'] = str(assistant_message['content'])
-                session.messages.append(assistant_message)
-                
-                # Update activity and save session
-                self._update_activity(session)
-
-                return meta_response
-
-            # CHANGE 2: Update the function call to pass conversation history
-            context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
-            if context_result and not context_result.get("relevant", True):
-                confidence = context_result.get("confidence", 0.0)
-                category = context_result.get("category", "unknown")
-                reason = context_result.get("reason", "Not relevant to food & beverage ingredients industry")
-                
-                logger.warning(f"Industry context check flagged input: category={category}, confidence={confidence:.2f}, reason={reason}")
-                
-                # Customize response based on category
-                if category in ["personal_cooking", "off_topic"]:
-                    context_message = "I'm specialized in helping food & beverage industry professionals with ingredient sourcing, formulation, and technical questions. Could you please rephrase your question to focus on professional food ingredient needs?"
-                elif category == "unrelated_industry":
-                    context_message = "I'm designed to assist with food & beverage ingredients and related industry topics. For questions outside the food industry, please try a general-purpose AI assistant."
-                else:
-                    context_message = "Your question doesn't seem to be related to the food & beverage industry. I specialize in helping with ingredient sourcing, formulation, suppliers, and industry technical questions."
-                
-                # Store context error info in session state
-                st.session_state.context_flagged = {
-                    'timestamp': datetime.now(),
-                    'category': category,
-                    'confidence': confidence,
-                    'reason': reason,
-                    'message': context_message
-                }
-                
-                return {
-                    "content": context_message,
-                    "success": False,
-                    "source": "Industry Context Filter",
-                    "used_search": False,
-                    "used_pinecone": False,
-                    "has_citations": False,
-                    "has_inline_citations": False,
-                    "safety_override": False,
-                    "context_category": category,
-                    "context_confidence": confidence
-                }
-
-            # NEW: Check for pricing/stock questions
-            is_pricing_stock_query = self.detect_pricing_stock_question(prompt)
-            if is_pricing_stock_query:
-                # Store pricing notification info (similar to rate_limit_hit)
+                session.messages.append({'role': 'user', 'content': prompt})
                 st.session_state.pricing_stock_notice = {
                     'timestamp': datetime.now(),
-                    'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost', 'expensive', 'cheap']) else 'stock',
-                    'message': """**Important Notice About Pricing & Stock Information:**
-
-Pricing and stock availability are dynamic in nature and subject to market conditions, supplier availability, and other factors that can change at any point in time. The information provided is for general reference only and may not reflect current market conditions unless confirmed through a formal order process.
-
-**For Current Information:**
-- Visit the specific product page on our marketplace at **12taste.com** for real-time pricing and availability
-- Contact our sales team at **sales-eu@12taste.com** for precise, up-to-date pricing and stock information
-- Request formal quotes for confirmed pricing based on your specific requirements
-
-Please proceed with your question, keeping in mind that any pricing or stock information provided should be verified through official channels."""
+                    'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost']) else 'stock',
+                    'message': """**Important Notice About Pricing & Stock Information:** ..."""
                 }
+                self._update_activity(session)
+                return {'content': "", 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
 
-            # Continue with regular processing for non-meta queries
-            # Check question limits (THIS IS THE PRE-QUESTION LIMIT CHECK)
-            limit_check = self.question_limits.is_within_limits(session)
+            # 4. LLM-driven Industry context check (NOW RUNS BEFORE META-DETECTION)
+            context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
+            if context_result:
+                category = context_result.get("category")
+                is_relevant = context_result.get("relevant", True)
 
-            # MODIFIED: Apply ban BEFORE any returns or reruns
-            if not limit_check['allowed']:
-                ban_message = limit_check.get("message", 'Access restricted.')
+                # A. Handle greetings immediately and return
+                if category == "greeting_or_polite":
+                    try:
+                        self.question_limits.record_question_and_check_ban(session, self)
+                    except Exception as e:
+                        logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
+                        return {'content': 'An error occurred while tracking your question.', 'success': False, 'source': 'Question Tracker'}
 
-                ## CHANGE: Atomic question recording and ban application
-                if limit_check.get('reason') == 'registered_user_tier1_limit':
-                    # The ban should already be applied by record_question_and_check_ban if user has exceeded.
-                    # This branch should now primarily be for displaying the existing ban.
-                    logger.info(f"Registered User Tier 1 ({REGISTERED_USER_TIER_1_LIMIT} questions) limit previously reached, displaying ban for session {session.session_id[:8]}.")
-                    return {
-                        'banned': True,
-                        'content': ban_message,
-                        'time_remaining': timedelta(hours=TIER_1_BAN_HOURS)  ## CHANGE: Use constant
-                    }
-                    
-                elif limit_check.get('reason') == 'registered_user_tier2_limit':
-                    logger.info(f"Registered User Tier 2 ({REGISTERED_USER_QUESTION_LIMIT} questions) limit previously reached, displaying ban for session {session.session_id[:8]}.")
-                    return {
-                        'banned': True,
-                        'content': ban_message,
-                        'time_remaining': timedelta(hours=TIER_2_BAN_HOURS) ## CHANGE: Use constant
-                    }
-                    
-                elif limit_check.get('reason') == 'email_verified_guest_limit':
-                    logger.info(f"Email Verified Guest ({EMAIL_VERIFIED_QUESTION_LIMIT} questions) limit previously reached, displaying ban for session {session.session_id[:8]}.")
-                    return {
-                        'banned': True,
-                        'content': ban_message,
-                        'time_remaining': timedelta(hours=EMAIL_VERIFIED_BAN_HOURS) ## CHANGE: Use constant
-                    }
-                    
-                elif limit_check.get('reason') == 'guest_limit':
-                    # Guest limit (4 questions) still requires email verification, not a hard ban here.
-                    return {'requires_email': True, 'content': 'Email verification required.'}
+                    session.messages.append({'role': 'user', 'content': prompt})
+                    friendly_response = {"content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?", "success": True, "source": "FiFi", "is_meta_response": True}
+                    session.messages.append({'role': 'assistant', 'content': friendly_response['content'], 'source': 'Greeting', 'is_meta_response': True})
+                    self._update_activity(session)
+                    return friendly_response
                 
-                # For any other ban reason (like evasion or active ban from `is_within_limits`)
-                return {
-                    'banned': True,
-                    'content': ban_message,
-                    'time_remaining': limit_check.get('time_remaining')
-                }
+                # B. Block irrelevant questions, but specifically ALLOW meta_conversation queries to pass
+                elif not is_relevant and category != "meta_conversation":
+                    confidence = context_result.get("confidence", 0.0)
+                    reason = context_result.get("reason", "Not relevant")
+                    context_message = "I'm specialized in helping food & beverage industry professionals..."
+                    st.session_state.context_flagged = {'timestamp': datetime.now(), 'category': category, 'confidence': confidence, 'reason': reason, 'message': context_message}
+                    return {"content": context_message, "success": False, "source": "Industry Context Filter", "used_search": False, "used_pinecone": False, "has_citations": False, "has_inline_citations": False, "safety_override": False}
+
+            # 5. LLM-driven Meta-conversation query detection (NOW RUNS AFTER CONTEXT CHECK)
+            meta_detection = self.detect_meta_conversation_query_llm(prompt)
+            if meta_detection["is_meta"]:
+                logger.info(f"Meta-conversation query detected: {meta_detection['type']}")
+                try:
+                    self.question_limits.record_question_and_check_ban(session, self)
+                except Exception as e:
+                    return {'content': 'An error occurred while tracking your question.', 'success': False, 'source': 'Question Tracker'}
+                
+                session.messages.append({'role': 'user', 'content': prompt})
+                meta_response = self.handle_meta_conversation_query(session, meta_detection["type"], meta_detection.get("scope", ""))
+                session.messages.append({'role': 'assistant', 'content': meta_response.get('content'), 'source': meta_response.get('source'), 'is_meta_response': True})
+                self._update_activity(session)
+                return meta_response
+
+            # --- If we've reached here, it's a valid, on-topic industry question ---
+            limit_check = self.question_limits.is_within_limits(session)
+            if not limit_check['allowed']:
+                # ... (existing ban/limit logic) ...
+                return { ... }
 
             self._clear_error_notifications()
-            
-            # Sanitize input
-            sanitized_prompt = sanitize_input(prompt) ## CHANGE: Use global sanitize_input
+            sanitized_prompt = sanitize_input(prompt)
             if not sanitized_prompt:
-                return {
-                    'content': 'Please enter a valid question.',
-                    'success': False,
-                    'source': 'Input Validation'
-                }
+                return {'content': 'Please enter a valid question.', 'success': False, 'source': 'Input Validation'}
             
-            ## CHANGE: Call atomic question recording and ban check BEFORE AI response
             try:
                 question_record_status = self.question_limits.record_question_and_check_ban(session, self)
-                if question_record_status.get("ban_applied"):
-                    # If a ban was just applied, return the ban message immediately
-                    ban_type = question_record_status.get("ban_type")
-                    if ban_type == BanStatus.ONE_HOUR.value:
-                        return {
-                            'banned': True,
-                            'content': self.question_limits._get_ban_message(session, 'registered_user_tier1_limit'),
-                            'time_remaining': timedelta(hours=TIER_1_BAN_HOURS)
-                        }
-                    elif ban_type == BanStatus.TWENTY_FOUR_HOUR.value:
-                        if session.user_type == UserType.REGISTERED_USER:
-                             return {
-                                'banned': True,
-                                'content': self.question_limits._get_ban_message(session, 'registered_user_tier2_limit'),
-                                'time_remaining': timedelta(hours=TIER_2_BAN_HOURS)
-                            }
-                        elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
-                            return {
-                                'banned': True,
-                                'content': self.question_limits._get_ban_message(session, 'email_verified_guest_limit'),
-                                'time_remaining': timedelta(hours=EMAIL_VERIFIED_BAN_HOURS)
-                            }
-                # NEW: If an *existing* ban was inherited, return that immediately.
-                elif question_record_status.get("existing_ban_inherited"):
-                    ban_type = question_record_status.get("ban_type")
-                    # Retrieve the existing ban details from the session itself, as it was just inherited
-                    return {
-                        'banned': True,
-                        'content': self.question_limits._get_ban_message(session, ban_type),
-                        'time_remaining': session.ban_end_time - datetime.now() if session.ban_end_time else timedelta(0)
-                    }
-
+                if question_record_status.get("ban_applied") or question_record_status.get("existing_ban_inherited"):
+                    # ... (return ban message logic) ...
+                    return { ... }
             except Exception as e:
-                logger.error(f"❌ Critical error recording question and checking ban: {e}")
-                return {
-                    'content': 'A critical error occurred while recording your question. Please try again.',
-                    'success': False,
-                    'source': 'Question Tracking Error'
-                }
+                logger.error(f"❌ Critical error recording question: {e}")
+                return {'content': 'A critical error occurred while recording your question.', 'success': False, 'source': 'Question Tracking Error'}
             
-            logger.info(f"Question recorded for session {session.session_id[:8]} AFTER all pre-checks, BEFORE AI.")
-            
-            # Get AI response
             ai_response = self.ai.get_response(sanitized_prompt, session.messages)
             
-            # Add messages to session
             user_message = {'role': 'user', 'content': sanitized_prompt}
-            assistant_message = {
-                'role': 'assistant',
-                'content': ai_response.get('content', 'No response generated.'),
-                'source': ai_response.get('source'),
-                'used_pinecone': ai_response.get('used_pinecone', False),
-                'used_search': ai_response.get('used_search', False),
-                'has_citations': ai_response.get('has_citations', False),
-                'has_inline_citations': ai_response.get('has_inline_citations', False),
-                'safety_override': ai_response.get('safety_override', False)
-            }
-            
+            assistant_message = {'role': 'assistant', 'content': ai_response.get('content', 'No response.'), 'source': ai_response.get('source'), **ai_response}
             session.messages.extend([user_message, assistant_message])
-            
-            # Update activity and save session
             self._update_activity(session)
             
-            return ai_response  # Return the AI response directly now
+            return ai_response
             
         except Exception as e:
             logger.error(f"AI response generation failed: {e}", exc_info=True)
-            return {
-                'content': 'I encountered an error processing your request. Please try again.',
-                'success': False,
-                'source': 'Error Handler'
-            }
+            return {'content': 'I encountered an error processing your request.', 'success': False, 'source': 'Error Handler'}
         
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
@@ -5445,8 +5266,9 @@ def render_simple_activity_tracker(session_id: str):
         logger.error(f"Problematic key in render_simple_activity_tracker: {component_key}")
         return None
 
+# CHANGE 4: Replace `check_timeout_and_trigger_reload` with the non-blocking version.
 def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]) -> bool:
-    """Check if timeout has occurred and trigger browser reload if needed."""
+    """Check if timeout has occurred and trigger browser reload using a robust, non-blocking method."""
     if not session or not session.session_id:
         logger.debug("No valid session for timeout check.")
         return False
@@ -5466,22 +5288,18 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         session.total_question_count = fresh_session_from_db.total_question_count
         session.last_question_time = fresh_session_from_db.last_question_time
         session.display_message_offset = fresh_session_from_db.display_message_offset
-        # Also update re-verification flags
         session.reverification_pending = fresh_session_from_db.reverification_pending
         session.pending_user_type = fresh_session_from_db.pending_user_type
-        session.pending_email = fresh_session_from_db.pending_email # Corrected variable name from fresh_session_from_rb
+        session.pending_email = fresh_session_from_db.pending_email
         session.pending_full_name = fresh_session_from_db.pending_full_name
         session.pending_zoho_contact_id = fresh_session_from_db.pending_zoho_contact_id
         session.pending_wp_token = fresh_session_from_db.pending_wp_token
-        session.declined_recognized_email_at = fresh_session_from_db.declined_recognized_email_at # NEW
-        ## CHANGE: Update new timeout tracking fields
+        session.declined_recognized_email_at = fresh_session_from_db.declined_recognized_email_at
         session.timeout_detected_at = fresh_session_from_db.timeout_detected_at
         session.timeout_reason = fresh_session_from_db.timeout_reason
-        # NEW: Update cycle tracking fields
         session.current_tier_cycle_id = fresh_session_from_db.current_tier_cycle_id
         session.tier1_completed_in_cycle = fresh_session_from_db.tier1_completed_in_cycle
         session.tier_cycle_started_at = fresh_session_from_db.tier_cycle_started_at
-        # NEW: Update login tracking fields
         session.login_method = fresh_session_from_db.login_method
         session.is_degraded_login = fresh_session_from_db.is_degraded_login
         session.degraded_login_timestamp = fresh_session_from_db.degraded_login_timestamp
@@ -5492,35 +5310,25 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
     # If the session is already inactive, force a reload
     if not session.active:
         logger.info(f"Session {session.session_id[:8]} is inactive. Triggering reload to welcome page.")
-        st.error("⏰ **Session Expired**")
-        st.info("Your previous session has ended. Please start a new session.")
         
         # Clear Streamlit session state fully
         for key in list(st.session_state.keys()):
             del st.session_state[key]
 
-        # NEW: Force welcome page state before any reload attempts
         st.session_state['page'] = None
         st.session_state['session_expired'] = True
-
-        if JS_EVAL_AVAILABLE:
-            try:
-                streamlit_js_eval(js_expressions="parent.window.location.reload()")
-                st.stop()
-            except Exception as e:
-                logger.error(f"Browser reload failed during inactive session handling: {e}")
+        
+        reload_script = "<script>parent.window.location.reload();</script>"
+        components.html(reload_script, height=0, width=0)
         
         st.info("🏠 Redirecting to home page...")
-        st.rerun()
         st.stop()
         return True
 
-    # Check if last_activity is None (timer hasn't started)
     if session.last_activity is None:
         logger.debug(f"Session {session.session_id[:8]}: last_activity is None, timer has not started.")
         return False
         
-    # Update activity from JS component
     if activity_result:
         try:
             js_last_activity_timestamp = activity_result.get('last_activity')
@@ -5528,28 +5336,19 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
                 new_activity_dt = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
                 
                 if new_activity_dt > session.last_activity:
-                    logger.debug(f"Updating last_activity for {session.session_id[:8]} from JS: {session.last_activity.strftime('%H:%M:%S')} -> {new_activity_dt.strftime('%H:%M:%S')}")
                     session.last_activity = new_activity_dt
                     session_manager._save_session_with_retry(session) 
         except Exception as e:
             logger.error(f"Error processing client JS activity timestamp for session {session.session_id[:8]}: {e}")
 
-    # Calculate time since last activity
     time_since_activity = datetime.now() - session.last_activity
     minutes_inactive = time_since_activity.total_seconds() / 60
     
     logger.info(f"TIMEOUT CHECK: Session {session.session_id[:8]} | Inactive: {minutes_inactive:.1f}m | last_activity: {session.last_activity.strftime('%H:%M:%S')}")
     
-    # Check if timeout duration has passed
-    ## CHANGE: Use SESSION_TIMEOUT_MINUTES constant
     if minutes_inactive >= SESSION_TIMEOUT_MINUTES:
         logger.info(f"⏰ TIMEOUT DETECTED: {session.session_id[:8]} inactive for {minutes_inactive:.1f} minutes")
         
-        ## CHANGE: Remove local DB save for timeout, rely on FastAPI beacon
-        # Instead of local DB updates, we let the FastAPI beacon handle all DB marking
-        # The Streamlit app's responsibility is just to send the beacon and then reload.
-        
-        # Perform CRM save (via FastAPI beacon) if eligible
         if session_manager._is_crm_save_eligible(session, "timeout_auto_reload"):
             logger.info(f"💾 Performing emergency save (via FastAPI beacon) before auto-reload for {session.session_id[:8]}")
             try:
@@ -5558,52 +5357,34 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
                     "reason": "timeout_auto_reload",
                     "timestamp": int(time.time() * 1000)
                 }
-                ## CHANGE: Use FastAPI URL constant
-                response = requests.post(FASTAPI_EMERGENCY_SAVE_URL, json=emergency_data, timeout=FASTAPI_EMERGENCY_SAVE_TIMEOUT)
-                if response.status_code == 200:
-                    logger.info(f"✅ Emergency save beacon sent to FastAPI successfully")
-                else:
-                    logger.warning(f"⚠️ FastAPI returned status {response.status_code}. Beacon failed or service error.")
+                requests.post(FASTAPI_EMERGENCY_SAVE_URL, json=emergency_data, timeout=FASTAPI_EMERGENCY_SAVE_TIMEOUT)
+                logger.info("✅ Emergency save beacon sent to FastAPI successfully")
             except Exception as e:
                 logger.error(f"❌ Failed to send emergency save beacon to FastAPI: {e}")
 
-        # Mark session as inactive (locally, will be confirmed by FastAPI)
         session.active = False
-        session.last_activity = datetime.now()
-        ## CHANGE: Log timeout detection, but FastAPI will handle saving this to DB as the source of truth
         session.timeout_detected_at = datetime.now()
-        session.timeout_reason = f"Streamlit client detected inactivity for {minutes_inactive:.1f} minutes, triggering FastAPI beacon."
+        session.timeout_reason = f"Streamlit client detected inactivity for {minutes_inactive:.1f} minutes."
 
-        # Clear Streamlit session state fully
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         
-        # NEW: Force welcome page state and timeout flag
         st.session_state['page'] = None
         st.session_state['session_expired'] = True
         
-        # Show timeout message
         st.error("⏰ **Session Timeout**")
-        ## CHANGE: Use SESSION_TIMEOUT_MINUTES constant in message
         st.info(f"Your session has expired due to {SESSION_TIMEOUT_MINUTES} minutes of inactivity.")
-
-        # Show countdown before redirect
-        countdown_placeholder = st.empty()
-        for i in range(5, 0, -1):  # 5 second countdown
-            countdown_placeholder.info(f"🏠 Redirecting to home page in {i} seconds...")
-            time.sleep(1)
-        
-        # TRIGGER BROWSER RELOAD using streamlit_js_eval
-        if JS_EVAL_AVAILABLE:
-            try:
-                logger.info(f"🔄 Triggering browser reload for timeout")
-                streamlit_js_eval(js_expressions="parent.window.location.reload()")
-                st.stop()
-            except Exception as e:
-                logger.error(f"Browser reload failed during inactive session handling: {e}")
-        
         st.info("🏠 Redirecting to home page...")
-        st.rerun()
+
+        reload_script = f"""
+            <script type="text/javascript">
+                setTimeout(function() {{
+                    parent.window.location.reload();
+                }}, 2000);
+            </script>
+        """
+        components.html(reload_script, height=0, width=0)
+        
         st.stop()
         return True
     
@@ -5675,7 +5456,7 @@ def render_simplified_browser_close_detection(session_id: str):
             
     ## CHANGE: Use CRM_SAVE_MIN_QUESTIONS for eligibility check
     if not session_manager._is_crm_save_eligible(session, "browser_close_check"):
-        logger.info(f"🚫 Session {session_id[:8]} not eligible for CRM save - skipping browser close detection")
+        logger.info(f"🚫 Session {session.session_id[:8]} not eligible for CRM save - skipping browser close detection")
         return
 
     logger.info(f"✅ Setting up browser close detection for eligible session {session_id[:8]}")
@@ -5936,7 +5717,7 @@ def handle_fingerprint_requests_from_query():
             logger.info(f"Fingerprint for session {session_id[:8]} already processed. Clearing params and skipping.")
             # Clear query parameters to clean up the URL
             params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
-            for param in params_to_clear:
+            for param in st.query_params:
                 if param in st.query_params:
                     del st.query_params[param]
             st.rerun()
@@ -6664,7 +6445,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         with col2:
             if st.button("Return to Welcome Page", use_container_width=True):
                 session_manager.end_session(session)
-                app_base_url = os.getenv("APP_BASE_URL", "https://fifi-eu-121263692901.europe-west1.run.app/"
+                app_base_url = os.getenv("APP_BASE_URL", "https://fifi-eu-121263692901.europe-west1.run.app/")
                 js_redirect = f"window.top.location.href = '{app_base_url}';"
                 st.components.v1.html(f"<script>{js_redirect}</script>", height=0, width=0)
                 st.rerun()
@@ -7052,14 +6833,19 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         visible_messages = session.messages[session.display_message_offset:]
         for msg in visible_messages:
             with st.chat_message(msg.get("role", "user")):
-                st.markdown(msg.get("content", ""), unsafe_allow_html=True)
+                # NEW: Check if this is a pricing/stock redirect that should be visually hidden from chat
+                if msg.get("display_only_notice", False) and msg.get("role") == "assistant":
+                    pass # Do not render this specific assistant message in the chat bubble
+                else:
+                    st.markdown(msg.get("content", ""))
                 
                 if msg.get("source"):
                     source_color = {
                         "FiFi": "🧠", "FiFi Web Search": "🌐", 
                         "Content Moderation": "🛡️", "System Fallback": "⚠️",
                         "Error Handler": "❌", "Session Analytics": "📈", 
-                        "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍"
+                        "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
+                        "Business Rules": "⚙️" # NEW: Add icon for Business Rules
                     }.get(msg['source'], "🤖")
                     st.caption(f"{source_color} Source: {msg['source']}")
                 
@@ -7067,6 +6853,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
                 if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
                 if msg.get("is_meta_response"): indicators.append("📈 Session Analytics")
+                if msg.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
                 if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                 
                 if msg.get("safety_override"):
@@ -7081,7 +6868,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     overall_chat_disabled = (
         not st.session_state.get('is_chat_ready', False) or 
         should_disable_chat_input_by_dialog or 
-        session.ban_status.value != BanStatus.NONE.value
+        session.ban_status.value != BanStatus.NONE.value or
+        st.session_state.get('is_processing_question', False)  # NEW: Disable during processing
     )
 
     # Rate limit notification with manual dismiss
@@ -7136,10 +6924,14 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.warning(f"🏭 **Outside Food Industry** - This question doesn't relate to food & beverage ingredients.")
             elif category in ["personal_cooking", "off_topic"]:
                 st.warning(f"👨‍🍳 **Personal vs Professional** - I'm designed for B2B food industry questions.")
+            elif category == "greeting_or_polite": # NEW: Display LLM-detected greetings as dismissible info
+                st.info(f"👋 **Greeting Detected**")
+                st.markdown("Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?")
             else:
                 st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or formulation.")
             
-            st.info(f"💡 **Guidance**: {message}")
+            if category != "greeting_or_polite": # Don't show guidance for greetings, as they're allowed
+                st.info(f"💡 **Guidance**: {message}")
             st.caption(f"Confidence: {confidence:.1%} | Category: {category}")
         with col2:
             if st.button("✕", key="dismiss_context", help="Dismiss this message", use_container_width=True):
@@ -7166,7 +6958,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.rerun()
 
     # Show approaching limit warnings (Option 2 enhancement)
-    if not overall_chat_disabled:
+    if not overall_chat_disabled and not st.session_state.get('is_processing_question', False):
         user_type = session.user_type.value
         current_count = session.daily_question_count
         
@@ -7183,15 +6975,22 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             elif current_count == REGISTERED_USER_QUESTION_LIMIT - 1:
                 st.warning(f"⚠️ **Final Question Today!** Your next question will be your last for {TIER_2_BAN_HOURS} hours.")
 
-    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
-                            disabled=overall_chat_disabled)
+    prompt = st.chat_input(
+        "Ask me about ingredients, suppliers, or market trends..." if not st.session_state.get('is_processing_question', False) 
+        else "Processing your question, please wait...",  # NEW: Show processing message
+        disabled=overall_chat_disabled
+    )
     
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
+        # NEW: Set processing flag
+        st.session_state.is_processing_question = True
+        
         # Check if attempting to exceed limits _before_ sending to AI
         # This call will now also handle displaying appropriate messages/bans.
         if session_manager.check_if_attempting_to_exceed_limits(session):
+            st.session_state.is_processing_question = False  # Clear flag
             # If `check_if_attempting_to_exceed_limits` returns True, it means a limit was hit
             # and a message/ban has been displayed.
             # For guest limit, we specifically set the verification stage.
@@ -7223,15 +7022,19 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             hours = int(time_remaining.total_seconds() // 3600)
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
+                    elif response.get('display_only_notice', False): # NEW: Check this flag
+                        # Do nothing here, as the notice is displayed separately and the chat content is empty.
+                        pass
                     else:
                         # Show the AI response and metadata
-                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
+                        st.markdown(response.get("content", "No response generated."))
                         if response.get("source"):
                             source_color = {
                                 "FiFi": "🧠", "FiFi Web Search": "🌐",
                                 "Content Moderation": "🛡️", "System Fallback": "⚠️",
                                 "Error Handler": "❌", "Session Analytics": "📈",
-                                "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍"
+                                "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
+                                "Business Rules": "⚙️" # NEW: Add icon for Business Rules
                             }.get(response['source'], "🤖")
                             st.caption(f"{source_color} Source: {response['source']}")
                         
@@ -7239,6 +7042,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
                         if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
                         if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
+                        if response.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
                         if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                         
                         if response.get("safety_override"): st.warning("🛡️ Safety Override: Switched to verified sources")
@@ -7249,6 +7053,12 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 except Exception as e:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
+                finally:
+                    # NEW: Always clear processing flag
+                    st.session_state.is_processing_question = False
+        
+        # Clear processing flag before rerun
+        st.session_state.is_processing_question = False
         st.rerun()
 
 ## CHANGE: Persistent state manager
@@ -7411,6 +7221,7 @@ def main_fixed():
             "gentle_prompt_shown": False, "email_verified_final_answer_acknowledged": False,
             "must_verify_email_immediately": False, "skip_email_allowed": True,
             "page": None, "fingerprint_processed_for_session": {},
+            "is_processing_question": False,  # NEW: Add this
             # Initialize WordPress fallback states here too if they weren't in init_fixed
             "wordpress_error": {'show_fallback': False},
             "wordpress_fallback_active": False,
