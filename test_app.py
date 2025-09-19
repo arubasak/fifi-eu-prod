@@ -2016,7 +2016,9 @@ class RateLimiter:
             
             ## CHANGE: Memory leak fix - cleanup cache if too large
             if len(self.requests) > self.MAX_TRACKED_IDS:
-                sorted_items = sorted(self.requests.items(), 
+                # Find the oldest N entries to remove
+                # This heuristic sorts by the last request time of each identifier
+                sorted_ids = sorted(self.requests.items(), 
                                     key=lambda x: max(x[1]) if x[1] else 0,
                                     reverse=False) # Oldest first
                 for old_id, _ in sorted_ids[:self.MAX_TRACKED_IDS // 10]: # Remove 10% of max
@@ -2112,7 +2114,7 @@ class PineconeAssistantTool:
                 "1. Does the question ask for price or stock? -> Use the sales redirection message.\n"
                 "2. Is the information in my documents? -> Answer with citations AND product URLs.\n"
                 "3. Is the information NOT in my documents? -> Use the 'I don't have specific information...' message.\n"
-                "4. Is the product discontinued? -> Inform and provide similar alternatives if available.\n"
+                "4. Is the product discontinued? -> Inform and provide alternatives if available.\n"
                 "5. Did I mention any products? -> Ensure each has a [More details] link and all are in Sources section."
             )
             
@@ -2884,7 +2886,33 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     return {"flagged": False}
 
-# REMOVED: The `should_skip_context_check` function is removed as per the confirmed solution.
+# NEW: Pre-filter function for obvious allowed queries
+def should_skip_context_check(prompt: str) -> bool:
+    """Skip context check for obvious allowed queries like greetings or short phrases."""
+    prompt_lower = prompt.lower().strip()
+    
+    # Greetings and polite expressions (extended based on 12taste.com context)
+    allowed_phrases = [
+        "hello", "hi", "hey", "good morning", "good afternoon", 
+        "good evening", "thanks", "thank you", "bye", "goodbye",
+        "how are you", "what's up", "greetings", "cheers",
+        "please", "sorry", "excuse me", "pardon",
+        "hi fifi", "hello fifi", "fifi"
+    ]
+    
+    # Single word or very short phrases (e.g., "OK", "Sure")
+    if len(prompt_lower.split()) <= 2:
+        return True
+        
+    # Exact greeting matches
+    if prompt_lower in allowed_phrases:
+        return True
+        
+    # Starts with greeting
+    if any(prompt_lower.startswith(phrase) for phrase in allowed_phrases):
+        return True
+    
+    return False
 
 # CHANGE 1: Enhanced Validation Function with Context
 @handle_api_errors("Industry Context Check", "Validate Question Context", show_to_user=False)
@@ -3446,7 +3474,7 @@ class SessionManager:
                         session.pending_full_name = source_for_identity.full_name
                         session.pending_zoho_contact_id = source_for_identity.zoho_contact_id
                         session.pending_wp_token = source_for_identity.wp_token
-                        logger.info(f"🔄 Offering REGISTERED_USER re-verification for {session.session_id[:8]} (highest precedence)")
+                        logger.info(f"🔄 Re-verification set for upgrade: {source_for_identity.user_type.value} for {session.session_id[:8]}")
                     else:
                         # Same or lower privilege, just inherit the details if available
                         session.user_type = source_for_identity.user_type
@@ -4541,6 +4569,7 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to sync email-verified sessions for {email}: {e}")
 
+    # CHANGE 10: Pricing/Stock Question Handler
     def detect_pricing_stock_question(self, prompt: str) -> bool:
         """Detect if question is about pricing or stock availability."""
 
@@ -4592,8 +4621,7 @@ Respond ONLY with JSON:
         try:
             response = self.ai.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "system", "content": "You are a search query optimizer. Respond only with the optimized search query."},
-                {"role": "user", "content": detection_prompt}],
+                messages=[{"role": "user", "content": detection_prompt}],
                 max_tokens=50,
                 temperature=0.1
             )
@@ -4817,35 +4845,8 @@ Respond ONLY with JSON:
                     technical_terms.add(word_lower)
 
         # Get top topics
-        # Assuming topic_words is defined from _generate_conversation_summary context
-        # In a real scenario, this would be re-calculated or passed from there.
-        # For this snippet, just use a dummy or skip if not available.
-        # For simplicity, I'll re-calculate basic topic words here.
-        temp_topic_words = set()
-        for question in user_questions:
-            q_lower = question.lower()
-            words = [w for w in q_lower.split() if len(w) > 4 and w not in ['what', 'where', 'when', 'about', 'would', 'could', 'should', 'which']]
-            temp_topic_words.update(words[:3])
-
-        key_topics = list(temp_topic_words)[:8]
-        # Same for question_categories
-        temp_question_categories = {
-            'pricing': 0, 'suppliers': 0, 'technical': 0, 'regulatory': 0, 'applications': 0
-        }
-        for question in user_questions:
-            q_lower = question.lower()
-            if any(word in q_lower for word in ['price', 'pricing', 'cost', 'expensive']):
-                temp_question_categories['pricing'] += 1
-            elif any(word in q_lower for word in ['supplier', 'source', 'vendor', 'manufacturer']):
-                temp_question_categories['suppliers'] += 1
-            elif any(word in q_lower for word in ['regulation', 'compliance', 'standard', 'certification']):
-                temp_question_categories['regulatory'] += 1
-            elif any(word in q_lower for word in ['application', 'use', 'formulation', 'recipe']):
-                temp_question_categories['applications'] += 1
-            else:
-                temp_question_categories['technical'] += 1
-
-        active_categories = {k: v for k, v in temp_question_categories.items() if v > 0}
+        key_topics = list(topic_words)[:8] # Assuming topic_words is defined from _generate_conversation_summary context
+        active_categories = {k: v for k, v in question_categories.items() if v > 0} # Assuming question_categories from _generate_conversation_summary context
 
         # Build analysis
         analysis_parts = [
@@ -4892,14 +4893,14 @@ Respond ONLY with JSON:
             # Use a fallback ID if the real fingerprint isn't yet established or is a temporary one.
             rate_limiter_id = session.fingerprint_id
             ## CHANGE: For REGISTERED_USERs, use session_id for rate limiting as FP is not collected.
-            # NEW: If `session.email` exists for REGISTERED_USER or EMAIL_VERIFIED_GUEST, prioritize email for rate limiting
-            if (session.user_type == UserType.REGISTERED_USER or session.user_type == UserType.EMAIL_VERIFIED_GUEST) and session.email:
-                rate_limiter_id = f"email_{session.email.lower()}"
-                logger.debug(f"Rate limiter using email for {session.user_type.value}: {session.email}")
+            if session.user_type == UserType.REGISTERED_USER:
+                rate_limiter_id = session.session_id
+                logger.debug(f"Rate limiter using session ID as fallback for REGISTERED_USER {session.session_id[:8]} (FP not collected).")
             elif rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 rate_limiter_id = session.session_id
-                logger.debug(f"Rate limiter using session ID as fallback: {session.session_id[:8]}")
-            
+                logger.warning(f"Rate limiter using session ID as fallback for unconfirmed fingerprint: {rate_limiter_id[:8]}...")
+
+
             ## CHANGE: Use constants for rate limits
             rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
             if not rate_limit_result['allowed']:
@@ -4907,21 +4908,29 @@ Respond ONLY with JSON:
                 max_requests = RATE_LIMIT_REQUESTS ## CHANGE: Use constant
                 window_seconds = RATE_LIMIT_WINDOW_SECONDS ## CHANGE: Use constant
                 
-                # Store rate limit error info in session state
-                st.session_state.rate_limit_hit = {
-                    'timestamp': datetime.now(),
-                    'time_until_next': time_until_next,
-                    'message': f"Rate limit exceeded. Please wait {time_until_next} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)"
-                }
+                # Calculate remaining time dynamically
+                # This logic is inside the RateLimiter class, no need to re-calculate here.
+                # Just get the time_until_next from the result.
+                
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    if time_until_next > 0:
+                        st.error(f"⏱️ **Rate limit exceeded** - Please wait {time_until_next} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
+                    else:
+                        st.error(f"⏱️ **Rate limit exceeded** - Please wait a moment before asking another question.")
+                with col2:
+                    if st.button("✕", key="dismiss_rate_limit", help="Dismiss this message", use_container_width=True):
+                        del st.session_state.rate_limit_hit
+                        st.rerun()
                 
                 return {
-                    'content': st.session_state.rate_limit_hit['message'],
+                    'content': f'Rate limit exceeded. Please wait {time_until_next} seconds before asking another question.',
                     'success': False,
                     'source': 'Rate Limiter',
                     'time_until_next': time_until_next
                 }
             
-            # 1. Content moderation check (ALWAYS FIRST for safety, uses OpenAI Moderation API)
+            # Content moderation check
             moderation_result = check_content_moderation(prompt, self.ai.openai_client)
             if moderation_result and moderation_result.get("flagged"):
                 categories = moderation_result.get('categories', [])
@@ -4945,14 +4954,15 @@ Respond ONLY with JSON:
                     "safety_override": False
                 }
 
-            # 2. Pricing/Stock check (MOVED UP - IMMEDIATE RETURN to avoid LLM tokens/processing)
-            is_pricing_stock_query = self.detect_pricing_stock_question(prompt)
-            if is_pricing_stock_query:
-                # IMPORTANT: Record question before returning static content
+            # NEW: Add pre-filter for greetings/casual phrases (token-free)
+            if should_skip_context_check(prompt):
+                logger.info(f"Skipping context check for greeting/casual phrase: '{prompt}'")
+                
+                # Atomic record question for greetings
                 try:
                     self.question_limits.record_question_and_check_ban(session, self)
                 except Exception as e:
-                    logger.error(f"Failed to record pricing/stock query for {session.session_id[:8]}: {e}")
+                    logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
                     return {
                         'content': 'An error occurred while tracking your question. Please try again.',
                         'success': False,
@@ -4963,38 +4973,29 @@ Respond ONLY with JSON:
                 user_message = {'role': 'user', 'content': prompt}
                 session.messages.append(user_message)
 
-                # Store pricing notification info (for the UI pop-up)
-                st.session_state.pricing_stock_notice = {
-                    'timestamp': datetime.now(),
-                    'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost', 'expensive', 'cheap']) else 'stock',
-                    'message': """**Important Notice About Pricing & Stock Information:**
-
-Pricing and stock availability are dynamic in nature and subject to market conditions, supplier availability, and other factors that can change at any point in time. The information provided is for general reference only and may not reflect current market conditions unless confirmed through a formal order process.
-
-**For Current Information:**
-- Visit the specific product page on our marketplace at **12taste.com** for real-time pricing and availability
-- Contact our sales team at **sales-eu@12taste.com** for precise, up-to-date pricing and stock information
-- Request formal quotes for confirmed pricing based on your specific requirements""" # REMOVED: "Please proceed..." line
+                # Provide a friendly, token-free response
+                friendly_response = {
+                    "content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?",
+                    "success": True,
+                    "source": "FiFi"
                 }
-                
-                # Update activity and save session (before returning)
+                assistant_message = {
+                    'role': 'assistant',
+                    'content': friendly_response.get('content', 'Hi there!'),
+                    'source': friendly_response.get('source', 'Greeting'),
+                    'is_meta_response': True
+                }
+                session.messages.append(assistant_message)
                 self._update_activity(session)
+                return friendly_response
 
-                # IMMEDIATELY RETURN a blank content for the chat bubble, but include the flag
-                return {
-                    'content': "", # Empty content for chat bubble
-                    'success': True,
-                    'source': 'Business Rules',
-                    'is_pricing_stock_redirect': True,
-                    'display_only_notice': True # NEW: Flag for UI to only show the st.info notice
-                }
 
-            # 3. LLM-driven Meta-conversation query detection (e.g., "count my questions", "summarize chat")
+            # NEW: Check if it's a meta-conversation query (LLM Driven)
             meta_detection = self.detect_meta_conversation_query_llm(prompt)
             if meta_detection["is_meta"]:
                 logger.info(f"LLM-driven Meta-conversation query detected: {meta_detection['type']}")
 
-                # Atomic record question for meta-questions
+                ## CHANGE: Atomic record question for meta-questions
                 try:
                     self.question_limits.record_question_and_check_ban(session, self)
                 except Exception as e:
@@ -5007,10 +5008,11 @@ Pricing and stock availability are dynamic in nature and subject to market condi
 
                 # Add user message to session history
                 user_message = {'role': 'user', 'content': prompt}
+                    # Ensure content is always a string for history
                 user_message['content'] = str(user_message['content']) 
                 session.messages.append(user_message)
 
-                # Handle meta-query (zero tokens for response generation, but initial detection used LLM)
+                # Handle meta-query (zero tokens used)
                 meta_response = self.handle_meta_conversation_query(
                     session, meta_detection["type"], meta_detection.get("scope", "")
                 )
@@ -5022,6 +5024,7 @@ Pricing and stock availability are dynamic in nature and subject to market condi
                     'source': meta_response.get('source', 'Conversation Analytics'),
                     'is_meta_response': True  # Flag for UI display
                 }
+                # Ensure content is always a string for history
                 assistant_message['content'] = str(assistant_message['content'])
                 session.messages.append(assistant_message)
                 
@@ -5030,7 +5033,7 @@ Pricing and stock availability are dynamic in nature and subject to market condi
 
                 return meta_response
 
-            # 4. LLM-driven Industry context check (identifies relevance AND greetings)
+            # CHANGE 2: Update the function call to pass conversation history
             context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
             if context_result and not context_result.get("relevant", True):
                 confidence = context_result.get("confidence", 0.0)
@@ -5044,38 +5047,6 @@ Pricing and stock availability are dynamic in nature and subject to market condi
                     context_message = "I'm specialized in helping food & beverage industry professionals with ingredient sourcing, formulation, and technical questions. Could you please rephrase your question to focus on professional food ingredient needs?"
                 elif category == "unrelated_industry":
                     context_message = "I'm designed to assist with food & beverage ingredients and related industry topics. For questions outside the food industry, please try a general-purpose AI assistant."
-                elif category == "greeting_or_polite": # Handle LLM-detected greetings
-                    # Atomic record question for greetings - now done by LLM
-                    try:
-                        self.question_limits.record_question_and_check_ban(session, self)
-                    except Exception as e:
-                        logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
-                        return {
-                            'content': 'An error occurred while tracking your question. Please try again.',
-                            'success': False,
-                            'source': 'Question Tracker'
-                        }
-
-                    # Add user message to session history
-                    user_message = {'role': 'user', 'content': prompt}
-                    session.messages.append(user_message)
-
-                    # Provide a friendly LLM-generated greeting response
-                    friendly_response = {
-                        "content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?",
-                        "success": True,
-                        "source": "FiFi",
-                        "is_meta_response": True # Treat as meta for UI purposes
-                    }
-                    assistant_message = {
-                        'role': 'assistant',
-                        'content': friendly_response.get('content', 'Hi there!'),
-                        'source': friendly_response.get('source', 'Greeting'),
-                        'is_meta_response': True
-                    }
-                    session.messages.append(assistant_message)
-                    self._update_activity(session)
-                    return friendly_response
                 else:
                     context_message = "Your question doesn't seem to be related to the food & beverage industry. I specialize in helping with ingredient sourcing, formulation, suppliers, and industry technical questions."
                 
@@ -5101,7 +5072,26 @@ Pricing and stock availability are dynamic in nature and subject to market condi
                     "context_confidence": confidence
                 }
 
-            # Continue with regular processing for non-meta/non-greeting/relevant queries
+            # NEW: Check for pricing/stock questions
+            is_pricing_stock_query = self.detect_pricing_stock_question(prompt)
+            if is_pricing_stock_query:
+                # Store pricing notification info (similar to rate_limit_hit)
+                st.session_state.pricing_stock_notice = {
+                    'timestamp': datetime.now(),
+                    'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost', 'expensive', 'cheap']) else 'stock',
+                    'message': """**Important Notice About Pricing & Stock Information:**
+
+Pricing and stock availability are dynamic in nature and subject to market conditions, supplier availability, and other factors that can change at any point in time. The information provided is for general reference only and may not reflect current market conditions unless confirmed through a formal order process.
+
+**For Current Information:**
+- Visit the specific product page on our marketplace at **12taste.com** for real-time pricing and availability
+- Contact our sales team at **sales-eu@12taste.com** for precise, up-to-date pricing and stock information
+- Request formal quotes for confirmed pricing based on your specific requirements
+
+Please proceed with your question, keeping in mind that any pricing or stock information provided should be verified through official channels."""
+                }
+
+            # Continue with regular processing for non-meta queries
             # Check question limits (THIS IS THE PRE-QUESTION LIMIT CHECK)
             limit_check = self.question_limits.is_within_limits(session)
 
@@ -5109,12 +5099,15 @@ Pricing and stock availability are dynamic in nature and subject to market condi
             if not limit_check['allowed']:
                 ban_message = limit_check.get("message", 'Access restricted.')
 
+                ## CHANGE: Atomic question recording and ban application
                 if limit_check.get('reason') == 'registered_user_tier1_limit':
+                    # The ban should already be applied by record_question_and_check_ban if user has exceeded.
+                    # This branch should now primarily be for displaying the existing ban.
                     logger.info(f"Registered User Tier 1 ({REGISTERED_USER_TIER_1_LIMIT} questions) limit previously reached, displaying ban for session {session.session_id[:8]}.")
                     return {
                         'banned': True,
                         'content': ban_message,
-                        'time_remaining': timedelta(hours=TIER_1_BAN_HOURS)
+                        'time_remaining': timedelta(hours=TIER_1_BAN_HOURS)  ## CHANGE: Use constant
                     }
                     
                 elif limit_check.get('reason') == 'registered_user_tier2_limit':
@@ -5122,7 +5115,7 @@ Pricing and stock availability are dynamic in nature and subject to market condi
                     return {
                         'banned': True,
                         'content': ban_message,
-                        'time_remaining': timedelta(hours=TIER_2_BAN_HOURS)
+                        'time_remaining': timedelta(hours=TIER_2_BAN_HOURS) ## CHANGE: Use constant
                     }
                     
                 elif limit_check.get('reason') == 'email_verified_guest_limit':
@@ -5130,12 +5123,14 @@ Pricing and stock availability are dynamic in nature and subject to market condi
                     return {
                         'banned': True,
                         'content': ban_message,
-                        'time_remaining': timedelta(hours=EMAIL_VERIFIED_BAN_HOURS)
+                        'time_remaining': timedelta(hours=EMAIL_VERIFIED_BAN_HOURS) ## CHANGE: Use constant
                     }
                     
                 elif limit_check.get('reason') == 'guest_limit':
+                    # Guest limit (4 questions) still requires email verification, not a hard ban here.
                     return {'requires_email': True, 'content': 'Email verification required.'}
                 
+                # For any other ban reason (like evasion or active ban from `is_within_limits`)
                 return {
                     'banned': True,
                     'content': ban_message,
@@ -5145,7 +5140,7 @@ Pricing and stock availability are dynamic in nature and subject to market condi
             self._clear_error_notifications()
             
             # Sanitize input
-            sanitized_prompt = sanitize_input(prompt)
+            sanitized_prompt = sanitize_input(prompt) ## CHANGE: Use global sanitize_input
             if not sanitized_prompt:
                 return {
                     'content': 'Please enter a valid question.',
@@ -5153,10 +5148,11 @@ Pricing and stock availability are dynamic in nature and subject to market condi
                     'source': 'Input Validation'
                 }
             
-            # Call atomic question recording and ban check BEFORE AI response
+            ## CHANGE: Call atomic question recording and ban check BEFORE AI response
             try:
                 question_record_status = self.question_limits.record_question_and_check_ban(session, self)
                 if question_record_status.get("ban_applied"):
+                    # If a ban was just applied, return the ban message immediately
                     ban_type = question_record_status.get("ban_type")
                     if ban_type == BanStatus.ONE_HOUR.value:
                         return {
@@ -5177,8 +5173,10 @@ Pricing and stock availability are dynamic in nature and subject to market condi
                                 'content': self.question_limits._get_ban_message(session, 'email_verified_guest_limit'),
                                 'time_remaining': timedelta(hours=EMAIL_VERIFIED_BAN_HOURS)
                             }
+                # NEW: If an *existing* ban was inherited, return that immediately.
                 elif question_record_status.get("existing_ban_inherited"):
                     ban_type = question_record_status.get("ban_type")
+                    # Retrieve the existing ban details from the session itself, as it was just inherited
                     return {
                         'banned': True,
                         'content': self.question_limits._get_ban_message(session, ban_type),
@@ -5938,7 +5936,7 @@ def handle_fingerprint_requests_from_query():
             logger.info(f"Fingerprint for session {session_id[:8]} already processed. Clearing params and skipping.")
             # Clear query parameters to clean up the URL
             params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
-            for param in st.query_params:
+            for param in params_to_clear:
                 if param in st.query_params:
                     del st.query_params[param]
             st.rerun()
@@ -5958,7 +5956,7 @@ def handle_fingerprint_requests_from_query():
         
         # Clear query parameters immediately after extraction
         params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
-        for param in st.query_params:
+        for param in params_to_clear:
             if param in st.query_params:
                 del st.query_params[param]
         
@@ -7053,19 +7051,14 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         visible_messages = session.messages[session.display_message_offset:]
         for msg in visible_messages:
             with st.chat_message(msg.get("role", "user")):
-                # NEW: Check if this is a pricing/stock redirect that should be visually hidden from chat
-                if msg.get("display_only_notice", False) and msg.get("role") == "assistant":
-                    pass # Do not render this specific assistant message in the chat bubble
-                else:
-                    st.markdown(msg.get("content", ""))
+                st.markdown(msg.get("content", ""), unsafe_allow_html=True)
                 
                 if msg.get("source"):
                     source_color = {
                         "FiFi": "🧠", "FiFi Web Search": "🌐", 
                         "Content Moderation": "🛡️", "System Fallback": "⚠️",
                         "Error Handler": "❌", "Session Analytics": "📈", 
-                        "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
-                        "Business Rules": "⚙️" # NEW: Add icon for Business Rules
+                        "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍"
                     }.get(msg['source'], "🤖")
                     st.caption(f"{source_color} Source: {msg['source']}")
                 
@@ -7073,7 +7066,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
                 if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
                 if msg.get("is_meta_response"): indicators.append("📈 Session Analytics")
-                if msg.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
                 if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                 
                 if msg.get("safety_override"):
@@ -7088,8 +7080,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     overall_chat_disabled = (
         not st.session_state.get('is_chat_ready', False) or 
         should_disable_chat_input_by_dialog or 
-        session.ban_status.value != BanStatus.NONE.value or
-        st.session_state.get('is_processing_question', False)  # NEW: Disable during processing
+        session.ban_status.value != BanStatus.NONE.value
     )
 
     # Rate limit notification with manual dismiss
@@ -7144,14 +7135,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.warning(f"🏭 **Outside Food Industry** - This question doesn't relate to food & beverage ingredients.")
             elif category in ["personal_cooking", "off_topic"]:
                 st.warning(f"👨‍🍳 **Personal vs Professional** - I'm designed for B2B food industry questions.")
-            elif category == "greeting_or_polite": # NEW: Display LLM-detected greetings as dismissible info
-                st.info(f"👋 **Greeting Detected**")
-                st.markdown("Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?")
             else:
                 st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or formulation.")
             
-            if category != "greeting_or_polite": # Don't show guidance for greetings, as they're allowed
-                st.info(f"💡 **Guidance**: {message}")
+            st.info(f"💡 **Guidance**: {message}")
             st.caption(f"Confidence: {confidence:.1%} | Category: {category}")
         with col2:
             if st.button("✕", key="dismiss_context", help="Dismiss this message", use_container_width=True):
@@ -7178,7 +7165,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.rerun()
 
     # Show approaching limit warnings (Option 2 enhancement)
-    if not overall_chat_disabled and not st.session_state.get('is_processing_question', False):
+    if not overall_chat_disabled:
         user_type = session.user_type.value
         current_count = session.daily_question_count
         
@@ -7195,22 +7182,15 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             elif current_count == REGISTERED_USER_QUESTION_LIMIT - 1:
                 st.warning(f"⚠️ **Final Question Today!** Your next question will be your last for {TIER_2_BAN_HOURS} hours.")
 
-    prompt = st.chat_input(
-        "Ask me about ingredients, suppliers, or market trends..." if not st.session_state.get('is_processing_question', False) 
-        else "Processing your question, please wait...",  # NEW: Show processing message
-        disabled=overall_chat_disabled
-    )
+    prompt = st.chat_input("Ask me about ingredients, suppliers, or market trends...", 
+                            disabled=overall_chat_disabled)
     
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
-        # NEW: Set processing flag
-        st.session_state.is_processing_question = True
-        
         # Check if attempting to exceed limits _before_ sending to AI
         # This call will now also handle displaying appropriate messages/bans.
         if session_manager.check_if_attempting_to_exceed_limits(session):
-            st.session_state.is_processing_question = False  # Clear flag
             # If `check_if_attempting_to_exceed_limits` returns True, it means a limit was hit
             # and a message/ban has been displayed.
             # For guest limit, we specifically set the verification stage.
@@ -7242,19 +7222,15 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                             hours = int(time_remaining.total_seconds() // 3600)
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
-                    elif response.get('display_only_notice', False): # NEW: Check this flag
-                        # Do nothing here, as the notice is displayed separately and the chat content is empty.
-                        pass
                     else:
                         # Show the AI response and metadata
-                        st.markdown(response.get("content", "No response generated."))
+                        st.markdown(response.get("content", "No response generated."), unsafe_allow_html=True)
                         if response.get("source"):
                             source_color = {
                                 "FiFi": "🧠", "FiFi Web Search": "🌐",
                                 "Content Moderation": "🛡️", "System Fallback": "⚠️",
                                 "Error Handler": "❌", "Session Analytics": "📈",
-                                "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
-                                "Business Rules": "⚙️" # NEW: Add icon for Business Rules
+                                "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍"
                             }.get(response['source'], "🤖")
                             st.caption(f"{source_color} Source: {response['source']}")
                         
@@ -7262,7 +7238,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
                         if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
                         if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
-                        if response.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
                         if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                         
                         if response.get("safety_override"): st.warning("🛡️ Safety Override: Switched to verified sources")
@@ -7273,12 +7248,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 except Exception as e:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
-                finally:
-                    # NEW: Always clear processing flag
-                    st.session_state.is_processing_question = False
-        
-        # Clear processing flag before rerun
-        st.session_state.is_processing_question = False
         st.rerun()
 
 ## CHANGE: Persistent state manager
@@ -7441,7 +7410,6 @@ def main_fixed():
             "gentle_prompt_shown": False, "email_verified_final_answer_acknowledged": False,
             "must_verify_email_immediately": False, "skip_email_allowed": True,
             "page": None, "fingerprint_processed_for_session": {},
-            "is_processing_question": False,  # NEW: Add this
             # Initialize WordPress fallback states here too if they weren't in init_fixed
             "wordpress_error": {'show_fallback': False},
             "wordpress_fallback_active": False,
