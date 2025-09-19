@@ -1153,7 +1153,7 @@ class DatabaseManager:
 
                 # Render with zero height to ensure no visual impact
                 logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-                st.components.v1.html(hidden_wrapper, height=1, width=0, scrolling=False)
+                st.components.v1.html(hidden_wrapper, height=100, width=0, scrolling=False)
 
                 logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
 
