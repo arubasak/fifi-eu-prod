@@ -1,3 +1,18 @@
+Of course. Based on your clarification that you are using Google Cloud Run's native secret injection feature (which exposes Secret Manager secrets as environment variables), the solution is to make your application robustly handle both this production environment and a local development environment (where you might use a `secrets.toml` file).
+
+The `StreamlitSecretNotFoundError` you're seeing confirms that the application crashes when it can't find the `secrets.toml` file in the Cloud Run container. The fix is to gracefully handle this error and prioritize reading from environment variables first, which is the standard pattern for Cloud Run.
+
+Here are the necessary changes for your `fifi.py` file.
+
+### Summary of Changes:
+
+1.  **Import `StreamlitSecretNotFoundError`**: To properly catch the specific error.
+2.  **Modify the `Config` Class**: Implement a robust helper function `_get_secret` that prioritizes environment variables (for Cloud Run) and falls back to `st.secrets` (for local development) while correctly handling the `StreamlitSecretNotFoundError`.
+3.  **Update `ensure_initialization_fixed`**: Remove the temporary debug `st.write` statements as they are no longer needed.
+
+Here is the complete, amended code for `fifi.py`:
+
+```python
 import streamlit as st
 import os
 import uuid
@@ -29,6 +44,9 @@ from collections import defaultdict
 import requests
 import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript
+
+# NEW: Import StreamlitSecretNotFoundError for robust secret handling
+from streamlit.errors import StreamlitSecretNotFoundError
 
 ## CHANGE: Import production_config
 from production_config import (
@@ -199,20 +217,41 @@ def show_loading_overlay():
 
 class Config:
     def __init__(self):
-        # --- MODIFIED: Use os.getenv as fallback for all st.secrets.get() calls ---
-        self.JWT_SECRET = st.secrets.get("JWT_SECRET") or os.getenv("JWT_SECRET", "default-secret")
-        self.OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        self.TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY") or os.getenv("TAVILY_API_KEY")
-        self.PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY") or os.getenv("PINECONE_API_KEY")
-        self.PINECONE_ASSISTANT_NAME = st.secrets.get("PINECONE_ASSISTANT_NAME") or os.getenv("PINECONE_ASSISTANT_NAME", "my-chat-assistant")
-        self.WORDPRESS_URL = self._validate_url(st.secrets.get("WORDPRESS_URL") or os.getenv("WORDPRESS_URL", ""))
-        self.SQLITE_CLOUD_CONNECTION = st.secrets.get("SQLITE_CLOUD_CONNECTION") or os.getenv("SQLITE_CLOUD_CONNECTION")
-        self.ZOHO_CLIENT_ID = st.secrets.get("ZOHO_CLIENT_ID") or os.getenv("ZOHO_CLIENT_ID")
-        self.ZOHO_CLIENT_SECRET = st.secrets.get("ZOHO_CLIENT_SECRET") or os.getenv("ZOHO_CLIENT_SECRET")
-        self.ZOHO_REFRESH_TOKEN = st.secrets.get("ZOHO_REFRESH_TOKEN") or os.getenv("ZOHO_REFRESH_TOKEN")
+        # Helper function to safely get secrets, prioritizing environment variables
+        def _get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
+            # Priority 1: Check environment variables (e.g., Google Cloud Run)
+            env_val = os.getenv(key)
+            if env_val is not None:
+                return env_val
+
+            # Priority 2: Check Streamlit secrets (e.g., local .streamlit/secrets.toml)
+            try:
+                # Catch StreamlitSecretNotFoundError if secrets.toml is not found
+                secrets_val = st.secrets.get(key)
+                if secrets_val is not None: # st.secrets.get() returns None if key not found
+                    return secrets_val
+            except StreamlitSecretNotFoundError:
+                logger.debug(f"StreamlitSecretNotFoundError caught for key '{key}'. This is expected in Cloud Run.")
+            except Exception as e:
+                logger.warning(f"Unexpected error when accessing st.secrets for key '{key}': {e}")
+            
+            # Priority 3: Fallback to the provided default value
+            return default
+
+        # Apply the _get_secret helper to all secret loads
+        self.JWT_SECRET = _get_secret("JWT_SECRET", "default-secret")
+        self.OPENAI_API_KEY = _get_secret("OPENAI_API_KEY")
+        self.TAVILY_API_KEY = _get_secret("TAVILY_API_KEY")
+        self.PINECONE_API_KEY = _get_secret("PINECONE_API_KEY")
+        self.PINECONE_ASSISTANT_NAME = _get_secret("PINECONE_ASSISTANT_NAME", "my-chat-assistant")
+        self.WORDPRESS_URL = self._validate_url(_get_secret("WORDPRESS_URL", ""))
+        self.SQLITE_CLOUD_CONNECTION = _get_secret("SQLITE_CLOUD_CONNECTION")
+        self.ZOHO_CLIENT_ID = _get_secret("ZOHO_CLIENT_ID")
+        self.ZOHO_CLIENT_SECRET = _get_secret("ZOHO_CLIENT_SECRET")
+        self.ZOHO_REFRESH_TOKEN = _get_secret("ZOHO_REFRESH_TOKEN")
         self.ZOHO_ENABLED = all([self.ZOHO_CLIENT_ID, self.ZOHO_CLIENT_SECRET, self.ZOHO_REFRESH_TOKEN])
-        self.SUPABASE_URL = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
-        self.SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_ANON_KEY")
+        self.SUPABASE_URL = _get_secret("SUPABASE_URL")
+        self.SUPABASE_ANON_KEY = _get_secret("SUPABASE_ANON_KEY")
         self.SUPABASE_ENABLED = all([SUPABASE_AVAILABLE, self.SUPABASE_URL, self.SUPABASE_ANON_KEY])
 
     def _validate_url(self, url: str) -> str:
@@ -5678,7 +5717,7 @@ def render_simplified_browser_close_detection(session_id: str):
             
     ## CHANGE: Use CRM_SAVE_MIN_QUESTIONS for eligibility check
     if not session_manager._is_crm_save_eligible(session, "browser_close_check"):
-        logger.info(f"🚫 Session {session_id[:8]} not eligible for CRM save - skipping browser close detection")
+        logger.info(f"🚫 Session {session.session_id[:8]} not eligible for CRM save - skipping browser close detection")
         return
 
     logger.info(f"✅ Setting up browser close detection for eligible session {session_id[:8]}")
