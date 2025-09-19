@@ -6664,7 +6664,8 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         with col2:
             if st.button("Return to Welcome Page", use_container_width=True):
                 session_manager.end_session(session)
-                js_redirect = f"window.top.location.href = 'https://fifi-eu.streamlit.app/';"
+                app_base_url = os.getenv("APP_BASE_URL", "https://fifi-eu-121263692901.europe-west1.run.app/"
+                js_redirect = f"window.top.location.href = '{app_base_url}';"
                 st.components.v1.html(f"<script>{js_redirect}</script>", height=0, width=0)
                 st.rerun()
         
