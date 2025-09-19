@@ -1,18 +1,3 @@
-Of course. Based on your clarification that you are using Google Cloud Run's native secret injection feature (which exposes Secret Manager secrets as environment variables), the solution is to make your application robustly handle both this production environment and a local development environment (where you might use a `secrets.toml` file).
-
-The `StreamlitSecretNotFoundError` you're seeing confirms that the application crashes when it can't find the `secrets.toml` file in the Cloud Run container. The fix is to gracefully handle this error and prioritize reading from environment variables first, which is the standard pattern for Cloud Run.
-
-Here are the necessary changes for your `fifi.py` file.
-
-### Summary of Changes:
-
-1.  **Import `StreamlitSecretNotFoundError`**: To properly catch the specific error.
-2.  **Modify the `Config` Class**: Implement a robust helper function `_get_secret` that prioritizes environment variables (for Cloud Run) and falls back to `st.secrets` (for local development) while correctly handling the `StreamlitSecretNotFoundError`.
-3.  **Update `ensure_initialization_fixed`**: Remove the temporary debug `st.write` statements as they are no longer needed.
-
-Here is the complete, amended code for `fifi.py`:
-
-```python
 import streamlit as st
 import os
 import uuid
