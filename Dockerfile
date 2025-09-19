@@ -1,6 +1,5 @@
 # --- Stage 1: Builder ---
 # This stage installs dependencies and compiles any code needed.
-# It will be discarded later to keep the final image small.
 FROM python:3.12-slim as builder
 
 WORKDIR /app
@@ -9,7 +8,6 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y build-essential
 
 # Install Python dependencies first to leverage Docker's layer caching.
-# This step is only re-run if requirements.txt changes.
 COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
@@ -32,6 +30,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends nginx && \
 # Copy installed Python packages from the builder stage
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 
+# === THIS IS THE FIX ===
+# Copy the executables (like 'streamlit') from the builder stage's binary path
+# to the final image's binary path. This makes the 'streamlit' command available.
+COPY --from=builder /usr/local/bin /usr/local/bin
+
 # Copy the application code and necessary config files
 COPY fifi.py .
 COPY production_config.py .
@@ -47,4 +50,3 @@ EXPOSE $PORT
 
 # Run the startup script
 CMD ["./start.sh"]
-
