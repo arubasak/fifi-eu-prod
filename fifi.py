@@ -1144,7 +1144,7 @@ class DatabaseManager:
 
                 # Render with zero height to ensure no visual impact
                 logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-                st.components.v1.html(hidden_wrapper, height=100, width=0, scrolling=False)
+                st.components.v1.html(hidden_wrapper, height=1, width=0, scrolling=False)
 
                 logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
 
@@ -5737,7 +5737,7 @@ def handle_fingerprint_requests_from_query():
         
         # Clear query parameters immediately after extraction
         params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
-        for param in st.query_params:
+        for param in params_to_clear:
             if param in st.query_params:
                 del st.query_params[param]
         
