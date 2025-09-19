@@ -173,7 +173,7 @@ def show_loading_overlay():
                 animation: spin 1s linear infinite;
                 margin: 0 auto 1rem;
             "></div>
-            <h3 style="color: #333; margin-bottom: 0.5rem;">🤖 FiFi AI Assistant</h3>
+            <h4 style="color: #333; margin-bottom: 0.5rem;">FiFi, AI sourcing assistant</h4>
             <p style="color: #666; margin: 0;">{loading_message}</p>
         </div>
         <style>
@@ -6743,7 +6743,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
     
     st.title("🤖 FiFi AI Assistant")
-    st.caption("Your intelligent food & beverage sourcing companion.")
+    st.caption("Hello, I am FiFi, your AI-powered assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, explore recipe ideas, technical data, and more.")
 
     # NEW: Show fingerprint waiting status ONLY for non-registered users
     ## CHANGE: Only show fingerprint wait for non-registered users
