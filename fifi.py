@@ -70,9 +70,8 @@ def get_image_as_base64(file_path):
 
 # Load images once using the helper function
 # ASSUMPTION: You have an 'assets' folder with these images next to fifi.py
-FIFI_AVATAR_B64 = get_image_as_base64("assets/fifi-avatar.png")
-USER_AVATAR_B64 = get_image_as_base64("assets/user-avatar.png")
-
+FIFI_AVATAR_B64 = get_image_as_base64(BASE_DIR / "assets" / "fifi-avatar.png")
+USER_AVATAR_B64 = get_image_as_base64(BASE_DIR / "assets" / "user-avatar.png")
 
 # =============================================================================
 # SETUP
