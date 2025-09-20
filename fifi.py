@@ -6976,7 +6976,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.warning(f"⚠️ **Final Question Today!** Your next question will be your last for {TIER_2_BAN_HOURS} hours.")
 
     prompt = st.chat_input(
-        "Ask me about ingredients, suppliers, or market trends..." if not st.session_state.get('is_processing_question', False) 
+        "Ask me about ingredients, product development or market trends—in any language." if not st.session_state.get('is_processing_question', False) 
         else "Processing your question, please wait...",  # NEW: Show processing message
         disabled=overall_chat_disabled
     )
