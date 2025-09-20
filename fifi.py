@@ -14,6 +14,8 @@ import copy
 import sqlite3
 import hashlib
 import secrets
+import base64  # <-- ADDED FOR AVATARS
+from pathlib import Path  # <-- ADDED FOR AVATARS
 from enum import Enum
 from urllib.parse import urlparse
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -43,18 +45,42 @@ from production_config import (
     CRM_SAVE_MIN_QUESTIONS, EVASION_BAN_HOURS,
     FASTAPI_EMERGENCY_SAVE_URL, FASTAPI_EMERGENCY_SAVE_TIMEOUT,
     DAILY_RESET_WINDOW, SESSION_TIMEOUT_DELTA,
-    FINGERPRINT_TIMEOUT_SECONDS # <--- ADDED FINGERPRINT_TIMEOUT_SECONDS
+    FINGERPRINT_TIMEOUT_SECONDS
 )
 
-# CHANGE 1: REMOVED the streamlit_js_eval import block as it's no longer needed and caused deployment issues.
+# =============================================================================
+# AVATAR LOADING (NEW)
+# =============================================================================
+
+# Helper function to load and Base64-encode images for stateless deployment
+@st.cache_data
+def get_image_as_base64(file_path):
+    """Loads an image file and returns it as a Base64 encoded string."""
+    try:
+        path = Path(file_path)
+        with path.open("rb") as f:
+            data = f.read()
+        return f"data:image/png;base64,{base64.b64encode(data).decode()}"
+    except FileNotFoundError:
+        logger.error(f"Avatar image not found at {file_path}")
+        return None
+    except Exception as e:
+        logger.error(f"Error loading image {file_path}: {e}")
+        return None
+
+# Load images once using the helper function
+# ASSUMPTION: You have an 'assets' folder with these images next to fifi.py
+FIFI_AVATAR_B64 = get_image_as_base64("assets/fifi-avatar.png")
+USER_AVATAR_B64 = get_image_as_base64("assets/user-avatar.png")
+
 
 # =============================================================================
-# FINAL INTEGRATED FIFI AI - SIMPLIFIED TIMEOUT SYSTEM
+# SETUP
 # =============================================================================
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO, # Keep at INFO unless debugging specific components
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -83,7 +109,6 @@ except ImportError:
     pass
 
 try:
-    # MODIFIED: Import TavilySearch instead of TavilyClient for Langchain integration
     from langchain_tavily import TavilySearch
     TAVILY_AVAILABLE = True
 except ImportError:
@@ -876,7 +901,7 @@ class DatabaseManager:
                     timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
                     timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
                     current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
-                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # FIXED: Changed from loaded_tier1_completed_in_in_cycle
+                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # FIXED TYPO
                     tier_cycle_started_at=loaded_tier_cycle_started_at, # NEW
                     login_method=loaded_login_method, # NEW
                     is_degraded_login=loaded_is_degraded_login, # NEW
@@ -2196,6 +2221,59 @@ class WooCommerceManager:
             parts.append(address_data['country'])
         
         return '\n'.join(parts) if parts else 'N/A'
+    
+    def test_connection(self) -> Dict[str, Any]:
+        """Test WooCommerce API connection and return status information."""
+        if not self.config.WOOCOMMERCE_ENABLED:
+            return {
+                "status": "disabled",
+                "message": "WooCommerce integration is not enabled"
+            }
+        
+        try:
+            # Try to fetch store information or a simple endpoint
+            response = requests.get(
+                f"{self.base_url}/system_status",
+                auth=self.auth,
+                timeout=5,
+                headers={
+                    'User-Agent': 'FiFi-AI-Assistant/1.0',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            if response.status_code == 200:
+                return {
+                    "status": "connected",
+                    "message": "WooCommerce API is working correctly",
+                    "api_url": self.base_url
+                }
+            elif response.status_code == 401:
+                return {
+                    "status": "authentication_failed",
+                    "message": "WooCommerce authentication failed. Check API credentials."
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"WooCommerce API returned status code: {response.status_code}"
+                }
+                
+        except requests.exceptions.Timeout:
+            return {
+                "status": "timeout",
+                "message": "WooCommerce API request timed out"
+            }
+        except requests.exceptions.ConnectionError:
+            return {
+                "status": "connection_error",
+                "message": "Could not connect to WooCommerce API"
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"WooCommerce API error: {str(e)}"
+            }
 
 
 # =============================================================================
@@ -4560,7 +4638,7 @@ class SessionManager:
             'type': error_type,
             'message': error_message,
             'username': username,
-            'show_fallback': True
+             'show_fallback': True
         }
         
         return None  # Return None to trigger the fallback UI
@@ -4838,12 +4916,7 @@ Order ID:"""
         # Check for order keywords
         has_order_keyword = any(keyword in prompt_lower for keyword in order_keywords)
         
-        # Check for order number patterns (optional, but good for context)
-        # We allow "order status" without a number to still be considered an order query
-        # But we don't *require* a number here, as the user might be asking generally
-        # has_order_pattern = bool(re.search(r'#?\d+', prompt))
-        
-        return has_order_keyword # and (has_order_pattern or True)
+        return has_order_keyword
 
 
     # CHANGE 11: Solution 1 - Meta-Question Detection (LLM Driven)
@@ -4888,7 +4961,7 @@ Respond ONLY with JSON:
                 logger.warning(f"LLM meta-query detection returned invalid JSON: {response_content}. Falling back to keyword.")
                 return self.detect_meta_conversation_query_keyword_fallback(prompt)
 
-            logger.info(f"LLM Meta-query detection: {prompt} → {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
+            logger.info(f"LLM Meta-query detection: {prompt} -> {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
             return result
 
         except Exception as e:
@@ -4898,8 +4971,11 @@ Respond ONLY with JSON:
     # Fallback for meta-conversation detection (old static method)
     def detect_meta_conversation_query_keyword_fallback(self, prompt: str) -> Dict[str, Any]:
         """Detect if user is asking about conversation history using static keywords (fallback)."""
-
         prompt_lower = prompt.lower().strip()
+    
+        # EXCLUDE pure numeric inputs from meta-conversation detection
+        if prompt_lower.isdigit():
+            return {"is_meta": False, "type": "none", "confidence": 1.0}
 
         # Summary patterns
         summary_patterns = [
@@ -5173,6 +5249,7 @@ Respond ONLY with JSON:
     def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
         """Gets AI response and manages session state with a corrected processing pipeline."""
         try:
+            logger.info(f"Processing prompt: '{prompt[:100]}' | Session: {session.session_id[:8]} | Type: {session.user_type.value}")
             # Determine rate limiter ID
             rate_limiter_id = session.fingerprint_id
             if (session.user_type in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]) and session.email:
@@ -5221,6 +5298,7 @@ Respond ONLY with JSON:
                 }
 
             # 3. Pricing/Stock check
+            logger.debug(f"Checking pricing/stock query for: '{prompt}'")
             if self.detect_pricing_stock_question(prompt):
                 try:
                     self.question_limits.record_question_and_check_ban(session, self)
@@ -5237,10 +5315,30 @@ Respond ONLY with JSON:
                 self._update_activity(session)
                 return {'content': "", 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
 
-            # 3.5 WooCommerce Order Check (NEW)
-            if hasattr(self, 'woocommerce') and self.woocommerce.config.WOOCOMMERCE_ENABLED:
-                if self.is_order_query(prompt):
+            # 3.5 WooCommerce Order Check (ENHANCED)
+            logger.debug(f"Checking WooCommerce order query for: '{prompt}'")
+            if hasattr(self, 'woocommerce') and self.woocommerce and self.woocommerce.config.WOOCOMMERCE_ENABLED:
+                # Check if we're expecting an order ID from previous message
+                expecting_order_id = False
+                if session.messages:
+                    # Look at the last assistant message
+                    for msg in reversed(session.messages):
+                        if msg.get('role') == 'assistant' and msg.get('source') == 'WooCommerce':
+                            if 'order ID' in msg.get('content', '') or 'order number' in msg.get('content', ''):
+                                expecting_order_id = True
+                                break
+                        # Only check the last exchange
+                        if msg.get('role') == 'user':
+                            break
+                
+                # Check if current prompt is an order query or potentially an order ID
+                if self.is_order_query(prompt) or (expecting_order_id and prompt.strip().isdigit()):
+                    # Try to extract order ID
                     order_id = self.extract_order_id_from_query(prompt)
+                    
+                    # If no order ID found but we have a standalone number and we're expecting one
+                    if not order_id and expecting_order_id and prompt.strip().isdigit():
+                        order_id = prompt.strip()
                     
                     if order_id:
                         logger.info(f"Order query detected for order ID: {order_id}")
@@ -5297,6 +5395,7 @@ Respond ONLY with JSON:
                         }
 
             # 4. LLM-driven Industry context check (NOW RUNS BEFORE META-DETECTION)
+            logger.debug(f"Checking industry context for: '{prompt}'")
             context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
             if context_result:
                 category = context_result.get("category")
@@ -5308,7 +5407,7 @@ Respond ONLY with JSON:
                         self.question_limits.record_question_and_check_ban(session, self)
                     except Exception as e:
                         logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
-                        return {'content': 'An error occurred while tracking your question.', 'success': False, 'source': 'Question Tracker'}
+                        return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
 
                     session.messages.append({'role': 'user', 'content': prompt})
                     friendly_response = {"content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?", "success": True, "source": "FiFi", "is_meta_response": True}
@@ -5316,22 +5415,16 @@ Respond ONLY with JSON:
                     self._update_activity(session)
                     return friendly_response
                 
-                # B. Block irrelevant questions, but specifically ALLOW meta_conversation queries to pass
-                # Also allow 'order_query' if WooCommerce is enabled, but no ID was found, or if it's disabled.
-                # If WooCommerce is disabled, order queries should be treated as off-topic for AI fallback.
-                elif not is_relevant and category != "meta_conversation" and \
-                    not (category == "order_query" and hasattr(self, 'woocommerce') and self.woocommerce.config.WOOCOMMERCE_ENABLED):
-                    
+                # B. Block irrelevant questions, but specifically ALLOW meta_conversation and order_queries to pass
+                elif not is_relevant and category not in ["meta_conversation", "order_query"]:
                     confidence = context_result.get("confidence", 0.0)
                     reason = context_result.get("reason", "Not relevant")
                     context_message = "I'm specialized in helping food & beverage industry professionals. Please ask me about ingredients, suppliers, or market trends."
-                    if category == "order_query" and not (hasattr(self, 'woocommerce') and self.woocommerce.config.WOOCOMMERCE_ENABLED):
-                        context_message = "I can only process general food and beverage industry questions. Order lookups are not enabled in my current configuration."
-                    
                     st.session_state.context_flagged = {'timestamp': datetime.now(), 'category': category, 'confidence': confidence, 'reason': reason, 'message': context_message}
                     return {"content": context_message, "success": False, "source": "Industry Context Filter", "used_search": False, "used_pinecone": False, "has_citations": False, "has_inline_citations": False, "safety_override": False}
 
             # 5. LLM-driven Meta-conversation query detection (NOW RUNS AFTER CONTEXT CHECK)
+            logger.debug(f"Checking meta-conversation for: '{prompt}'")
             meta_detection = self.detect_meta_conversation_query_llm(prompt)
             if meta_detection["is_meta"]:
                 logger.info(f"Meta-conversation query detected: {meta_detection['type']}")
@@ -6353,7 +6446,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
     with st.sidebar:
         st.title("🎛️ Dashboard")
         
-        ## START <<<<<<<<<<<<<<<< REPLACEMENT 3 OF 3
         if session.user_type.value == UserType.REGISTERED_USER.value:
             st.success("✅ **Registered User**")
             
@@ -6388,7 +6480,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     hours = int(time_remaining.total_seconds() // 3600)
                     minutes = int((time_remaining.total_seconds() % 3600) // 60)
                     st.caption(f"⏳ Tier 1 break: {hours}h {minutes}m remaining until Tier 2")
-                # FIX 2: Check tier1_completed_in_cycle to ensure correct message after ban expiry
                 elif session.tier1_completed_in_cycle:
                     # Ban has expired and was served
                     st.progress(1.0, text="Tier 1 Complete ✅")
@@ -6410,7 +6501,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     st.caption(f"⏰ {remaining_tier2} questions until {TIER_2_BAN_HOURS}-hour reset")
                 else:
                     st.caption(f"🚫 Daily limit reached - {TIER_2_BAN_HOURS}-hour reset required")
-        ## END <<<<<<<<<<<<<<<< REPLACEMENT 3 OF 3
                     
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             st.info("📧 **Email Verified Guest**")
@@ -6538,8 +6628,13 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         else: 
             st.caption("🚫 CRM Integration: Registered users & verified guests only")
 
-        if session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
-            st.success("🛒 WooCommerce: Connected")
+        if session_manager.woocommerce and session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
+            status = session_manager.woocommerce.test_connection()
+            if status["status"] == "connected":
+                st.success("🛒 WooCommerce: Connected")
+            else:
+                st.error(f"🛒 WooCommerce: {status['status'].replace('_', ' ').title()}")
+                st.caption(status["message"])
         else:
             st.info("🛒 WooCommerce: Not configured")
         
@@ -7173,7 +7268,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         # Display chat messages (respects soft clear offset)
         visible_messages = session.messages[session.display_message_offset:]
         for msg in visible_messages:
-            with st.chat_message(msg.get("role", "user"), avatar="🧑‍💻" if msg.get("role") == "user" else "🤖"): # ADDED AVATAR
+            role = msg.get("role", "user")
+            avatar_icon = USER_AVATAR_B64 if role == "user" else FIFI_AVATAR_B64
+            with st.chat_message(role, avatar=avatar_icon): # AVATAR IMPLEMENTED
                 # NEW: Check if this is a pricing/stock redirect that should be visually hidden from chat
                 if msg.get("display_only_notice", False) and msg.get("role") == "assistant":
                     pass # Do not render this specific assistant message in the chat bubble
@@ -7347,10 +7444,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             st.rerun()
             return
         
-        with st.chat_message("user", avatar="🧑‍💻"): # ADDED AVATAR
+        with st.chat_message("user", avatar=USER_AVATAR_B64): # AVATAR IMPLEMENTED
             st.markdown(prompt)
         
-        with st.chat_message("assistant", avatar="🤖"): # ADDED AVATAR
+        with st.chat_message("assistant", avatar=FIFI_AVATAR_B64): # AVATAR IMPLEMENTED
             with st.spinner("🔍 FiFi is processing your question and we request your patience..."):
                 try:
                     response = session_manager.get_ai_response(session, prompt)
@@ -7555,7 +7652,7 @@ def main_fixed():
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
-            page_icon="🤖", 
+            page_icon=FIFI_AVATAR_B64 if FIFI_AVATAR_B64 else "🤖", 
             layout="wide"
         )
     except Exception as e:
