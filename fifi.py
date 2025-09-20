@@ -7178,7 +7178,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
     
-    st.title("🤖 FiFi AI Assistant")
+    st.title("FiFi AI Assistant")
     st.caption("Hello, I am FiFi, your AI-powered assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, explore recipe ideas, technical data, and more.")
 
     # NEW: Show fingerprint waiting status ONLY for non-registered users
