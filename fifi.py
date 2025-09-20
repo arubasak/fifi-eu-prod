@@ -6205,8 +6205,8 @@ def handle_fingerprint_requests_from_query():
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock and WordPress fallback UI."""
     
-    st.title("🤖 Welcome to FiFi AI Assistant")
-    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
+    st.title("Welcome to :rainbow[FiFi]")
+    st.subheader("Your :blue[AI sourcing] assistant")
 
     # Show loading overlay if in loading state
     if show_loading_overlay():
