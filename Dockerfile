@@ -39,6 +39,10 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY fifi.py .
 COPY production_config.py .
 COPY fingerprint_component.html .
+
+# === ADD THIS LINE TO COPY THE ASSETS DIRECTORY ===
+COPY assets ./assets
+
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY start.sh .
 
