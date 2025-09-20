@@ -230,9 +230,19 @@ class Config:
         self.SUPABASE_ANON_KEY = _get_secret("SUPABASE_ANON_KEY")
         self.SUPABASE_ENABLED = all([SUPABASE_AVAILABLE, self.SUPABASE_URL, self.SUPABASE_ANON_KEY])
 
+        # WooCommerce Configuration
+        self.WOOCOMMERCE_URL = self._validate_url(_get_secret("WOOCOMMERCE_URL", ""))
+        self.WOOCOMMERCE_CONSUMER_KEY = _get_secret("WOOCOMMERCE_CONSUMER_KEY")
+        self.WOOCOMMERCE_CONSUMER_SECRET = _get_secret("WOOCOMMERCE_CONSUMER_SECRET")
+        self.WOOCOMMERCE_ENABLED = all([
+            self.WOOCOMMERCE_URL, 
+            self.WOOCOMMERCE_CONSUMER_KEY, 
+            self.WOOCOMMERCE_CONSUMER_SECRET
+        ])
+
     def _validate_url(self, url: str) -> str:
         if url and not url.startswith(('http://', 'https://')):
-            logger.warning(f"Invalid URL format for WORDPRESS_URL: {url}. Disabling feature.")
+            logger.warning(f"Invalid URL format for {url}. Disabling feature.")
             return ""
         return url.rstrip('/')
 
@@ -866,7 +876,7 @@ class DatabaseManager:
                     timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
                     timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
                     current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
-                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # NEW
+                    tier1_completed_in_cycle=loaded_tier1_completed_in_in_cycle, # NEW
                     tier_cycle_started_at=loaded_tier_cycle_started_at, # NEW
                     login_method=loaded_login_method, # NEW
                     is_degraded_login=loaded_is_degraded_login, # NEW
@@ -2009,6 +2019,185 @@ class ZohoCRMManager:
                 
         return note_content
 
+
+class WooCommerceManager:
+    """Manages WooCommerce integration for order retrieval."""
+    
+    def __init__(self, config: Config):
+        self.config = config
+        self.base_url = f"{config.WOOCOMMERCE_URL}/wp-json/wc/v3"
+        self.auth = None
+        
+        if self.config.WOOCOMMERCE_ENABLED:
+            from requests.auth import HTTPBasicAuth
+            self.auth = HTTPBasicAuth(
+                self.config.WOOCOMMERCE_CONSUMER_KEY,
+                self.config.WOOCOMMERCE_CONSUMER_SECRET
+            )
+            logger.info("✅ WooCommerce manager initialized")
+        else:
+            logger.warning("⚠️ WooCommerce not enabled - missing configuration")
+    
+    @handle_api_errors("WooCommerce", "Get Order", show_to_user=True)
+    def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a single order by ID from WooCommerce."""
+        if not self.config.WOOCOMMERCE_ENABLED:
+            return None
+        
+        try:
+            # Clean the order ID (remove # if present)
+            clean_order_id = str(order_id).replace('#', '').strip()
+            
+            response = requests.get(
+                f"{self.base_url}/orders/{clean_order_id}",
+                auth=self.auth,
+                timeout=10,
+                headers={
+                    'User-Agent': 'FiFi-AI-Assistant/1.0',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            if response.status_code == 404:
+                logger.info(f"Order {clean_order_id} not found")
+                return {"error": "not_found", "message": f"Order #{clean_order_id} not found"}
+            
+            response.raise_for_status()
+            order_data = response.json()
+            
+            logger.info(f"Successfully retrieved order #{clean_order_id}")
+            return order_data
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"WooCommerce API error: {e}")
+            return {"error": "api_error", "message": str(e)}
+    
+    def format_order_for_display(self, order: Dict[str, Any]) -> str:
+        """Format order data into a user-friendly markdown string."""
+        if "error" in order:
+            if order["error"] == "not_found":
+                return f"❌ {order['message']}"
+            else:
+                return f"⚠️ Error retrieving order: {order['message']}"
+        
+        # Extract key order information
+        order_id = order.get('id', 'N/A')
+        order_number = order.get('number', order_id)
+        status = order.get('status', 'unknown')
+        date_created = order.get('date_created', '')
+        total = order.get('total', '0')
+        currency = order.get('currency', 'USD')
+        
+        # Customer info
+        billing = order.get('billing', {})
+        customer_name = f"{billing.get('first_name', '')} {billing.get('last_name', '')}".strip()
+        customer_email = billing.get('email', 'N/A')
+        
+        # Format the response
+        response = f"""## 📦 Order #{order_number}
+
+**Status:** {self._format_status(status)}
+**Date:** {self._format_date(date_created)}
+**Total:** {currency} {total}
+
+### 👤 Customer Information
+- **Name:** {customer_name or 'N/A'}
+- **Email:** {customer_email}
+- **Phone:** {billing.get('phone', 'N/A')}
+
+### 📍 Billing Address
+{self._format_address(billing)}
+
+"""
+        
+        # Add shipping address if different
+        shipping = order.get('shipping', {})
+        if shipping and shipping != billing:
+            response += f"""### 📍 Shipping Address
+{self._format_address(shipping)}
+
+"""
+        
+        # Add order items
+        line_items = order.get('line_items', [])
+        if line_items:
+            response += "### 🛒 Order Items\n"
+            for item in line_items:
+                name = item.get('name', 'Unknown')
+                quantity = item.get('quantity', 0)
+                price = item.get('price', '0')
+                total = item.get('total', '0')
+                response += f"- **{name}** × {quantity} @ {currency} {price} = {currency} {total}\n"
+            response += "\n"
+        
+        # Add payment method
+        payment_method = order.get('payment_method_title', 'N/A')
+        response += f"**Payment Method:** {payment_method}\n"
+        
+        # Add order notes if any
+        customer_note = order.get('customer_note', '')
+        if customer_note:
+            response += f"\n**Customer Note:** {customer_note}\n"
+        
+        return response
+    
+    def _format_status(self, status: str) -> str:
+        """Format order status with emoji."""
+        status_map = {
+            'pending': '🕐 Pending',
+            'processing': '⚙️ Processing',
+            'on-hold': '⏸️ On Hold',
+            'completed': '✅ Completed',
+            'cancelled': '❌ Cancelled',
+            'refunded': '💰 Refunded',
+            'failed': '❌ Failed'
+        }
+        return status_map.get(status, status.title())
+    
+    def _format_date(self, date_str: str) -> str:
+        """Format ISO date string to readable format."""
+        try:
+            if date_str:
+                # Parse ISO format date
+                date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                return date_obj.strftime("%B %d, %Y at %I:%M %p")
+        except:
+            pass
+        return date_str
+    
+    def _format_address(self, address_data: Dict[str, Any]) -> str:
+        """Format address data into readable string."""
+        parts = []
+        
+        # Add company if exists
+        if address_data.get('company'):
+            parts.append(address_data['company'])
+        
+        # Add street address
+        if address_data.get('address_1'):
+            parts.append(address_data['address_1'])
+        if address_data.get('address_2'):
+            parts.append(address_data['address_2'])
+        
+        # Add city, state, zip
+        city_state_zip = []
+        if address_data.get('city'):
+            city_state_zip.append(address_data['city'])
+        if address_data.get('state'):
+            city_state_zip.append(address_data['state'])
+        if address_data.get('postcode'):
+            city_state_zip.append(address_data['postcode'])
+        
+        if city_state_zip:
+            parts.append(', '.join(city_state_zip))
+        
+        # Add country
+        if address_data.get('country'):
+            parts.append(address_data['country'])
+        
+        return '\n'.join(parts) if parts else 'N/A'
+
+
 # =============================================================================
 # RATE LIMITER & AI SYSTEM
 # =============================================================================
@@ -2037,6 +2226,10 @@ class RateLimiter:
                                     reverse=False) # Oldest first
                 for old_id, _ in sorted_items[:self.MAX_TRACKED_IDS // 10]: # Remove 10% of max
                     del self.requests[old_id]
+
+            ## CHANGE: Memory leak fix - cleanup component_attempts if too large
+            # No component_attempts in RateLimiter, so this fix doesn't apply here.
+            # This block was moved from FingerprintingManager, ensure it's not misplaced.
             
             if len(self.requests[identifier]) < self.max_requests:
                 self.requests[identifier].append(now)
@@ -2943,6 +3136,7 @@ def check_industry_context(prompt: str, chat_history: List[Dict] = None, client:
 - Market trends in food & beverage industry
 - Follow-up questions that relate to previous context
 - Meta-conversation queries (summarize chat, count questions, list topics)
+- Order status queries (e.g., "Where is my order 123?")
 
 **FLAG ONLY:**
 - Consumer/home cooking recipes or diet advice
@@ -2959,7 +3153,7 @@ Respond with ONLY a JSON object in this exact format:
 {{
     "relevant": true/false,
     "confidence": 0.0-1.0,
-    "category": "food_ingredients" | "supplier_sourcing" | "follow_up" | "meta_conversation" | "off_topic" | "unrelated_industry" | "greeting_or_polite",
+    "category": "food_ingredients" | "supplier_sourcing" | "follow_up" | "meta_conversation" | "order_query" | "off_topic" | "unrelated_industry" | "greeting_or_polite",
     "reason": "Brief explanation."
 }}"""
 
@@ -3000,7 +3194,8 @@ class SessionManager:
                  zoho_manager: ZohoCRMManager, ai_system: EnhancedAI, 
                  rate_limiter: RateLimiter, fingerprinting_manager: DatabaseManager.FingerprintingManager, # Corrected type hint
                  email_verification_manager: DatabaseManager.EmailVerificationManager, # Corrected type hint
-                 question_limit_manager: DatabaseManager.QuestionLimitManager): # Corrected type hint
+                 question_limit_manager: DatabaseManager.QuestionLimitManager, # Corrected type hint
+                 woocommerce_manager: Optional['WooCommerceManager'] = None):  # Add this parameter
         self.config = config
         self.db = db_manager
         self.zoho = zoho_manager
@@ -3009,6 +3204,7 @@ class SessionManager:
         self.fingerprinting = fingerprinting_manager
         self.email_verification = email_verification_manager
         self.question_limits = question_limit_manager
+        self.woocommerce = woocommerce_manager  # Add this line
         self._cleanup_interval = timedelta(hours=1)
         self._last_cleanup = datetime.now()
         
@@ -4578,6 +4774,76 @@ class SessionManager:
 
         return has_pricing or has_stock
 
+    # Add this method to SessionManager class
+    def extract_order_id_from_query(self, prompt: str) -> Optional[str]:
+        """Extract order ID from natural language query using LLM."""
+        if not self.ai.openai_client:
+            # Fallback to regex extraction
+            import re
+            # Look for patterns like: order 123, order #123, #123, order number 123
+            patterns = [
+                r'order\s*#?\s*(\d+)',
+                r'#\s*(\d+)',
+                r'order\s*number\s*(\d+)',
+                r'order\s*id\s*(\d+)'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, prompt.lower())
+                if match:
+                    return match.group(1)
+            return None
+        
+        try:
+            extraction_prompt = f"""Extract the order ID/number from this query. 
+If no order ID is mentioned, respond with "NONE".
+Only return the numeric ID, no other text.
+
+Query: "{prompt}"
+
+Order ID:"""
+
+            response = self.ai.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You extract order IDs from queries. Respond only with the numeric ID or NONE."},
+                    {"role": "user", "content": extraction_prompt}
+                ],
+                max_tokens=20,
+                temperature=0
+            )
+            
+            extracted_id = response.choices[0].message.content.strip()
+            
+            if extracted_id and extracted_id != "NONE":
+                # Clean up the ID (remove #, spaces, etc.)
+                cleaned_id = ''.join(filter(str.isdigit, extracted_id))
+                return cleaned_id if cleaned_id else None
+                
+        except Exception as e:
+            logger.error(f"LLM order ID extraction failed: {e}")
+            
+        return None
+    
+    def is_order_query(self, prompt: str) -> bool:
+        """Check if the query is about retrieving an order."""
+        order_keywords = [
+            'order', 'purchase', 'invoice', 'receipt', 
+            'transaction', 'order status', 'order details',
+            'order number', 'order id', 'check order'
+        ]
+        
+        prompt_lower = prompt.lower()
+        
+        # Check for order keywords
+        has_order_keyword = any(keyword in prompt_lower for keyword in order_keywords)
+        
+        # Check for order number patterns
+        has_order_pattern = bool(re.search(r'#?\d+', prompt))
+        
+        return has_order_keyword and has_order_pattern
+
+
     # CHANGE 11: Solution 1 - Meta-Question Detection (LLM Driven)
     def detect_meta_conversation_query_llm(self, prompt: str) -> Dict[str, Any]:
         """LLM-powered detection of meta-conversation queries."""
@@ -4964,10 +5230,52 @@ Respond ONLY with JSON:
                 st.session_state.pricing_stock_notice = {
                     'timestamp': datetime.now(),
                     'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost']) else 'stock',
-                    'message': """**Important Notice About Pricing & Stock Information:** ..."""
+                    'message': """Thank you for your interest in pricing information. For the most accurate and up-to-date pricing and quotes, please visit the product page directly on our website or contact our sales team at sales-eu@12taste.com for personalized assistance."""
                 }
                 self._update_activity(session)
                 return {'content': "", 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
+
+            # 3.5 WooCommerce Order Check (NEW)
+            if hasattr(self, 'woocommerce') and self.woocommerce.config.WOOCOMMERCE_ENABLED:
+                if self.is_order_query(prompt):
+                    order_id = self.extract_order_id_from_query(prompt)
+                    
+                    if order_id:
+                        logger.info(f"Order query detected for order ID: {order_id}")
+                        
+                        # Record the question
+                        try:
+                            self.question_limits.record_question_and_check_ban(session, self)
+                        except Exception as e:
+                            logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
+                            return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
+                        
+                        # Get order details
+                        order_data = self.woocommerce.get_order(order_id)
+                        
+                        if order_data:
+                            formatted_order = self.woocommerce.format_order_for_display(order_data)
+                            
+                            # Add to message history
+                            session.messages.append({'role': 'user', 'content': prompt})
+                            session.messages.append({
+                                'role': 'assistant', 
+                                'content': formatted_order,
+                                'source': 'WooCommerce',
+                                'order_id': order_id
+                            })
+                            
+                            self._update_activity(session)
+                            
+                            return {
+                                'content': formatted_order,
+                                'success': True,
+                                'source': 'WooCommerce',
+                                'order_id': order_id
+                            }
+                        else:
+                            # Let it fall through to regular AI processing if order not found
+                            logger.info(f"Order {order_id} not found, falling back to AI")
 
             # 4. LLM-driven Industry context check (NOW RUNS BEFORE META-DETECTION)
             context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
@@ -4990,10 +5298,10 @@ Respond ONLY with JSON:
                     return friendly_response
                 
                 # B. Block irrelevant questions, but specifically ALLOW meta_conversation queries to pass
-                elif not is_relevant and category != "meta_conversation":
+                elif not is_relevant and category != "meta_conversation" and category != "order_query":
                     confidence = context_result.get("confidence", 0.0)
                     reason = context_result.get("reason", "Not relevant")
-                    context_message = "I'm specialized in helping food & beverage industry professionals..."
+                    context_message = "I'm specialized in helping food & beverage industry professionals. Please ask me about ingredients, suppliers, or market trends."
                     st.session_state.context_flagged = {'timestamp': datetime.now(), 'category': category, 'confidence': confidence, 'reason': reason, 'message': context_message}
                     return {"content": context_message, "success": False, "source": "Industry Context Filter", "used_search": False, "used_pinecone": False, "has_citations": False, "has_inline_citations": False, "safety_override": False}
 
@@ -5016,7 +5324,8 @@ Respond ONLY with JSON:
             limit_check = self.question_limits.is_within_limits(session)
             if not limit_check['allowed']:
                 # ... (existing ban/limit logic) ...
-                return { ... }
+                message = limit_check.get('message', 'Access restricted due to usage policy.')
+                return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': limit_check.get('time_remaining')}
 
             self._clear_error_notifications()
             sanitized_prompt = sanitize_input(prompt)
@@ -5026,8 +5335,9 @@ Respond ONLY with JSON:
             try:
                 question_record_status = self.question_limits.record_question_and_check_ban(session, self)
                 if question_record_status.get("ban_applied") or question_record_status.get("existing_ban_inherited"):
-                    # ... (return ban message logic) ...
-                    return { ... }
+                    message = self.question_limits._get_ban_message(session, question_record_status.get("ban_type"))
+                    time_remaining_td = session.ban_end_time - datetime.now() if session.ban_end_time else None
+                    return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': time_remaining_td}
             except Exception as e:
                 logger.error(f"❌ Critical error recording question: {e}")
                 return {'content': 'A critical error occurred while recording your question.', 'success': False, 'source': 'Question Tracking Error'}
@@ -6201,6 +6511,11 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
         else: 
             st.caption("🚫 CRM Integration: Registered users & verified guests only")
+
+        if session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
+            st.success("🛒 WooCommerce: Connected")
+        else:
+            st.info("🛒 WooCommerce: Not configured")
         
         st.divider()
         
@@ -6845,7 +7160,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         "Content Moderation": "🛡️", "System Fallback": "⚠️",
                         "Error Handler": "❌", "Session Analytics": "📈", 
                         "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
-                        "Business Rules": "⚙️" # NEW: Add icon for Business Rules
+                        "Business Rules": "⚙️", # NEW: Add icon for Business Rules
+                        "WooCommerce": "🛒" # NEW: Add icon for WooCommerce
                     }.get(msg['source'], "🤖")
                     st.caption(f"{source_color} Source: {msg['source']}")
                 
@@ -6854,6 +7170,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
                 if msg.get("is_meta_response"): indicators.append("📈 Session Analytics")
                 if msg.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
+                if msg.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce") # NEW: Add for WooCommerce
                 if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                 
                 if msg.get("safety_override"):
@@ -6927,8 +7244,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             elif category == "greeting_or_polite": # NEW: Display LLM-detected greetings as dismissible info
                 st.info(f"👋 **Greeting Detected**")
                 st.markdown("Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?")
+            elif category == "order_query" and session.user_type == UserType.GUEST and not session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
+                st.info("🛒 **Order Inquiry** - Order lookup is available for registered users on supported e-commerce platforms. Please log in or enable WooCommerce in your configuration.")
             else:
-                st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or formulation.")
+                st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or market trends.")
             
             if category != "greeting_or_polite": # Don't show guidance for greetings, as they're allowed
                 st.info(f"💡 **Guidance**: {message}")
@@ -6976,7 +7295,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 st.warning(f"⚠️ **Final Question Today!** Your next question will be your last for {TIER_2_BAN_HOURS} hours.")
 
     prompt = st.chat_input(
-        "Ask me about ingredients, product development or market trends—in any language." if not st.session_state.get('is_processing_question', False) 
+        "Ask me about ingredients, suppliers, or market trends..." if not st.session_state.get('is_processing_question', False) 
         else "Processing your question, please wait...",  # NEW: Show processing message
         disabled=overall_chat_disabled
     )
@@ -7034,7 +7353,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                                 "Content Moderation": "🛡️", "System Fallback": "⚠️",
                                 "Error Handler": "❌", "Session Analytics": "📈",
                                 "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
-                                "Business Rules": "⚙️" # NEW: Add icon for Business Rules
+                                "Business Rules": "⚙️", # NEW: Add icon for Business Rules
+                                "WooCommerce": "🛒" # NEW: Add icon for WooCommerce
                             }.get(response['source'], "🤖")
                             st.caption(f"{source_color} Source: {response['source']}")
                         
@@ -7043,6 +7363,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
                         if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
                         if response.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
+                        if response.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce") # NEW: Add for WooCommerce
                         if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                         
                         if response.get("safety_override"): st.warning("🛡️ Safety Override: Switched to verified sources")
@@ -7153,11 +7474,22 @@ def ensure_initialization_fixed():
                 })()
             
             question_limit_manager = DatabaseManager.QuestionLimitManager()
-            
+
+            # Add WooCommerce manager initialization
+            try:
+                if config.WOOCOMMERCE_ENABLED:
+                    woocommerce_manager = WooCommerceManager(config)
+                else:
+                    woocommerce_manager = None
+            except Exception as e:
+                logger.error(f"WooCommerce manager initialization failed: {e}")
+                woocommerce_manager = None
+
+            # Update SessionManager initialization
             st.session_state.session_manager = SessionManager(
                 config, st.session_state.db_manager, zoho_manager, ai_system, 
                 rate_limiter, fingerprinting_manager, email_verification_manager, 
-                question_limit_manager
+                question_limit_manager, woocommerce_manager  # Add this
             )
             
             st.session_state.pdf_exporter = pdf_exporter
