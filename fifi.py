@@ -635,7 +635,7 @@ class DatabaseManager:
                 time.sleep(wait_time)
         
         # Final fallback to in-memory
-        logger.critical("🚨 All reconnection attempts failed, falling back to in-memory storage")
+        logger.critical("🚨 ALL RECONNECTION ATTEMPTS FAILED. FALLING BACK TO IN-MEMORY STORAGE")
         self.db_type = "memory"
         self.local_sessions = {}
 
@@ -876,7 +876,7 @@ class DatabaseManager:
                     timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
                     timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
                     current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
-                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # NEW
+                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # FIXED: Changed from loaded_tier1_completed_in_in_cycle
                     tier_cycle_started_at=loaded_tier_cycle_started_at, # NEW
                     login_method=loaded_login_method, # NEW
                     is_degraded_login=loaded_is_degraded_login, # NEW
@@ -2932,7 +2932,7 @@ class EnhancedAI:
             "does not provide specific information",
             "search results do not provide",
             "results do not provide",
-            "do not contain specific information", # ADD THIS LINE
+            "do not contain specific information",
             "does not contain specific information",
             "search results do not contain",
             "results do not contain"
@@ -4830,7 +4830,7 @@ Order ID:"""
         order_keywords = [
             'order', 'purchase', 'invoice', 'receipt', 
             'transaction', 'order status', 'order details',
-            'order number', 'order id', 'check order'
+            'order number', 'order id', 'check order', 'my order'
         ]
         
         prompt_lower = prompt.lower()
@@ -4838,10 +4838,12 @@ Order ID:"""
         # Check for order keywords
         has_order_keyword = any(keyword in prompt_lower for keyword in order_keywords)
         
-        # Check for order number patterns
-        has_order_pattern = bool(re.search(r'#?\d+', prompt))
+        # Check for order number patterns (optional, but good for context)
+        # We allow "order status" without a number to still be considered an order query
+        # But we don't *require* a number here, as the user might be asking generally
+        # has_order_pattern = bool(re.search(r'#?\d+', prompt))
         
-        return has_order_keyword and has_order_pattern
+        return has_order_keyword # and (has_order_pattern or True)
 
 
     # CHANGE 11: Solution 1 - Meta-Question Detection (LLM Driven)
@@ -4886,7 +4888,7 @@ Respond ONLY with JSON:
                 logger.warning(f"LLM meta-query detection returned invalid JSON: {response_content}. Falling back to keyword.")
                 return self.detect_meta_conversation_query_keyword_fallback(prompt)
 
-            logger.info(f"LLM Meta-query detection: {prompt} -> {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
+            logger.info(f"LLM Meta-query detection: {prompt} → {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
             return result
 
         except Exception as e:
@@ -5276,6 +5278,23 @@ Respond ONLY with JSON:
                         else:
                             # Let it fall through to regular AI processing if order not found
                             logger.info(f"Order {order_id} not found, falling back to AI")
+                    else:
+                        # Order query detected but no ID provided - prompt user for ID
+                        try:
+                            self.question_limits.record_question_and_check_ban(session, self)
+                        except Exception as e:
+                            logger.error(f"Failed to record order ID prompt for {session.session_id[:8]}: {e}")
+                            return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
+                        
+                        message = "I can help with order statuses, but I need the order ID. Could you please provide the order number?"
+                        session.messages.append({'role': 'user', 'content': prompt})
+                        session.messages.append({'role': 'assistant', 'content': message, 'source': 'WooCommerce'})
+                        self._update_activity(session)
+                        return {
+                            'content': message,
+                            'success': True,
+                            'source': 'WooCommerce'
+                        }
 
             # 4. LLM-driven Industry context check (NOW RUNS BEFORE META-DETECTION)
             context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
@@ -5298,10 +5317,17 @@ Respond ONLY with JSON:
                     return friendly_response
                 
                 # B. Block irrelevant questions, but specifically ALLOW meta_conversation queries to pass
-                elif not is_relevant and category != "meta_conversation" and category != "order_query":
+                # Also allow 'order_query' if WooCommerce is enabled, but no ID was found, or if it's disabled.
+                # If WooCommerce is disabled, order queries should be treated as off-topic for AI fallback.
+                elif not is_relevant and category != "meta_conversation" and \
+                    not (category == "order_query" and hasattr(self, 'woocommerce') and self.woocommerce.config.WOOCOMMERCE_ENABLED):
+                    
                     confidence = context_result.get("confidence", 0.0)
                     reason = context_result.get("reason", "Not relevant")
                     context_message = "I'm specialized in helping food & beverage industry professionals. Please ask me about ingredients, suppliers, or market trends."
+                    if category == "order_query" and not (hasattr(self, 'woocommerce') and self.woocommerce.config.WOOCOMMERCE_ENABLED):
+                        context_message = "I can only process general food and beverage industry questions. Order lookups are not enabled in my current configuration."
+                    
                     st.session_state.context_flagged = {'timestamp': datetime.now(), 'category': category, 'confidence': confidence, 'reason': reason, 'message': context_message}
                     return {"content": context_message, "success": False, "source": "Industry Context Filter", "used_search": False, "used_pinecone": False, "has_citations": False, "has_inline_citations": False, "safety_override": False}
 
@@ -6371,7 +6397,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     # User is at 10 questions but hasn't triggered/served the Tier 1 ban yet
                     st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0),
                                text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions")
-                    st.caption("📈 Next question will trigger a 1-hour break before Tier 2.")
+                    st.caption(f"📈 Next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.")
             else: # daily_question_count > REGISTERED_USER_TIER_1_LIMIT
                 tier2_questions_asked = session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT
                 tier2_limit = REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT
@@ -7058,7 +7084,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
     
     st.title("🤖 FiFi AI Assistant")
-    st.caption("Hello, I am FiFi, your AI-powered sourcing assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, formulate product development ideas, explore technical data, and more...")
+    st.caption("Hello, I am FiFi, your AI-powered assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, explore recipe ideas, technical data, and more.")
 
     # NEW: Show fingerprint waiting status ONLY for non-registered users
     ## CHANGE: Only show fingerprint wait for non-registered users
@@ -7147,7 +7173,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         # Display chat messages (respects soft clear offset)
         visible_messages = session.messages[session.display_message_offset:]
         for msg in visible_messages:
-            with st.chat_message(msg.get("role", "user")):
+            with st.chat_message(msg.get("role", "user"), avatar="🧑‍💻" if msg.get("role") == "user" else "🤖"): # ADDED AVATAR
                 # NEW: Check if this is a pricing/stock redirect that should be visually hidden from chat
                 if msg.get("display_only_notice", False) and msg.get("role") == "assistant":
                     pass # Do not render this specific assistant message in the chat bubble
@@ -7321,10 +7347,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             st.rerun()
             return
         
-        with st.chat_message("user"):
+        with st.chat_message("user", avatar="🧑‍💻"): # ADDED AVATAR
             st.markdown(prompt)
         
-        with st.chat_message("assistant"):
+        with st.chat_message("assistant", avatar="🤖"): # ADDED AVATAR
             with st.spinner("🔍 FiFi is processing your question and we request your patience..."):
                 try:
                     response = session_manager.get_ai_response(session, prompt)
