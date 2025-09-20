@@ -876,7 +876,7 @@ class DatabaseManager:
                     timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
                     timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
                     current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
-                    tier1_completed_in_cycle=loaded_tier1_completed_in_in_cycle, # NEW
+                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # NEW
                     tier_cycle_started_at=loaded_tier_cycle_started_at, # NEW
                     login_method=loaded_login_method, # NEW
                     is_degraded_login=loaded_is_degraded_login, # NEW
@@ -7058,7 +7058,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
     
     st.title("🤖 FiFi AI Assistant")
-    st.caption("Hello, I am FiFi, your AI-powered assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, explore recipe ideas, technical data, and more.")
+    st.caption("Hello, I am FiFi, your AI-powered sourcing assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, formulate product development ideas, explore technical data, and more...")
 
     # NEW: Show fingerprint waiting status ONLY for non-registered users
     ## CHANGE: Only show fingerprint wait for non-registered users
