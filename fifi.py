@@ -4680,8 +4680,11 @@ class SessionManager:
 
     def _check_and_upgrade_to_registered(self, session: UserSession, email: str, 
                                         is_fallback_from_wordpress: bool = False) -> UserSession:
-        """Check if email belongs to a registered user and upgrade if found.
-           Sets degraded login flag if originating from WordPress fallback."""
+        """
+        Check if email belongs to a registered user and upgrade if found.
+        NEW: Now also synchronizes the current session's fingerprint across all of the
+        registered user's historical sessions to permanently merge the identities.
+        """
         
         # Find all sessions with this email
         email_sessions = self.db.find_sessions_by_email(email)
@@ -4693,70 +4696,75 @@ class SessionManager:
         
         if registered_sessions:
             # Found registered user history - upgrade current session
-            most_recent = max(registered_sessions, 
-                             key=lambda s: s.last_activity or s.created_at)
+            most_recent_registered = max(registered_sessions, 
+                                         key=lambda s: s.last_activity or s.created_at)
             
-            logger.info(f"🎯 Found registered user history for {email} - upgrading session")
+            logger.info(f"🎯 Found registered user history for {email} - upgrading session {session.session_id[:8]}")
             
             # Upgrade to registered user
             session.user_type = UserType.REGISTERED_USER
-            session.full_name = most_recent.full_name
-            session.zoho_contact_id = most_recent.zoho_contact_id
+            session.full_name = most_recent_registered.full_name
+            session.zoho_contact_id = most_recent_registered.zoho_contact_id
             
-            # NEW: Track degraded login
+            # Track degraded login status
             if is_fallback_from_wordpress:
                 session.is_degraded_login = True
                 session.degraded_login_timestamp = datetime.now()
                 session.login_method = 'email_fallback'
-                session.wp_token = None # Ensure no WP token is carried over for degraded login
-                log_security_event("DEGRADED_LOGIN", session, {
-                    "reason": "wordpress_auth_failure_fallback",
-                    "original_method": "wordpress",
-                    "fallback_method": "email_otp"
-                })
-                logger.warning(f"⚠️ Degraded login for registered user {email} - no WordPress token")
+                session.wp_token = None
+                log_security_event("DEGRADED_LOGIN", session, {"reason": "wordpress_auth_failure_fallback"})
+                logger.warning(f"⚠️ Degraded login for registered user {email}")
             else:
-                session.login_method = 'email_verified' # This path for re-verification through fingerprint or direct guest email verification
+                session.login_method = 'email_verified'
                 session.is_degraded_login = False
             
-            # Note: wp_token is NOT set for email-only login (handled above for is_fallback_from_wordpress)
-            
-            # Inherit question counts and ban status
+            # Inherit question counts and ban status from the most recent session
             now = datetime.now()
-            if (most_recent.last_question_time and 
-                (now - most_recent.last_question_time) < DAILY_RESET_WINDOW):
-                session.daily_question_count = most_recent.daily_question_count
-                session.total_question_count = most_recent.total_question_count
-                session.last_question_time = most_recent.last_question_time
+            if (most_recent_registered.last_question_time and 
+                (now - most_recent_registered.last_question_time) < DAILY_RESET_WINDOW):
+                session.daily_question_count = most_recent_registered.daily_question_count
+                session.total_question_count = most_recent_registered.total_question_count
+                session.last_question_time = most_recent_registered.last_question_time
+                session.current_tier_cycle_id = most_recent_registered.current_tier_cycle_id
+                session.tier1_completed_in_cycle = most_recent_registered.tier1_completed_in_cycle
+                session.tier_cycle_started_at = most_recent_registered.tier_cycle_started_at
                 
-                # Inherit tier cycle info
-                session.current_tier_cycle_id = most_recent.current_tier_cycle_id
-                session.tier1_completed_in_cycle = most_recent.tier1_completed_in_cycle
-                session.tier_cycle_started_at = most_recent.tier_cycle_started_at
-                
-                # Check for active bans
-                if (most_recent.ban_status != BanStatus.NONE and
-                    most_recent.ban_end_time and
-                    most_recent.ban_end_time > now):
-                    session.ban_status = most_recent.ban_status
-                    session.ban_start_time = most_recent.ban_start_time
-                    session.ban_end_time = most_recent.ban_end_time
-                    session.ban_reason = most_recent.ban_reason
+                if (most_recent_registered.ban_status != BanStatus.NONE and
+                    most_recent_registered.ban_end_time and
+                    most_recent_registered.ban_end_time > now):
+                    session.ban_status = most_recent_registered.ban_status
+                    session.ban_start_time = most_recent_registered.ban_start_time
+                    session.ban_end_time = most_recent_registered.ban_end_time
+                    session.ban_reason = most_recent_registered.ban_reason
             
-            # Save upgraded session
+            # ==================== THE CRITICAL FIX ====================
+            # If the current session has a real fingerprint, synchronize it across
+            # all of this registered user's sessions to merge the identities.
+            current_fingerprint = session.fingerprint_id
+            if current_fingerprint and not current_fingerprint.startswith(("temp_", "fallback_", "not_collected_")):
+                logger.info(f"🔗 Merging identities: Linking fingerprint {current_fingerprint[:8]} to email {email}")
+                for reg_session in registered_sessions:
+                    if reg_session.fingerprint_id != current_fingerprint:
+                        reg_session.fingerprint_id = current_fingerprint
+                        reg_session.fingerprint_method = session.fingerprint_method # Also copy the method
+                        self.db.save_session(reg_session)
+                        logger.debug(f"  - Updated fingerprint for historical session {reg_session.session_id[:8]}")
+            # ==========================================================
+
+            # Save the fully upgraded and merged session
             self.db.save_session(session)
             
-            # Sync with other registered user sessions
+            # Sync counts and status across any other *active* sessions
             self.sync_registered_user_sessions(email, session.session_id)
-            
+                
             return session
         
-        # No registered user history - remain as email verified guest
+        # No registered user history found, proceed as email-verified guest
         session.login_method = 'email_verified'
-        session.is_degraded_login = False # Ensure this is false for guests
+        session.is_degraded_login = False
         session.degraded_login_timestamp = None
-        session.wp_token = None # Ensure no WP token if just email verified guest
-        logger.info(f"No registered user history found for {email} - keeping as email verified guest")
+        session.wp_token = None
+        logger.info(f"No registered user history found for {email} - proceeding as email verified guest")
         return session
 
     # NEW: Add Ban Synchronization Method
