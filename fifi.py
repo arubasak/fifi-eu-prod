@@ -460,6 +460,11 @@ class UserSession:
     is_degraded_login: bool = False  # True when registered user logged in via email instead of WordPress
     degraded_login_timestamp: Optional[datetime] = None
 
+# =============================================================================
+# DATABASE MANAGER (CORRECTED)
+# =============================================================================
+# The entire DatabaseManager class from the "working" code is inserted here.
+# This corrects the schema, save/load logic, and typo issues.
 
 class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
@@ -662,7 +667,7 @@ class DatabaseManager:
                 time.sleep(wait_time)
         
         # Final fallback to in-memory
-        logger.critical("🚨 ALL RECONNECTION ATTEMPTS FAILED. FALLING BACK TO IN-MEMORY STORAGE")
+        logger.critical("🚨 All reconnection attempts failed, falling back to in-memory storage")
         self.db_type = "memory"
         self.local_sessions = {}
 
@@ -903,7 +908,7 @@ class DatabaseManager:
                     timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
                     timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
                     current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
-                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # FIXED TYPO
+                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # NEW
                     tier_cycle_started_at=loaded_tier_cycle_started_at, # NEW
                     login_method=loaded_login_method, # NEW
                     is_degraded_login=loaded_is_degraded_login, # NEW
@@ -2045,7 +2050,6 @@ class ZohoCRMManager:
                 note_content += f"   _Source: {msg['source']}_\n"
                 
         return note_content
-
 
 class WooCommerceManager:
     """Manages WooCommerce integration for order retrieval."""
@@ -4637,10 +4641,10 @@ class SessionManager:
         
         # Store error info for display
         st.session_state.wordpress_error = {
-            'type': error_type,
+            'type': error__type,
             'message': error_message,
             'username': username,
-             'show_fallback': True
+            'show_fallback': True
         }
         
         return None  # Return None to trigger the fallback UI
@@ -4782,7 +4786,7 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to sync ban for registered user {email}: {e}")
             # Clean up lock on error
-            if lock_key in self._ban_sync_locks:
+            if 'lock_key' in locals() and lock_key in self._ban_sync_locks:
                 del self._ban_sync_locks[lock_key]
 
     # NEW: Add Ban Synchronization Method
@@ -6166,7 +6170,7 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
             logger.info(f"Chat input unlocked for session {session.session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
-            logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
+            logger.warning(f"⚠️ Fingerprint application failed for session '{session.session_id[:8]}'")
             # If it failed, ensure we still enable chat, but with 'failed' status
             st.session_state.is_chat_ready = True
             st.session_state.fingerprint_status = 'failed'
