@@ -14,8 +14,8 @@ import copy
 import sqlite3
 import hashlib
 import secrets
-import base64  # <-- ADDED FOR AVATARS
-from pathlib import Path  # <-- ADDED FOR AVATARS
+import base64
+from pathlib import Path
 from enum import Enum
 from urllib.parse import urlparse
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -35,7 +35,7 @@ from streamlit_javascript import st_javascript
 # NEW: Import StreamlitSecretNotFoundError for robust secret handling
 from streamlit.errors import StreamlitSecretNotFoundError
 
-## CHANGE: Import production_config
+# CHANGE: Import production_config
 from production_config import (
     DAILY_RESET_WINDOW_HOURS, SESSION_TIMEOUT_MINUTES, FINGERPRINT_TIMEOUT_SECONDS,
     TIER_1_BAN_HOURS, TIER_2_BAN_HOURS, EMAIL_VERIFIED_BAN_HOURS,
@@ -44,13 +44,16 @@ from production_config import (
     MAX_MESSAGE_LENGTH, MAX_PDF_MESSAGES, MAX_FINGERPRINT_CACHE_SIZE, MAX_RATE_LIMIT_TRACKING, MAX_ERROR_HISTORY,
     CRM_SAVE_MIN_QUESTIONS, EVASION_BAN_HOURS,
     FASTAPI_EMERGENCY_SAVE_URL, FASTAPI_EMERGENCY_SAVE_TIMEOUT,
-    DAILY_RESET_WINDOW, SESSION_TIMEOUT_DELTA,
-    FINGERPRINT_TIMEOUT_SECONDS
+    DAILY_RESET_WINDOW, SESSION_TIMEOUT_DELTA
 )
 
 # =============================================================================
-# AVATAR LOADING (NEW)
+# AVATAR LOADING (FIXED)
 # =============================================================================
+
+# FIX: Use absolute path to prevent FileNotFoundError in different environments
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 
 # Helper function to load and Base64-encode images for stateless deployment
 @st.cache_data
@@ -68,10 +71,9 @@ def get_image_as_base64(file_path):
         logger.error(f"Error loading image {file_path}: {e}")
         return None
 
-# Load images once using the helper function
-# ASSUMPTION: You have an 'assets' folder with these images next to fifi.py
-FIFI_AVATAR_B64 = get_image_as_base64("assets/fifi-avatar.png")
-USER_AVATAR_B64 = get_image_as_base64("assets/user-avatar.png")
+# Load images once using the helper function with the absolute path
+FIFI_AVATAR_B64 = get_image_as_base64(os.path.join(ASSETS_DIR, "fifi-avatar.png"))
+USER_AVATAR_B64 = get_image_as_base64(os.path.join(ASSETS_DIR, "user-avatar.png"))
 
 
 # =============================================================================
@@ -3043,12 +3045,11 @@ class EnhancedAI:
         logger.warning("✅ ALL CHECKS PASSED - Should NOT fallback.")
         return False
     
-    # CHANGE 6: Business-First Routing (Always Try Pinecone First)
-    @handle_api_errors("AI System", "Get Response", show_to_user=True)
-    def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
+    # THREADING CHANGE: Renamed to indicate it's a blocking call.
+    def get_response_blocking(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """
         AI response flow that prioritizes Pinecone and adheres to strict business rules for fallback.
-        Now includes direct Tavily routing for recency questions.
+        This is the original, synchronous version of the method.
         """
         # Convert chat history to LangChain format
         def _convert_to_langchain_format(history: List[Dict]) -> List[BaseMessage]:
@@ -3145,6 +3146,7 @@ class EnhancedAI:
             "has_inline_citations": False,
             "safety_override": False
         }
+
 
 @handle_api_errors("Content Moderation", "Check Prompt", show_to_user=False)
 def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
@@ -5245,9 +5247,53 @@ Respond ONLY with JSON:
             "source": "Topic Analysis"
         }
     
-    # CHANGE 3: Reordered pipeline to correctly handle greetings, meta-queries, and off-topic questions
-    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-        """Gets AI response and manages session state with a corrected processing pipeline."""
+    # THREADING CHANGE: This method runs in a background thread.
+    def _get_ai_response_threaded(self, session: UserSession, prompt: str):
+        """
+        This function is executed in a separate thread to avoid blocking the main UI.
+        It calls the blocking AI response method and stores the result in st.session_state.
+        """
+        try:
+            logger.info(f"Thread started for session {session.session_id[:8]}")
+            # Call the original, blocking version of the AI response logic
+            response = self.get_ai_response_blocking(session, prompt)
+            st.session_state['ai_response'] = response
+        except Exception as e:
+            logger.error(f"Error in AI response thread: {e}", exc_info=True)
+            # Store an error response in session_state so the UI can handle it
+            st.session_state['ai_response'] = {
+                'content': 'I encountered a critical error while processing your request. Please try again.',
+                'success': False,
+                'source': 'Error Handler'
+            }
+        finally:
+            logger.info(f"Thread finished for session {session.session_id[:8]}")
+
+
+    # THREADING CHANGE: This method replaces the original get_ai_response and now starts a thread.
+    def get_ai_response_non_blocking(self, session: UserSession, prompt: str):
+        """
+        Starts the AI response generation in a background thread.
+        This method returns immediately, allowing the UI to remain responsive.
+        """
+        # Clear any previous response
+        if 'ai_response' in st.session_state:
+            del st.session_state['ai_response']
+
+        # Create and start the thread
+        ai_thread = threading.Thread(
+            target=self._get_ai_response_threaded,
+            args=(session, prompt)
+        )
+        ai_thread.start()
+        logger.info(f"AI response thread initiated for session {session.session_id[:8]}")
+
+    # THREADING CHANGE: Renaming the original get_ai_response method
+    def get_ai_response_blocking(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+        """
+        Gets AI response and manages session state with a corrected processing pipeline.
+        This is the original blocking version, now called by the background thread.
+        """
         try:
             logger.info(f"Processing prompt: '{prompt[:100]}' | Session: {session.session_id[:8]} | Type: {session.user_type.value}")
             # Determine rate limiter ID
@@ -5461,7 +5507,7 @@ Respond ONLY with JSON:
                 logger.error(f"❌ Critical error recording question: {e}")
                 return {'content': 'A critical error occurred while recording your question.', 'success': False, 'source': 'Question Tracking Error'}
             
-            ai_response = self.ai.get_response(sanitized_prompt, session.messages)
+            ai_response = self.ai.get_response_blocking(sanitized_prompt, session.messages)
             
             user_message = {'role': 'user', 'content': sanitized_prompt}
             assistant_message = {'role': 'assistant', 'content': ai_response.get('content', 'No response.'), 'source': ai_response.get('source'), **ai_response}
@@ -7423,87 +7469,33 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         disabled=overall_chat_disabled
     )
     
+    # THREADING CHANGE: Logic to start the thread and handle the response
     if prompt:
-        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
-        
-        # NEW: Set processing flag
+        logger.info(f"🎯 User submitted prompt for session {session.session_id[:8]}")
         st.session_state.is_processing_question = True
-        
-        # Check if attempting to exceed limits _before_ sending to AI
-        # This call will now also handle displaying appropriate messages/bans.
-        if session_manager.check_if_attempting_to_exceed_limits(session):
-            st.session_state.is_processing_question = False  # Clear flag
-            # If `check_if_attempting_to_exceed_limits` returns True, it means a limit was hit
-            # and a message/ban has been displayed.
-            # For guest limit, we specifically set the verification stage.
-            if session.user_type.value == UserType.GUEST.value and \
-               session.daily_question_count >= GUEST_QUESTION_LIMIT: ## CHANGE: Use constant
-                st.session_state.verification_stage = 'email_entry'
-                st.session_state.chat_blocked_by_dialog = True
-                st.session_state.final_answer_acknowledged = True # Acknowledge the 'final answer' to trigger dialog
-            st.rerun()
-            return
-        
-        with st.chat_message("user", avatar=USER_AVATAR_B64): # AVATAR IMPLEMENTED
-            st.markdown(prompt)
-        
-        with st.chat_message("assistant", avatar=FIFI_AVATAR_B64): # AVATAR IMPLEMENTED
-            with st.spinner("🔍 FiFi is processing your question and we request your patience..."):
-                try:
-                    response = session_manager.get_ai_response(session, prompt)
-                    st.session_state.just_answered = True # Set flag for gentle prompts
-                    
-                    if response.get('requires_email'):
-                        st.error("📧 Please verify your email to continue.")
-                        st.session_state.verification_stage = 'email_entry' 
-                        st.session_state.chat_blocked_by_dialog = True
-                    elif response.get('banned'):
-                        st.error(response.get("content", 'Access restricted.'))
-                        if response.get('time_remaining'):
-                            time_remaining = response['time_remaining']
-                            hours = int(time_remaining.total_seconds() // 3600)
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                            st.error(f"Time remaining: {hours}h {minutes}m")
-                    elif response.get('display_only_notice', False): # NEW: Check this flag
-                        # Do nothing here, as the notice is displayed separately and the chat content is empty.
-                        pass
-                    else:
-                        # Show the AI response and metadata
-                        st.markdown(response.get("content", "No response generated."))
-                        if response.get("source"):
-                            source_color = {
-                                "FiFi": "🧠", "FiFi Web Search": "🌐",
-                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                                "Error Handler": "❌", "Session Analytics": "📈",
-                                "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
-                                "Business Rules": "⚙️", # NEW: Add icon for Business Rules
-                                "WooCommerce": "🛒" # NEW: Add icon for WooCommerce
-                            }.get(response['source'], "🤖")
-                            st.caption(f"{source_color} Source: {response['source']}")
-                        
-                        indicators = []
-                        if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
-                        if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
-                        if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
-                        if response.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
-                        if response.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce") # NEW: Add for WooCommerce
-                        if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-                        
-                        if response.get("safety_override"): st.warning("🛡️ Safety Override: Switched to verified sources")
-                        if response.get("has_citations") and response.get("has_inline_citations"): st.caption("📚 Response includes verified citations")
-                        
-                        logger.info(f"✅ Question processed successfully")
-
-                except Exception as e:
-                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
-                    st.error("⚠️ I encountered an error. Please try again.")
-                finally:
-                    # NEW: Always clear processing flag
-                    st.session_state.is_processing_question = False
-        
-        # Clear processing flag before rerun
-        st.session_state.is_processing_question = False
+        session_manager.get_ai_response_non_blocking(session, prompt)
         st.rerun()
+
+    if st.session_state.get('is_processing_question'):
+        if 'ai_response' in st.session_state:
+            response = st.session_state.pop('ai_response')
+            st.session_state.is_processing_question = False
+            st.session_state.just_answered = True
+            
+            # Update the session with the new messages
+            # The response is now available, so we can save it
+            sanitized_prompt = session.messages[-1]['content'] # Get the last user message
+            user_message = {'role': 'user', 'content': sanitized_prompt}
+            assistant_message = {'role': 'assistant', 'content': response.get('content', 'No response.'), 'source': response.get('source'), **response}
+            session.messages.extend([user_message, assistant_message])
+            session_manager._update_activity(session)
+            
+            st.rerun()
+        else:
+            # Still processing, show a spinner in the chat area
+            with st.chat_message("assistant", avatar=FIFI_AVATAR_B64):
+                st.spinner("🔍 FiFi is processing your question and we request your patience...")
+
 
 ## CHANGE: Persistent state manager
 class PersistentState:
@@ -7572,7 +7564,7 @@ def ensure_initialization_fixed():
                 ai_system = type('FallbackAI', (), {
                     "openai_client": None,
                     '_needs_current_information': lambda self, prompt: False, # NEW: Add dummy for direct routing
-                    'get_response': lambda self, prompt, history=None: {
+                    'get_response_blocking': lambda self, prompt, history=None: {
                         "content": "AI system temporarily unavailable.",
                         "success": False
                     }
