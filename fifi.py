@@ -14,8 +14,8 @@ import copy
 import sqlite3
 import hashlib
 import secrets
-import base64
-from pathlib import Path
+import base64  # <-- ADDED FOR AVATARS
+from pathlib import Path  # <-- ADDED FOR AVATARS
 from enum import Enum
 from urllib.parse import urlparse
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -35,7 +35,7 @@ from streamlit_javascript import st_javascript
 # NEW: Import StreamlitSecretNotFoundError for robust secret handling
 from streamlit.errors import StreamlitSecretNotFoundError
 
-# CHANGE: Import production_config
+## CHANGE: Import production_config
 from production_config import (
     DAILY_RESET_WINDOW_HOURS, SESSION_TIMEOUT_MINUTES, FINGERPRINT_TIMEOUT_SECONDS,
     TIER_1_BAN_HOURS, TIER_2_BAN_HOURS, EMAIL_VERIFIED_BAN_HOURS,
@@ -44,16 +44,13 @@ from production_config import (
     MAX_MESSAGE_LENGTH, MAX_PDF_MESSAGES, MAX_FINGERPRINT_CACHE_SIZE, MAX_RATE_LIMIT_TRACKING, MAX_ERROR_HISTORY,
     CRM_SAVE_MIN_QUESTIONS, EVASION_BAN_HOURS,
     FASTAPI_EMERGENCY_SAVE_URL, FASTAPI_EMERGENCY_SAVE_TIMEOUT,
-    DAILY_RESET_WINDOW, SESSION_TIMEOUT_DELTA
+    DAILY_RESET_WINDOW, SESSION_TIMEOUT_DELTA,
+    FINGERPRINT_TIMEOUT_SECONDS
 )
 
 # =============================================================================
-# AVATAR LOADING (FIXED)
+# AVATAR LOADING (NEW)
 # =============================================================================
-
-# FIX: Use absolute path to prevent FileNotFoundError in different environments
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 
 # Helper function to load and Base64-encode images for stateless deployment
 @st.cache_data
@@ -71,9 +68,10 @@ def get_image_as_base64(file_path):
         logger.error(f"Error loading image {file_path}: {e}")
         return None
 
-# Load images once using the helper function with the absolute path
-FIFI_AVATAR_B64 = get_image_as_base64(os.path.join(ASSETS_DIR, "fifi-avatar.png"))
-USER_AVATAR_B64 = get_image_as_base64(os.path.join(ASSETS_DIR, "user-avatar.png"))
+# Load images once using the helper function
+# ASSUMPTION: You have an 'assets' folder with these images next to fifi.py
+FIFI_AVATAR_B64 = get_image_as_base64("assets/fifi-avatar.png")
+USER_AVATAR_B64 = get_image_as_base64("assets/user-avatar.png")
 
 
 # =============================================================================
@@ -460,11 +458,6 @@ class UserSession:
     is_degraded_login: bool = False  # True when registered user logged in via email instead of WordPress
     degraded_login_timestamp: Optional[datetime] = None
 
-# =============================================================================
-# DATABASE MANAGER (CORRECTED)
-# =============================================================================
-# The entire DatabaseManager class from the "working" code is inserted here.
-# This corrects the schema, save/load logic, and typo issues.
 
 class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
@@ -667,7 +660,7 @@ class DatabaseManager:
                 time.sleep(wait_time)
         
         # Final fallback to in-memory
-        logger.critical("🚨 All reconnection attempts failed, falling back to in-memory storage")
+        logger.critical("🚨 ALL RECONNECTION ATTEMPTS FAILED. FALLING BACK TO IN-MEMORY STORAGE")
         self.db_type = "memory"
         self.local_sessions = {}
 
@@ -908,7 +901,7 @@ class DatabaseManager:
                     timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
                     timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
                     current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
-                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # NEW
+                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # FIXED TYPO
                     tier_cycle_started_at=loaded_tier_cycle_started_at, # NEW
                     login_method=loaded_login_method, # NEW
                     is_degraded_login=loaded_is_degraded_login, # NEW
@@ -2009,7 +2002,7 @@ class ZohoCRMManager:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
                 if attempt_note < max_retries_note - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
                     return False
@@ -2050,6 +2043,7 @@ class ZohoCRMManager:
                 note_content += f"   _Source: {msg['source']}_\n"
                 
         return note_content
+
 
 class WooCommerceManager:
     """Manages WooCommerce integration for order retrieval."""
@@ -2405,7 +2399,7 @@ class PineconeAssistantTool:
                 "1. Does the question ask for price or stock? -> Use the sales redirection message.\n"
                 "2. Is the information in my documents? -> Answer with citations AND product URLs.\n"
                 "3. Is the information NOT in my documents? -> Use the 'I don't have specific information...' message.\n"
-                "4. Is the product discontinued? -> Inform the user and provide similar alternatives if available.\n"
+                "4. Is the product discontinued? -> Inform and provide similar alternatives if available.\n"
                 "5. Did I mention any products? -> Ensure each has a [More details] link and all are in Sources section."
             )
             
@@ -3049,11 +3043,12 @@ class EnhancedAI:
         logger.warning("✅ ALL CHECKS PASSED - Should NOT fallback.")
         return False
     
-    # THREADING CHANGE: Renamed to indicate it's a blocking call.
-    def get_response_blocking(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
+    # CHANGE 6: Business-First Routing (Always Try Pinecone First)
+    @handle_api_errors("AI System", "Get Response", show_to_user=True)
+    def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
         """
         AI response flow that prioritizes Pinecone and adheres to strict business rules for fallback.
-        This is the original, synchronous version of the method.
+        Now includes direct Tavily routing for recency questions.
         """
         # Convert chat history to LangChain format
         def _convert_to_langchain_format(history: List[Dict]) -> List[BaseMessage]:
@@ -3150,7 +3145,6 @@ class EnhancedAI:
             "has_inline_citations": False,
             "safety_override": False
         }
-
 
 @handle_api_errors("Content Moderation", "Check Prompt", show_to_user=False)
 def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Optional[Dict[str, Any]]:
@@ -4641,10 +4635,10 @@ class SessionManager:
         
         # Store error info for display
         st.session_state.wordpress_error = {
-            'type': error__type,
+            'type': error_type,
             'message': error_message,
             'username': username,
-            'show_fallback': True
+             'show_fallback': True
         }
         
         return None  # Return None to trigger the fallback UI
@@ -4786,7 +4780,7 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to sync ban for registered user {email}: {e}")
             # Clean up lock on error
-            if 'lock_key' in locals() and lock_key in self._ban_sync_locks:
+            if lock_key in self._ban_sync_locks:
                 del self._ban_sync_locks[lock_key]
 
     # NEW: Add Ban Synchronization Method
@@ -5251,89 +5245,11 @@ Respond ONLY with JSON:
             "source": "Topic Analysis"
         }
     
-    # THREADING CHANGE: This method runs in a background thread.
-    def _get_ai_response_threaded(self, session_id: str, prompt: str):
-        """
-        This function is executed in a separate thread to avoid blocking the main UI.
-        It calls the blocking AI response method and stores the result in st.session_state.
-        """
+    # CHANGE 3: Reordered pipeline to correctly handle greetings, meta-queries, and off-topic questions
+    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+        """Gets AI response and manages session state with a corrected processing pipeline."""
         try:
-            logger.info(f"Thread started for session {session_id[:8]}")
-            
-            # Load fresh session from DB inside the thread
-            session = self.db.load_session(session_id)
-            if not session:
-                logger.error(f"Session {session_id[:8]} not found in thread. Aborting AI processing.")
-                st.session_state['ai_response_complete'] = True # Signal completion even on error
-                st.session_state['ai_response'] = {
-                    'content': 'I encountered a critical error processing your request. Session not found.',
-                    'success': False,
-                    'source': 'Error Handler'
-                }
-                return
-
-            # Call the original, blocking version of the AI response logic
-            response = self.get_ai_response_blocking(session, prompt)
-            
-            # Save the updated session AFTER AI processing is complete
-            # This save will include all messages and state changes made within get_ai_response_blocking
-            self._save_session_with_retry(session)
-
-            st.session_state['ai_response_complete'] = True # Signal to main thread that AI is done
-            
-        except Exception as e:
-            logger.error(f"Error in AI response thread: {e}", exc_info=True)
-            # Store an error response in session_state so the UI can handle it
-            st.session_state['ai_response_complete'] = True # Signal completion even on error
-            # Attempt to update the session with an error message
-            session = self.db.load_session(session_id) # Reload to ensure we have the latest messages
-            if session:
-                error_message = {'role': 'assistant', 'content': 'I encountered a critical error while processing your request. Please try again.', 'source': 'Error Handler', 'success': False}
-                session.messages.append(error_message)
-                self._save_session_with_retry(session)
-            st.session_state['ai_response_error'] = True # Specific error flag
-        finally:
-            logger.info(f"Thread finished for session {session_id[:8]}")
-
-
-    # THREADING CHANGE: This method replaces the original get_ai_response and now starts a thread.
-    def get_ai_response_non_blocking(self, session: UserSession, prompt: str):
-        """
-        Starts the AI response generation in a background thread.
-        This method returns immediately, allowing the UI to remain responsive.
-        """
-        # Clear any previous response flags
-        if 'ai_response_complete' in st.session_state:
-            del st.session_state['ai_response_complete']
-        if 'ai_response_error' in st.session_state:
-            del st.session_state['ai_response_error']
-
-        # Immediately append user message to session.messages and save
-        sanitized_prompt = sanitize_input(prompt)
-        user_message = {'role': 'user', 'content': sanitized_prompt}
-        session.messages.append(user_message)
-        self._update_activity(session) # This also saves the session to DB
-
-        # Set processing flag
-        st.session_state.is_processing_question = True
-
-        # Create and start the thread
-        ai_thread = threading.Thread(
-            target=self._get_ai_response_threaded,
-            args=(session.session_id, prompt) # Pass session_id and prompt, the thread will load the session
-        )
-        ai_thread.start()
-        logger.info(f"AI response thread initiated for session {session.session_id[:8]}")
-
-    # THREADING CHANGE: Renaming the original get_ai_response method
-    def get_ai_response_blocking(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-        """
-        Gets AI response and manages session state with a corrected processing pipeline.
-        This is the original blocking version, now called by the background thread.
-        Crucially, this now updates the `session` object passed to it, which is loaded fresh in the thread.
-        """
-        try:
-            logger.info(f"Processing prompt in thread: '{prompt[:100]}' | Session: {session.session_id[:8]} | Type: {session.user_type.value}")
+            logger.info(f"Processing prompt: '{prompt[:100]}' | Session: {session.session_id[:8]} | Type: {session.user_type.value}")
             # Determine rate limiter ID
             rate_limiter_id = session.fingerprint_id
             if (session.user_type in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]) and session.email:
@@ -5350,35 +5266,36 @@ Respond ONLY with JSON:
                 max_requests = RATE_LIMIT_REQUESTS
                 window_seconds = RATE_LIMIT_WINDOW_SECONDS
                 
-                # Append assistant message to session.messages in thread
-                assistant_message = {
-                    'role': 'assistant',
-                    'content': f"Rate limit exceeded. Please wait {time_until_next} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)",
-                    'source': 'Rate Limiter',
+                st.session_state.rate_limit_hit = {
+                    'timestamp': datetime.now(),
+                    'time_until_next': time_until_next,
+                    'message': f"Rate limit exceeded. Please wait {time_until_next} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)"
+                }
+                
+                return {
+                    'content': st.session_state.rate_limit_hit['message'],
                     'success': False,
+                    'source': 'Rate Limiter',
                     'time_until_next': time_until_next
                 }
-                session.messages.append(assistant_message)
-                return assistant_message
             
             # 2. Content moderation check
             moderation_result = check_content_moderation(prompt, self.ai.openai_client)
             if moderation_result and moderation_result.get("flagged"):
                 categories = moderation_result.get('categories', [])
-                categories_text = ', '.join(categories) if categories else 'policy violation'
-                message = moderation_result.get("message", "Your message violates our content policy. Please rephrase your question.")
+                logger.warning(f"Input flagged by moderation for: {', '.join(categories)}")
                 
-                # Append assistant message to session.messages in thread
-                assistant_message = {
-                    "role": "assistant",
-                    "content": message,
-                    "source": "Content Moderation", "success": False, "used_search": False, "used_pinecone": False,
-                    "has_citations": False, "has_inline_citations": False, "safety_override": False,
-                    "categories": categories,
-                    "moderation_flagged": True
+                st.session_state.moderation_flagged = {
+                    'timestamp': datetime.now(),
+                    'categories': categories,
+                    'message': moderation_result.get("message", "Your message violates our content policy. Please rephrase your question.")
                 }
-                session.messages.append(assistant_message)
-                return assistant_message
+                
+                return {
+                    "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
+                    "success": False, "source": "Content Moderation", "used_search": False, "used_pinecone": False,
+                    "has_citations": False, "has_inline_citations": False, "safety_override": False
+                }
 
             # 3. Pricing/Stock check
             logger.debug(f"Checking pricing/stock query for: '{prompt}'")
@@ -5387,22 +5304,16 @@ Respond ONLY with JSON:
                     self.question_limits.record_question_and_check_ban(session, self)
                 except Exception as e:
                     logger.error(f"Failed to record pricing/stock query for {session.session_id[:8]}: {e}")
-                    assistant_message = {'role': 'assistant', 'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
-                    session.messages.append(assistant_message)
-                    return assistant_message
+                    return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
 
-                # Append assistant message (the pricing/stock notice) to session.messages in thread
-                notice_message_content = """Thank you for your interest in pricing information. For the most accurate and up-to-date pricing and quotes, please visit the product page directly on our website or contact our sales team at sales-eu@12taste.com for personalized assistance."""
-                assistant_message = {
-                    'role': 'assistant',
-                    'content': notice_message_content,
-                    'source': 'Business Rules',
-                    'is_pricing_stock_redirect': True,
-                    'display_only_notice': True, # This flag will prevent it from being rendered as a chat bubble
-                    'success': True
+                session.messages.append({'role': 'user', 'content': prompt})
+                st.session_state.pricing_stock_notice = {
+                    'timestamp': datetime.now(),
+                    'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost']) else 'stock',
+                    'message': """Thank you for your interest in pricing information. For the most accurate and up-to-date pricing and quotes, please visit the product page directly on our website or contact our sales team at sales-eu@12taste.com for personalized assistance."""
                 }
-                session.messages.append(assistant_message)
-                return assistant_message
+                self._update_activity(session)
+                return {'content': "", 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
 
             # 3.5 WooCommerce Order Check (ENHANCED)
             logger.debug(f"Checking WooCommerce order query for: '{prompt}'")
@@ -5437,9 +5348,7 @@ Respond ONLY with JSON:
                             self.question_limits.record_question_and_check_ban(session, self)
                         except Exception as e:
                             logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
-                            assistant_message = {'role': 'assistant', 'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
-                            session.messages.append(assistant_message)
-                            return assistant_message
+                            return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
                         
                         # Get order details
                         order_data = self.woocommerce.get_order(order_id)
@@ -5447,16 +5356,23 @@ Respond ONLY with JSON:
                         if order_data:
                             formatted_order = self.woocommerce.format_order_for_display(order_data)
                             
-                            # Append assistant message to session.messages in thread
-                            assistant_message = {
+                            # Add to message history
+                            session.messages.append({'role': 'user', 'content': prompt})
+                            session.messages.append({
                                 'role': 'assistant', 
                                 'content': formatted_order,
                                 'source': 'WooCommerce',
-                                'order_id': order_id,
-                                'success': True
+                                'order_id': order_id
+                            })
+                            
+                            self._update_activity(session)
+                            
+                            return {
+                                'content': formatted_order,
+                                'success': True,
+                                'source': 'WooCommerce',
+                                'order_id': order_id
                             }
-                            session.messages.append(assistant_message)
-                            return assistant_message
                         else:
                             # Let it fall through to regular AI processing if order not found
                             logger.info(f"Order {order_id} not found, falling back to AI")
@@ -5466,14 +5382,17 @@ Respond ONLY with JSON:
                             self.question_limits.record_question_and_check_ban(session, self)
                         except Exception as e:
                             logger.error(f"Failed to record order ID prompt for {session.session_id[:8]}: {e}")
-                            assistant_message = {'role': 'assistant', 'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
-                            session.messages.append(assistant_message)
-                            return assistant_message
+                            return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
                         
                         message = "I can help with order statuses, but I need the order ID. Could you please provide the order number?"
-                        assistant_message = {'role': 'assistant', 'content': message, 'source': 'WooCommerce', 'success': True}
-                        session.messages.append(assistant_message)
-                        return assistant_message
+                        session.messages.append({'role': 'user', 'content': prompt})
+                        session.messages.append({'role': 'assistant', 'content': message, 'source': 'WooCommerce'})
+                        self._update_activity(session)
+                        return {
+                            'content': message,
+                            'success': True,
+                            'source': 'WooCommerce'
+                        }
 
             # 4. LLM-driven Industry context check (NOW RUNS BEFORE META-DETECTION)
             logger.debug(f"Checking industry context for: '{prompt}'")
@@ -5488,30 +5407,21 @@ Respond ONLY with JSON:
                         self.question_limits.record_question_and_check_ban(session, self)
                     except Exception as e:
                         logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
-                        assistant_message = {'role': 'assistant', 'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
-                        session.messages.append(assistant_message)
-                        return assistant_message
+                        return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
 
-                    friendly_response_content = "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?"
-                    assistant_message = {"role": "assistant", "content": friendly_response_content, "success": True, "source": "FiFi", "is_meta_response": True}
-                    session.messages.append(assistant_message)
-                    return assistant_message
+                    session.messages.append({'role': 'user', 'content': prompt})
+                    friendly_response = {"content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?", "success": True, "source": "FiFi", "is_meta_response": True}
+                    session.messages.append({'role': 'assistant', 'content': friendly_response['content'], 'source': 'Greeting', 'is_meta_response': True})
+                    self._update_activity(session)
+                    return friendly_response
                 
                 # B. Block irrelevant questions, but specifically ALLOW meta_conversation and order_queries to pass
                 elif not is_relevant and category not in ["meta_conversation", "order_query"]:
                     confidence = context_result.get("confidence", 0.0)
                     reason = context_result.get("reason", "Not relevant")
                     context_message = "I'm specialized in helping food & beverage industry professionals. Please ask me about ingredients, suppliers, or market trends."
-                    
-                    # Append assistant message to session.messages in thread
-                    assistant_message = {
-                        "role": "assistant", "content": context_message, "success": False, 
-                        "source": "Industry Context Filter", "used_search": False, "used_pinecone": False,
-                        "has_citations": False, "has_inline_citations": False, "safety_override": False,
-                        "context_flagged": True, "category": category, "confidence": confidence, "reason": reason
-                    }
-                    session.messages.append(assistant_message)
-                    return assistant_message
+                    st.session_state.context_flagged = {'timestamp': datetime.now(), 'category': category, 'confidence': confidence, 'reason': reason, 'message': context_message}
+                    return {"content": context_message, "success": False, "source": "Industry Context Filter", "used_search": False, "used_pinecone": False, "has_citations": False, "has_inline_citations": False, "safety_override": False}
 
             # 5. LLM-driven Meta-conversation query detection (NOW RUNS AFTER CONTEXT CHECK)
             logger.debug(f"Checking meta-conversation for: '{prompt}'")
@@ -5521,58 +5431,48 @@ Respond ONLY with JSON:
                 try:
                     self.question_limits.record_question_and_check_ban(session, self)
                 except Exception as e:
-                    assistant_message = {'role': 'assistant', 'content': 'An error occurred while tracking your question.', 'success': False, 'source': 'Question Tracker'}
-                    session.messages.append(assistant_message)
-                    return assistant_message
+                    return {'content': 'An error occurred while tracking your question.', 'success': False, 'source': 'Question Tracker'}
                 
+                session.messages.append({'role': 'user', 'content': prompt})
                 meta_response = self.handle_meta_conversation_query(session, meta_detection["type"], meta_detection.get("scope", ""))
-                # Append assistant message to session.messages in thread
-                assistant_message = {'role': 'assistant', 'content': meta_response.get('content'), 'source': meta_response.get('source'), 'is_meta_response': True, 'success': meta_response.get('success', False)}
-                session.messages.append(assistant_message)
-                return assistant_message
+                session.messages.append({'role': 'assistant', 'content': meta_response.get('content'), 'source': meta_response.get('source'), 'is_meta_response': True})
+                self._update_activity(session)
+                return meta_response
 
             # --- If we've reached here, it's a valid, on-topic industry question ---
             limit_check = self.question_limits.is_within_limits(session)
             if not limit_check['allowed']:
                 # ... (existing ban/limit logic) ...
                 message = limit_check.get('message', 'Access restricted due to usage policy.')
-                assistant_message = {'role': 'assistant', 'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': limit_check.get('time_remaining')}
-                session.messages.append(assistant_message)
-                return assistant_message
+                return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': limit_check.get('time_remaining')}
 
             self._clear_error_notifications()
             sanitized_prompt = sanitize_input(prompt)
             if not sanitized_prompt:
-                assistant_message = {'role': 'assistant', 'content': 'Please enter a valid question.', 'success': False, 'source': 'Input Validation'}
-                session.messages.append(assistant_message)
-                return assistant_message
+                return {'content': 'Please enter a valid question.', 'success': False, 'source': 'Input Validation'}
             
             try:
                 question_record_status = self.question_limits.record_question_and_check_ban(session, self)
                 if question_record_status.get("ban_applied") or question_record_status.get("existing_ban_inherited"):
                     message = self.question_limits._get_ban_message(session, question_record_status.get("ban_type"))
                     time_remaining_td = session.ban_end_time - datetime.now() if session.ban_end_time else None
-                    assistant_message = {'role': 'assistant', 'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': time_remaining_td}
-                    session.messages.append(assistant_message)
-                    return assistant_message
+                    return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': time_remaining_td}
             except Exception as e:
                 logger.error(f"❌ Critical error recording question: {e}")
-                assistant_message = {'role': 'assistant', 'content': 'A critical error occurred while recording your question.', 'success': False, 'source': 'Question Tracking Error'}
-                session.messages.append(assistant_message)
-                return assistant_message
+                return {'content': 'A critical error occurred while recording your question.', 'success': False, 'source': 'Question Tracking Error'}
             
-            ai_response = self.ai.get_response_blocking(sanitized_prompt, session.messages) # Pass the updated session.messages for context
+            ai_response = self.ai.get_response(sanitized_prompt, session.messages)
             
-            # Append assistant message to session.messages in thread
+            user_message = {'role': 'user', 'content': sanitized_prompt}
             assistant_message = {'role': 'assistant', 'content': ai_response.get('content', 'No response.'), 'source': ai_response.get('source'), **ai_response}
-            session.messages.append(assistant_message)
-            return assistant_message
+            session.messages.extend([user_message, assistant_message])
+            self._update_activity(session)
+            
+            return ai_response
             
         except Exception as e:
             logger.error(f"AI response generation failed: {e}", exc_info=True)
-            assistant_message = {'role': 'assistant', 'content': 'I encountered an error processing your request.', 'success': False, 'source': 'Error Handler'}
-            session.messages.append(assistant_message)
-            return assistant_message
+            return {'content': 'I encountered an error processing your request.', 'success': False, 'source': 'Error Handler'}
         
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
@@ -6170,7 +6070,7 @@ def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method:
             logger.info(f"Chat input unlocked for session {session.session_id[:8]} after successful JS fingerprinting.")
             return True
         else:
-            logger.warning(f"⚠️ Fingerprint application failed for session '{session.session_id[:8]}'")
+            logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
             # If it failed, ensure we still enable chat, but with 'failed' status
             st.session_state.is_chat_ready = True
             st.session_state.fingerprint_status = 'failed'
@@ -7278,7 +7178,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
     
-    st.header("FiFi AI Assistant")
+    st.title("FiFi AI Assistant")
     st.caption("Hello, I am FiFi, your AI-powered assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, explore recipe ideas, technical data, and more.")
 
     # NEW: Show fingerprint waiting status ONLY for non-registered users
@@ -7324,92 +7224,84 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
 
-    # Re-fetch session to ensure latest messages are displayed (especially after thread updates)
-    session = session_manager.db.load_session(session.session_id)
-    if not session:
-        st.error("⚠️ Lost session context. Please refresh the page.")
-        return
-
     # Render chat content ONLY if not blocked by a dialog
-    # The `st.session_state.get('chat_blocked_by_dialog', False)` will be set by `display_email_prompt_if_needed`
-    # and should prevent the chat rendering logic below if a blocking dialog is active.
-    
-    # ENHANCED: Show tier warnings for registered users
-    limit_check_for_display = session_manager.question_limits.is_within_limits(session)
-    if (session.user_type.value == UserType.REGISTERED_USER.value and 
-        limit_check_for_display.get('allowed') and 
-        limit_check_for_display.get('tier')):
-        
-        tier = limit_check_for_display.get('tier')
-        remaining = limit_check_for_display.get('remaining', 0)
-        
-        # Check actual ban status for accurate messaging
-        has_active_tier1_ban = (
-            session.ban_status == BanStatus.ONE_HOUR and 
-            session.ban_end_time and 
-            datetime.now() < session.ban_end_time
-        )
-        
-        if tier == 2 and remaining <= 3:
-            st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until {TIER_2_BAN_HOURS}-hour reset!") ## CHANGE: Use constant
-        elif tier == 1 and remaining <= 2 and remaining > 0:
-            st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until {TIER_1_BAN_HOURS}-hour break.") ## CHANGE: Use constant
-        ## CHANGE: Use REGISTERED_USER_TIER_1_LIMIT constant
-        elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
-            # At exactly 10 questions - check ban status
-            if has_active_tier1_ban:
-                time_remaining = session.ban_end_time - datetime.now()
-                minutes = int(time_remaining.total_seconds() / 60)
-                hours = int(time_remaining.total_seconds() / 3600)
-                if hours >= 1:
-                    st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {hours} hour(s) remaining") ## CHANGE: Use constant
+    if not st.session_state.get('chat_blocked_by_dialog', False):
+        # ENHANCED: Show tier warnings for registered users
+        limit_check_for_display = session_manager.question_limits.is_within_limits(session)
+        if (session.user_type.value == UserType.REGISTERED_USER.value and 
+            limit_check_for_display.get('allowed') and 
+            limit_check_for_display.get('tier')):
+            
+            tier = limit_check_for_display.get('tier')
+            remaining = limit_check_for_display.get('remaining', 0)
+            
+            # Check actual ban status for accurate messaging
+            has_active_tier1_ban = (
+                session.ban_status == BanStatus.ONE_HOUR and 
+                session.ban_end_time and 
+                datetime.now() < session.ban_end_time
+            )
+            
+            if tier == 2 and remaining <= 3:
+                st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until {TIER_2_BAN_HOURS}-hour reset!") ## CHANGE: Use constant
+            elif tier == 1 and remaining <= 2 and remaining > 0:
+                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until {TIER_1_BAN_HOURS}-hour break.") ## CHANGE: Use constant
+            ## CHANGE: Use REGISTERED_USER_TIER_1_LIMIT constant
+            elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
+                # At exactly 10 questions - check ban status
+                if has_active_tier1_ban:
+                    time_remaining = session.ban_end_time - datetime.now()
+                    minutes = int(time_remaining.total_seconds() / 60)
+                    hours = int(time_remaining.total_seconds() / 3600)
+                    if hours >= 1:
+                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {hours} hour(s) remaining") ## CHANGE: Use constant
+                    else:
+                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {minutes} minutes remaining") ## CHANGE: Use constant
+                # FIX 2: Check tier1_completed_in_cycle to know if ban was already served
+                elif session.tier1_completed_in_cycle:
+                    # Ban has expired and was served
+                    st.info("✅ **Tier 1 Complete**: You can now proceed to Tier 2!")
                 else:
-                    st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {minutes} minutes remaining") ## CHANGE: Use constant
-            # FIX 2: Check tier1_completed_in_cycle to know if ban was already served
-            elif session.tier1_completed_in_cycle:
-                # Ban has expired and was served
-                st.info("✅ **Tier 1 Complete**: You can now proceed to Tier 2!")
-            else:
-                # User is at 10 questions but hasn't triggered/served the Tier 1 ban yet
-                st.info(f"ℹ️ **Tier 1 Complete**: Your next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.") ## CHANGE: Use constant
+                    # User is at 10 questions but hasn't triggered/served the Tier 1 ban yet
+                    st.info(f"ℹ️ **Tier 1 Complete**: Your next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.") ## CHANGE: Use constant
 
-    # Display chat messages (respects soft clear offset)
-    visible_messages = session.messages[session.display_message_offset:]
-    for msg in visible_messages:
-        role = msg.get("role", "user")
-        avatar_icon = USER_AVATAR_B64 if role == "user" else FIFI_AVATAR_B64
-        with st.chat_message(role, avatar=avatar_icon): # AVATAR IMPLEMENTED
-            # NEW: Check if this is a pricing/stock redirect that should be visually hidden from chat
-            if msg.get("display_only_notice", False) and msg.get("role") == "assistant":
-                pass # Do not render this specific assistant message in the chat bubble
-            else:
-                st.markdown(msg.get("content", ""))
-            
-            if msg.get("source"):
-                source_color = {
-                    "FiFi": "🧠", "FiFi Web Search": "🌐", 
-                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                    "Error Handler": "❌", "Session Analytics": "📈", 
-                    "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
-                    "Business Rules": "⚙️", # NEW: Add icon for Business Rules
-                    "WooCommerce": "🛒" # NEW: Add icon for WooCommerce
-                }.get(msg['source'], "🤖")
-                st.caption(f"{source_color} Source: {msg['source']}")
-            
-            indicators = []
-            if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
-            if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
-            if msg.get("is_meta_response"): indicators.append("📈 Session Analytics")
-            if msg.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
-            if msg.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce") # NEW: Add for WooCommerce
-            if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-            
-            if msg.get("safety_override"):
-                st.warning("🛡️ Safety Override: Switched to verified sources")
-            
-            if msg.get("has_citations") and msg.get("has_inline_citations"):
-                st.caption("📚 Response includes verified citations")
-            
+        # Display chat messages (respects soft clear offset)
+        visible_messages = session.messages[session.display_message_offset:]
+        for msg in visible_messages:
+            role = msg.get("role", "user")
+            avatar_icon = USER_AVATAR_B64 if role == "user" else FIFI_AVATAR_B64
+            with st.chat_message(role, avatar=avatar_icon): # AVATAR IMPLEMENTED
+                # NEW: Check if this is a pricing/stock redirect that should be visually hidden from chat
+                if msg.get("display_only_notice", False) and msg.get("role") == "assistant":
+                    pass # Do not render this specific assistant message in the chat bubble
+                else:
+                    st.markdown(msg.get("content", ""))
+                
+                if msg.get("source"):
+                    source_color = {
+                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                        "Error Handler": "❌", "Session Analytics": "📈", 
+                        "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
+                        "Business Rules": "⚙️", # NEW: Add icon for Business Rules
+                        "WooCommerce": "🛒" # NEW: Add icon for WooCommerce
+                    }.get(msg['source'], "🤖")
+                    st.caption(f"{source_color} Source: {msg['source']}")
+                
+                indicators = []
+                if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
+                if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
+                if msg.get("is_meta_response"): indicators.append("📈 Session Analytics")
+                if msg.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
+                if msg.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce") # NEW: Add for WooCommerce
+                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                
+                if msg.get("safety_override"):
+                    st.warning("🛡️ Safety Override: Switched to verified sources")
+                
+                if msg.get("has_citations") and msg.get("has_inline_citations"):
+                    st.caption("📚 Response includes verified citations")
+                
     # Chat input section with inline error notifications + manual dismiss
     # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
     # And combine with other disabled conditions
@@ -7531,34 +7423,87 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         disabled=overall_chat_disabled
     )
     
-    # THREADING CHANGE: Logic to start the thread and handle the response
     if prompt:
-        logger.info(f"🎯 User submitted prompt for session {session.session_id[:8]}")
-        session_manager.get_ai_response_non_blocking(session, prompt)
+        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
+        
+        # NEW: Set processing flag
+        st.session_state.is_processing_question = True
+        
+        # Check if attempting to exceed limits _before_ sending to AI
+        # This call will now also handle displaying appropriate messages/bans.
+        if session_manager.check_if_attempting_to_exceed_limits(session):
+            st.session_state.is_processing_question = False  # Clear flag
+            # If `check_if_attempting_to_exceed_limits` returns True, it means a limit was hit
+            # and a message/ban has been displayed.
+            # For guest limit, we specifically set the verification stage.
+            if session.user_type.value == UserType.GUEST.value and \
+               session.daily_question_count >= GUEST_QUESTION_LIMIT: ## CHANGE: Use constant
+                st.session_state.verification_stage = 'email_entry'
+                st.session_state.chat_blocked_by_dialog = True
+                st.session_state.final_answer_acknowledged = True # Acknowledge the 'final answer' to trigger dialog
+            st.rerun()
+            return
+        
+        with st.chat_message("user", avatar=USER_AVATAR_B64): # AVATAR IMPLEMENTED
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant", avatar=FIFI_AVATAR_B64): # AVATAR IMPLEMENTED
+            with st.spinner("🔍 FiFi is processing your question and we request your patience..."):
+                try:
+                    response = session_manager.get_ai_response(session, prompt)
+                    st.session_state.just_answered = True # Set flag for gentle prompts
+                    
+                    if response.get('requires_email'):
+                        st.error("📧 Please verify your email to continue.")
+                        st.session_state.verification_stage = 'email_entry' 
+                        st.session_state.chat_blocked_by_dialog = True
+                    elif response.get('banned'):
+                        st.error(response.get("content", 'Access restricted.'))
+                        if response.get('time_remaining'):
+                            time_remaining = response['time_remaining']
+                            hours = int(time_remaining.total_seconds() // 3600)
+                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                    elif response.get('display_only_notice', False): # NEW: Check this flag
+                        # Do nothing here, as the notice is displayed separately and the chat content is empty.
+                        pass
+                    else:
+                        # Show the AI response and metadata
+                        st.markdown(response.get("content", "No response generated."))
+                        if response.get("source"):
+                            source_color = {
+                                "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                "Error Handler": "❌", "Session Analytics": "📈",
+                                "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
+                                "Business Rules": "⚙️", # NEW: Add icon for Business Rules
+                                "WooCommerce": "🛒" # NEW: Add icon for WooCommerce
+                            }.get(response['source'], "🤖")
+                            st.caption(f"{source_color} Source: {response['source']}")
+                        
+                        indicators = []
+                        if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
+                        if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
+                        if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
+                        if response.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
+                        if response.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce") # NEW: Add for WooCommerce
+                        if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                        
+                        if response.get("safety_override"): st.warning("🛡️ Safety Override: Switched to verified sources")
+                        if response.get("has_citations") and response.get("has_inline_citations"): st.caption("📚 Response includes verified citations")
+                        
+                        logger.info(f"✅ Question processed successfully")
+
+                except Exception as e:
+                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
+                    st.error("⚠️ I encountered an error. Please try again.")
+                finally:
+                    # NEW: Always clear processing flag
+                    st.session_state.is_processing_question = False
+        
+        # Clear processing flag before rerun
+        st.session_state.is_processing_question = False
         st.rerun()
-
-    if st.session_state.get('is_processing_question'):
-        # Check if the AI thread has completed its work
-        if st.session_state.get('ai_response_complete'):
-            logger.info(f"AI response thread complete for session {session.session_id[:8]}. Rerunning to update UI.")
-            st.session_state.is_processing_question = False
-            st.session_state.just_answered = True
-            
-            # Clear the flag
-            del st.session_state['ai_response_complete']
-            if 'ai_response_error' in st.session_state:
-                del st.session_state['ai_response_error']
-
-            # A full reload of the session object is handled by main_fixed on rerun,
-            # which will then display the updated messages.
-            st.rerun() 
-        else:
-            # Still processing, show a spinner in the chat area
-            # Only show if not blocked by dialog (which might hide all chat elements)
-            if not should_disable_chat_input_by_dialog:
-                with st.chat_message("assistant", avatar=FIFI_AVATAR_B64):
-                    st.spinner("🔍 FiFi is processing your question and we request your patience...")
-
 
 ## CHANGE: Persistent state manager
 class PersistentState:
@@ -7627,7 +7572,7 @@ def ensure_initialization_fixed():
                 ai_system = type('FallbackAI', (), {
                     "openai_client": None,
                     '_needs_current_information': lambda self, prompt: False, # NEW: Add dummy for direct routing
-                    'get_response_blocking': lambda self, prompt, history=None: {
+                    'get_response': lambda self, prompt, history=None: {
                         "content": "AI system temporarily unavailable.",
                         "success": False
                     }
@@ -7732,8 +7677,6 @@ def main_fixed():
             "must_verify_email_immediately": False, "skip_email_allowed": True,
             "page": None, "fingerprint_processed_for_session": {},
             "is_processing_question": False,  # NEW: Add this
-            "ai_response_complete": False, # NEW: Flag for AI thread completion
-            "ai_response_error": False, # NEW: Flag for AI thread error
             # Initialize WordPress fallback states here too if they weren't in init_fixed
             "wordpress_error": {'show_fallback': False},
             "wordpress_fallback_active": False,
