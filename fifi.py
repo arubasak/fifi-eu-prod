@@ -4167,7 +4167,12 @@ class SessionManager:
 
     ## START <<<<<<<<<<<<<<<< REPLACEMENT 2 OF 3
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        """Enhanced WordPress authentication with Email Verified fallback option"""
+        """
+        CORRECTED & COMPLETE: Enhanced WordPress authentication with Email Verified fallback option.
+        Now prioritizes inheriting question counts from the current in-memory guest session
+        before checking the database, preventing race conditions, and fully preserving
+        all ban, reset, and tier cycle inheritance logic from the original method.
+        """
         if not self.config.WORDPRESS_URL:
             st.error("WordPress authentication is not configured. Please contact support.")
             logger.warning("WordPress authentication attempted but URL not configured.")
@@ -4184,7 +4189,7 @@ class SessionManager:
             if response.status_code == 200:
                 content_type = response.headers.get('Content-Type', '').lower()
                 if 'application/json' not in content_type:
-                    logger.error(f"WordPress authentication received unexpected Content-Type '{content_type}' with 200 status. Expected application/json. Response text: '{response.text[:200]}'", exc_info=True)
+                    logger.error(f"WordPress authentication received unexpected Content-Type '{content_type}' with 200 status. Expected application/json. Response text: '{response.text[:200]}'")
                     return self._handle_wordpress_error_with_fallback(
                         "API Response Error", 
                         "WordPress returned an unexpected response. The JWT plugin might be misconfigured.",
@@ -4194,7 +4199,7 @@ class SessionManager:
                 try:
                     data = response.json()
                 except requests.exceptions.JSONDecodeError as e:
-                    logger.error(f"WordPress authentication received non-JSON response with 200 status, despite Content-Type possibly being JSON. Response text: '{response.text[:200]}'. Error: {e}", exc_info=True)
+                    logger.error(f"WordPress authentication received non-JSON response with 200 status. Error: {e}")
                     return self._handle_wordpress_error_with_fallback(
                         "JSON Parse Error", 
                         "WordPress returned invalid data. Please try again or contact support.",
@@ -4207,119 +4212,137 @@ class SessionManager:
                 
                 if wp_token and user_email:
                     current_session = self.get_session()
+                    now = datetime.now()
                     
-                    ## CHANGE: Explicitly set fingerprint to not collected/not applicable for REGISTERED_USER
+                    # --- START OF THE CRITICAL FIX (for question count inheritance) ---
+                    # 1. Capture question counts from the CURRENT in-memory session.
+                    # This is the most up-to-date information before DB queries might overwrite it with older data.
+                    inherited_daily_count_from_current_session = 0
+                    inherited_total_count_from_current_session = 0
+                    inherited_last_question_time_from_current_session = None
+                    
+                    if current_session.user_type == UserType.GUEST and current_session.daily_question_count > 0:
+                        logger.info(f"Prioritizing inheritance from active in-memory guest session {current_session.session_id[:8]} (Daily: {current_session.daily_question_count}).")
+                        inherited_daily_count_from_current_session = current_session.daily_question_count
+                        inherited_total_count_from_current_session = current_session.total_question_count
+                        inherited_last_question_time_from_current_session = current_session.last_question_time
+                    # --- END OF THE CRITICAL FIX ---
+
+                    # --- Original logic for database-based inheritance and ban checks ---
+                    
+                    # Explicitly set fingerprint to not collected/not applicable for REGISTERED_USER
                     current_session.fingerprint_id = "not_collected_registered_user"
                     current_session.fingerprint_method = "email_primary"
                     logger.info(f"Registered user {current_session.session_id[:8]} fingerprint marked as not collected/email primary.")
 
-                    ## CHANGE: Always check email-based history for registered users
+                    # Always check email-based history for registered users
                     all_email_sessions = self.db.find_sessions_by_email(user_email)
                     
-                    # FIX 1: Determine visitor type based on email history
+                    # Determine visitor type based on email history (excluding current session's ID from count)
                     if all_email_sessions and any(s.session_id != current_session.session_id for s in all_email_sessions):
                         current_session.visitor_type = "returning_visitor"
-                        logger.info(f"Registered user {user_email} marked as returning_visitor (found {len(all_email_sessions)} past sessions)")
+                        logger.info(f"Registered user {user_email} marked as returning_visitor (found {len(all_email_sessions)} past sessions).")
                     else:
                         current_session.visitor_type = "new_visitor" 
-                        logger.info(f"Registered user {user_email} marked as new_visitor (first login)")
+                        logger.info(f"Registered user {user_email} marked as new_visitor (first login).")
 
-
-                    # Find the most recent session with same email to inherit counts, BANS AND CYCLE INFO from
                     most_recent_ban_session = None
-                    most_recent_session_for_counts_and_cycle = None
+                    most_recent_db_session_for_counts_and_cycle = None
                     
                     if all_email_sessions:
-                        # Sort by last activity/question time to find the most recent
                         sorted_sessions = sorted(all_email_sessions, 
                                                key=lambda s: s.last_question_time or s.last_activity or s.created_at, 
                                                reverse=True)
                         
-                        # Find most recent session for counts and cycle
-                        most_recent_session_for_counts_and_cycle = sorted_sessions[0] if sorted_sessions else None
+                        if sorted_sessions:
+                            most_recent_db_session_for_counts_and_cycle = sorted_sessions[0]
                         
-                        # NEW: Find any session with an ACTIVE ban
-                        now = datetime.now()
+                        # Find any session with an ACTIVE ban
                         for sess in sorted_sessions:
                             if (sess.ban_status != BanStatus.NONE and 
                                 sess.ban_end_time and 
                                 sess.ban_end_time > now):
                                 most_recent_ban_session = sess
-                                logger.info(f"Found active ban in session {sess.session_id[:8]}: {sess.ban_status.value} until {sess.ban_end_time}")
+                                logger.info(f"Found active ban in session {sess.session_id[:8]}: {sess.ban_status.value} until {sess.ban_end_time}.")
                                 break
+                    
+                    # --- Aggregate Question Counts and Last Activity ---
+                    # Start with counts from the current in-memory session (our fix)
+                    final_daily_count = inherited_daily_count_from_current_session
+                    final_total_count = inherited_total_count_from_current_session
+                    final_last_question_time = inherited_last_question_time_from_current_session
+                    
+                    # Now compare with database history for same email, respecting DAILY_RESET_WINDOW
+                    if most_recent_db_session_for_counts_and_cycle:
+                        db_time_check = most_recent_db_session_for_counts_and_cycle.last_question_time or \
+                                        most_recent_db_session_for_counts_and_cycle.last_activity or \
+                                        most_recent_db_session_for_counts_and_cycle.created_at
                         
-                        # Inherit question counts and cycle info
-                        if most_recent_session_for_counts_and_cycle:
-                            time_check = most_recent_session_for_counts_and_cycle.last_question_time or \
-                                         most_recent_session_for_counts_and_cycle.last_activity or \
-                                         most_recent_session_for_counts_and_cycle.created_at
-                            
-                            if time_check and (now - time_check) < DAILY_RESET_WINDOW:
-                                # Inherit question counts and cycle info from most recent same-email session
-                                current_session.daily_question_count = most_recent_session_for_counts_and_cycle.daily_question_count
-                                current_session.total_question_count = max(current_session.total_question_count, 
-                                                                          most_recent_session_for_counts_and_cycle.total_question_count)
-                                current_session.last_question_time = most_recent_session_for_counts_and_cycle.last_question_time
-                                
-                                # NEW: Inherit cycle info
-                                current_session.current_tier_cycle_id = most_recent_session_for_counts_and_cycle.current_tier_cycle_id
-                                current_session.tier1_completed_in_cycle = most_recent_session_for_counts_and_cycle.tier1_completed_in_cycle
-                                current_session.tier_cycle_started_at = most_recent_session_for_counts_and_cycle.tier_cycle_started_at
-
-                                logger.info(f"✅ Email-based inheritance: Inherited {most_recent_session_for_counts_and_cycle.daily_question_count} questions from {most_recent_session_for_counts_and_cycle.session_id[:8]} (same email: {user_email})")
+                        if db_time_check and (now - db_time_check) < DAILY_RESET_WINDOW:
+                            # If DB session is more recent AND has a higher daily count
+                            if most_recent_db_session_for_counts_and_cycle.daily_question_count > final_daily_count:
+                                final_daily_count = most_recent_db_session_for_counts_and_cycle.daily_question_count
+                                final_last_question_time = most_recent_db_session_for_counts_and_cycle.last_question_time
+                                # Also inherit cycle info from this session
+                                current_session.current_tier_cycle_id = most_recent_db_session_for_counts_and_cycle.current_tier_cycle_id
+                                current_session.tier1_completed_in_cycle = most_recent_db_session_for_counts_and_cycle.tier1_completed_in_cycle
+                                current_session.tier_cycle_started_at = most_recent_db_session_for_counts_and_cycle.tier_cycle_started_at
+                                logger.info(f"✅ Email-based inheritance: Inherited higher daily count ({final_daily_count}) from DB session {most_recent_db_session_for_counts_and_cycle.session_id[:8]} (email: {user_email}).")
                             else:
-                                logger.info(f"🕐 Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count AND tier cycle")
-                                current_session.daily_question_count = 0
-                                current_session.last_question_time = None
-                                # NEW: Reset cycle to a fresh start
-                                current_session.current_tier_cycle_id = str(uuid.uuid4())
-                                current_session.tier1_completed_in_cycle = False
-                                current_session.tier_cycle_started_at = datetime.now()
-                        
-                        # NEW: Inherit active ban if found
-                        if most_recent_ban_session:
-                            current_session.ban_status = most_recent_ban_session.ban_status
-                            current_session.ban_start_time = most_recent_ban_session.ban_start_time
-                            current_session.ban_end_time = most_recent_ban_session.ban_end_time
-                            current_session.ban_reason = most_recent_ban_session.ban_reason
-                            current_session.question_limit_reached = True
-                            # NEW: Also inherit cycle information from the banned session
-                            current_session.current_tier_cycle_id = most_recent_ban_session.current_tier_cycle_id
-                            current_session.tier1_completed_in_cycle = most_recent_ban_session.tier1_completed_in_cycle
-                            current_session.tier_cycle_started_at = most_recent_ban_session.tier_cycle_started_at
-                            logger.info(f"✅ Inherited active ban: {current_session.ban_status.value} until {current_session.ban_end_time}")
-                        
-                        # Also inherit Zoho contact ID if available
-                        if not current_session.zoho_contact_id:
-                            for sess in sorted_sessions:
-                                if sess.zoho_contact_id:
-                                    current_session.zoho_contact_id = sess.zoho_contact_id
-                                    logger.info(f"Inherited Zoho contact ID from session {sess.session_id[:8]}")
-                                    break
-                    else:
-                        # No email history found
-                        current_session.daily_question_count = 0
-                        current_session.total_question_count = 0
-                        current_session.last_question_time = None
-                        # NEW: Initialize cycle for a completely fresh start
+                                # DB session is recent but current session has equal or higher count, so use current_session's already set count
+                                logger.info(f"DB session {most_recent_db_session_for_counts_and_cycle.session_id[:8]} is recent but current session's count ({final_daily_count}) is higher/equal. No change to daily count.")
+                        else:
+                            # DB session is old, reset daily count (unless current session had recent activity)
+                            if not final_last_question_time or (now - final_last_question_time) >= DAILY_RESET_WINDOW:
+                                logger.info(f"🕐 DB email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count AND tier cycle for fresh start.")
+                                final_daily_count = 0
+                                final_last_question_time = None
+                    
+                    # Update current_session with the determined final counts
+                    current_session.daily_question_count = final_daily_count
+                    current_session.total_question_count = max(current_session.total_question_count, final_total_count) # Total count always takes max
+                    current_session.last_question_time = final_last_question_time
+                    
+                    # If no cycle info was inherited or reset, initialize a new one for REGISTERED_USER
+                    if not current_session.current_tier_cycle_id or not current_session.tier_cycle_started_at:
                         current_session.current_tier_cycle_id = str(uuid.uuid4())
                         current_session.tier1_completed_in_cycle = False
-                        current_session.tier_cycle_started_at = datetime.now()
-                        logger.info(f"🆕 No email history found for {user_email}, starting fresh (new tier cycle)")
+                        current_session.tier_cycle_started_at = now
+                        logger.info(f"🆕 Initializing new tier cycle for {user_email} as no active cycle found to inherit.")
 
-                    # Clear evasion tracking (these can always be cleared on successful login)
+
+                    # --- Inherit active BAN status ---
+                    if most_recent_ban_session:
+                        current_session.ban_status = most_recent_ban_session.ban_status
+                        current_session.ban_start_time = most_recent_ban_session.ban_start_time
+                        current_session.ban_end_time = most_recent_ban_session.ban_end_time
+                        current_session.ban_reason = most_recent_ban_session.ban_reason
+                        current_session.question_limit_reached = True
+                        # Ensure cycle info is consistent with the ban
+                        current_session.current_tier_cycle_id = most_recent_ban_session.current_tier_cycle_id
+                        current_session.tier1_completed_in_cycle = most_recent_ban_session.tier1_completed_in_cycle
+                        current_session.tier_cycle_started_at = most_recent_ban_session.tier_cycle_started_at
+                        logger.info(f"✅ Inherited active ban: {current_session.ban_status.value} until {current_session.ban_end_time}.")
+                    
+                    # Also inherit Zoho contact ID if available from any session
+                    if not current_session.zoho_contact_id:
+                        for sess in all_email_sessions:
+                            if sess.zoho_contact_id:
+                                current_session.zoho_contact_id = sess.zoho_contact_id
+                                logger.info(f"Inherited Zoho contact ID from session {sess.session_id[:8]}.")
+                                break
+
+                    # Clear evasion tracking (always cleared on successful login)
                     current_session.evasion_count = 0
                     current_session.current_penalty_hours = 0
                     current_session.escalation_level = 0
                     
-                    # Set REGISTERED_USER attributes
+                    # Set REGISTERED_USER attributes (these are definitive from WordPress)
                     current_session.user_type = UserType.REGISTERED_USER
                     current_session.email = user_email
                     current_session.full_name = user_display_name
                     current_session.wp_token = wp_token
-                    current_session.last_activity = datetime.now()
-                    
-                    # NEW: Set login method
+                    current_session.last_activity = now
                     current_session.login_method = 'wordpress'
                     current_session.is_degraded_login = False
                     current_session.degraded_login_timestamp = None
@@ -4337,18 +4360,20 @@ class SessionManager:
                     current_session.pending_wp_token = None
                     current_session.declined_recognized_email_at = None
 
-                    ## CHANGE: Enable chat immediately for registered users
+                    # Enable chat immediately for registered users
                     st.session_state.is_chat_ready = True
                     st.session_state.fingerprint_wait_start = None # Ensure any FP wait is cleared for this user
 
                     # Save the updated session
                     try:
                         self.db.save_session(current_session)
-                        ## CHANGE: Use constant in log message
                         logger.info(f"✅ REGISTERED_USER setup complete: {user_email}, {current_session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT} questions. Chat enabled immediately.")
                         
+                        # Sync all other active sessions for this registered user
+                        self.sync_registered_user_sessions(user_email, current_session.session_id)
+
                     except Exception as e:
-                        logger.error(f"Failed to save authenticated session: {e}")
+                        logger.error(f"Failed to save authenticated session: {e}", exc_info=True)
                         st.error("Authentication succeeded but session could not be saved. Please try again.")
                         return None
                     
@@ -4366,7 +4391,7 @@ class SessionManager:
                 return None
             
         except requests.exceptions.SSLError as e:
-            logger.error(f"WordPress SSL/Port 443 error: {e}")
+            logger.error(f"WordPress SSL/Port 443 error: {e}", exc_info=True)
             return self._handle_wordpress_error_with_fallback(
                 "SSL/Connection Error", 
                 "Cannot establish secure connection to the authentication server (e.g., Port 443 issue).",
@@ -4374,7 +4399,7 @@ class SessionManager:
             )
             
         except requests.exceptions.Timeout as e:
-            logger.error(f"WordPress authentication timed out: {e}")
+            logger.error(f"WordPress authentication timed out: {e}", exc_info=True)
             return self._handle_wordpress_error_with_fallback(
                 "Timeout Error",
                 "The authentication service is not responding in time. The server may be down or overloaded.",
@@ -4382,7 +4407,7 @@ class SessionManager:
             )
             
         except requests.exceptions.ConnectionError as e:
-            logger.error(f"WordPress authentication connection error: {e}")
+            logger.error(f"WordPress authentication connection error: {e}", exc_info=True)
             return self._handle_wordpress_error_with_fallback(
                 "Connection Error",
                 "Could not connect to the authentication service. Please check your internet connection or the service may be down.",
@@ -4396,6 +4421,7 @@ class SessionManager:
                 "An unexpected error occurred during authentication. Please try again later.",
                 username
             )
+                                        
     ## END <<<<<<<<<<<<<<<< REPLACEMENT 2 OF 3
 
     def _handle_wordpress_error_with_fallback(self, error_type: str, error_message: str, username: str) -> Optional[UserSession]:
