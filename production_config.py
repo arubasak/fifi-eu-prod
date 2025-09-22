@@ -1,56 +1,32 @@
 # production_config.py
-"""
-Production configuration - DO NOT MODIFY WITHOUT APPROVAL
-Last updated: September 12, 2025
-Version: 1.0.0
-"""
+# (Your existing constants)
 
-from datetime import timedelta
-
-# Timing Configuration (in appropriate units)
 DAILY_RESET_WINDOW_HOURS = 24
-SESSION_TIMEOUT_MINUTES = 5
-FINGERPRINT_TIMEOUT_SECONDS = 20
-
-# Ban Durations (in hours)
+SESSION_TIMEOUT_MINUTES = 60
+FINGERPRINT_TIMEOUT_SECONDS = 20 # Keep at 20 seconds, the JS will use this
 TIER_1_BAN_HOURS = 1
 TIER_2_BAN_HOURS = 24
 EMAIL_VERIFIED_BAN_HOURS = 24
-
-# Question Limits
 GUEST_QUESTION_LIMIT = 4
 EMAIL_VERIFIED_QUESTION_LIMIT = 10
 REGISTERED_USER_QUESTION_LIMIT = 20
-REGISTERED_USER_TIER_1_LIMIT = 10  # When tier 1 break triggers
-
-# Rate Limiting
-RATE_LIMIT_REQUESTS = 2
+REGISTERED_USER_TIER_1_LIMIT = 10
+RATE_LIMIT_REQUESTS = 15
 RATE_LIMIT_WINDOW_SECONDS = 60
+MAX_MESSAGE_LENGTH = 1000
+MAX_PDF_MESSAGES = 50
+MAX_FINGERPRINT_CACHE_SIZE = 1000
+MAX_RATE_LIMIT_TRACKING = 1000
+MAX_ERROR_HISTORY = 500
+CRM_SAVE_MIN_QUESTIONS = 2
+EVASION_BAN_HOURS = 72
 
-# System Limits
-MAX_MESSAGE_LENGTH = 4000
-MAX_PDF_MESSAGES = 500 # Maximum messages to include in PDF to prevent memory issues
-MAX_FINGERPRINT_CACHE_SIZE = 10000
-MAX_RATE_LIMIT_TRACKING = 10000
-MAX_ERROR_HISTORY = 100
-
-# CRM Configuration
-CRM_SAVE_MIN_QUESTIONS = 1  # Minimum questions before CRM save
-
-# Evasion Penalties (hours)
-EVASION_BAN_HOURS = [1, 2, 4, 8, 24]
-
-# FastAPI Integration
-FASTAPI_EMERGENCY_SAVE_URL = 'https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save'
+# FastAPI Endpoints
+# IMPORTANT: Update these with your actual deployed FastAPI URLs
+FASTAPI_EMERGENCY_SAVE_URL = "https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save"
+FASTAPI_FINGERPRINT_URL = "https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint" # NEW: For client-side fingerprinting
 FASTAPI_EMERGENCY_SAVE_TIMEOUT = 5 # seconds
 
-# Create timedelta objects for easy use
+# Time Deltas (derived from hours/minutes for convenience)
 DAILY_RESET_WINDOW = timedelta(hours=DAILY_RESET_WINDOW_HOURS)
 SESSION_TIMEOUT_DELTA = timedelta(minutes=SESSION_TIMEOUT_MINUTES)
-
-# =============================================================================
-# NEW: URLs for Fingerprinting Redirect Strategy
-# =============================================================================
-# IMPORTANT: These must be the full, correct URLs of your deployed services.
-STREAMLIT_APP_URL = "https://fifi-eu.streamlit.app"
-FASTAPI_BEACON_BASE_URL = "https://fifi-beacon-fastapi-121263692901.europe-west4.run.app"
