@@ -36,81 +36,81 @@
 
 <script>
 (function () {
-  const sessionId = "{SESSION_ID}";
+  const sessionId = "{SESSION_ID}"; // Injected by Python
+  const fastapiFingerprintUrl = "{FASTAPI_FINGERPRINT_URL}"; // Injected by Python
+  const fingerprintTimeoutSeconds = {FINGERPRINT_TIMEOUT_SECONDS}; // Injected by Python
   const statusEl = document.getElementById('status');
   
   console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
   
-  // Check if already processed
   const PROCESSED_KEY = `fifi_creep_done_${sessionId}`;
-  if (window[PROCESSED_KEY]) {
-    console.log('✅ Already processed for this session');
+  if (sessionStorage.getItem(PROCESSED_KEY)) {
+    console.log('✅ Fingerprint already processed for this session in sessionStorage. Signaling Streamlit ready state.');
+    sendPingToStreamlitReadyState('complete'); 
     return;
   }
   
   let fingerprintSent = false;
   const startTime = Date.now();
-  
-  function sendFingerprint(payload) {
+
+  function sendPingToStreamlitReadyState(status = 'complete', fpId = '') {
+      if (window.fifiPingSent) return; 
+      window.fifiPingSent = true;
+
+      const StreamlitAppURL = window.location.origin + window.location.pathname;
+      const imageUrl = `${StreamlitAppURL}?event=fingerprint_status_update&session_id=${encodeURIComponent(sessionId)}&status=${encodeURIComponent(status)}&fingerprint_id=${encodeURIComponent(fpId.substring(0,12))}`;
+      
+      const img = new Image();
+      img.src = imageUrl;
+      img.style.display = 'none';
+      document.body.appendChild(img);
+      console.log('✅ Signaled Streamlit readiness via image beacon:', imageUrl);
+  }
+
+  async function sendFingerprint(payload) {
     if (fingerprintSent) return;
     fingerprintSent = true;
-    window[PROCESSED_KEY] = true;
+    sessionStorage.setItem(PROCESSED_KEY, 'true');
     
     const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`🔍 Fingerprint obtained after ${elapsedSeconds} seconds:`, payload);
+    console.log(`🔍 Fingerprint obtained after ${elapsedSeconds} seconds. Sending to FastAPI:`, payload);
     statusEl.textContent = `Fingerprint detected: ${(payload.fingerprint_id || 'unknown').substring(0, 12)}...`;
-    
-    // OPTIMIZATION: Reduced delay from 500ms to 0ms
-    setTimeout(() => { // CHANGE: Reduced to 0ms
-      try {
-        // Get the parent window URL if in iframe, otherwise use current
-        let baseUrl = window.location.origin + window.location.pathname;
-        
-        // Try to use parent URL if accessible
-        try {
-          if (window.parent && window.parent !== window && window.parent.location.href) {
-            const parentUrl = new URL(window.parent.location.href);
-            baseUrl = parentUrl.origin + parentUrl.pathname;
-            console.log('Using parent URL:', baseUrl);
-          }
-        } catch (e) {
-          console.log('Using current URL (parent not accessible):', baseUrl);
-        }
-        
-        const url = `${baseUrl}?event=fingerprint_complete`
-          + `&session_id=${encodeURIComponent(sessionId)}`
-          + `&fingerprint_id=${encodeURIComponent(payload.fingerprint_id || '')}`
-          + `&method=${encodeURIComponent(payload.method || '')}`
-          + `&privacy=${encodeURIComponent(payload.privacy || '')}`
-          + `&fuzzy=${encodeURIComponent(payload.fuzzy || '')}`
-          + `&working_methods=${encodeURIComponent((payload.working_methods || []).join(','))}`
-          + `&timestamp=${Date.now()}`;
-        
-        console.log('🔍 Redirecting to:', url);
-        
-        // Use parent location if available, otherwise current window
-        if (window.parent && window.parent !== window) {
-          try {
-            window.parent.location.href = url;
-          } catch (e) {
-            window.location.href = url;
-          }
+
+    try {
+        const response = await fetch(fastapiFingerprintUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({
+                session_id: sessionId,
+                fingerprint_id: payload.fingerprint_id || '',
+                method: payload.method || 'unknown',
+                privacy: payload.privacy || 'standard',
+                working_methods: payload.working_methods || []
+            }),
+            keepalive: true
+        });
+
+        if (!response.ok) {
+            console.error(`❌ FastAPI fingerprint endpoint responded with status ${response.status}`);
+            statusEl.textContent = `Error sending FP (status ${response.status})`;
         } else {
-          window.location.href = url;
+            console.log('✅ Fingerprint data sent to FastAPI successfully.');
         }
-        
-      } catch (e) {
-        console.error('❌ Redirect failed:', e);
+    } catch (e) {
+        console.error('❌ Failed to send fingerprint to FastAPI:', e);
         statusEl.textContent = 'Error: Could not send fingerprint to server';
-      }
-    }, 0); // CHANGE: Reduced from 100ms to 0ms
+    } finally {
+        sendPingToStreamlitReadyState('complete', payload.fingerprint_id || 'fallback');
+    }
   }
   
   function asHex(s, min = 32, max = 64) {
     return (typeof s === 'string' && new RegExp(`^[a-f0-9]{${min},${max}}$`, 'i').test(s)) ? s : null;
   }
   
-  // DOM scraping function
   function tryDomScrape() {
     const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
     const fuzzyEl = document.querySelector('#fuzzy-fingerprint .fuzzy-fp');
@@ -123,7 +123,6 @@
     const fpText = header.textContent || '';
     const fuzzyTxt = fuzzyEl?.textContent || '';
     
-    // Only log when content changes
     if (fpText !== 'FP ID: Computing...') {
       console.log('📝 Header text:', fpText);
     }
@@ -149,7 +148,6 @@
     return false;
   }
   
-  // Fallback fingerprint
   function createFallback(reason) {
     console.warn('⚠️ Using fallback fingerprint, reason:', reason);
     statusEl.textContent = 'Using fallback fingerprint (' + reason + ')';
@@ -192,9 +190,8 @@
     });
   }
   
-  // OPTIMIZED: Start detection with adjusted timing
   let attempts = 0;
-  const maxAttempts = 30; // REDUCED from 50 to 30
+  const maxAttempts = 30; 
   
   function attemptFingerprint() {
     attempts++;
@@ -205,7 +202,6 @@
     }
     
     if (attempts < maxAttempts) {
-      // OPTIMIZED: Faster attempts
       const delay = attempts < 5 ? 200 : attempts < 15 ? 300 : 500;
       setTimeout(attemptFingerprint, delay);
     } else {
@@ -213,19 +209,17 @@
     }
   }
   
-  // OPTIMIZED: Start after shorter delay (reduced from 3000ms to 1000ms)
   setTimeout(() => {
     console.log('🚀 Starting fingerprint detection...');
     attemptFingerprint();
   }, 1000);
   
-  // OPTIMIZED: Reduced absolute timeout from 30s to 20s
   setTimeout(() => {
     if (!fingerprintSent) {
-      console.error('⏰ Absolute timeout reached after 20 seconds');
-      createFallback('absolute_timeout_20s');
+      console.error(`⏰ Absolute timeout reached after ${fingerprintTimeoutSeconds} seconds`);
+      createFallback(`absolute_timeout_${fingerprintTimeoutSeconds}s`);
     }
-  }, 20000);
+  }, fingerprintTimeoutSeconds * 1000);
 })();
 </script>
 </body>
