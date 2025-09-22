@@ -3449,6 +3449,7 @@ class SessionManager:
         for the current session, setting reverification pending status accordingly.
         """
         logger.info(f"🔄 [CORRECTED LOGIC] Attempting fingerprint inheritance for session {session.session_id[:8]} (Type: {session.user_type.value}, FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'})...")
+        now = datetime.now() # <--- THIS LINE IS CRITICAL TO ADD
 
         # Guard clauses: No need for inheritance if already a registered user
         if session.user_type == UserType.REGISTERED_USER:
