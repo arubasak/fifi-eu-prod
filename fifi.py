@@ -4060,12 +4060,11 @@ class SessionManager:
 
     def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
         """
-        Verifies the email verification code and upgrades user status.
-        CORRECTED: Now correctly handles the edge case where a user first declines a
+        CORRECTED & COMPLETE: Verifies the email verification code and upgrades user status.
+        Now correctly handles the edge case where a user first declines a
         recognized email but then proceeds to verify that exact same email address.
         """
         try:
-            # Determine the email to verify. Prioritize the pending email if it exists.
             email_to_verify = session.pending_email if session.reverification_pending else session.email
 
             if not email_to_verify:
@@ -4079,7 +4078,7 @@ class SessionManager:
             verification_success = self.email_verification.verify_code(email_to_verify, sanitized_code)
             
             if verification_success:
-                # ==================== THE CRITICAL FIX IS HERE ====================
+                # --- START OF THE CRITICAL FIX (for "declined then re-verify") ---
                 # Check for the specific edge case: The user previously declined recognition,
                 # but is now verifying the *exact same email* that was pending.
                 user_is_reclaiming_declined_account = (
@@ -4091,21 +4090,64 @@ class SessionManager:
                 if user_is_reclaiming_declined_account:
                     logger.warning(f"OVERRIDE: User declined recognition for {session.pending_email} but is now verifying it. Re-enabling reverification logic.")
                     session.reverification_pending = True
-                    # The pending_user_type should still be in the session object from the initial inheritance.
-                # ================================================================
+                    # The pending_user_type, full_name, etc., should still be stored in the session
+                    # because we never explicitly cleared them after the "no_declined_reco" click.
+                    # This relies on the _attempt_fingerprint_inheritance logic setting these fields.
+                    # We will now use these stored pending fields for the upgrade.
+                # --- END OF THE CRITICAL FIX ---
 
-                # Handle reverification (existing flow, now also triggered by the override)
+
+                # Global email history check for general inheritance of usage/bans
+                should_check_global_email_history_for_guest_upgrade = (
+                    not session.reverification_pending and  # Only for guests NOT reclaiming existing account
+                    session.user_type == UserType.GUEST     # Only if currently a guest
+                )
+                
+                max_daily_count_global = 0
+                max_total_count_global = 0
+                most_recent_question_time_global = None
+                inherit_ban_global = False
+                ban_info_global = None
+
+                if should_check_global_email_history_for_guest_upgrade:
+                    all_email_sessions_for_global_check = self.db.find_sessions_by_email(email_to_verify)
+                    
+                    for email_session in all_email_sessions_for_global_check:
+                        # Only consider email_verified_guest sessions for this specific inheritance path
+                        if email_session.user_type == UserType.EMAIL_VERIFIED_GUEST:
+                            # Check if within daily reset window
+                            if (email_session.last_question_time and 
+                                (now - email_session.last_question_time) < DAILY_RESET_WINDOW):
+                                if email_session.daily_question_count > max_daily_count_global:
+                                    max_daily_count_global = email_session.daily_question_count
+                                    most_recent_question_time_global = email_session.last_question_time
+                                
+                                if (email_session.ban_status == BanStatus.TWENTY_FOUR_HOUR and 
+                                    email_session.ban_end_time and 
+                                    email_session.ban_end_time > now):
+                                    inherit_ban_global = True
+                                    ban_info_global = {
+                                        'status': email_session.ban_status,
+                                        'start_time': email_session.ban_start_time,
+                                        'end_time': email_session.ban_end_time,
+                                        'reason': email_session.ban_reason
+                                    }
+                            max_total_count_global = max(max_total_count_global, email_session.total_question_count)
+                    
+                    logger.info(f"📧 Email verification for {email_to_verify}: Found global history. Max daily count: {max_daily_count_global}, Has active ban: {inherit_ban_global}")
+                
+                # --- Main User Status Upgrade Logic ---
                 if session.reverification_pending:
-                    # Restore the user to their highest known status
+                    # User is reclaiming a previously recognized account (Registered or Email Verified)
                     session.user_type = session.pending_user_type if session.pending_user_type else UserType.EMAIL_VERIFIED_GUEST
                     session.email = session.pending_email
                     session.full_name = session.pending_full_name
                     session.zoho_contact_id = session.pending_zoho_contact_id
                     session.wp_token = session.pending_wp_token
                     
-                    # Clean up all pending and recognition flags
+                    # Clean up pending and recognition flags
                     session.reverification_pending = False
-                    session.recognition_response = "reclaimed_after_decline" # New status for tracking
+                    session.recognition_response = "reclaimed_successfully"
                     session.pending_user_type = None
                     session.pending_email = None
                     session.pending_full_name = None
@@ -4117,19 +4159,62 @@ class SessionManager:
                     session.degraded_login_timestamp = None
 
                     logger.info(f"✅ User {session.session_id[:8]} reclaimed higher privilege: {session.user_type.value} for {session.email}")
-
                 else:
-                    # Standard flow for a guest upgrading for the first time
-                    # First, check if this email belongs to a registered user
+                    # New email verification or upgrade from guest to a non-reclaimed account.
+                    # We need to perform initial upgrade based on `_check_and_upgrade_to_registered` first.
+                    old_daily_count = session.daily_question_count # Preserve current count for potential same-session upgrade
+                    
+                    # This call will determine if it's a REGISTERED_USER or keeps it non-registered
                     session = self._check_and_upgrade_to_registered(session, email_to_verify, is_fallback_from_wordpress=False)
                     
-                    # If it wasn't upgraded to registered, proceed with email-verified guest logic
                     if session.user_type != UserType.REGISTERED_USER:
+                        # If not upgraded to Registered, proceed with Email Verified Guest logic
                         session.user_type = UserType.EMAIL_VERIFIED_GUEST
-                        # (The rest of the global inheritance and count preservation logic remains the same)
-                        # ... [rest of the original logic for email-verified guest] ...
-                        logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email}")
+                        session.email = email_to_verify # Ensure email is set on the session
+                        
+                        # Apply global email-based inheritance for email-verified guests
+                        if should_check_global_email_history_for_guest_upgrade and (max_daily_count_global > 0 or inherit_ban_global):
+                            logger.info(f"🌍 GLOBAL EMAIL INHERITANCE: Applying cross-device limits for {email_to_verify} as EMAIL_VERIFIED_GUEST.")
+                            session.daily_question_count = max_daily_count_global
+                            session.total_question_count = max(session.total_question_count, max_total_count_global)
+                            session.last_question_time = most_recent_question_time_global
+                            
+                            if inherit_ban_global and ban_info_global:
+                                session.ban_status = ban_info_global['status']
+                                session.ban_start_time = ban_info_global['start_time']
+                                session.ban_end_time = ban_info_global['end_time']
+                                session.ban_reason = ban_info_global['reason']
+                                session.question_limit_reached = True
+                                logger.info(f"🚫 Inherited active ban until {ban_info_global['end_time']}")
+                        else:
+                            # Check if this is a same-session upgrade (GUEST -> EMAIL_VERIFIED_GUEST)
+                            is_same_session_upgrade = (
+                                session.user_type == UserType.GUEST and # Was a guest just before this upgrade
+                                old_daily_count > 0 # And had asked questions in *this* guest session
+                            )
+                            
+                            if is_same_session_upgrade:
+                                logger.info(f"🔄 SAME SESSION UPGRADE: Preserving question count {old_daily_count} from GUEST to EMAIL_VERIFIED_GUEST for {session.session_id[:8]}")
+                                session.daily_question_count = old_daily_count
+                            else:
+                                # First time using this email (or no recent activity on this device) - true clean slate for a new email-verified guest
+                                logger.info(f"🆕 FIRST TIME EMAIL: {email_to_verify} gets fresh start as EMAIL_VERIFIED_GUEST.")
+                                session.daily_question_count = 0
+                                session.total_question_count = 0
+                                session.last_question_time = None
+                                session.question_limit_reached = False
+                                session.ban_status = BanStatus.NONE
+                                session.ban_start_time = None
+                                session.ban_end_time = None
+                                session.ban_reason = None
+                        
+                        session.login_method = 'email_verified'
+                        session.is_degraded_login = False
+                        session.degraded_login_timestamp = None
+
+                        logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email} with {session.daily_question_count} questions")
                     else:
+                        # User was upgraded to REGISTERED_USER by _check_and_upgrade_to_registered
                         logger.info(f"✅ User {session.session_id[:8]} restored to REGISTERED_USER status via email verification")
 
                 session.question_limit_reached = False
@@ -4140,13 +4225,14 @@ class SessionManager:
 
                 try:
                     self.db.save_session(session)
-                    # Sync based on the final, correct user type
+                    # Sync with other sessions based on the final user type
                     if session.user_type == UserType.REGISTERED_USER:
                         self.sync_registered_user_sessions(session.email, session.session_id)
                     elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
                         self.sync_email_verified_sessions(session.email, session.session_id)
+                        
                 except Exception as e:
-                    logger.error(f"Failed to save upgraded session: {e}")
+                    logger.error(f"Failed to save upgraded session: {e}", exc_info=True)
             
                 return {
                     'success': True,
@@ -4159,7 +4245,7 @@ class SessionManager:
                 }
             
         except Exception as e:
-            logger.error(f"Email code verification failed: {e}")
+            logger.error(f"Email code verification failed: {e}", exc_info=True)
             return {
                 'success': False,
                 'message': 'Verification failed. Please try again.'
