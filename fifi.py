@@ -3480,284 +3480,106 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Error checking manual CRM eligibility for {session.session_id[:8]}: {e}")
             return False
+# In fifi.py, inside the SessionManager class, replace the entire method with this one.
 
     def _attempt_fingerprint_inheritance(self, session: UserSession):
         """
-        Attempts to inherit session data with EMAIL as primary identifier for registered users.
-        For non-registered users, it uses fingerprint.
+        CORRECTED: Attempts to inherit session data by first finding all linked identities
+        (via fingerprint AND email) and then determining the absolute highest privilege level.
         """
-        logger.info(f"🔄 Attempting inheritance for session {session.session_id[:8]} (Type: {session.user_type.value}) with FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'}...")
+        logger.info(f"🔄 [CORRECTED LOGIC] Attempting inheritance for session {session.session_id[:8]} (FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'})...")
 
-        try:
-            # PRIORITY 1: For REGISTERED_USER, use EMAIL-based inheritance ONLY
-            if session.user_type == UserType.REGISTERED_USER and session.email:
-                logger.info(f"📧 Using EMAIL-based inheritance for registered user {session.email}")
-                
-                email_sessions = self.db.find_sessions_by_email(session.email)
-                email_sessions = [s for s in email_sessions if s.session_id != session.session_id]
-                
-                if email_sessions:
-                    # Find most recent session with same email to inherit counts from
-                    most_recent = max(email_sessions, key=lambda s: s.last_question_time or s.last_activity or s.created_at)
-                    
-                    now = datetime.now()
-                    if (most_recent.last_question_time and (now - most_recent.last_question_time) < DAILY_RESET_WINDOW) or \
-                       (not most_recent.last_question_time and most_recent.last_activity and (now - most_recent.last_activity) < DAILY_RESET_WINDOW):
-                        # Inherit counts
-                        session.daily_question_count = most_recent.daily_question_count
-                        session.total_question_count = max(session.total_question_count, most_recent.total_question_count)
-                        session.last_question_time = most_recent.last_question_time
-                        
-                        # NEW: Also inherit cycle information
-                        session.current_tier_cycle_id = most_recent.current_tier_cycle_id
-                        session.tier1_completed_in_cycle = most_recent.tier1_completed_in_cycle
-                        session.tier_cycle_started_at = most_recent.tier_cycle_started_at
+        # Guard clauses for registered users or sessions without a real fingerprint
+        if session.user_type == UserType.REGISTERED_USER:
+            logger.debug("Skipping fingerprint inheritance for an already registered user.")
+            return
+        if not session.fingerprint_id or session.fingerprint_id.startswith(("temp_", "fallback_")):
+            logger.info("No valid fingerprint yet, skipping inheritance.")
+            session.visitor_type = "new_visitor"
+            return
 
-                        # Inherit Zoho contact ID
-                        if not session.zoho_contact_id and most_recent.zoho_contact_id:
-                            session.zoho_contact_id = most_recent.zoho_contact_id
-                        
-                        logger.info(f"✅ REGISTERED_USER EMAIL inheritance successful: {most_recent.daily_question_count} questions from {most_recent.session_id[:8]}")
-                    else:
-                        session.daily_question_count = 0
-                        session.total_question_count = 0
-                        session.last_question_time = None
-                        # NEW: Reset cycle for an old session
-                        session.current_tier_cycle_id = str(uuid.uuid4())
-                        session.tier1_completed_in_cycle = False
-                        session.tier_cycle_started_at = datetime.now()
-                        logger.info(f"🕐 REGISTERED_USER Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count AND tier cycle")
-                else:
-                    session.daily_question_count = 0
-                    session.total_question_count = 0
-                    session.last_question_time = None
-                    # NEW: Always initialize cycle for a fresh start
-                    session.current_tier_cycle_id = str(uuid.uuid4())
-                    session.tier1_completed_in_cycle = False
-                    session.tier_cycle_started_at = datetime.now()
-                    logger.info(f"🆕 REGISTERED_USER no same-email history found, starting fresh (new tier cycle)")
-                
-                return
+        # --- STEP 1: GATHER ALL LINKED SESSIONS (Fingerprint + Email Cross-Check) ---
+        
+        # Find initial set of sessions linked by the current device's fingerprint
+        historical_fp_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+        
+        # Filter out the current session itself from the historical list
+        historical_fp_sessions = [s for s in historical_fp_sessions if s.session_id != session.session_id]
 
-            # PRIORITY 1.5: For EMAIL_VERIFIED_GUEST, also use EMAIL-based inheritance
-            elif session.user_type == UserType.EMAIL_VERIFIED_GUEST and session.email:
-                logger.info(f"📧 Using EMAIL-based inheritance for email-verified guest {session.email}")
-                
-                email_sessions = self.db.find_sessions_by_email(session.email)
-                email_sessions = [s for s in email_sessions if s.session_id != session.session_id]
-                
-                if email_sessions:
-                    # Find most recent session with same email to inherit counts from
-                    most_recent = max(email_sessions, key=lambda s: s.last_question_time or s.last_activity or s.created_at)
-                    
-                    now = datetime.now()
-                    if (most_recent.last_question_time and (now - most_recent.last_question_time) < DAILY_RESET_WINDOW):
-                        # Inherit counts
-                        session.daily_question_count = most_recent.daily_question_count
-                        session.total_question_count = max(session.total_question_count, most_recent.total_question_count)
-                        session.last_question_time = most_recent.last_question_time
-                        
-                        # Inherit ban if active
-                        if (most_recent.ban_status != BanStatus.NONE and 
-                            most_recent.ban_end_time and 
-                            most_recent.ban_end_time > now):
-                            session.ban_status = most_recent.ban_status
-                            session.ban_start_time = most_recent.ban_start_time
-                            session.ban_end_time = most_recent.ban_end_time
-                            session.ban_reason = most_recent.ban_reason
-                            session.question_limit_reached = True
-                        
-                        logger.info(f"✅ EMAIL_VERIFIED_GUEST EMAIL inheritance successful: {most_recent.daily_question_count} questions from {most_recent.session_id[:8]}")
-                    else:
-                        logger.info(f"🕐 EMAIL_VERIFIED_GUEST Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count")
-                        session.daily_question_count = 0
-                        session.last_question_time = None
-                
-                return  # Skip fingerprint-based inheritance for email-verified guests
+        if not historical_fp_sessions:
+            session.visitor_type = "new_visitor"
+            logger.info(f"Inheritance complete for new visitor {session.session_id[:8]}. No historical sessions found for fingerprint.")
+            session.reverification_pending = False
+            return
 
-            # PRIORITY 2: For non-registered users (Guest), use fingerprint
-            if not session.fingerprint_id or session.fingerprint_id.startswith(("temp_", "fallback_")):
-                logger.info("No valid fingerprint yet or temporary, skipping fingerprint-based inheritance for non-registered.")
-                session.visitor_type = "new_visitor"
-                return
+        session.visitor_type = "returning_visitor"
 
-            historical_fp_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
-            historical_fp_sessions = [s for s in historical_fp_sessions if s.session_id != session.session_id]
+        # From the fingerprint-linked sessions, extract all unique emails ever used on this device
+        unique_emails_from_fp = {s.email.lower() for s in historical_fp_sessions if s.email}
+        
+        # Now, broaden the search. For each email found, find ALL sessions associated with it,
+        # even if they have a different (or no) fingerprint. This is the crucial cross-check.
+        all_linked_sessions = list(historical_fp_sessions)
+        
+        for email in unique_emails_from_fp:
+            email_history = self.db.find_sessions_by_email(email)
+            for s in email_history:
+                # Add to our master list of all related sessions if it's not already there
+                if s.session_id not in {sess.session_id for sess in all_linked_sessions}:
+                    all_linked_sessions.append(s)
 
-            if not historical_fp_sessions:
-                session.visitor_type = "new_visitor"
-                logger.info(f"Inheritance complete for new visitor {session.session_id[:8]}. No historical sessions found for fingerprint.")
-                session.reverification_pending = False
-                session.pending_user_type = None
-                session.pending_email = None
-                session.pending_full_name = None
-                session.pending_zoho_contact_id = None
-                session.pending_wp_token = None
-                session.declined_recognized_email_at = None
-                return
+        # --- STEP 2: DETERMINE THE HIGHEST PRIVILEGE LEVEL from the complete list ---
 
-            session.visitor_type = "returning_visitor"
-            
-            current_email = session.email.lower() if session.email else None
-            
-            # Separate identity inheritance from count inheritance
-            all_sessions_for_identity = [session] + historical_fp_sessions
-            sessions_for_count_inheritance = []
-            
-            # UPDATED LOGIC: For count inheritance
-            if current_email:
-                # If current session has email, inherit from same email sessions
-                sessions_for_count_inheritance = [
-                    s for s in historical_fp_sessions 
-                    if s.email and s.email.lower() == current_email
-                ]
-            else:
-                # NEW: If current session is GUEST (no email), inherit from other GUEST sessions
-                sessions_for_count_inheritance = [
-                    s for s in historical_fp_sessions 
-                    if s.user_type == UserType.GUEST and not s.email
-                ]
-                logger.info(f"🎯 GUEST inheriting from {len(sessions_for_count_inheritance)} previous GUEST sessions with same fingerprint")
-            
-            # --- Initialize values for merging ---
-            merged_total_question_count = session.total_question_count
-            merged_last_question_time = session.last_question_time
-            merged_daily_question_count = session.daily_question_count
-            source_for_identity = session
-            most_recent_ban_session = None
+        highest_privilege_session = None
+        highest_level = -1
+
+        for s in all_linked_sessions:
+            current_level = self._get_privilege_level(s.user_type)
+            if current_level > highest_level:
+                highest_level = current_level
+                highest_privilege_session = s
+            # Tie-breaker: if levels are the same, prefer the one with the most recent activity
+            elif current_level == highest_level and highest_privilege_session:
+                s_activity = s.last_activity or s.created_at
+                hp_activity = highest_privilege_session.last_activity or highest_privilege_session.created_at
+                if s_activity > hp_activity:
+                    highest_privilege_session = s
+        
+        # --- STEP 3: SET THE CORRECT PENDING STATUS ---
+
+        if not highest_privilege_session or not highest_privilege_session.email:
+            logger.info("No privileged session with an email found in the entire history. Proceeding as a standard guest.")
+            return
+
+        # If the highest privilege found is better than a simple guest, set the session to reverify.
+        # This will correctly identify the REGISTERED_USER status from the WordPress session.
+        if self._get_privilege_level(highest_privilege_session.user_type) > self._get_privilege_level(UserType.GUEST):
+            logger.info(f"Highest privilege found: {highest_privilege_session.user_type.value} from session {highest_privilege_session.session_id[:8]}. Setting reverification.")
+            session.reverification_pending = True
+            session.pending_user_type = highest_privilege_session.user_type
+            session.pending_email = highest_privilege_session.email
+            session.pending_full_name = highest_privilege_session.full_name
+            session.pending_zoho_contact_id = highest_privilege_session.zoho_contact_id
+            session.pending_wp_token = highest_privilege_session.wp_token
+        else:
+            # The highest privilege was just another guest, so no reverification is needed.
+            session.reverification_pending = False
+            logger.info("Highest privilege found was GUEST. No reverification needed.")
+
+
+        # --- STEP 4: INHERIT COUNTS AND BANS (Sourced from the highest privilege session's history) ---
+        # This part ensures that question counts and ban status are also inherited correctly.
+        all_sessions_for_counts = [s for s in all_linked_sessions if s.email and s.email.lower() == highest_privilege_session.email.lower()]
+        most_recent_for_counts = max(all_sessions_for_counts, key=lambda s: s.last_question_time or s.created_at, default=None)
+
+        if most_recent_for_counts:
             now = datetime.now()
+            if (most_recent_for_counts.last_question_time and (now - most_recent_for_counts.last_question_time) < DAILY_RESET_WINDOW):
+                session.daily_question_count = most_recent_for_counts.daily_question_count
+                session.last_question_time = most_recent_for_counts.last_question_time
+                logger.info(f"Inherited daily count of {session.daily_question_count} from session {most_recent_for_counts.session_id[:8]}")
 
-            # --- Pass 1: Find the highest privilege identity from ALL sessions ---
-            unique_emails_in_history = set()
-            highest_user_type_seen = UserType.GUEST
-            
-            for s in all_sessions_for_identity:
-                if s.email:
-                    unique_emails_in_history.add(s.email.lower())
-
-                if self._get_privilege_level(s.user_type) > self._get_privilege_level(highest_user_type_seen):
-                    highest_user_type_seen = s.user_type
-
-                if self._get_privilege_level(s.user_type) > self._get_privilege_level(source_for_identity.user_type):
-                    source_for_identity = s
-                elif self._get_privilege_level(s.user_type) == self._get_privilege_level(source_for_identity.user_type):
-                    if s.last_activity and (not source_for_identity.last_activity or s.last_activity > source_for_identity.last_activity):
-                        source_for_identity = s
-
-            # --- Apply multiple email detection for recognition purposes ---
-            if len(unique_emails_in_history) > 1:
-                logger.info(f"🚨 Multiple emails ({len(unique_emails_in_history)}) detected for fingerprint - disabling explicit recognition prompt.")
-                session.recognition_response = "multiple_emails_detected"
-                session.reverification_pending = False
-                session.pending_user_type = None
-                session.pending_email = None
-                session.pending_full_name = None
-                session.pending_zoho_contact_id = None
-                session.pending_wp_token = None
-            
-            # --- User type precedence - always offer highest seen type ---
-            if highest_user_type_seen == UserType.REGISTERED_USER and session.user_type != UserType.REGISTERED_USER:
-                registered_session = next((s for s in all_sessions_for_identity if s.user_type == UserType.REGISTERED_USER), None)
-                if registered_session and registered_session.email:
-                    session.reverification_pending = True
-                    session.pending_user_type = UserType.REGISTERED_USER
-                    session.pending_email = registered_session.email
-                    session.pending_full_name = registered_session.full_name
-                    session.pending_zoho_contact_id = registered_session.zoho_contact_id
-                    session.pending_wp_token = registered_session.wp_token
-                    logger.info(f"🔄 Offering REGISTERED_USER re-verification for {session.session_id[:8]} (highest precedence)")
-                    return
-            
-            # --- Pass 2: Find ban and count info from appropriate sessions ---
-            for s in sessions_for_count_inheritance:
-                # Find the single most recent ban to evaluate
-                if s.ban_status != BanStatus.NONE and s.ban_end_time:
-                    if most_recent_ban_session is None or s.ban_end_time > most_recent_ban_session.ban_end_time:
-                        most_recent_ban_session = s
-                
-                # Merge total count and last question time
-                merged_total_question_count = max(merged_total_question_count, s.total_question_count)
-                if s.last_question_time and (not merged_last_question_time or s.last_question_time > merged_last_question_time):
-                    merged_last_question_time = s.last_question_time
-
-            # --- Pass 3: Determine daily count and ban status ---
-            ban_is_active = most_recent_ban_session and now < most_recent_ban_session.ban_end_time
-            
-            if ban_is_active:
-                logger.info(f"Inheritance: Found ACTIVE ban. Applying to session {session.session_id[:8]}.")
-                session.ban_status = most_recent_ban_session.ban_status
-                session.ban_start_time = most_recent_ban_session.ban_start_time
-                session.ban_end_time = most_recent_ban_session.ban_end_time
-                session.ban_reason = most_recent_ban_session.ban_reason
-                session.question_limit_reached = True
-                
-                # Find the max daily count from sessions within the reset window
-                for s in sessions_for_count_inheritance:
-                    if s.daily_question_count and s.last_question_time and (now - s.last_question_time < DAILY_RESET_WINDOW):
-                        merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
-            else:
-                logger.info(f"Inheritance: No active ban found. Evaluating question count reset.")
-                session.ban_status = BanStatus.NONE
-                session.ban_start_time = None
-                session.ban_end_time = None
-                session.ban_reason = None
-                session.question_limit_reached = False
-
-                # Check if the daily count should be reset based on last question time
-                if merged_last_question_time and (now - merged_last_question_time) < DAILY_RESET_WINDOW:
-                    # The last question was recent
-                    for s in sessions_for_count_inheritance:
-                        if s.daily_question_count and s.last_question_time and (now - s.last_question_time < DAILY_RESET_WINDOW):
-                            merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
-                    logger.info(f"✅ Inherited daily count: {merged_daily_question_count} from previous sessions")
-                else:
-                    logger.info(f"Inheritance: Last question time is > {DAILY_RESET_WINDOW_HOURS}h ago OR no questions. Resetting daily count to 0.")
-                    merged_daily_question_count = 0
-                    merged_last_question_time = None
-            
-            # --- Apply all merged and determined values to the current session ---
-            session.total_question_count = merged_total_question_count
-            session.daily_question_count = merged_daily_question_count
-            session.last_question_time = merged_last_question_time
-
-            # Apply identity (considering multiple emails and privilege levels)
-            if (len(unique_emails_in_history) <= 1 or 
-                self._get_privilege_level(source_for_identity.user_type) > self._get_privilege_level(session.user_type)):
-                
-                source_email = source_for_identity.email.lower() if source_for_identity.email else None
-                session_email = session.email.lower() if session.email else None
-                
-                if (not session_email or not source_email or source_email == session_email):
-                    if self._get_privilege_level(source_for_identity.user_type) > self._get_privilege_level(session.user_type):
-                        # Higher privilege found, set reverification pending
-                        session.reverification_pending = True
-                        session.pending_user_type = source_for_identity.user_type
-                        session.pending_email = source_for_identity.email
-                        session.pending_full_name = source_for_identity.full_name
-                        session.pending_zoho_contact_id = source_for_identity.zoho_contact_id
-                        session.pending_wp_token = source_for_identity.wp_token
-                        logger.info(f"🔄 Offering REGISTERED_USER re-verification for {session.session_id[:8]} (highest precedence)")
-                    else:
-                        # Same or lower privilege, just inherit the details if available
-                        session.user_type = source_for_identity.user_type
-                        session.email = source_for_identity.email
-                        session.full_name = source_for_identity.full_name
-                        session.zoho_contact_id = source_for_identity.zoho_contact_id
-                        session.wp_token = source_for_identity.wp_token
-                else:
-                    logger.info(f"Inheritance: Identity not transferred due to email mismatch: source={source_email}, session={session_email}")
-            else:
-                logger.info(f"Inheritance: Identity not fully transferred due to multiple emails and no privilege upgrade for {session.session_id[:8]}.")
-
-            # Update fingerprint if necessary
-            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and not source_for_identity.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                session.fingerprint_id = source_for_identity.fingerprint_id
-                session.fingerprint_method = source_for_identity.fingerprint_method
-            
-            logger.info(f"✅ Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}")
-
-        except Exception as e:
-            logger.error(f"Error during fingerprint inheritance for session {session.session_id[:8]}: {e}", exc_info=True)
+        logger.info(f"✅ Inheritance complete for {session.session_id[:8]}. Pending status set to: {session.pending_user_type.value if session.reverification_pending else 'None'}")
         
     def get_session(self) -> Optional[UserSession]:
         """Gets or creates the current user session with enhanced validation."""
