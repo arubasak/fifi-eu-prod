@@ -3484,102 +3484,185 @@ class SessionManager:
 
     def _attempt_fingerprint_inheritance(self, session: UserSession):
         """
-        CORRECTED: Attempts to inherit session data by first finding all linked identities
-        (via fingerprint AND email) and then determining the absolute highest privilege level.
+        CORRECTED & COMPLETE: Attempts to inherit session data by first finding all linked identities
+        (via fingerprint AND email) and then determining the absolute highest privilege level
+        for the current session, setting reverification pending status accordingly.
         """
-        logger.info(f"🔄 [CORRECTED LOGIC] Attempting inheritance for session {session.session_id[:8]} (FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'})...")
+        logger.info(f"🔄 [CORRECTED LOGIC] Attempting fingerprint inheritance for session {session.session_id[:8]} (Type: {session.user_type.value}, FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'})...")
 
-        # Guard clauses for registered users or sessions without a real fingerprint
+        # Guard clauses: No need for inheritance if already a registered user
         if session.user_type == UserType.REGISTERED_USER:
-            logger.debug("Skipping fingerprint inheritance for an already registered user.")
-            return
-        if not session.fingerprint_id or session.fingerprint_id.startswith(("temp_", "fallback_")):
-            logger.info("No valid fingerprint yet, skipping inheritance.")
-            session.visitor_type = "new_visitor"
+            logger.debug(f"Session {session.session_id[:8]} is already REGISTERED_USER. Skipping fingerprint inheritance.")
             return
 
-        # --- STEP 1: GATHER ALL LINKED SESSIONS (Fingerprint + Email Cross-Check) ---
+        # If session has no real fingerprint yet, it can't be used to find related history (other than itself).
+        # We also want to skip if it's a temporary Python fallback FP.
+        if not session.fingerprint_id or session.fingerprint_id.startswith(("temp_", "fallback_", "temp_py_")):
+            session.visitor_type = "new_visitor"
+            session.reverification_pending = False
+            session.pending_user_type = None
+            session.pending_email = None
+            session.pending_full_name = None
+            session.pending_zoho_contact_id = None
+            session.pending_wp_token = None
+            session.declined_recognized_email_at = None
+            logger.debug(f"Session {session.session_id[:8]} has no stable fingerprint. No historical inheritance possible yet.")
+            return
+
+        # --- STEP 1: GATHER ALL POTENTIALLY LINKED SESSIONS (via Fingerprint AND Email Cross-Check) ---
         
-        # Find initial set of sessions linked by the current device's fingerprint
+        # Start with sessions linked by the current device's fingerprint (includes inactive ones)
         historical_fp_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
         
-        # Filter out the current session itself from the historical list
-        historical_fp_sessions = [s for s in historical_fp_sessions if s.session_id != session.session_id]
-
-        if not historical_fp_sessions:
-            session.visitor_type = "new_visitor"
-            logger.info(f"Inheritance complete for new visitor {session.session_id[:8]}. No historical sessions found for fingerprint.")
-            session.reverification_pending = False
-            return
-
-        session.visitor_type = "returning_visitor"
-
-        # From the fingerprint-linked sessions, extract all unique emails ever used on this device
+        # Collect all unique emails from these fingerprint-linked sessions
         unique_emails_from_fp = {s.email.lower() for s in historical_fp_sessions if s.email}
         
-        # Now, broaden the search. For each email found, find ALL sessions associated with it,
-        # even if they have a different (or no) fingerprint. This is the crucial cross-check.
-        all_linked_sessions = list(historical_fp_sessions)
+        # Now, broaden the search: find ALL sessions associated with these emails,
+        # even if they have a different (or no) fingerprint (e.g., WordPress sessions).
+        all_related_sessions = list(historical_fp_sessions) # Start with FP-matched sessions
         
         for email in unique_emails_from_fp:
             email_history = self.db.find_sessions_by_email(email)
             for s in email_history:
-                # Add to our master list of all related sessions if it's not already there
-                if s.session_id not in {sess.session_id for sess in all_linked_sessions}:
-                    all_linked_sessions.append(s)
+                # Add to our master list of all related sessions if it's not already present
+                if s.session_id not in {sess.session_id for sess in all_related_sessions}:
+                    all_related_sessions.append(s)
 
-        # --- STEP 2: DETERMINE THE HIGHEST PRIVILEGE LEVEL from the complete list ---
+        # Remove the current session itself from the list used for *finding* inheritance,
+        # but keep it in consideration for potentially having the highest current state.
+        all_related_sessions = [s for s in all_related_sessions if s.session_id != session.session_id]
 
-        highest_privilege_session = None
-        highest_level = -1
-
-        for s in all_linked_sessions:
-            current_level = self._get_privilege_level(s.user_type)
-            if current_level > highest_level:
-                highest_level = current_level
-                highest_privilege_session = s
-            # Tie-breaker: if levels are the same, prefer the one with the most recent activity
-            elif current_level == highest_level and highest_privilege_session:
-                s_activity = s.last_activity or s.created_at
-                hp_activity = highest_privilege_session.last_activity or highest_privilege_session.created_at
-                if s_activity > hp_activity:
-                    highest_privilege_session = s
+        if not all_related_sessions:
+            session.visitor_type = "new_visitor"
+            session.reverification_pending = False
+            session.pending_user_type = None
+            session.pending_email = None
+            session.pending_full_name = None
+            session.pending_zoho_contact_id = None
+            session.pending_wp_token = None
+            session.declined_recognized_email_at = None
+            logger.info(f"Inheritance complete for new visitor {session.session_id[:8]}. No historical data found.")
+            return
         
-        # --- STEP 3: SET THE CORRECT PENDING STATUS ---
+        session.visitor_type = "returning_visitor"
 
-        if not highest_privilege_session or not highest_privilege_session.email:
-            logger.info("No privileged session with an email found in the entire history. Proceeding as a standard guest.")
+        # --- STEP 2: DETERMINE THE HIGHEST PRIVILEGE LEVEL AND BEST CANDIDATE SESSION ---
+
+        highest_privilege_candidate = None
+        highest_level = self._get_privilege_level(session.user_type) # Start with current session's level
+
+        # Prioritize explicit "declined_recognized_email_at" if recent
+        if session.declined_recognized_email_at and (now - session.declined_recognized_email_at) < timedelta(minutes=60): # Example: within 1 hour
+            # If user explicitly declined recently, don't immediately re-offer the old identity.
+            # They should proceed as a guest and be prompted when they hit limits or manually verify.
+            session.reverification_pending = False
+            session.pending_user_type = None
+            session.pending_email = None
+            session.pending_full_name = None
+            session.pending_zoho_contact_id = None
+            session.pending_wp_token = None
+            logger.info(f"Session {session.session_id[:8]}: User recently declined recognition. Proceeding as current guest.")
             return
 
-        # If the highest privilege found is better than a simple guest, set the session to reverify.
-        # This will correctly identify the REGISTERED_USER status from the WordPress session.
-        if self._get_privilege_level(highest_privilege_session.user_type) > self._get_privilege_level(UserType.GUEST):
-            logger.info(f"Highest privilege found: {highest_privilege_session.user_type.value} from session {highest_privilege_session.session_id[:8]}. Setting reverification.")
+        for s in all_related_sessions:
+            current_s_level = self._get_privilege_level(s.user_type)
+            if current_s_level > highest_level:
+                highest_level = current_s_level
+                highest_privilege_candidate = s
+            # Tie-breaker: if levels are the same, prefer the one with the most recent activity
+            elif current_s_level == highest_level and highest_privilege_candidate:
+                s_activity = s.last_activity or s.created_at
+                hpc_activity = highest_privilege_candidate.last_activity or highest_privilege_candidate.created_at
+                if s_activity and hpc_activity and s_activity > hpc_activity:
+                    highest_privilege_candidate = s
+                elif not hpc_activity and s_activity: # If current candidate has no activity, and s does
+                     highest_privilege_candidate = s
+
+        # --- STEP 3: SET THE CURRENT SESSION'S PENDING STATUS BASED ON HIGHEST CANDIDATE ---
+
+        if highest_privilege_candidate and highest_privilege_candidate.email and \
+           self._get_privilege_level(highest_privilege_candidate.user_type) > self._get_privilege_level(UserType.GUEST):
+            
+            logger.info(f"Session {session.session_id[:8]}: Detected higher privilege: {highest_privilege_candidate.user_type.value} for {highest_privilege_candidate.email}. Setting reverification pending.")
             session.reverification_pending = True
-            session.pending_user_type = highest_privilege_session.user_type
-            session.pending_email = highest_privilege_session.email
-            session.pending_full_name = highest_privilege_session.full_name
-            session.pending_zoho_contact_id = highest_privilege_session.zoho_contact_id
-            session.pending_wp_token = highest_privilege_session.wp_token
+            session.pending_user_type = highest_privilege_candidate.user_type
+            session.pending_email = highest_privilege_candidate.email
+            session.pending_full_name = highest_privilege_candidate.full_name
+            session.pending_zoho_contact_id = highest_privilege_candidate.zoho_contact_id
+            session.pending_wp_token = highest_privilege_candidate.wp_token
+            # Clear declined_recognized_email_at if a higher account is now being offered again
+            session.declined_recognized_email_at = None
+
+            # Optional: If the highest privileged session has a fingerprint, and the current session
+            # is still using a temporary one, update the current session's fingerprint immediately
+            # for faster future recognition. This helps merge device identities over time.
+            if highest_privilege_candidate.fingerprint_id and \
+               not highest_privilege_candidate.fingerprint_id.startswith(("temp_", "fallback_", "not_collected_")) and \
+               session.fingerprint_id.startswith(("temp_", "fallback_", "temp_py_")):
+                session.fingerprint_id = highest_privilege_candidate.fingerprint_id
+                session.fingerprint_method = highest_privilege_candidate.fingerprint_method
+                logger.info(f"Session {session.session_id[:8]}: Updated temporary fingerprint to {session.fingerprint_id[:8]} from highest privilege candidate.")
+
         else:
-            # The highest privilege was just another guest, so no reverification is needed.
             session.reverification_pending = False
-            logger.info("Highest privilege found was GUEST. No reverification needed.")
+            session.pending_user_type = None
+            session.pending_email = None
+            session.pending_full_name = None
+            session.pending_zoho_contact_id = None
+            session.pending_wp_token = None
+            logger.debug(f"Session {session.session_id[:8]}: No higher privilege found for reverification. Cleared pending status.")
+
+        # --- STEP 4: INHERIT COUNTS AND BANS (from the best available historical session, if applicable) ---
+        # This needs to be done carefully, considering the DAILY_RESET_WINDOW
+        
+        # Find the best session for inheriting *counts and bans* specifically, which might not be the
+        # same as the `highest_privilege_candidate` if that one is very old and its counts have reset.
+        best_session_for_current_counts = None
+        current_max_daily_count = session.daily_question_count # Start with current session's count
+        
+        for s in all_related_sessions:
+            # Check for recency within the daily reset window AND matching email
+            if s.email and highest_privilege_candidate and s.email.lower() == highest_privilege_candidate.email.lower():
+                if s.last_question_time and (now - s.last_question_time) < DAILY_RESET_WINDOW:
+                    if s.daily_question_count > current_max_daily_count:
+                        current_max_daily_count = s.daily_question_count
+                        best_session_for_current_counts = s
+                
+                # Always track highest total questions (across reset windows) and ban status
+                session.total_question_count = max(session.total_question_count, s.total_question_count)
+                if (s.ban_status != BanStatus.NONE and s.ban_end_time and s.ban_end_time > now):
+                    # Inherit active ban if found
+                    session.ban_status = s.ban_status
+                    session.ban_start_time = s.ban_start_time
+                    session.ban_end_time = s.ban_end_time
+                    session.ban_reason = s.ban_reason
+                    session.question_limit_reached = True
+                    # Inherit cycle info with the ban
+                    session.current_tier_cycle_id = s.current_tier_cycle_id
+                    session.tier1_completed_in_cycle = s.tier1_completed_in_cycle
+                    session.tier_cycle_started_at = s.tier_cycle_started_at
+                    logger.info(f"Session {session.session_id[:8]}: Inherited active ban from session {s.session_id[:8]}.")
+        
+        # Apply the determined daily count and last question time
+        session.daily_question_count = current_max_daily_count
+        if best_session_for_current_counts and best_session_for_current_counts.last_question_time:
+            session.last_question_time = best_session_for_current_counts.last_question_time
+            # Also inherit tier cycle info if we're inheriting recent counts
+            session.current_tier_cycle_id = best_session_for_current_counts.current_tier_cycle_id
+            session.tier1_completed_in_cycle = best_session_for_current_counts.tier1_completed_in_cycle
+            session.tier_cycle_started_at = best_session_for_current_counts.tier_cycle_started_at
+        elif not session.last_question_time: # If no inherited last_question_time, ensure it's None for fresh start
+            session.daily_question_count = 0 # Reset daily if no recent activity found to inherit
+            session.last_question_time = None
+            # Reset cycle if no active cycle inherited
+            if not session.current_tier_cycle_id:
+                session.current_tier_cycle_id = str(uuid.uuid4())
+                session.tier1_completed_in_cycle = False
+                session.tier_cycle_started_at = now
+                logger.info(f"Session {session.session_id[:8]}: New tier cycle started due to no recent inherited activity.")
 
 
-        # --- STEP 4: INHERIT COUNTS AND BANS (Sourced from the highest privilege session's history) ---
-        # This part ensures that question counts and ban status are also inherited correctly.
-        all_sessions_for_counts = [s for s in all_linked_sessions if s.email and s.email.lower() == highest_privilege_session.email.lower()]
-        most_recent_for_counts = max(all_sessions_for_counts, key=lambda s: s.last_question_time or s.created_at, default=None)
-
-        if most_recent_for_counts:
-            now = datetime.now()
-            if (most_recent_for_counts.last_question_time and (now - most_recent_for_counts.last_question_time) < DAILY_RESET_WINDOW):
-                session.daily_question_count = most_recent_for_counts.daily_question_count
-                session.last_question_time = most_recent_for_counts.last_question_time
-                logger.info(f"Inherited daily count of {session.daily_question_count} from session {most_recent_for_counts.session_id[:8]}")
-
-        logger.info(f"✅ Inheritance complete for {session.session_id[:8]}. Pending status set to: {session.pending_user_type.value if session.reverification_pending else 'None'}")
+        logger.info(f"✅ Final inheritance status for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}, pending_type={session.pending_user_type.value if session.pending_user_type else 'None'}, declined_at={session.declined_recognized_email_at}")
         
     def get_session(self) -> Optional[UserSession]:
         """Gets or creates the current user session with enhanced validation."""
