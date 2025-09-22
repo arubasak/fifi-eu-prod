@@ -4341,6 +4341,7 @@ class SessionManager:
         Now prioritizes inheriting question counts from the current in-memory guest session
         before checking the database, preventing race conditions, and fully preserving
         all ban, reset, and tier cycle inheritance logic from the original method.
+        Includes extensive debug logging for question count inheritance.
         """
         if not self.config.WORDPRESS_URL:
             st.error("WordPress authentication is not configured. Please contact support.")
@@ -4383,6 +4384,9 @@ class SessionManager:
                     current_session = self.get_session()
                     now = datetime.now()
                     
+                    logger.debug(f"DEBUG AUTH: --- Start authenticate_with_wordpress for session {current_session.session_id[:8]} ---")
+                    logger.debug(f"DEBUG AUTH: Initial current_session (from get_session) daily_q: {current_session.daily_question_count}, total_q: {current_session.total_question_count}, last_q_time: {current_session.last_question_time}")
+
                     # --- START OF THE CRITICAL FIX (for question count inheritance) ---
                     # 1. Capture question counts from the CURRENT in-memory session.
                     # This is the most up-to-date information before DB queries might overwrite it with older data.
@@ -4391,10 +4395,12 @@ class SessionManager:
                     inherited_last_question_time_from_current_session = None
                     
                     if current_session.user_type == UserType.GUEST and current_session.daily_question_count > 0:
-                        logger.info(f"Prioritizing inheritance from active in-memory guest session {current_session.session_id[:8]} (Daily: {current_session.daily_question_count}).")
+                        logger.debug(f"DEBUG AUTH: Capturing from in-memory guest: daily={current_session.daily_question_count}, total={current_session.total_question_count}")
                         inherited_daily_count_from_current_session = current_session.daily_question_count
                         inherited_total_count_from_current_session = current_session.total_question_count
                         inherited_last_question_time_from_current_session = current_session.last_question_time
+                    else:
+                        logger.debug(f"DEBUG AUTH: In-memory guest count is 0 or not a guest ({current_session.user_type.value}).")
                     # --- END OF THE CRITICAL FIX ---
 
                     # --- Original logic for database-based inheritance and ban checks ---
@@ -4425,59 +4431,84 @@ class SessionManager:
                         
                         if sorted_sessions:
                             most_recent_db_session_for_counts_and_cycle = sorted_sessions[0]
+                            logger.debug(f"DEBUG AUTH: Most recent DB session for counts: {most_recent_db_session_for_counts_and_cycle.session_id[:8]} daily_q: {most_recent_db_session_for_counts_and_cycle.daily_question_count}, last_q_time: {most_recent_db_session_for_counts_and_cycle.last_question_time}")
                         
                         # Find any session with an ACTIVE ban
                         for sess in sorted_sessions:
-                            if (sess.ban_status != BanStatus.NONE and 
-                                sess.ban_end_time and 
-                                sess.ban_end_time > now):
+                            if (sess.ban_status != BanStatus.NONE and sess.ban_end_time and sess.ban_end_time > now):
                                 most_recent_ban_session = sess
-                                logger.info(f"Found active ban in session {sess.session_id[:8]}: {sess.ban_status.value} until {sess.ban_end_time}.")
+                                logger.info(f"DEBUG AUTH: Found active ban in session {sess.session_id[:8]}: {sess.ban_status.value} until {sess.ban_end_time}.")
                                 break
-                    
+                    else:
+                        logger.debug("DEBUG AUTH: No historical email sessions found in DB.")
+
                     # --- Aggregate Question Counts and Last Activity ---
                     # Start with counts from the current in-memory session (our fix)
                     final_daily_count = inherited_daily_count_from_current_session
                     final_total_count = inherited_total_count_from_current_session
                     final_last_question_time = inherited_last_question_time_from_current_session
                     
+                    logger.debug(f"DEBUG AUTH: final_daily_count initialized to in-memory guest count: {final_daily_count}")
+
                     # Now compare with database history for same email, respecting DAILY_RESET_WINDOW
                     if most_recent_db_session_for_counts_and_cycle:
                         db_time_check = most_recent_db_session_for_counts_and_cycle.last_question_time or \
                                         most_recent_db_session_for_counts_and_cycle.last_activity or \
                                         most_recent_db_session_for_counts_and_cycle.created_at
                         
-                        if db_time_check and (now - db_time_check) < DAILY_RESET_WINDOW:
+                        time_diff = now - db_time_check if db_time_check else timedelta.max
+                        logger.debug(f"DEBUG AUTH: Time difference to DB session ({most_recent_db_session_for_counts_and_cycle.session_id[:8]}): {time_diff} (DAILY_RESET_WINDOW: {DAILY_RESET_WINDOW})")
+
+                        if db_time_check and time_diff < DAILY_RESET_WINDOW:
                             # If DB session is more recent AND has a higher daily count
                             if most_recent_db_session_for_counts_and_cycle.daily_question_count > final_daily_count:
+                                logger.info(f"DEBUG AUTH: Inherited higher daily count ({most_recent_db_session_for_counts_and_cycle.daily_question_count}) from DB session {most_recent_db_session_for_counts_and_cycle.session_id[:8]} (email: {user_email}).")
                                 final_daily_count = most_recent_db_session_for_counts_and_cycle.daily_question_count
                                 final_last_question_time = most_recent_db_session_for_counts_and_cycle.last_question_time
                                 # Also inherit cycle info from this session
                                 current_session.current_tier_cycle_id = most_recent_db_session_for_counts_and_cycle.current_tier_cycle_id
                                 current_session.tier1_completed_in_cycle = most_recent_db_session_for_counts_and_cycle.tier1_completed_in_cycle
                                 current_session.tier_cycle_started_at = most_recent_db_session_for_counts_and_cycle.tier_cycle_started_at
-                                logger.info(f"✅ Email-based inheritance: Inherited higher daily count ({final_daily_count}) from DB session {most_recent_db_session_for_counts_and_cycle.session_id[:8]} (email: {user_email}).")
                             else:
                                 # DB session is recent but current session has equal or higher count, so use current_session's already set count
-                                logger.info(f"DB session {most_recent_db_session_for_counts_and_cycle.session_id[:8]} is recent but current session's count ({final_daily_count}) is higher/equal. No change to daily count.")
+                                logger.debug(f"DEBUG AUTH: DB session is recent but current session's count ({final_daily_count}) is higher/equal. No change to daily count from DB.")
                         else:
-                            # DB session is old, reset daily count (unless current session had recent activity)
+                            logger.debug("DEBUG AUTH: DB session is outside DAILY_RESET_WINDOW or has no time check. Checking in-memory.")
+                            # If no recent DB activity and no recent in-memory activity, then reset
                             if not final_last_question_time or (now - final_last_question_time) >= DAILY_RESET_WINDOW:
-                                logger.info(f"🕐 DB email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count AND tier cycle for fresh start.")
+                                logger.info(f"DEBUG AUTH: Resetting daily count to 0 for fresh start as no recent activity found to inherit (DB or in-memory).")
                                 final_daily_count = 0
                                 final_last_question_time = None
-                    
+                                # Reset cycle here too for a truly fresh start
+                                current_session.current_tier_cycle_id = str(uuid.uuid4()) 
+                                current_session.tier1_completed_in_cycle = False
+                                current_session.tier_cycle_started_at = now
+                    else:
+                        logger.debug("DEBUG AUTH: No most_recent_db_session_for_counts_and_cycle found.")
+                        # If no DB history and no recent in-memory activity, reset
+                        if not final_last_question_time or (now - final_last_question_time) >= DAILY_RESET_WINDOW:
+                            logger.info(f"DEBUG AUTH: Resetting daily count to 0 as no historical DB or recent in-memory activity found.")
+                            final_daily_count = 0
+                            final_last_question_time = None
+                            # Reset cycle here too for a truly fresh start
+                            current_session.current_tier_cycle_id = str(uuid.uuid4())
+                            current_session.tier1_completed_in_cycle = False
+                            current_session.tier_cycle_started_at = now
+
                     # Update current_session with the determined final counts
                     current_session.daily_question_count = final_daily_count
                     current_session.total_question_count = max(current_session.total_question_count, final_total_count) # Total count always takes max
                     current_session.last_question_time = final_last_question_time
                     
-                    # If no cycle info was inherited or reset, initialize a new one for REGISTERED_USER
+                    logger.debug(f"DEBUG AUTH: Final daily_question_count after aggregation: {current_session.daily_question_count}")
+
+                    # If no cycle info was inherited from DB or reset above (e.g., if only in-memory counts were higher), initialize a new one.
+                    # This ensures a registered user always has a valid tier cycle ID.
                     if not current_session.current_tier_cycle_id or not current_session.tier_cycle_started_at:
                         current_session.current_tier_cycle_id = str(uuid.uuid4())
                         current_session.tier1_completed_in_cycle = False
                         current_session.tier_cycle_started_at = now
-                        logger.info(f"🆕 Initializing new tier cycle for {user_email} as no active cycle found to inherit.")
+                        logger.info(f"DEBUG AUTH: Initializing new tier cycle for {user_email} as no active cycle found/inherited.")
 
 
                     # --- Inherit active BAN status ---
@@ -4491,14 +4522,14 @@ class SessionManager:
                         current_session.current_tier_cycle_id = most_recent_ban_session.current_tier_cycle_id
                         current_session.tier1_completed_in_cycle = most_recent_ban_session.tier1_completed_in_cycle
                         current_session.tier_cycle_started_at = most_recent_ban_session.tier_cycle_started_at
-                        logger.info(f"✅ Inherited active ban: {current_session.ban_status.value} until {current_session.ban_end_time}.")
+                        logger.info(f"DEBUG AUTH: Inherited active ban: {current_session.ban_status.value} until {current_session.ban_end_time}.")
                     
                     # Also inherit Zoho contact ID if available from any session
                     if not current_session.zoho_contact_id:
                         for sess in all_email_sessions:
                             if sess.zoho_contact_id:
                                 current_session.zoho_contact_id = sess.zoho_contact_id
-                                logger.info(f"Inherited Zoho contact ID from session {sess.session_id[:8]}.")
+                                logger.info(f"DEBUG AUTH: Inherited Zoho contact ID from session {sess.session_id[:8]}.")
                                 break
 
                     # Clear evasion tracking (always cleared on successful login)
@@ -4536,16 +4567,18 @@ class SessionManager:
                     # Save the updated session
                     try:
                         self.db.save_session(current_session)
+                        logger.info(f"DEBUG AUTH: Session {current_session.session_id[:8]} saved after WordPress login. Final daily_q: {current_session.daily_question_count}.")
                         logger.info(f"✅ REGISTERED_USER setup complete: {user_email}, {current_session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT} questions. Chat enabled immediately.")
                         
                         # Sync all other active sessions for this registered user
                         self.sync_registered_user_sessions(user_email, current_session.session_id)
 
                     except Exception as e:
-                        logger.error(f"Failed to save authenticated session: {e}", exc_info=True)
+                        logger.error(f"DEBUG AUTH: Failed to save authenticated session {current_session.session_id[:8]}: {e}", exc_info=True)
                         st.error("Authentication succeeded but session could not be saved. Please try again.")
                         return None
                     
+                    logger.debug(f"DEBUG AUTH: --- End authenticate_with_wordpress for session {current_session.session_id[:8]} ---")
                     return current_session
                 else:
                     logger.error(f"WordPress authentication successful (status 200) but missing token or email in response. Response: {data}")
@@ -4589,8 +4622,7 @@ class SessionManager:
                 "Authentication Error",
                 "An unexpected error occurred during authentication. Please try again later.",
                 username
-            )
-                                        
+            )                                    
     ## END <<<<<<<<<<<<<<<< REPLACEMENT 2 OF 3
 
     def _handle_wordpress_error_with_fallback(self, error_type: str, error_message: str, username: str) -> Optional[UserSession]:
