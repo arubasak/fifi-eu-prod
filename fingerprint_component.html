@@ -33,6 +33,12 @@
     <div id="fingerprint-display" class="hidden"></div>
 
     <script>
+        // Check Streamlit availability
+        console.log('Streamlit object available:', typeof window.Streamlit);
+        if (window.Streamlit) {
+            console.log('Streamlit methods:', Object.keys(window.Streamlit));
+        }
+        
         // Disable service worker to prevent CreepJS error
         if ('serviceWorker' in navigator) {
             delete navigator.serviceWorker;
@@ -253,6 +259,9 @@
         
         // Send fingerprint to parent
         function sendFingerprintToParent(fingerprint) {
+            log('📤 Sending fingerprint to communication channels...');
+            
+            // Send to parent window
             if (window.parent && window.parent !== window) {
                 window.parent.postMessage({
                     type: 'fingerprint',
@@ -260,10 +269,10 @@
                     timestamp: Date.now(),
                     session: sessionId
                 }, '*');
-                log('📤 Fingerprint sent to parent:', fingerprint);
+                log('📤 Fingerprint sent to parent window:', fingerprint);
             }
             
-            // Also send to Streamlit if available
+            // Send to Streamlit
             if (window.Streamlit) {
                 window.Streamlit.setComponentValue({
                     fingerprint: fingerprint,
@@ -271,40 +280,69 @@
                     session: sessionId
                 });
                 log('📤 Fingerprint sent to Streamlit:', fingerprint);
+            } else {
+                log('⚠️ Streamlit not available!');
             }
         }
         
         // Load CreepJS
         async function loadCreepJS() {
-            try {
-                updateStatus('Loading CreepJS library...');
-                const script = document.createElement('script');
-                script.src = 'https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js';
-                script.onload = () => log('✅ CreepJS loaded successfully');
-                script.onerror = () => log('❌ CreepJS load error');
-                document.head.appendChild(script);
-            } catch (error) {
-                log('❌ Failed to load CreepJS:', error);
-            }
+            return new Promise((resolve, reject) => {
+                try {
+                    updateStatus('Loading CreepJS library...');
+                    const script = document.createElement('script');
+                    script.src = 'https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js';
+                    script.onload = () => {
+                        log('✅ CreepJS loaded successfully');
+                        resolve();
+                    };
+                    script.onerror = (error) => {
+                        log('❌ CreepJS load error:', error);
+                        reject(error);
+                    };
+                    document.head.appendChild(script);
+                } catch (error) {
+                    log('❌ Failed to load CreepJS:', error);
+                    reject(error);
+                }
+            });
         }
+        
+        // Check functions are defined
+        console.log('Function check:');
+        console.log('- detectFingerprint:', typeof detectFingerprint);
+        console.log('- generateFallbackFingerprint:', typeof generateFallbackFingerprint);
+        console.log('- sendFingerprintToParent:', typeof sendFingerprintToParent);
+        console.log('- loadCreepJS:', typeof loadCreepJS);
         
         // Main execution
         (async function main() {
+            console.log('1️⃣ Main function started');
             try {
                 // Load CreepJS
+                console.log('2️⃣ About to load CreepJS');
                 await loadCreepJS();
                 
                 // Wait a bit for CreepJS to initialize
+                console.log('3️⃣ CreepJS loaded, waiting 1 second');
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 
                 // Detect fingerprint
+                console.log('4️⃣ About to call detectFingerprint()');
                 const fingerprint = await detectFingerprint();
+                console.log('5️⃣ detectFingerprint returned:', fingerprint);
                 
                 // Display result
                 const displayEl = document.getElementById('fingerprint-display');
-                displayEl.textContent = `Fingerprint: ${fingerprint}`;
-                displayEl.classList.remove('hidden');
+                if (displayEl) {
+                    displayEl.textContent = `Fingerprint: ${fingerprint}`;
+                    displayEl.classList.remove('hidden');
+                    console.log('6️⃣ Updated display element');
+                } else {
+                    console.error('❌ Display element not found!');
+                }
                 
+                // Update status
                 if (fingerprint.startsWith('fallback-')) {
                     updateStatus('✓ Fingerprint generated (fallback method)', 'warning');
                 } else if (fingerprint.startsWith('error-')) {
@@ -312,15 +350,18 @@
                 } else {
                     updateStatus('✓ Fingerprint detected successfully', 'success');
                 }
+                console.log('7️⃣ Updated status');
                 
                 // Send to parent
+                console.log('8️⃣ About to send fingerprint to parent');
                 sendFingerprintToParent(fingerprint);
                 
                 // Log final result
-                log('🎉 Final fingerprint:', fingerprint);
+                console.log('9️⃣ 🎉 Final fingerprint:', fingerprint);
                 
             } catch (error) {
-                log('❌ Critical error:', error);
+                console.error('❌ Critical error in main():', error);
+                console.error('Stack trace:', error.stack);
                 updateStatus('Failed to generate fingerprint', 'error');
                 
                 // Send error fingerprint
@@ -328,6 +369,21 @@
                 sendFingerprintToParent(errorFingerprint);
             }
         })();
+        
+        // Backup execution in case main() fails
+        setTimeout(() => {
+            console.log('⏰ Backup check after 5 seconds');
+            const displayEl = document.getElementById('fingerprint-display');
+            if (!displayEl || !displayEl.textContent.includes('Fingerprint:')) {
+                console.error('❗ Fingerprint not detected after 5 seconds, forcing detection');
+                detectFingerprint().then(fp => {
+                    console.log('Backup detection result:', fp);
+                    sendFingerprintToParent(fp);
+                }).catch(error => {
+                    console.error('Backup detection failed:', error);
+                });
+            }
+        }, 5000);
         
         // Listen for parent requests
         window.addEventListener('message', (event) => {
