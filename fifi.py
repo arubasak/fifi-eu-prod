@@ -31,6 +31,7 @@ from collections import defaultdict
 import requests
 import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript # Keep st_javascript for activity tracker
+import asyncio # NEW: Import asyncio
 
 # NEW: Import StreamlitSecretNotFoundError for robust secret handling
 from streamlit.errors import StreamlitSecretNotFoundError
@@ -2848,10 +2849,7 @@ class EnhancedAI:
     
     @handle_api_errors("AI System", "Get Response", show_to_user=True)
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """
-        AI response flow that prioritizes Pinecone and adheres to strict business rules for fallback.
-        Now includes direct Tavily routing for recency questions.
-        """
+        """Gets AI response and manages session state with a corrected processing pipeline."""
         def _convert_to_langchain_format(history: List[Dict]) -> List[BaseMessage]:
             langchain_history_converted = []
             if history:
@@ -3500,13 +3498,19 @@ class SessionManager:
                     
                         ban_type = limit_check.get('ban_type', 'unknown')
                         message = limit_check.get('message', 'Access restricted due to usage policy.')
-                        time_remaining = limit_check.get('time_remaining')
-                    
+                        time_remaining = limit_check.get('time_until_next') # time_until_next is an int (seconds) from RateLimiter or timedelta from QuestionLimitManager
+
                         st.error(f"🚫 **Access Restricted**")
-                        if time_remaining:
+                        # Handle time_remaining based on its type
+                        if isinstance(time_remaining, timedelta):
                             hours = max(0, int(time_remaining.total_seconds() // 3600))
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
+                        elif isinstance(time_remaining, (int, float)):
+                            hours = max(0, int(time_remaining // 3600))
+                            minutes = int((time_remaining % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+
                         st.info(message)
                         logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
                 
@@ -4496,6 +4500,873 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to sync email-verified sessions for {email}: {e}")
 
+    def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]) -> bool:
+        """Applies fingerprinting data from custom component to the session with better validation.
+        This function will now be called only for non-registered users (Guests)."""
+        logger.debug(f"🔍 APPLYING FINGERPRINT received from JS: {fingerprint_data.get('fingerprint_id', 'None')[:8]} to session {session.session_id[:8]} (UserType: {session.user_type.value})")
+        
+        if session.user_type == UserType.REGISTERED_USER:
+            logger.warning(f"Attempted to apply fingerprint to REGISTERED_USER {session.session_id[:8]}. Ignoring.")
+            return False
+
+        try:
+            if not fingerprint_data or not isinstance(fingerprint_data, dict):
+                logger.warning("Invalid fingerprint data provided to apply_fingerprinting")
+                return False
+            
+            old_fingerprint_id = session.fingerprint_id
+            old_method = session.fingerprint_method
+            
+            session.fingerprint_id = fingerprint_data.get('fingerprint_id')
+            session.fingerprint_method = fingerprint_data.get('fingerprint_method')
+            session.browser_privacy_level = fingerprint_data.get('browser_privacy_level', 'standard')
+            session.recognition_response = None
+            
+            if not session.fingerprint_id or not session.fingerprint_method:
+                logger.error("Invalid fingerprint data: missing essential fields from JS. Reverting to old fingerprint.")
+                session.fingerprint_id = old_fingerprint_id
+                session.fingerprint_method = old_method
+                return False
+            
+            self._attempt_fingerprint_inheritance(session)
+            
+            try:
+                self.db.save_session(session)
+                logger.info(f"✅ Fingerprinting applied and inheritance checked for {session.session_id[:8]}: {session.fingerprint_method} (ID: {session.fingerprint_id[:8]}...), active={session.active}, rev_pending={session.reverification_pending}")
+            except Exception as e:
+                logger.error(f"Failed to save session after fingerprinting (JS data received): {e}")
+                session.fingerprint_id = old_fingerprint_id
+                session.fingerprint_method = old_method
+                return False
+        except Exception as e:
+            logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
+            return False
+        return True
+
+    def check_fingerprint_history(self, fingerprint_id: str) -> Dict[str, Any]:
+        """Check if a fingerprint has historical sessions and return relevant information, now handling multiple emails."""
+        
+        try:
+            existing_sessions = self.db.find_sessions_by_fingerprint(fingerprint_id)
+            
+            if not existing_sessions:
+                return {'has_history': False}
+            
+            unique_emails = set()
+            for s in existing_sessions:
+                if s.email:
+                    unique_emails.add(s.email.lower())
+            
+            if len(unique_emails) > 1:
+                logger.info(f"🚨 Multiple emails ({len(unique_emails)}) detected for fingerprint {fingerprint_id[:8]}: {unique_emails}")
+                return {
+                    'has_history': True,
+                    'multiple_emails': True,
+                    'email_count': len(unique_emails),
+                    'skip_recognition': True
+                }
+            
+            most_privileged_session = None
+            for s in existing_sessions:
+                if s.user_type == UserType.REGISTERED_USER:
+                    logger.info(f"Skipping REGISTERED_USER session {s.session_id[:8]} for fingerprint-based recognition.")
+                    continue
+
+                if s.email and (most_privileged_session is None or 
+                               self._get_privilege_level(s.user_type) > self._get_privilege_level(most_privileged_session.user_type)):
+                    most_privileged_session = s
+
+            if most_privileged_session:
+                return {
+                    'has_history': True,
+                    'multiple_emails': False,
+                    'email': most_privileged_session.email,
+                    'full_name': most_privileged_session.full_name,
+                    'user_type': most_privileged_session.user_type.value,
+                    'last_activity': most_privileged_session.last_activity,
+                    'daily_question_count': most_privileged_session.daily_question_count
+                }
+            
+            return {'has_history': False}
+            
+        except Exception as e:
+            logger.error(f"Error checking fingerprint history: {e}")
+            return {'has_history': False}
+
+    def _mask_email(self, email: str) -> str:
+        """Masks an email address for privacy (shows first 2 chars + domain)."""
+        try:
+            local, domain = email.split('@')
+            if len(local) <= 2:
+                masked_local = local[0] + '*' * (len(local) - 1)
+            else:
+                masked_local = local[:2] + '*' * (len(local) - 2)
+            return f"{masked_local}@{domain}"
+        except Exception:
+            return "****@****.***"
+
+    def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
+        """Email verification - allows unlimited email switches with OTP verification. No evasion penalties."""
+        try:
+            sanitized_email = sanitize_input(email).lower().strip()
+            
+            if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', sanitized_email):
+                logger.debug(f"handle_guest_email_verification returning FAILURE: Invalid email format for {email}")
+                return {'success': False, 'message': 'Please enter a valid email address.'}
+            
+            if sanitized_email not in session.email_addresses_used:
+                session.email_addresses_used.append(sanitized_email)
+            
+            if not session.reverification_pending:
+                if session.email and session.email != sanitized_email:
+                    session.email_switches_count += 1
+                session.email = sanitized_email
+                session.login_method = 'email_verified'
+            elif session.reverification_pending and sanitized_email != session.pending_email:
+                session.email_switches_count += 1
+                session.email = sanitized_email
+                session.reverification_pending = False
+                session.pending_user_type = None
+                session.pending_email = None
+                session.pending_full_name = None
+                session.pending_zoho_contact_id = None
+                session.pending_wp_token = None
+                session.login_method = 'email_verified'
+                logger.warning(f"Session {session.session_id[:8]} switched email during pending re-verification. Resetting pending state.")
+
+            session.declined_recognized_email_at = None
+            
+            if session.last_activity is None:
+                session.last_activity = datetime.now()
+
+            try:
+                self.db.save_session(session)
+            except Exception as e:
+                logger.error(f"Failed to save session before email verification: {e}")
+                final_result = {
+                    'success': False, 
+                    'message': 'An internal error occurred saving your session. Please try again.'
+                }
+                logger.debug(f"handle_guest_email_verification returning FAILURE (DB Save): {final_result}")
+                return final_result
+            
+            code_sent = self.email_verification.send_verification_code(sanitized_email)
+            
+            if code_sent:
+                final_result = {
+                    'success': True,
+                    'message': f'Verification code sent to {sanitized_email}. Please check your email.'
+                }
+                logger.debug(f"handle_guest_email_verification returning SUCCESS: {final_result}")
+                return final_result
+            else:
+                final_result = {
+                    'success': False, 
+                    'message': 'Failed to send verification code. Please try again later.'
+                }
+                logger.debug(f"handle_guest_email_verification returning FAILURE (Code Not Sent): {final_result}")
+                return final_result
+                
+        except Exception as e:
+            logger.error(f"Email verification handling failed with unexpected exception: {e}", exc_info=True)
+            final_result = {
+                'success': False, 
+                'message': 'An unexpected error occurred during verification. Please try again.'
+            }
+            logger.debug(f"handle_guest_email_verification returning FAILURE (Unexpected Exception): {final_result}")
+            return final_result
+
+
+    def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
+        """
+        Verifies the email verification code and upgrades user status.
+        Now correctly handles both:
+        1. User declining recognition then verifying same email.
+        2. Inheriting the HIGHEST question count during re-verification.
+        """
+        try:
+            email_to_verify = session.pending_email if session.reverification_pending else session.email
+
+            if not email_to_verify:
+                logger.error(f"VERIFY EMAIL: No email_to_verify found for session {session.session_id[:8]}.")
+                return {'success': False, 'message': 'No email address found for verification.'}
+            
+            sanitized_code = sanitize_input(code).strip()
+            
+            if not sanitized_code:
+                return {'success': False, 'message': 'Please enter the verification code.'}
+            
+            verification_success = self.email_verification.verify_code(email_to_verify, sanitized_code)
+            
+            if verification_success:
+                logger.info(f"VERIFY EMAIL: OTP successful for {email_to_verify} in session {session.session_id[:8]}.")
+
+                user_is_reclaiming_declined_account = (
+                    session.recognition_response == "no_declined_reco" and
+                    session.pending_email and
+                    email_to_verify.lower() == session.pending_email.lower()
+                )
+
+                if user_is_reclaiming_declined_account:
+                    logger.warning(f"VERIFY EMAIL: OVERRIDE - User declined recognition for {session.pending_email} but is now verifying it. Re-enabling reverification logic.")
+                    session.reverification_pending = True
+
+                if session.reverification_pending:
+                    logger.info(f"VERIFY EMAIL: Entering reverification_pending path for session {session.session_id[:8]}.")
+                    
+                    current_guest_daily_q = session.daily_question_count
+                    current_guest_total_q = session.total_question_count
+                    current_guest_last_q_time = session.last_question_time
+
+                    all_email_sessions_for_inheritance = self.db.find_sessions_by_email(email_to_verify)
+                    
+                    highest_daily_count = current_guest_daily_q
+                    highest_total_count = current_guest_total_q
+                    most_recent_q_time = current_guest_last_q_time
+                    inherited_ban_info = None
+                    inherited_tier_cycle_id = None
+                    inherited_tier1_completed = False
+                    inherited_tier_cycle_started_at = None
+
+                    now = datetime.now()
+
+                    for s in all_email_sessions_for_inheritance:
+                        if not session.zoho_contact_id and s.zoho_contact_id:
+                            session.zoho_contact_id = s.zoho_contact_id
+                            logger.debug(f"VERIFY EMAIL: Inherited Zoho Contact ID {s.zoho_contact_id} from session {s.session_id[:8]}.")
+
+                        if s.last_question_time and (now - s.last_question_time) < DAILY_RESET_WINDOW:
+                            if s.daily_question_count > highest_daily_count:
+                                highest_daily_count = s.daily_question_count
+                                most_recent_q_time = s.last_question_time
+                            
+                            highest_total_count = max(highest_total_count, s.total_question_count)
+
+                            if s.current_tier_cycle_id:
+                                inherited_tier_cycle_id = s.current_tier_cycle_id
+                                inherited_tier1_completed = s.tier1_completed_in_cycle
+                                inherited_tier_cycle_started_at = s.tier_cycle_started_at
+
+                        if (s.ban_status != BanStatus.NONE and s.ban_end_time and s.ban_end_time > now):
+                            inherited_ban_info = {
+                                'status': s.ban_status,
+                                'start_time': s.ban_start_time,
+                                'end_time': s.ban_end_time,
+                                'reason': s.ban_reason
+                            }
+                            inherited_tier_cycle_id = s.current_tier_cycle_id
+                            inherited_tier1_completed = s.tier1_completed_in_cycle
+                            inherited_tier_cycle_started_at = s.tier_cycle_started_at
+                            logger.info(f"VERIFY EMAIL: Inherited active ban from session {s.session_id[:8]}.")
+                    
+                    session.user_type = session.pending_user_type
+                    session.email = session.pending_email
+                    session.full_name = session.pending_full_name
+                    session.wp_token = session.pending_wp_token
+                    
+                    session.daily_question_count = highest_daily_count
+                    session.total_question_count = highest_total_count
+                    session.last_question_time = most_recent_q_time
+
+                    if inherited_ban_info:
+                        session.ban_status = inherited_ban_info['status']
+                        session.ban_start_time = inherited_ban_info['start_time']
+                        session.ban_end_time = inherited_ban_info['end_time']
+                        session.ban_reason = inherited_ban_info['reason']
+                        session.question_limit_reached = True
+                    else:
+                        session.ban_status = BanStatus.NONE # Clear any temporary ban status
+                        session.question_limit_reached = False
+
+                    # Apply tier cycle info
+                    session.current_tier_cycle_id = inherited_tier_cycle_id if inherited_tier_cycle_id else str(uuid.uuid4())
+                    session.tier1_completed_in_cycle = inherited_tier1_completed
+                    session.tier_cycle_started_at = inherited_tier_cycle_started_at if inherited_tier_cycle_started_at else now
+
+                    # Clean up all pending and recognition flags
+                    session.reverification_pending = False
+                    session.recognition_response = "reclaimed_successfully" # Track this state
+                    session.pending_user_type = None
+                    session.pending_email = None
+                    session.pending_full_name = None
+                    session.pending_zoho_contact_id = None
+                    session.pending_wp_token = None
+                    session.declined_recognized_email_at = None # Ensure this is cleared on successful verification
+                    
+                    session.login_method = 'email_verified'
+                    session.is_degraded_login = False # Reclaiming an account is not degraded by definition
+                    session.degraded_login_timestamp = None
+
+                    logger.info(f"VERIFY EMAIL: ✅ User {session.session_id[:8]} reclaimed {session.user_type.value} for {session.email}. Daily_Q: {session.daily_question_count}.")
+
+                else:
+                    logger.info(f"VERIFY EMAIL: Entering standard guest-to-upgrade path for session {session.session_id[:8]}.")
+                    # New email verification or upgrade from guest to a non-reclaimed account.
+                    old_daily_count = session.daily_question_count # Preserve current count for potential same-session upgrade
+                    
+                    # This call will determine if it's a REGISTERED_USER or keeps it non-registered
+                    # It will also set the login_method and is_degraded_login if applicable.
+                    session = self._check_and_upgrade_to_registered(session, email_to_verify, is_fallback_from_wordpress=False)
+                    
+                    if session.user_type != UserType.REGISTERED_USER:
+                        # If not upgraded to Registered, proceed with Email Verified Guest logic
+                        session.user_type = UserType.EMAIL_VERIFIED_GUEST
+                        session.email = email_to_verify # Ensure email is set on the session
+                        
+                        # Apply global email-based inheritance for email-verified guests (from any *other* email_verified_guest sessions)
+                        should_check_global_email_history_for_guest_upgrade = (
+                            session.user_type == UserType.EMAIL_VERIFIED_GUEST # Must be EVG after _check_and_upgrade_to_registered
+                        )
+                        
+                        max_daily_count_global = 0
+                        max_total_count_global = 0
+                        most_recent_question_time_global = None
+                        inherit_ban_global = False
+                        ban_info_global = None
+
+                        if should_check_global_email_history_for_guest_upgrade:
+                            all_email_sessions_for_global_check = self.db.find_sessions_by_email(email_to_verify)
+                            for email_session_check in all_email_sessions_for_global_check:
+                                # Only consider other EVG sessions or current session itself for max counts
+                                if email_session_check.user_type == UserType.EMAIL_VERIFIED_GUEST:
+                                    if (email_session_check.last_question_time and 
+                                        (now - email_session_check.last_question_time) < DAILY_RESET_WINDOW):
+                                        if email_session_check.daily_question_count > max_daily_count_global:
+                                            max_daily_count_global = email_session_check.daily_question_count
+                                            most_recent_question_time_global = email_session_check.last_question_time
+                                        
+                                        if (email_session_check.ban_status == BanStatus.TWENTY_FOUR_HOUR and 
+                                            email_session_check.ban_end_time and 
+                                            email_session_check.ban_end_time > now):
+                                            inherit_ban_global = True
+                                            ban_info_global = {
+                                                'status': email_session_check.ban_status,
+                                                'start_time': email_session_check.ban_start_time,
+                                                'end_time': email_session_check.ban_end_time,
+                                                'reason': email_session_check.ban_reason
+                                            }
+                                    max_total_count_global = max(max_total_count_global, email_session_check.total_question_count)
+                        
+                        if should_check_global_email_history_for_guest_upgrade and (max_daily_count_global > 0 or inherit_ban_global):
+                            logger.info(f"VERIFY EMAIL: 🌍 GLOBAL EMAIL INHERITANCE: Applying cross-device limits for {email_to_verify} as EMAIL_VERIFIED_GUEST.")
+                            session.daily_question_count = max_daily_count_global
+                            session.total_question_count = max(session.total_question_count, max_total_count_global)
+                            session.last_question_time = most_recent_question_time_global
+                            
+                            if inherit_ban_global and ban_info_global:
+                                session.ban_status = ban_info_global['status']
+                                session.ban_start_time = ban_info_global['start_time']
+                                session.ban_end_time = ban_info_global['end_time']
+                                session.ban_reason = ban_info_global['reason']
+                                session.question_limit_reached = True
+                                logger.info(f"VERIFY EMAIL: 🚫 Inherited active ban until {ban_info_global['end_time']}")
+                        else:
+                            is_same_session_upgrade = (
+                                session.user_type == UserType.GUEST and # Was a guest just before this upgrade
+                                old_daily_count > 0 # And had asked questions in *this* guest session
+                            )
+                            
+                            if is_same_session_upgrade:
+                                logger.info(f"VERIFY EMAIL: 🔄 SAME SESSION UPGRADE: Preserving question count {old_daily_count} from GUEST to EMAIL_VERIFIED_GUEST for {session.session_id[:8]}")
+                                session.daily_question_count = old_daily_count
+                            else:
+                                logger.info(f"VERIFY EMAIL: 🆕 FIRST TIME EMAIL: {email_to_verify} gets fresh start as EMAIL_VERIFIED_GUEST.")
+                                session.daily_question_count = 0
+                                session.total_question_count = 0
+                                session.last_question_time = None
+                                session.question_limit_reached = False
+                                session.ban_status = BanStatus.NONE
+                                session.ban_start_time = None
+                                session.ban_end_time = None
+                                session.ban_reason = None
+                        
+                        session.login_method = 'email_verified'
+                        session.is_degraded_login = False
+                        session.degraded_login_timestamp = None
+
+                        logger.info(f"VERIFY EMAIL: ✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email} with {session.daily_question_count} questions")
+                    else:
+                        logger.info(f"VERIFY EMAIL: ✅ User {session.session_id[:8]} restored to REGISTERED_USER status via email verification (from _check_and_upgrade_to_registered).")
+
+                # Ensure these are cleared on successful verification regardless of path
+                session.question_limit_reached = False
+                session.declined_recognized_email_at = None 
+            
+                if session.last_activity is None:
+                    session.last_activity = now # Use current time
+
+                try:
+                    self.db.save_session(session)
+                    # Sync with other sessions based on the final user type
+                    if session.user_type == UserType.REGISTERED_USER:
+                        self.sync_registered_user_sessions(session.email, session.session_id)
+                    elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
+                        self.sync_email_verified_sessions(session.email, session.session_id)
+                        
+                except Exception as e:
+                    logger.error(f"VERIFY EMAIL: Failed to save upgraded session {session.session_id[:8]}: {e}", exc_info=True)
+            
+                return {
+                    'success': True,
+                    'message': '✅ Email verified successfully!'
+                }
+            else:
+                logger.warning(f"VERIFY EMAIL: OTP verification failed for {email_to_verify} in session {session.session_id[:8]}.")
+                return {
+                    'success': False,
+                    'message': 'Invalid verification code. Please check the code and try again.'
+                }
+            
+        except Exception as e:
+            logger.error(f"VERIFY EMAIL: Email code verification failed for session {session.session_id[:8]}: {e}", exc_info=True)
+            return {
+                'success': False,
+                'message': 'Verification failed due to an unexpected error. Please try again.'
+            }
+    def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
+        """
+        CORRECTED & COMPLETE: Enhanced WordPress authentication with Email Verified fallback option.
+        Now prioritizes inheriting question counts from the current in-memory guest session
+        before checking the database, preventing race conditions, and fully preserving
+        all ban, reset, and tier cycle inheritance logic from the original method.
+        Includes extensive debug logging for question count inheritance.
+        """
+        if not self.config.WORDPRESS_URL:
+            st.error("WordPress authentication is not configured. Please contact support.")
+            logger.warning("WordPress authentication attempted but URL not configured.")
+            return None
+        
+        try:
+            auth_url = f"{self.config.WORDPRESS_URL}/wp-json/jwt-auth/v1/token"
+            
+            response = requests.post(auth_url, json={
+                'username': username,
+                'password': password
+            }, timeout=10)
+            
+            if response.status_code == 200:
+                content_type = response.headers.get('Content-Type', '').lower()
+                if 'application/json' not in content_type:
+                    logger.error(f"WordPress authentication received unexpected Content-Type '{content_type}' with 200 status. Expected application/json. Response text: '{response.text[:200]}'")
+                    return self._handle_wordpress_error_with_fallback(
+                        "API Response Error", 
+                        "WordPress returned an unexpected response. The JWT plugin might be misconfigured.",
+                        username
+                    )
+
+                try:
+                    data = response.json()
+                except requests.exceptions.JSONDecodeError as e:
+                    logger.error(f"WordPress authentication received non-JSON response with 200 status. Error: {e}")
+                    return self._handle_wordpress_error_with_fallback(
+                        "JSON Parse Error", 
+                        "WordPress returned invalid data. Please try again or contact support.",
+                        username
+                    )
+                
+                wp_token = data.get('token')
+                user_email = data.get('user_email')
+                user_display_name = data.get('user_display_name')
+                
+                if wp_token and user_email:
+                    current_session = self.get_session()
+                    now = datetime.now()
+                    
+                    logger.debug(f"DEBUG AUTH: --- Start authenticate_with_wordpress for session {current_session.session_id[:8]} ---")
+                    logger.debug(f"DEBUG AUTH: Initial current_session (from get_session) daily_q: {current_session.daily_question_count}, total_q: {current_session.total_question_count}, last_q_time: {current_session.last_question_time}")
+
+                    inherited_daily_count_from_current_session = 0
+                    inherited_total_count_from_current_session = 0
+                    inherited_last_question_time_from_current_session = None
+                    
+                    if current_session.user_type == UserType.GUEST and current_session.daily_question_count > 0:
+                        logger.debug(f"DEBUG AUTH: Capturing from in-memory guest: daily={current_session.daily_question_count}, total={current_session.total_question_count}")
+                        inherited_daily_count_from_current_session = current_session.daily_question_count
+                        inherited_total_count_from_current_session = current_session.total_question_count
+                    inherited_last_question_time_from_current_session = None
+                    
+                    if current_session.user_type == UserType.GUEST and current_session.daily_question_count > 0:
+                        logger.debug(f"DEBUG AUTH: Capturing from in-memory guest: daily={current_session.daily_question_count}, total={current_session.total_question_count}")
+                        inherited_daily_count_from_current_session = current_session.daily_question_count
+                        inherited_total_count_from_current_session = current_session.total_question_count
+                        inherited_last_question_time_from_current_session = current_session.last_question_time
+                    else:
+                        logger.debug(f"DEBUG AUTH: In-memory guest count is 0 or not a guest ({current_session.user_type.value}).")
+
+                    current_session.fingerprint_id = "not_collected_registered_user"
+                    current_session.fingerprint_method = "email_primary"
+                    logger.info(f"Registered user {current_session.session_id[:8]} fingerprint marked as not collected/email primary.")
+
+                    all_email_sessions = self.db.find_sessions_by_email(user_email)
+                    
+                    if all_email_sessions and any(s.session_id != current_session.session_id for s in all_email_sessions):
+                        current_session.visitor_type = "returning_visitor"
+                        logger.info(f"Registered user {user_email} marked as returning_visitor (found {len(all_email_sessions)} past sessions).")
+                    else:
+                        current_session.visitor_type = "new_visitor" 
+                        logger.info(f"Registered user {user_email} marked as new_visitor (first login).")
+
+                    most_recent_ban_session = None
+                    most_recent_db_session_for_counts_and_cycle = None
+                    
+                    if all_email_sessions:
+                        sorted_sessions = sorted(all_email_sessions, 
+                                               key=lambda s: s.last_question_time or s.last_activity or s.created_at, 
+                                               reverse=True)
+                        
+                        if sorted_sessions:
+                            most_recent_db_session_for_counts_and_cycle = sorted_sessions[0]
+                            logger.debug(f"DEBUG AUTH: Most recent DB session for counts: {most_recent_db_session_for_counts_and_cycle.session_id[:8]} daily_q: {most_recent_db_session_for_counts_and_cycle.daily_question_count}, last_q_time: {most_recent_db_session_for_counts_and_cycle.last_question_time}")
+                        
+                        for sess in sorted_sessions:
+                            if (sess.ban_status != BanStatus.NONE and sess.ban_end_time and sess.ban_end_time > now):
+                                most_recent_ban_session = sess
+                                logger.info(f"DEBUG AUTH: Found active ban in session {sess.session_id[:8]}: {sess.ban_status.value} until {sess.ban_end_time}.")
+                                break
+                    else:
+                        logger.debug("DEBUG AUTH: No historical email sessions found in DB.")
+
+                    final_daily_count = inherited_daily_count_from_current_session
+                    final_total_count = inherited_total_count_from_current_session
+                    final_last_question_time = inherited_last_question_time_from_current_session
+                    
+                    logger.debug(f"DEBUG AUTH: final_daily_count initialized to in-memory guest count: {final_daily_count}")
+
+                    if most_recent_db_session_for_counts_and_cycle:
+                        db_time_check = most_recent_db_session_for_counts_and_cycle.last_question_time or \
+                                        most_recent_db_session_for_counts_and_cycle.last_activity or \
+                                        most_recent_db_session_for_counts_and_cycle.created_at
+                        
+                        time_diff = now - db_time_check if db_time_check else timedelta.max
+                        logger.debug(f"DEBUG AUTH: Time difference to DB session ({most_recent_db_session_for_counts_and_cycle.session_id[:8]}): {time_diff} (DAILY_RESET_WINDOW: {DAILY_RESET_WINDOW})")
+
+                        if db_time_check and time_diff < DAILY_RESET_WINDOW:
+                            if most_recent_db_session_for_counts_and_cycle.daily_question_count > final_daily_count:
+                                logger.info(f"DEBUG AUTH: Inherited higher daily count ({most_recent_db_session_for_counts_and_cycle.daily_question_count}) from DB session {most_recent_db_session_for_counts_and_cycle.session_id[:8]} (email: {user_email}).")
+                                final_daily_count = most_recent_db_session_for_counts_and_cycle.daily_question_count
+                                final_last_question_time = most_recent_db_session_for_counts_and_cycle.last_question_time
+                                current_session.current_tier_cycle_id = most_recent_db_session_for_counts_and_cycle.current_tier_cycle_id
+                                current_session.tier1_completed_in_cycle = most_recent_db_session_for_counts_and_cycle.tier1_completed_in_cycle
+                                current_session.tier_cycle_started_at = most_recent_db_session_for_counts_and_cycle.tier_cycle_started_at
+                            else:
+                                logger.debug(f"DEBUG AUTH: DB session is recent but current session's count ({final_daily_count}) is higher/equal. No change to daily count from DB.")
+                        else:
+                            logger.debug("DEBUG AUTH: DB session is outside DAILY_RESET_WINDOW or has no time check. Checking in-memory.")
+                            if not final_last_question_time or (now - final_last_question_time) >= DAILY_RESET_WINDOW:
+                                logger.info(f"DEBUG AUTH: Resetting daily count to 0 for fresh start as no recent activity found to inherit (DB or in-memory).")
+                                final_daily_count = 0
+                                final_last_question_time = None
+                                current_session.current_tier_cycle_id = str(uuid.uuid4()) 
+                                current_session.tier1_completed_in_cycle = False
+                                current_session.tier_cycle_started_at = now
+                    else:
+                        logger.debug("DEBUG AUTH: No most_recent_db_session_for_counts_and_cycle found.")
+                        if not final_last_question_time or (now - final_last_question_time) >= DAILY_RESET_WINDOW:
+                            logger.info(f"DEBUG AUTH: Resetting daily count to 0 as no historical DB or recent in-memory activity found.")
+                            final_daily_count = 0
+                            final_last_question_time = None
+                            current_session.current_tier_cycle_id = str(uuid.uuid4())
+                            current_session.tier1_completed_in_cycle = False
+                            current_session.tier_cycle_started_at = now
+
+                    current_session.daily_question_count = final_daily_count
+                    current_session.total_question_count = max(current_session.total_question_count, final_total_count)
+                    current_session.last_question_time = final_last_question_time
+                    
+                    logger.debug(f"DEBUG AUTH: Final daily_question_count after aggregation: {current_session.daily_question_count}")
+
+                    if not current_session.current_tier_cycle_id or not current_session.tier_cycle_started_at:
+                        current_session.current_tier_cycle_id = str(uuid.uuid4())
+                        current_session.tier1_completed_in_cycle = False
+                        current_session.tier_cycle_started_at = now
+                        logger.info(f"DEBUG AUTH: Initializing new tier cycle for {user_email} as no active cycle found/inherited.")
+
+
+                    if most_recent_ban_session:
+                        current_session.ban_status = most_recent_ban_session.ban_status
+                        current_session.ban_start_time = most_recent_ban_session.ban_start_time
+                        current_session.ban_end_time = most_recent_ban_session.ban_end_time
+                        current_session.ban_reason = most_recent_ban_session.ban_reason
+                        current_session.question_limit_reached = True
+                        current_session.current_tier_cycle_id = most_recent_ban_session.current_tier_cycle_id
+                        current_session.tier1_completed_in_cycle = most_recent_ban_session.tier1_completed_in_cycle
+                        current_session.tier_cycle_started_at = most_recent_ban_session.tier_cycle_started_at
+                        logger.info(f"DEBUG AUTH: Inherited active ban: {current_session.ban_status.value} until {current_session.ban_end_time}.")
+                    
+                    if not current_session.zoho_contact_id:
+                        for sess in all_email_sessions:
+                            if sess.zoho_contact_id:
+                                current_session.zoho_contact_id = sess.zoho_contact_id
+                                logger.info(f"DEBUG AUTH: Inherited Zoho contact ID from session {sess.session_id[:8]}.")
+                                break
+
+                    current_session.evasion_count = 0
+                    current_session.current_penalty_hours = 0
+                    current_session.escalation_level = 0
+                    
+                    current_session.user_type = UserType.REGISTERED_USER
+                    current_session.email = user_email
+                    current_session.full_name = user_display_name
+                    current_session.wp_token = wp_token
+                    current_session.last_activity = now
+                    current_session.login_method = 'wordpress'
+                    current_session.is_degraded_login = False
+                    current_session.degraded_login_timestamp = None
+                    log_security_event("WORDPRESS_LOGIN_SUCCESS", current_session, {
+                        "username": username,
+                        "has_wp_token": bool(wp_token)
+                    })
+
+                    current_session.reverification_pending = False
+                    current_session.pending_user_type = None
+                    current_session.pending_email = None
+                    current_session.pending_full_name = None
+                    current_session.pending_zoho_contact_id = None
+                    current_session.pending_wp_token = None
+                    current_session.declined_recognized_email_at = None
+
+                    st.session_state.is_chat_ready = True
+                    st.session_state.fingerprint_wait_start = None
+
+                    try:
+                        self.db.save_session(current_session)
+                        logger.info(f"DEBUG AUTH: Session {current_session.session_id[:8]} saved after WordPress login. Final daily_q: {current_session.daily_question_count}.")
+                        logger.info(f"✅ REGISTERED_USER setup complete: {user_email}, {current_session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT} questions. Chat enabled immediately.")
+                        
+                        self.sync_registered_user_sessions(user_email, current_session.session_id)
+
+                    except Exception as e:
+                        logger.error(f"DEBUG AUTH: Failed to save authenticated session {current_session.session_id[:8]}: {e}", exc_info=True)
+                        st.error("Authentication succeeded but session could not be saved. Please try again.")
+                        return None
+                    
+                    logger.debug(f"DEBUG AUTH: --- End authenticate_with_wordpress for session {current_session.session_id[:8]} ---")
+                    return current_session
+                else:
+                    logger.error(f"WordPress authentication successful (status 200) but missing token or email in response. Response: {data}")
+                    return self._handle_wordpress_error_with_fallback(
+                        "Incomplete Response", 
+                        "WordPress returned an incomplete response (missing token/email).",
+                        username
+                    )
+            else:
+                logger.warning(f"WordPress authentication failed with status: {response.status_code}. Response: {response.text[:200]}")
+                st.error("Invalid username or password.")
+                return None
+            
+        except requests.exceptions.SSLError as e:
+            logger.error(f"WordPress SSL/Port 443 error: {e}", exc_info=True)
+            return self._handle_wordpress_error_with_fallback(
+                "SSL/Connection Error", 
+                "Cannot establish secure connection to the authentication server (e.g., Port 443 issue).",
+                username
+            )
+            
+        except requests.exceptions.Timeout as e:
+            logger.error(f"WordPress authentication timed out: {e}", exc_info=True)
+            return self._handle_wordpress_error_with_fallback(
+                "Timeout Error",
+                "The authentication service is not responding in time. The server may be down or overloaded.",
+                username
+            )
+            
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"WordPress authentication connection error: {e}", exc_info=True)
+            return self._handle_wordpress_error_with_fallback(
+                "Connection Error",
+                "Could not connect to the authentication service. Please check your internet connection or the service may be down.",
+                username
+            )
+            
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during WordPress authentication: {e}", exc_info=True)
+            return self._handle_wordpress_error_with_fallback(
+                "Authentication Error",
+                "An unexpected error occurred during authentication. Please try again later.",
+                username
+            )
+    def _handle_wordpress_error_with_fallback(self, error_type: str, error_message: str, username: str) -> Optional[UserSession]:
+        """Handle WordPress errors with email verification fallback option."""
+        
+        st.session_state.wordpress_error = {
+            'type': error_type,
+            'message': error_message,
+            'username': username,
+             'show_fallback': True
+        }
+        
+        return None
+
+    def _check_and_upgrade_to_registered(self, session: UserSession, email: str, 
+                                        is_fallback_from_wordpress: bool = False) -> UserSession:
+        """
+        Check if email belongs to a registered user and upgrade if found.
+        NEW: Now also synchronizes the current session's fingerprint across all of the
+        registered user's historical sessions to permanently merge the identities.
+        """
+        
+        email_sessions = self.db.find_sessions_by_email(email)
+        
+        registered_sessions = [s for s in email_sessions 
+                              if s.user_type == UserType.REGISTERED_USER
+                              and s.session_id != session.session_id]
+        
+        if registered_sessions:
+            most_recent_registered = max(registered_sessions, 
+                                         key=lambda s: s.last_activity or s.created_at)
+            
+            logger.info(f"🎯 Found registered user history for {email} - upgrading session {session.session_id[:8]}")
+            
+            session.user_type = UserType.REGISTERED_USER
+            session.full_name = most_recent_registered.full_name
+            session.zoho_contact_id = most_recent_registered.zoho_contact_id
+            
+            if is_fallback_from_wordpress:
+                session.is_degraded_login = True
+                session.degraded_login_timestamp = datetime.now()
+                session.login_method = 'email_fallback'
+                session.wp_token = None
+                log_security_event("DEGRADED_LOGIN", session, {"reason": "wordpress_auth_failure_fallback"})
+                logger.warning(f"⚠️ Degraded login for registered user {email}")
+            else:
+                session.login_method = 'email_verified'
+                session.is_degraded_login = False
+            
+            now = datetime.now()
+            if (most_recent_registered.last_question_time and 
+                (now - most_recent_registered.last_question_time) < DAILY_RESET_WINDOW):
+                session.daily_question_count = most_recent_registered.daily_question_count
+                session.total_question_count = most_recent_registered.total_question_count
+                session.last_question_time = most_recent_registered.last_question_time
+                session.current_tier_cycle_id = most_recent_registered.current_tier_cycle_id
+                session.tier1_completed_in_cycle = most_recent_registered.tier1_completed_in_cycle
+                session.tier_cycle_started_at = most_recent_registered.tier_cycle_started_at
+                
+                if (most_recent_registered.ban_status != BanStatus.NONE and
+                    most_recent_registered.ban_end_time and
+                    most_recent_registered.ban_end_time > now):
+                    session.ban_status = most_recent_registered.ban_status
+                    session.ban_start_time = most_recent_registered.ban_start_time
+                    session.ban_end_time = most_recent_registered.ban_end_time
+                    session.ban_reason = most_recent_registered.ban_reason
+            
+            current_fingerprint = session.fingerprint_id
+            if current_fingerprint and not current_fingerprint.startswith(("temp_", "fallback_", "not_collected_")):
+                logger.info(f"🔗 Merging identities: Linking fingerprint {current_fingerprint[:8]} to email {email}")
+                for reg_session in registered_sessions:
+                    if reg_session.fingerprint_id != current_fingerprint:
+                        reg_session.fingerprint_id = current_fingerprint
+                        reg_session.fingerprint_method = session.fingerprint_method
+                        self.db.save_session(reg_session)
+                        logger.debug(f"  - Updated fingerprint for historical session {reg_session.session_id[:8]}")
+
+            self.db.save_session(session)
+            
+            self.sync_registered_user_sessions(email, session.session_id)
+                
+            return session
+        
+        session.login_method = 'email_verified'
+        session.is_degraded_login = False
+        session.degraded_login_timestamp = None
+        session.wp_token = None
+        logger.info(f"No registered user history found for {email} - proceeding as email verified guest")
+        return session
+
+    def sync_ban_for_registered_user(self, email: str, banned_session: UserSession):
+        """Sync ban status with distributed lock to prevent race conditions"""
+        try:
+            lock_key = f"ban_sync_{email}"
+            now = datetime.now()
+            
+            if lock_key in self._ban_sync_locks:
+                lock_time = self._ban_sync_locks[lock_key]
+                if now - lock_time < self._ban_lock_timeout:
+                    logger.warning(f"Ban sync already in progress for {email}, skipping")
+                    return
+                else:
+                    del self._ban_sync_locks[lock_key]
+            
+            self._ban_sync_locks[lock_key] = now
+            
+            try:
+                email_sessions = self.db.find_sessions_by_email(email)
+                active_registered_sessions = [s for s in email_sessions 
+                                              if s.active and s.user_type == UserType.REGISTERED_USER 
+                                              and s.session_id != banned_session.session_id]
+                
+                if not active_registered_sessions:
+                    return
+                
+                for sess in active_registered_sessions:
+                    sess.ban_status = banned_session.ban_status
+                    sess.ban_start_time = banned_session.ban_start_time
+                    sess.ban_end_time = banned_session.ban_end_time
+                    sess.ban_reason = banned_session.ban_reason
+                    sess.question_limit_reached = banned_session.question_limit_reached
+                    
+                    sess.current_tier_cycle_id = banned_session.current_tier_cycle_id
+                    sess.tier1_completed_in_cycle = banned_session.tier1_completed_in_cycle
+                    sess.tier_cycle_started_at = banned_session.tier_cycle_started_at
+                    
+                    self.db.save_session(sess)
+                    logger.debug(f"Synced ban and cycle info to session {sess.session_id[:8]} for registered user {email}")
+                
+                logger.info(f"Synced ban across {len(active_registered_sessions)} sessions for registered user {email}")
+                
+            finally:
+                if lock_key in self._ban_sync_locks:
+                    del self._ban_sync_locks[lock_key]
+                    
+        except Exception as e:
+            logger.error(f"Failed to sync ban for registered user {email}: {e}")
+            if lock_key in self._ban_sync_locks:
+                del self._ban_sync_locks[lock_key]
+
+    def sync_email_verified_sessions(self, email: str, current_session_id: str):
+        """Sync question counts across all active email-verified sessions with the same email"""
+        try:
+            email_sessions = self.db.find_sessions_by_email(email)
+            active_email_verified_sessions = [
+                s for s in email_sessions 
+                if s.active and s.user_type == UserType.EMAIL_VERIFIED_GUEST
+            ]
+            
+            if not active_email_verified_sessions:
+                return
+            
+            max_count_session = None
+            now = datetime.now()
+            for sess in active_email_verified_sessions:
+                if sess.last_question_time and (now - sess.last_question_time) < DAILY_RESET_WINDOW:
+                    if max_count_session is None or sess.daily_question_count > max_count_session.daily_question_count:
+                        max_count_session = sess
+            
+            if max_count_session is None:
+                logger.info(f"No recent active sessions for email-verified {email} to sync.")
+                return
+            
+            for sess in active_email_verified_sessions:
+                if sess.session_id != max_count_session.session_id:
+                    sess.daily_question_count = max_count_session.daily_question_count
+                    sess.total_question_count = max_count_session.total_question_count
+                    sess.last_question_time = max_count_session.last_question_time
+                    
+                    if max_count_session.ban_status != BanStatus.NONE:
+                        sess.ban_status = max_count_session.ban_status
+                        sess.ban_start_time = max_count_session.ban_start_time
+                        sess.ban_end_time = max_count_session.ban_end_time
+                        sess.ban_reason = max_count_session.ban_reason
+                        sess.question_limit_reached = max_count_session.question_limit_reached
+                    
+                    self.db.save_session(sess)
+                    logger.debug(f"Synced session {sess.session_id[:8]} to {max_count_session.daily_question_count} daily questions from {max_count_session.session_id[:8]}")
+            
+            logger.info(f"Synced {len(active_email_verified_sessions)} email-verified sessions for {email}")
+            
+        except Exception as e:
+            logger.error(f"Failed to sync email-verified sessions for {email}: {e}")
+
     def detect_pricing_stock_question(self, prompt: str) -> bool:
         """Detect if question is about pricing or stock availability."""
 
@@ -4978,7 +5849,8 @@ Respond ONLY with JSON:
                             logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
                             return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
                         
-                        customer = await self.woocommerce.get_customer_by_email(session.email)
+                        # NEW: Use asyncio.run to execute async WooCommerce methods
+                        customer = asyncio.run(self.woocommerce.get_customer_by_email(session.email))
                         customer_id = customer.get('id') if customer else None
 
                         if not customer_id:
@@ -4993,7 +5865,7 @@ Respond ONLY with JSON:
                                 'source': '12Taste Order Status'
                             }
 
-                        order_data = await self.woocommerce.get_order(order_id, customer_id=customer_id)
+                        order_data = asyncio.run(self.woocommerce.get_order(order_id, customer_id=customer_id))
                         
                         if order_data and not order_data.get("error"):
                             formatted_order = self.woocommerce.format_order_for_display(order_data)
@@ -5093,7 +5965,7 @@ Respond ONLY with JSON:
             limit_check = self.question_limits.is_within_limits(session)
             if not limit_check['allowed']:
                 message = limit_check.get('message', 'Access restricted due to usage policy.')
-                return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': limit_check.get('time_remaining')}
+                return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': limit_check.get('time_until_next')} # Ensure consistent key
 
             self._clear_error_notifications()
             sanitized_prompt = sanitize_input(prompt)
@@ -6278,9 +7150,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.info(f"Take your time to read this answer. When you're ready, verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions per day + chat history saving!")
         
         with st.expander("📧 Ready to Unlock More Questions?", expanded=False):
-            st.markdown("### 🚀 What You'll Get After Email Verification:")
-            st.markdown(f"• **{EMAIL_VERIFIED_QUESTION_LIMIT} questions per day** • **Chat history saving** • **Cross-device sync**")
-            
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("📧 Yes, Let's Verify My Email!", use_container_width=True, key="gentle_verify_btn"):
@@ -6309,9 +7178,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.info(f"Take your time to read this answer. Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
         
         with st.expander("🚀 Want More Questions Daily?", expanded=False):
-            st.markdown("### 📈 Upgrade Benefits:")
-            st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** • **Tier system** • **Priority support**")
-            
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
@@ -6873,8 +7739,14 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         st.error(response.get("content", 'Access restricted.'))
                         if response.get('time_remaining'):
                             time_remaining = response['time_remaining']
-                            hours = int(time_remaining.total_seconds() // 3600)
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            # Ensure time_remaining is a timedelta or convert if it's an int/float (seconds)
+                            if isinstance(time_remaining, (int, float)):
+                                time_remaining_td = timedelta(seconds=time_remaining)
+                            else: # Assume it's already a timedelta from the BanStatus.ONE_HOUR / TWENTY_FOUR_HOUR messages
+                                time_remaining_td = time_remaining
+                            
+                            hours = int(time_remaining_td.total_seconds() // 3600)
+                            minutes = int((time_remaining_td.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
                     elif response.get('display_only_notice', False):
                         pass
