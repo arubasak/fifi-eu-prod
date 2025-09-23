@@ -1,6 +1,7 @@
 # production_config.py
-# (Your existing constants)
+from datetime import timedelta  # ADD THIS LINE - this was missing!
 
+# (Your existing constants)
 DAILY_RESET_WINDOW_HOURS = 24
 SESSION_TIMEOUT_MINUTES = 60
 FINGERPRINT_TIMEOUT_SECONDS = 20 # Keep at 20 seconds, the JS will use this
@@ -20,13 +21,11 @@ MAX_RATE_LIMIT_TRACKING = 1000
 MAX_ERROR_HISTORY = 500
 CRM_SAVE_MIN_QUESTIONS = 2
 EVASION_BAN_HOURS = 72
-
 # FastAPI Endpoints
 # IMPORTANT: Update these with your actual deployed FastAPI URLs
 FASTAPI_EMERGENCY_SAVE_URL = "https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/emergency-save"
 FASTAPI_FINGERPRINT_URL = "https://fifi-beacon-fastapi-121263692901.europe-west4.run.app/fingerprint" # NEW: For client-side fingerprinting
 FASTAPI_EMERGENCY_SAVE_TIMEOUT = 5 # seconds
-
 # Time Deltas (derived from hours/minutes for convenience)
 DAILY_RESET_WINDOW = timedelta(hours=DAILY_RESET_WINDOW_HOURS)
 SESSION_TIMEOUT_DELTA = timedelta(minutes=SESSION_TIMEOUT_MINUTES)
