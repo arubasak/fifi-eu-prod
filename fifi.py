@@ -174,6 +174,10 @@ def show_loading_overlay():
     if is_loading():
         loading_message = st.session_state.get('loading_message', 'Loading...')
         
+        # Don't show overlay for fingerprinting operations
+        if loading_message == "Setting up device recognition...":
+            return False
+        
         # Create a full-screen overlay using HTML/CSS
         overlay_html = f"""
         <div style="
@@ -1099,9 +1103,9 @@ class DatabaseManager:
                 html_content = html_content.replace('{FASTAPI_FINGERPRINT_URL}', json.dumps(FASTAPI_FINGERPRINT_URL))
                 html_content = html_content.replace('{FINGERPRINT_TIMEOUT_SECONDS}', str(FINGERPRINT_TIMEOUT_SECONDS))
 
-                # Render with zero height to ensure no visual impact
+                # Render with minimal height to ensure no visual impact
                 logger.debug(f"Generated fingerprint HTML (first 500 chars): {html_content[:500]}...")
-                st.components.v1.html(html_content, height=100, width=0, scrolling=False) # Pass full content
+                st.components.v1.html(html_content, height=1, width=1, scrolling=False) # Changed height to 1, width to 1
 
                 logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
 
@@ -5832,7 +5836,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                                 
                                 if upgraded_session.user_type == UserType.REGISTERED_USER:
                                     if upgraded_session.is_degraded_login:
-                                        st.info("ℹ️ Logged in as Registered User via email due to WordPress issues.")
+                                        st.info("ℹ️ Logged in as Registered User via email (WordPress was unavailable)")
                                     st.success(f"✅ Welcome back! Your registered account has been restored.")
                                     st.balloons()
                                 else:
@@ -7122,7 +7126,18 @@ def main_fixed():
             session = None
             
             if loading_reason == 'start_guest':
+                # FIX: Ensure a session exists or create one for fingerprinting
                 session = session_manager.get_session()
+                if session is None:
+                    # Fallback to creating a basic session if get_session failed
+                    session_id = str(uuid.uuid4())
+                    session = UserSession(session_id=session_id, last_activity=None, login_method='guest')
+                    session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
+                    session.fingerprint_method = "temporary_fallback_python"
+                    st.session_state.current_session_id = session.session_id
+                    session_manager.db.save_session(session)
+                    logger.warning(f"Created temporary session {session.session_id[:8]} during start_guest loading due to get_session failure.")
+
                 if session and session.last_activity is None:
                     session.last_activity = datetime.now()
                     session_manager.db.save_session(session)
@@ -7199,6 +7214,9 @@ def main_fixed():
                 session_manager.fingerprinting.render_fingerprint_component(session.session_id)
                 st.session_state[fingerprint_key] = True
                 logger.info(f"✅ Fingerprint component rendered for session {session.session_id[:8]}")
+                # Force a rerun immediately after rendering the component
+                st.rerun()
+                return # Stop further execution in this run to allow the component to initialize
 
         # --- FINGERPRINT READY STATE MANAGEMENT ---
         # For non-registered users, we wait for a stable fingerprint OR a timeout.
