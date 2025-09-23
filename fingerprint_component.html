@@ -257,7 +257,7 @@
             return await generateFallbackFingerprint();
         }
         
-        // Send fingerprint to parent
+        // Send fingerprint to parent - UPDATED TO HANDLE MISSING STREAMLIT
         function sendFingerprintToParent(fingerprint) {
             log('📤 Sending fingerprint to communication channels...');
             
@@ -281,7 +281,34 @@
                 });
                 log('📤 Fingerprint sent to Streamlit:', fingerprint);
             } else {
-                log('⚠️ Streamlit not available!');
+                log('⚠️ Streamlit not available! Attempting alternative methods...');
+                
+                // Try parent's Streamlit
+                if (window.parent && window.parent.Streamlit) {
+                    window.parent.Streamlit.setComponentValue({
+                        fingerprint: fingerprint,
+                        timestamp: Date.now(),
+                        session: sessionId
+                    });
+                    log('📤 Fingerprint sent via parent.Streamlit');
+                } else {
+                    // As last resort, store in window for retrieval
+                    window.lastFingerprint = fingerprint;
+                    log('💾 Fingerprint stored in window.lastFingerprint:', fingerprint);
+                    
+                    // Try to notify parent to retrieve it
+                    if (window.parent && window.parent !== window) {
+                        window.parent.postMessage({
+                            type: 'streamlit-value',
+                            value: {
+                                fingerprint: fingerprint,
+                                timestamp: Date.now(),
+                                session: sessionId
+                            }
+                        }, '*');
+                        log('📤 Sent streamlit-value message to parent');
+                    }
+                }
             }
         }
         
