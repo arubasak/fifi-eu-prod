@@ -1,459 +1,226 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>FiFi Fingerprinting</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background-color: #f5f5f5;
-        }
-        #status {
-            padding: 10px;
-            border-radius: 5px;
-            margin: 10px 0;
-            font-weight: bold;
-        }
-        .success { background-color: #d4edda; color: #155724; }
-        .warning { background-color: #fff3cd; color: #856404; }
-        .error { background-color: #f8d7da; color: #721c24; }
-        .computing { background-color: #cce5ff; color: #004085; }
-        #fingerprint-display {
-            font-family: monospace;
-            background: white;
-            padding: 10px;
-            border-radius: 5px;
-            word-break: break-all;
-        }
-        .hidden { display: none; }
-    </style>
+  <meta charset="utf-8" />
+  <title>FiFi Fingerprinting</title>
+  <style>
+    body { margin: 0; padding: 10px; font-family: Arial, sans-serif; }
+    #status { margin-top: 10px; font-size: 12px; color: #666; }
+  </style>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/style.min.css">
 </head>
 <body>
-    <div id="status" class="computing">Initializing fingerprinting...</div>
-    <div id="fingerprint-display" class="hidden"></div>
+<!-- CreepJS DOM structure -->
+<div id="fp-app">
+  <fingerprint>
+    <div id="fingerprint-data">
+      <div class="fingerprint-header-container">
+        <div class="fingerprint-header">
+          <div class="ellipsis-all">FP ID: Computing...</div>
+          <div id="fuzzy-fingerprint">
+            <div class="ellipsis-all fuzzy-fp">Fuzzy:
+              <span class="blurred">0000000000000000000000000000000000000000000000000000000000000000</span>
+            </div>
+          </div>
+          <div><span class="time">0 ms</span></div>
+        </div>
+      </div>
+    </div>
+  </fingerprint>
+</div>
 
-    <script>
-        // Check Streamlit availability
-        console.log('Streamlit object available:', typeof window.Streamlit);
-        if (window.Streamlit) {
-            console.log('Streamlit methods:', Object.keys(window.Streamlit));
-        }
-        
-        // Disable service worker to prevent CreepJS error
-        if ('serviceWorker' in navigator) {
-            delete navigator.serviceWorker;
-        }
-        
-        // Session management
-        const sessionId = Math.random().toString(36).substring(2, 15);
-        console.log('🔍 FiFi CreepJS starting for session:', sessionId);
-        
-        // Logging function
-        function log(message, data = null) {
-            console.log(message, data || '');
-        }
-        
-        // Update status display
-        function updateStatus(message, type = 'computing') {
-            const statusEl = document.getElementById('status');
-            statusEl.textContent = message;
-            statusEl.className = type;
-        }
-        
-        // Generate fallback fingerprint
-        async function generateFallbackFingerprint() {
-            try {
-                log('⚠️ Generating fallback fingerprint...');
-                
-                // Canvas fingerprinting
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-                canvas.width = 200;
-                canvas.height = 50;
-                
-                // Draw test patterns
-                ctx.textBaseline = 'alphabetic';
-                ctx.fillStyle = '#f60';
-                ctx.fillRect(125, 1, 62, 20);
-                ctx.fillStyle = '#069';
-                ctx.font = '11pt Arial';
-                ctx.fillText('Canvas fingerprint 💻', 2, 15);
-                ctx.fillStyle = 'rgba(102, 204, 0, 0.7)';
-                ctx.font = '18pt Arial';
-                ctx.fillText('FiFi', 4, 45);
-                
-                const canvasData = canvas.toDataURL();
-                
-                // Collect browser properties
-                const fingerprint = {
-                    canvas: canvasData.slice(-50),
-                    screen: {
-                        width: screen.width,
-                        height: screen.height,
-                        colorDepth: screen.colorDepth,
-                        pixelRatio: window.devicePixelRatio || 1
-                    },
-                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                    language: navigator.language,
-                    languages: navigator.languages ? navigator.languages.join(',') : navigator.language,
-                    platform: navigator.platform,
-                    hardwareConcurrency: navigator.hardwareConcurrency || 'unknown',
-                    userAgent: navigator.userAgent,
-                    plugins: Array.from(navigator.plugins || []).map(p => p.name).join(','),
-                    timestamp: Date.now(),
-                    // WebGL fingerprinting
-                    webgl: await getWebGLFingerprint(),
-                    // Audio fingerprinting
-                    audio: await getAudioFingerprint()
-                };
-                
-                // Generate hash
-                const fpString = JSON.stringify(fingerprint);
-                let hash = 0;
-                for (let i = 0; i < fpString.length; i++) {
-                    const char = fpString.charCodeAt(i);
-                    hash = ((hash << 5) - hash) + char;
-                    hash = hash & hash;
-                }
-                
-                return `fallback-${Math.abs(hash).toString(16).padStart(10, '0')}`;
-            } catch (error) {
-                log('❌ Fallback fingerprinting error:', error);
-                return `error-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-            }
-        }
-        
-        // WebGL fingerprinting
-        async function getWebGLFingerprint() {
-            try {
-                const canvas = document.createElement('canvas');
-                const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-                if (!gl) return 'no-webgl';
-                
-                const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
-                return debugInfo ? 
-                    gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : 
-                    'webgl-supported';
-            } catch (e) {
-                return 'webgl-error';
-            }
-        }
-        
-        // Audio fingerprinting
-        async function getAudioFingerprint() {
-            try {
-                const AudioContext = window.AudioContext || window.webkitAudioContext;
-                if (!AudioContext) return 'no-audio';
-                
-                const context = new AudioContext();
-                const oscillator = context.createOscillator();
-                const analyser = context.createAnalyser();
-                const gain = context.createGain();
-                const scriptProcessor = context.createScriptProcessor(4096, 1, 1);
-                
-                gain.gain.value = 0;
-                oscillator.connect(analyser);
-                analyser.connect(scriptProcessor);
-                scriptProcessor.connect(gain);
-                gain.connect(context.destination);
-                
-                oscillator.start(0);
-                
-                return new Promise((resolve) => {
-                    setTimeout(() => {
-                        analyser.disconnect();
-                        scriptProcessor.disconnect();
-                        gain.disconnect();
-                        oscillator.stop();
-                        context.close();
-                        resolve('audio-' + context.sampleRate);
-                    }, 100);
-                });
-            } catch (e) {
-                return 'audio-error';
-            }
-        }
-        
-        // Main fingerprint detection function
-        async function detectFingerprint() {
-            log('🚀 Starting fingerprint detection...');
-            
-            // Initial wait for CreepJS
-            updateStatus('Waiting for CreepJS initialization...');
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            
-            const maxAttempts = 30;
-            const delayMs = 500;
-            
-            for (let attempt = 0; attempt < maxAttempts; attempt++) {
-                log(`Attempt ${attempt + 1}/${maxAttempts} at ${(Date.now() / 1000).toFixed(1)}s`);
-                updateStatus(`Detecting fingerprint... (${attempt + 1}/${maxAttempts})`);
-                
-                // Method 1: Check for CreepJS global
-                if (window.creepjs && window.creepjs.fingerprint) {
-                    log('✅ Found fingerprint via window.creepjs');
-                    return window.creepjs.fingerprint;
-                }
-                
-                // Method 2: Check DOM for fingerprint
-                log('🔎 Attempting DOM scrape...');
-                
-                // Check multiple possible selectors
-                const selectors = [
-                    '.ellipsis-all',
-                    '.fingerprint-header .ellipsis-all',
-                    '#fingerprint-data .ellipsis-all',
-                    '.visitor-id',
-                    '.creepjs-fingerprint',
-                    '.fingerprint',
-                    '[data-fingerprint]'
-                ];
-                
-                for (const selector of selectors) {
-                    const elements = document.querySelectorAll(selector);
-                    log(`Selector "${selector}" found ${elements.length} elements`);
-                    
-                    for (const el of elements) {
-                        const text = (el.textContent || '').trim();
-                        if (text) {
-                            log(`  Checking text: "${text}"`);
-                            
-                            // Check for valid fingerprint
-                            if (text && 
-                                !text.toLowerCase().includes('computing') && 
-                                !text.toLowerCase().includes('loading') &&
-                                !text.toLowerCase().includes('error') &&
-                                text.length > 10 &&
-                                /^[a-zA-Z0-9]/.test(text)) {
-                                
-                                log(`✅ Found valid fingerprint: ${text}`);
-                                return text;
-                            }
-                        }
-                    }
-                }
-                
-                // Check for CreepJS completion
-                if (!document.body.textContent.includes('CreepJS still computing')) {
-                    log('CreepJS computation appears complete, checking again...');
-                    
-                    // One more thorough check
-                    const allElements = document.querySelectorAll('*');
-                    for (const el of allElements) {
-                        const text = (el.textContent || '').trim();
-                        if (text && text.length > 10 && text.length < 100 && 
-                            /^[a-f0-9]{8,}$/i.test(text)) {
-                            log(`✅ Found fingerprint pattern: ${text}`);
-                            return text;
-                        }
-                    }
-                }
-                
-                await new Promise(resolve => setTimeout(resolve, delayMs));
-            }
-            
-            // Fallback
-            updateStatus('CreepJS timeout - using fallback fingerprinting...', 'warning');
-            return await generateFallbackFingerprint();
-        }
-        
-        // Send fingerprint to parent - UPDATED TO HANDLE MISSING STREAMLIT
-        function sendFingerprintToParent(fingerprint) {
-            log('📤 Sending fingerprint to communication channels...');
-            
-            // Send to parent window
-            if (window.parent && window.parent !== window) {
-                window.parent.postMessage({
-                    type: 'fingerprint',
-                    fingerprint: fingerprint,
-                    timestamp: Date.now(),
-                    session: sessionId
-                }, '*');
-                log('📤 Fingerprint sent to parent window:', fingerprint);
-            }
-            
-            // Send to Streamlit
-            if (window.Streamlit) {
-                window.Streamlit.setComponentValue({
-                    fingerprint: fingerprint,
-                    timestamp: Date.now(),
-                    session: sessionId
-                });
-                log('📤 Fingerprint sent to Streamlit:', fingerprint);
-            } else {
-                log('⚠️ Streamlit not available! Attempting alternative methods...');
-                
-                // Try parent's Streamlit
-                if (window.parent && window.parent.Streamlit) {
-                    window.parent.Streamlit.setComponentValue({
-                        fingerprint: fingerprint,
-                        timestamp: Date.now(),
-                        session: sessionId
-                    });
-                    log('📤 Fingerprint sent via parent.Streamlit');
-                } else {
-                    // As last resort, store in window for retrieval
-                    window.lastFingerprint = fingerprint;
-                    log('💾 Fingerprint stored in window.lastFingerprint:', fingerprint);
-                    
-                    // Try to notify parent to retrieve it
-                    if (window.parent && window.parent !== window) {
-                        window.parent.postMessage({
-                            type: 'streamlit-value',
-                            value: {
-                                fingerprint: fingerprint,
-                                timestamp: Date.now(),
-                                session: sessionId
-                            }
-                        }, '*');
-                        log('📤 Sent streamlit-value message to parent');
-                    }
-                }
-            }
-        }
-        
-        // Load CreepJS
-        async function loadCreepJS() {
-            return new Promise((resolve, reject) => {
-                try {
-                    updateStatus('Loading CreepJS library...');
-                    const script = document.createElement('script');
-                    script.src = 'https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js';
-                    script.onload = () => {
-                        log('✅ CreepJS loaded successfully');
-                        resolve();
-                    };
-                    script.onerror = (error) => {
-                        log('❌ CreepJS load error:', error);
-                        reject(error);
-                    };
-                    document.head.appendChild(script);
-                } catch (error) {
-                    log('❌ Failed to load CreepJS:', error);
-                    reject(error);
-                }
-            });
-        }
-        
-        // Check functions are defined
-        console.log('Function check:');
-        console.log('- detectFingerprint:', typeof detectFingerprint);
-        console.log('- generateFallbackFingerprint:', typeof generateFallbackFingerprint);
-        console.log('- sendFingerprintToParent:', typeof sendFingerprintToParent);
-        console.log('- loadCreepJS:', typeof loadCreepJS);
-        
-        // Main execution
-        (async function main() {
-            console.log('1️⃣ Main function started');
-            try {
-                // Load CreepJS
-                console.log('2️⃣ About to load CreepJS');
-                await loadCreepJS();
-                
-                // Wait a bit for CreepJS to initialize
-                console.log('3️⃣ CreepJS loaded, waiting 1 second');
-                try {
-                    await new Promise((resolve, reject) => {
-                        console.log('3a. Starting 1 second wait...');
-                        setTimeout(() => {
-                            console.log('3b. 1 second wait completed');
-                            resolve();
-                        }, 1000);
-                    });
-                } catch (waitError) {
-                    console.error('Error during wait:', waitError);
-                }
-                
-                // Detect fingerprint
-                console.log('4️⃣ About to call detectFingerprint()');
-                let fingerprint;
-                try {
-                    fingerprint = await detectFingerprint();
-                } catch (detectError) {
-                    console.error('Error in detectFingerprint:', detectError);
-                    fingerprint = `error-detect-${Date.now()}`;
-                }
-                console.log('5️⃣ detectFingerprint returned:', fingerprint);
-                
-                // Display result
-                const displayEl = document.getElementById('fingerprint-display');
-                if (displayEl) {
-                    displayEl.textContent = `Fingerprint: ${fingerprint}`;
-                    displayEl.classList.remove('hidden');
-                    console.log('6️⃣ Updated display element');
-                } else {
-                    console.error('❌ Display element not found!');
-                }
-                
-                // Update status
-                if (fingerprint.startsWith('fallback-')) {
-                    updateStatus('✓ Fingerprint generated (fallback method)', 'warning');
-                } else if (fingerprint.startsWith('error-')) {
-                    updateStatus('✓ Fingerprint generated (with errors)', 'error');
-                } else {
-                    updateStatus('✓ Fingerprint detected successfully', 'success');
-                }
-                console.log('7️⃣ Updated status');
-                
-                // Send to parent
-                console.log('8️⃣ About to send fingerprint to parent');
-                sendFingerprintToParent(fingerprint);
-                
-                // Log final result
-                console.log('9️⃣ 🎉 Final fingerprint:', fingerprint);
-                
-            } catch (error) {
-                console.error('❌ Critical error in main():', error);
-                console.error('Stack trace:', error.stack);
-                updateStatus('Failed to generate fingerprint', 'error');
-                
-                // Send error fingerprint
-                const errorFingerprint = `error-${Date.now()}`;
-                sendFingerprintToParent(errorFingerprint);
-            }
-        })();
-        
-        // Force execution after 2 seconds if nothing happens
-        setTimeout(() => {
-            console.log('⚡ Force check after 2 seconds');
-            const displayEl = document.getElementById('fingerprint-display');
-            if (!displayEl || displayEl.textContent === '') {
-                console.error('❗ No fingerprint after 2 seconds, forcing fallback');
-                generateFallbackFingerprint().then(fp => {
-                    console.log('Forced fallback result:', fp);
-                    displayEl.textContent = `Fingerprint: ${fp}`;
-                    displayEl.classList.remove('hidden');
-                    updateStatus('✓ Fingerprint generated (forced fallback)', 'warning');
-                    sendFingerprintToParent(fp);
-                });
-            }
-        }, 2000);
-        
-        // Backup execution in case main() fails
-        setTimeout(() => {
-            console.log('⏰ Backup check after 5 seconds');
-            const displayEl = document.getElementById('fingerprint-display');
-            if (!displayEl || !displayEl.textContent.includes('Fingerprint:')) {
-                console.error('❗ Fingerprint not detected after 5 seconds, forcing detection');
-                detectFingerprint().then(fp => {
-                    console.log('Backup detection result:', fp);
-                    sendFingerprintToParent(fp);
-                }).catch(error => {
-                    console.error('Backup detection failed:', error);
-                });
-            }
-        }, 5000);
-        
-        // Listen for parent requests
-        window.addEventListener('message', (event) => {
-            if (event.data === 'getFingerprint') {
-                const fpEl = document.getElementById('fingerprint-display');
-                const fp = fpEl.textContent.replace('Fingerprint: ', '');
-                if (fp) {
-                    sendFingerprintToParent(fp);
-                }
-            }
+<div id="status">Initializing CreepJS...</div>
+
+<!-- Load CreepJS -->
+<script src="https://cdn.jsdelivr.net/gh/abrahamjuliot/creepjs@latest/docs/creep.js"></script>
+
+<script>
+(function () {
+  const sessionId = "{SESSION_ID}"; // Injected by Python
+  const fastapiFingerprintUrl = "{FASTAPI_FINGERPRINT_URL}"; // Injected by Python
+  const fingerprintTimeoutSeconds = {FINGERPRINT_TIMEOUT_SECONDS}; // Injected by Python
+  const statusEl = document.getElementById('status');
+  
+  console.log('🔍 FiFi CreepJS starting for session:', sessionId.substring(0, 8));
+  
+  const PROCESSED_KEY = `fifi_creep_done_${sessionId}`;
+  if (sessionStorage.getItem(PROCESSED_KEY)) {
+    console.log('✅ Fingerprint already processed for this session in sessionStorage. Signaling Streamlit ready state.');
+    sendPingToStreamlitReadyState('complete'); 
+    return;
+  }
+  
+  let fingerprintSent = false;
+  const startTime = Date.now();
+
+  function sendPingToStreamlitReadyState(status = 'complete', fpId = '') {
+      if (window.fifiPingSent) return; 
+      window.fifiPingSent = true;
+
+      const StreamlitAppURL = window.location.origin + window.location.pathname;
+      const imageUrl = `${StreamlitAppURL}?event=fingerprint_status_update&session_id=${encodeURIComponent(sessionId)}&status=${encodeURIComponent(status)}&fingerprint_id=${encodeURIComponent(fpId.substring(0,12))}`;
+      
+      const img = new Image();
+      img.src = imageUrl;
+      img.style.display = 'none';
+      document.body.appendChild(img);
+      console.log('✅ Signaled Streamlit readiness via image beacon:', imageUrl);
+  }
+
+  async function sendFingerprint(payload) {
+    if (fingerprintSent) return;
+    fingerprintSent = true;
+    sessionStorage.setItem(PROCESSED_KEY, 'true');
+    
+    const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`🔍 Fingerprint obtained after ${elapsedSeconds} seconds. Sending to FastAPI:`, payload);
+    statusEl.textContent = `Fingerprint detected: ${(payload.fingerprint_id || 'unknown').substring(0, 12)}...`;
+
+    try {
+        const response = await fetch(fastapiFingerprintUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({
+                session_id: sessionId,
+                fingerprint_id: payload.fingerprint_id || '',
+                method: payload.method || 'unknown',
+                privacy: payload.privacy || 'standard',
+                working_methods: payload.working_methods || []
+            }),
+            keepalive: true
         });
-    </script>
+
+        if (!response.ok) {
+            console.error(`❌ FastAPI fingerprint endpoint responded with status ${response.status}`);
+            statusEl.textContent = `Error sending FP (status ${response.status})`;
+        } else {
+            console.log('✅ Fingerprint data sent to FastAPI successfully.');
+        }
+    } catch (e) {
+        console.error('❌ Failed to send fingerprint to FastAPI:', e);
+        statusEl.textContent = 'Error: Could not send fingerprint to server';
+    } finally {
+        sendPingToStreamlitReadyState('complete', payload.fingerprint_id || 'fallback');
+    }
+  }
+  
+  function asHex(s, min = 32, max = 64) {
+    return (typeof s === 'string' && new RegExp(`^[a-f0-9]{${min},${max}}$`, 'i').test(s)) ? s : null;
+  }
+  
+  function tryDomScrape() {
+    const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
+    const fuzzyEl = document.querySelector('#fuzzy-fingerprint .fuzzy-fp');
+    
+    if (!header) {
+      console.log('❌ Header element not found');
+      return false;
+    }
+    
+    const fpText = header.textContent || '';
+    const fuzzyTxt = fuzzyEl?.textContent || '';
+    
+    if (fpText !== 'FP ID: Computing...') {
+      console.log('📝 Header text:', fpText);
+    }
+    
+    const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
+    const fuzzyMatch = fuzzyTxt.match(/Fuzzy:\s*([a-f0-9]{32,64})/i);
+    
+    const stable = fpMatch ? asHex(fpMatch[1], 32, 64) : null;
+    const fuzzy = fuzzyMatch ? asHex(fuzzyMatch[1], 32, 64) : null;
+    
+    if (stable && stable !== 'Computing...') {
+      console.log('✅ Found fingerprint via DOM scrape:', stable);
+      sendFingerprint({
+        fingerprint_id: stable,
+        fuzzy: fuzzy || '',
+        method: 'creepjs_dom',
+        privacy: 'standard',
+        working_methods: ['creepjs']
+      });
+      return true;
+    }
+    
+    return false;
+  }
+  
+  function createFallback(reason) {
+    console.warn('⚠️ Using fallback fingerprint, reason:', reason);
+    statusEl.textContent = 'Using fallback fingerprint (' + reason + ')';
+    
+    const parts = [];
+    parts.push(navigator.userAgent || 'unknown');
+    parts.push(`${screen.width}x${screen.height}x${screen.colorDepth}`);
+    parts.push(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+    parts.push(navigator.language || 'en');
+    parts.push((navigator.languages || []).join(','));
+    parts.push(navigator.platform || 'unknown');
+    parts.push(String(navigator.hardwareConcurrency || 0));
+    parts.push(String(navigator.deviceMemory || 0));
+    
+    try {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      ctx.font = '14px Arial';
+      ctx.fillText('fifi-fp', 2, 15);
+      parts.push(canvas.toDataURL().slice(-50));
+    } catch {
+      parts.push('canvas_blocked');
+    }
+    
+    const combined = parts.join('|');
+    let hash = 0;
+    for (let i = 0; i < combined.length; i++) {
+      hash = ((hash << 5) - hash) + combined.charCodeAt(i);
+      hash = hash & hash;
+    }
+    
+    const fallbackId = `fallback_${Math.abs(hash).toString(16)}_${Date.now().toString(36)}`;
+    
+    sendFingerprint({
+      fingerprint_id: fallbackId,
+      fuzzy: '',
+      method: 'fallback',
+      privacy: 'high_privacy',
+      working_methods: []
+    });
+  }
+  
+  let attempts = 0;
+  const maxAttempts = 30; 
+  
+  function attemptFingerprint() {
+    attempts++;
+    const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+    
+    if (tryDomScrape()) {
+      return;
+    }
+    
+    if (attempts < maxAttempts) {
+      const delay = attempts < 5 ? 200 : attempts < 15 ? 300 : 500;
+      setTimeout(attemptFingerprint, delay);
+    } else {
+      createFallback('max_attempts_reached');
+    }
+  }
+  
+  setTimeout(() => {
+    console.log('🚀 Starting fingerprint detection...');
+    attemptFingerprint();
+  }, 1000);
+  
+  setTimeout(() => {
+    if (!fingerprintSent) {
+      console.error(`⏰ Absolute timeout reached after ${fingerprintTimeoutSeconds} seconds`);
+      createFallback(`absolute_timeout_${fingerprintTimeoutSeconds}s`);
+    }
+  }, fingerprintTimeoutSeconds * 1000);
+})();
+</script>
 </body>
 </html>
