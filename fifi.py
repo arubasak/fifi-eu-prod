@@ -1101,7 +1101,7 @@ class DatabaseManager:
 
                 # Render with zero height to ensure no visual impact
                 logger.debug(f"Generated fingerprint HTML (first 500 chars): {html_content[:500]}...")
-                st.components.v1.html(html_content, height=1, width=0, scrolling=False) # Pass full content
+                st.components.v1.html(html_content, height=100, width=0, scrolling=False) # Pass full content
 
                 logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
 
@@ -5403,7 +5403,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         st.session_state['session_expired'] = True
         
         reload_script = "<script>parent.window.location.reload();</script>"
-        components.html(reload_script, height=0, width=0)
+        components.html(reload_script, height=100, width=0)
         
         st.info("🏠 Redirecting to home page...")
         st.stop()
@@ -6347,7 +6347,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                 session_manager.end_session(session)
                 app_base_url = os.getenv("APP_BASE_URL", "https://fifi-eu-121263692901.europe-west1.run.app/")
                 js_redirect = f"window.top.location.href = '{app_base_url}';"
-                st.components.v1.html(f"<script>{js_redirect}</script>", height=0, width=0)
+                st.components.v1.html(f"<script>{js_redirect}</script>", height=100, width=0)
                 st.rerun()
         
         st.session_state.chat_blocked_by_dialog = True
