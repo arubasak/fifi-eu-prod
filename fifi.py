@@ -1100,7 +1100,7 @@ class DatabaseManager:
                 html_content = html_content.replace('{FINGERPRINT_TIMEOUT_SECONDS}', str(FINGERPRINT_TIMEOUT_SECONDS))
 
                 # Render with zero height to ensure no visual impact
-                logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
+                logger.debug(f"Generated fingerprint HTML (first 500 chars): {html_content[:500]}...")
                 st.components.v1.html(html_content, height=1, width=0, scrolling=False) # Pass full content
 
                 logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
