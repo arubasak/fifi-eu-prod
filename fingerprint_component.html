@@ -352,11 +352,27 @@
                 
                 // Wait a bit for CreepJS to initialize
                 console.log('3️⃣ CreepJS loaded, waiting 1 second');
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                try {
+                    await new Promise((resolve, reject) => {
+                        console.log('3a. Starting 1 second wait...');
+                        setTimeout(() => {
+                            console.log('3b. 1 second wait completed');
+                            resolve();
+                        }, 1000);
+                    });
+                } catch (waitError) {
+                    console.error('Error during wait:', waitError);
+                }
                 
                 // Detect fingerprint
                 console.log('4️⃣ About to call detectFingerprint()');
-                const fingerprint = await detectFingerprint();
+                let fingerprint;
+                try {
+                    fingerprint = await detectFingerprint();
+                } catch (detectError) {
+                    console.error('Error in detectFingerprint:', detectError);
+                    fingerprint = `error-detect-${Date.now()}`;
+                }
                 console.log('5️⃣ detectFingerprint returned:', fingerprint);
                 
                 // Display result
@@ -396,6 +412,22 @@
                 sendFingerprintToParent(errorFingerprint);
             }
         })();
+        
+        // Force execution after 2 seconds if nothing happens
+        setTimeout(() => {
+            console.log('⚡ Force check after 2 seconds');
+            const displayEl = document.getElementById('fingerprint-display');
+            if (!displayEl || displayEl.textContent === '') {
+                console.error('❗ No fingerprint after 2 seconds, forcing fallback');
+                generateFallbackFingerprint().then(fp => {
+                    console.log('Forced fallback result:', fp);
+                    displayEl.textContent = `Fingerprint: ${fp}`;
+                    displayEl.classList.remove('hidden');
+                    updateStatus('✓ Fingerprint generated (forced fallback)', 'warning');
+                    sendFingerprintToParent(fp);
+                });
+            }
+        }, 2000);
         
         // Backup execution in case main() fails
         setTimeout(() => {
