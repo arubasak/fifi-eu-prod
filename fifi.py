@@ -175,7 +175,7 @@ def show_loading_overlay():
         loading_message = st.session_state.get('loading_message', 'Loading...')
         
         # Don't show overlay for fingerprinting operations
-        if loading_message == "Setting up device recognition...":
+        if loading_message.startswith("Setting up device recognition..."): # Changed to startsWith
             return False
         
         # Create a full-screen overlay using HTML/CSS
@@ -3498,7 +3498,7 @@ class SessionManager:
                             st.session_state.known_device_emails = list(known_emails)
                 
                     limit_check = self.question_limits.is_within_limits(session)
-                    if not limit_check.get('allowed', True) and limit_check.get('reason') != 'guest_limit':
+                    if not limit_check.get('allowed', True) and limit_check.get('reason') not in ['guest_limit', 'email_verified_guest_limit', 'registered_user_tier1_limit', 'registered_user_tier2_limit']:
                     
                         ban_type = limit_check.get('ban_type', 'unknown')
                         message = limit_check.get('message', 'Access restricted due to usage policy.')
@@ -6625,23 +6625,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
     st.caption("Hello, I am FiFi, your AI-powered assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, explore recipe ideas, technical data, and more.")
 
     # NEW: Show fingerprint waiting status ONLY for non-registered users
-    if session.user_type != UserType.REGISTERED_USER and \
-       not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
-        
-        current_time_float = time.time()
-        wait_start = st.session_state.get('fingerprint_wait_start')
-        elapsed = current_time_float - wait_start
-        remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed)
-        
-        if remaining > 0:
-            st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
-            st.caption("FiFi is setting up device recognition for security and session management.")
-        else:
-            st.info("🔒 **Finalizing setup...** Almost ready!")
-        
-        progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
-        st.progress(progress_value, text="Session Security Setup")
-        st.markdown("---")
+    # This block is now handled higher up in main_fixed, so it won't be displayed here
+    # However, if for any reason it gets to this point and is still not ready,
+    # it means the fingerprinting is taking too long or failed, and main_fixed
+    # will have already triggered a rerun. This means this section will only
+    # execute once is_chat_ready is True.
 
     # Simple activity tracking
     if activity_result:
@@ -7108,7 +7096,6 @@ def main_fixed():
 
     # --- OPTIMIZATION: Handle URL-based events EARLY, before any other logic ---
     handle_emergency_save_requests_from_query()
-    # handle_fingerprint_requests_from_query() # REMOVED: No longer handles actual FP data
     if handle_fingerprint_status_update_from_query(): # NEW: Handle iframe signaling completion
         return # Stop execution if a fingerprint status update was handled and reran
 
@@ -7117,79 +7104,122 @@ def main_fixed():
         st.error("❌ Session Manager not available. Please refresh the page.")
         return
 
+    # Ensure current_session_id is always available if possible
+    if 'current_session_id' not in st.session_state and not st.session_state.get('is_loading', False):
+        # This branch is for first load when starting as guest, or after a full refresh
+        # where session_id might be lost. Ensure a session is created or retrieved.
+        temp_session = session_manager.get_session() 
+        if temp_session:
+            st.session_state.current_session_id = temp_session.session_id
+            logger.debug(f"Recovered or created session {temp_session.session_id[:8]} on initial access.")
+        else:
+            logger.error("Failed to create or retrieve session even with get_session. Cannot proceed.")
+            st.error("Fatal error: Could not initialize user session. Please try refreshing your browser.")
+            return
+
     if st.session_state.get('is_loading', False):
-        if show_loading_overlay():
-            pass
+        loading_reason = st.session_state.get('loading_reason', 'unknown')
+        session_id_for_loading = st.session_state.get('current_session_id')
+        session = None
 
-        try:
-            loading_reason = st.session_state.get('loading_reason', 'unknown')
-            session = None
-            
-            if loading_reason == 'start_guest':
-                # FIX: Ensure a session exists or create one for fingerprinting
-                session = session_manager.get_session()
-                if session is None:
-                    # Fallback to creating a basic session if get_session failed
-                    session_id = str(uuid.uuid4())
-                    session = UserSession(session_id=session_id, last_activity=None, login_method='guest')
-                    session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
-                    session.fingerprint_method = "temporary_fallback_python"
-                    st.session_state.current_session_id = session.session_id
-                    session_manager.db.save_session(session)
-                    logger.warning(f"Created temporary session {session.session_id[:8]} during start_guest loading due to get_session failure.")
+        if session_id_for_loading:
+            session = session_manager.db.load_session(session_id_for_loading)
+            if not session: # Should not happen, but for safety
+                logger.error(f"Session {session_id_for_loading[:8]} disappeared during loading state. Recreating.")
+                session = session_manager._create_new_session()
+                st.session_state.current_session_id = session.session_id
+                session_manager.db.save_session(session)
 
-                if session and session.last_activity is None:
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
-                st.session_state.page = "chat"
+
+        if loading_reason == 'start_guest':
+            set_loading_state(True, "Setting up device recognition...") # Set message for fingerprinting
+
+            # Render fingerprint component ONLY if it hasn't been rendered or fingerprinting hasn't completed
+            fingerprint_rendered_key = f"fingerprint_rendered_{session_id_for_loading}"
+            if not st.session_state.get(fingerprint_rendered_key, False) and \
+               not st.session_state.get('fingerprint_client_side_completed', False):
                 
-            elif loading_reason == 'authenticate':
-                username = st.session_state.get('temp_username', '')
-                password = st.session_state.get('temp_password', '')
-                if username and password:
-                    authenticated_session = session_manager.authenticate_with_wordpress(username, password)
-                    if authenticated_session:
-                        session = authenticated_session
-                        st.session_state.current_session_id = authenticated_session.session_id
-                        st.session_state.page = "chat"
-                        st.session_state.is_chat_ready = True
-                        st.session_state.fingerprint_wait_start = None
-                        st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
-                        st.balloons()
+                session_manager.fingerprinting.render_fingerprint_component(session_id_for_loading)
+                st.session_state[fingerprint_rendered_key] = True
+                st.session_state.fingerprint_wait_start = time.time() # Start timer
+                logger.info(f"✅ Fingerprint component rendered and timer started for {session_id_for_loading[:8]}. Rerunning.")
+                st.rerun() # Force rerun to allow JS to run
+
+            # If fingerprint component was rendered, now wait for its completion or timeout
+            if st.session_state.get(fingerprint_rendered_key, False):
+                # Poll DB for fingerprint data, after client-side signals completion or timeout
+                latest_session_from_db = session_manager.db.load_session(session_id_for_loading)
+                if latest_session_from_db:
+                    session.fingerprint_id = latest_session_from_db.fingerprint_id
+                    session.fingerprint_method = latest_session_from_db.fingerprint_method
+                    session.browser_privacy_level = latest_session_from_db.browser_privacy_level
+                
+                fingerprint_is_stable = not (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")))
+                
+                wait_start = st.session_state.get('fingerprint_wait_start', time.time())
+                elapsed = time.time() - wait_start
+
+                if fingerprint_is_stable or elapsed > FINGERPRINT_TIMEOUT_SECONDS:
+                    st.session_state.is_chat_ready = True
+                    set_loading_state(False) # Fingerprinting is done, clear loading
+                    if session and session.last_activity is None: # Initial activity if it's a truly new session
+                        session.last_activity = datetime.now()
+                        session_manager.db.save_session(session)
+                    logger.info(f"Fingerprinting for {session_id_for_loading[:8]} completed (stable={fingerprint_is_stable}, elapsed={elapsed:.1f}s). Chat ready.")
+                else:
+                    # Still waiting for fingerprint, keep showing loading message and rerun
+                    st.session_state.loading_message = f"Setting up device recognition... ({int(FINGERPRINT_TIMEOUT_SECONDS - elapsed)}s remaining)"
+                    time.sleep(0.5) # Small delay to prevent busy-looping
+                    st.rerun()
+                    return # Continue waiting
+
+            st.session_state.page = "chat" # Once fingerprinting is resolved, proceed to chat
+            
+        elif loading_reason == 'authenticate':
+            username = st.session_state.get('temp_username', '')
+            password = st.session_state.get('temp_password', '')
+            if username and password:
+                authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                if authenticated_session:
+                    session = authenticated_session
+                    st.session_state.current_session_id = authenticated_session.session_id
+                    st.session_state.page = "chat"
+                    st.session_state.is_chat_ready = True
+                    st.session_state.fingerprint_wait_start = None
+                    st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
+                    st.balloons()
+                else: # Authentication failed by WordPress
+                    set_loading_state(False)
+                    st.session_state.page = None # Return to welcome page
                     if 'temp_username' in st.session_state: del st.session_state['temp_username']
                     if 'temp_password' in st.session_state: del st.session_state['temp_password']
-                else:
-                    set_loading_state(False)
-                    st.error("Authentication failed: Missing username or password.")
-                    return
+                    st.rerun() # Rerun to display error or fallback on welcome page
+                    return # Stop this run
+            else:
+                set_loading_state(False)
+                st.error("Authentication failed: Missing username or password.")
+                st.session_state.page = None # Return to welcome page
+                st.rerun()
+                return
             
-            if 'loading_reason' in st.session_state:
-                del st.session_state['loading_reason']
-
-            if session:
-                if session.user_type == UserType.REGISTERED_USER:
-                    st.session_state.is_chat_ready = True
-                else:
-                    # After initial load/auth, check DB for stable FP
-                    latest_session_from_db = session_manager.db.load_session(session.session_id)
-                    if latest_session_from_db:
-                        session.fingerprint_id = latest_session_from_db.fingerprint_id
-                        session.fingerprint_method = latest_session_from_db.fingerprint_method
-                        session.browser_privacy_level = latest_session_from_db.browser_privacy_level
-                    fingerprint_is_stable = not (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")))
-                    if fingerprint_is_stable:
-                        st.session_state.is_chat_ready = True
-
+            # Clear loading state after successful authentication
             set_loading_state(False)
-            st.rerun()
-            return
+
+
+        if 'loading_reason' in st.session_state:
+            del st.session_state['loading_reason']
+
+        # After any loading path, if chat is not ready, ensure we set it if conditions met.
+        # This primarily catches the authenticated user path, where FP is not strictly awaited.
+        if session and not st.session_state.get('is_chat_ready', False):
+            if session.user_type == UserType.REGISTERED_USER:
+                st.session_state.is_chat_ready = True
+            # For non-registered, is_chat_ready should have been set by the fingerprinting logic above.
+
+        set_loading_state(False)
+        st.rerun()
+        return
             
-        except Exception as e:
-            set_loading_state(False)
-            st.error(f"⚠️ Error during loading: {str(e)}")
-            logger.error(f"Loading state error: {e}", exc_info=True)
-            return
-
     current_page = st.session_state.get('page')
     
     if current_page != "chat":
@@ -7206,60 +7236,24 @@ def main_fixed():
             st.rerun()
             return
         
-        # Conditionally render fingerprinting component ONLY IF client-side hasn't completed yet
-        # and it's a non-registered user
-        if session.user_type != UserType.REGISTERED_USER and not st.session_state.get('fingerprint_client_side_completed', False):
-            fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-            if not st.session_state.get(fingerprint_key, False):
-                session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-                st.session_state[fingerprint_key] = True
-                logger.info(f"✅ Fingerprint component rendered for session {session.session_id[:8]}")
-                # Force a rerun immediately after rendering the component
-                st.rerun()
-                return # Stop further execution in this run to allow the component to initialize
-
-        # --- FINGERPRINT READY STATE MANAGEMENT ---
-        # For non-registered users, we wait for a stable fingerprint OR a timeout.
-        if session.user_type != UserType.REGISTERED_USER:
-            # Check the DB for the latest fingerprint after the client-side component has signaled completion.
-            # This is crucial because FastAPI updates the DB, not Streamlit's session_state directly.
-            if st.session_state.get('fingerprint_client_side_completed', False):
-                latest_session_from_db = session_manager.db.load_session(session.session_id)
-                if latest_session_from_db:
-                    session.fingerprint_id = latest_session_from_db.fingerprint_id
-                    session.fingerprint_method = latest_session_from_db.fingerprint_method
-                    session.browser_privacy_level = latest_session_from_db.browser_privacy_level
-                    # Clear the client-side completed flag once we've read from DB
-                    st.session_state.fingerprint_client_side_completed = False
-            
-            fingerprint_is_stable = not (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")))
-            
-            if fingerprint_is_stable:
-                st.session_state.is_chat_ready = True
-                if 'fingerprint_wait_start' in st.session_state:
-                    del st.session_state['fingerprint_wait_start']
-            else:
-                if 'fingerprint_wait_start' not in st.session_state:
-                    st.session_state.fingerprint_wait_start = time.time()
-                
-                if time.time() - st.session_state.fingerprint_wait_start > FINGERPRINT_TIMEOUT_SECONDS:
-                    st.session_state.is_chat_ready = True
-                    logger.warning(f"Fingerprint timeout ({FINGERPRINT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
-                else:
-                    st.session_state.is_chat_ready = False
-        else: # Registered users are always ready (fingerprint handled as "not collected" or inherited by email)
-            st.session_state.is_chat_ready = True
-            if 'fingerprint_wait_start' in st.session_state:
-                del st.session_state['fingerprint_wait_start']
-        
-        # If still waiting for fingerprint, rerun to show progress
+        # This block is *now redundant* in `render_chat_interface_simplified`
+        # because the waiting for fingerprint happens *before* entering the chat page.
+        # However, it's harmless if `is_chat_ready` is already True.
         if not st.session_state.get('is_chat_ready', False):
-            # NEW: Show a spinner or message directly in the chat area
-            with st.chat_message("assistant", avatar=FIFI_AVATAR_B64):
-                st.info("🔒 Initializing secure session and device recognition...")
-                st.markdown(f"*Please wait, this ensures consistent experience and usage tracking.*")
-            st.rerun()
-            return
+            # This should technically not be reached if the loading state handled fingerprinting correctly
+            # But as a failsafe, ensure it doesn't block infinitely
+            if 'fingerprint_wait_start' not in st.session_state:
+                 st.session_state.fingerprint_wait_start = time.time()
+            
+            if time.time() - st.session_state.fingerprint_wait_start > FINGERPRINT_TIMEOUT_SECONDS:
+                st.session_state.is_chat_ready = True
+                logger.warning(f"Failsafe: Fingerprint timeout in chat page ({FINGERPRINT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
+            else:
+                with st.chat_message("assistant", avatar=FIFI_AVATAR_B64):
+                    st.info("🔒 Initializing secure session and device recognition...")
+                    st.markdown(f"*Please wait, this ensures consistent experience and usage tracking.*")
+                st.rerun()
+                return
 
         # Render activity tracker and check for session timeout
         activity_data_from_js = None
