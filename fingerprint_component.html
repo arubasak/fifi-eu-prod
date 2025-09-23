@@ -17,12 +17,6 @@
       <div class="fingerprint-header-container">
         <div class="fingerprint-header">
           <div class="ellipsis-all">FP ID: Computing...</div>
-          <div id="fuzzy-fingerprint">
-            <div class="ellipsis-all fuzzy-fp">Fuzzy:
-              <span class="blurred">0000000000000000000000000000000000000000000000000000000000000000</span>
-            </div>
-          </div>
-          <div><span class="time">0 ms</span></div>
         </div>
       </div>
     </div>
@@ -107,42 +101,78 @@
     }
   }
   
-  function asHex(s, min = 32, max = 64) {
-    return (typeof s === 'string' && new RegExp(`^[a-f0-9]{${min},${max}}$`, 'i').test(s)) ? s : null;
-  }
-  
   function tryDomScrape() {
-    const header = document.querySelector('#fingerprint-data .fingerprint-header .ellipsis-all');
-    const fuzzyEl = document.querySelector('#fuzzy-fingerprint .fuzzy-fp');
+    console.log('🔎 Attempting DOM scrape...');
     
-    if (!header) {
-      console.log('❌ Header element not found');
-      return false;
+    // Debug: Log all elements with class 'ellipsis-all'
+    const allEllipsis = document.querySelectorAll('.ellipsis-all');
+    console.log('Found elements with .ellipsis-all:', allEllipsis.length);
+    allEllipsis.forEach((el, i) => {
+      console.log(`  [${i}] Text: "${el.textContent}"`);
+    });
+    
+    // Try multiple possible selectors for CreepJS fingerprint
+    const selectors = [
+      '.fingerprint-header .ellipsis-all',
+      '#fingerprint-data .ellipsis-all',
+      '.visitor-fingerprint .ellipsis-all',
+      '.fingerprint',
+      '[data-fingerprint]',
+      '.fp-hash',
+      '#creepjs-fingerprint'
+    ];
+    
+    for (const selector of selectors) {
+      const elements = document.querySelectorAll(selector);
+      console.log(`Selector "${selector}" found ${elements.length} elements`);
+      
+      for (const el of elements) {
+        const text = el.textContent || el.getAttribute('data-fingerprint') || '';
+        console.log(`  Checking text: "${text}"`);
+        
+        // Look for hex patterns that could be fingerprints
+        const hexMatches = text.match(/[a-f0-9]{32,64}/gi);
+        if (hexMatches) {
+          for (const match of hexMatches) {
+            if (match.length >= 32) {
+              console.log('✅ Found potential fingerprint:', match);
+              sendFingerprint({
+                fingerprint_id: match,
+                method: 'creepjs_dom',
+                privacy: 'standard',
+                working_methods: ['creepjs']
+              });
+              return true;
+            }
+          }
+        }
+      }
     }
     
-    const fpText = header.textContent || '';
-    const fuzzyTxt = fuzzyEl?.textContent || '';
-    
-    if (fpText !== 'FP ID: Computing...') {
-      console.log('📝 Header text:', fpText);
+    // Also check if CreepJS has exposed any global variables
+    if (window.creepjs) {
+      console.log('Found window.creepjs:', window.creepjs);
     }
     
-    const fpMatch = fpText.match(/FP\s*ID:\s*([a-f0-9]{32,64})/i);
-    const fuzzyMatch = fuzzyTxt.match(/Fuzzy:\s*([a-f0-9]{32,64})/i);
-    
-    const stable = fpMatch ? asHex(fpMatch[1], 32, 64) : null;
-    const fuzzy = fuzzyMatch ? asHex(fuzzyMatch[1], 32, 64) : null;
-    
-    if (stable && stable !== 'Computing...') {
-      console.log('✅ Found fingerprint via DOM scrape:', stable);
-      sendFingerprint({
-        fingerprint_id: stable,
-        fuzzy: fuzzy || '',
-        method: 'creepjs_dom',
-        privacy: 'standard',
-        working_methods: ['creepjs']
-      });
-      return true;
+    // Check for CreepJS fingerprint in sessionStorage or localStorage
+    for (const storage of [sessionStorage, localStorage]) {
+      for (let i = 0; i < storage.length; i++) {
+        const key = storage.key(i);
+        if (key && key.toLowerCase().includes('creep')) {
+          const value = storage.getItem(key);
+          console.log(`Found storage key "${key}":`, value);
+          if (value && /[a-f0-9]{32,64}/i.test(value)) {
+            console.log('✅ Found fingerprint in storage');
+            sendFingerprint({
+              fingerprint_id: value,
+              method: 'creepjs_storage',
+              privacy: 'standard',
+              working_methods: ['creepjs']
+            });
+            return true;
+          }
+        }
+      }
     }
     
     return false;
@@ -190,14 +220,55 @@
     });
   }
   
+  // Try to intercept CreepJS when it's ready
+  let creepjsCheckInterval = setInterval(() => {
+    // Check if CreepJS has finished by looking for results
+    const fpElements = document.querySelectorAll('.fingerprint, .visitor-fingerprint, [class*="fingerprint"]');
+    let foundValidFp = false;
+    
+    for (const el of fpElements) {
+      const text = el.textContent || '';
+      if (text.includes('Computing') || text.includes('loading')) {
+        console.log('CreepJS still computing...');
+        return; // Still loading
+      }
+      
+      // Look for hex patterns
+      const hexMatch = text.match(/[a-f0-9]{32,64}/i);
+      if (hexMatch) {
+        console.log('✅ Found CreepJS fingerprint via interval check:', hexMatch[0]);
+        sendFingerprint({
+          fingerprint_id: hexMatch[0],
+          method: 'creepjs_interval',
+          privacy: 'standard',
+          working_methods: ['creepjs']
+        });
+        foundValidFp = true;
+        clearInterval(creepjsCheckInterval);
+        break;
+      }
+    }
+    
+    if (!foundValidFp) {
+      console.log('CreepJS check - no valid fingerprint found yet');
+    }
+  }, 500);
+  
+  // Clear interval after timeout
+  setTimeout(() => {
+    clearInterval(creepjsCheckInterval);
+  }, fingerprintTimeoutSeconds * 1000);
+  
   let attempts = 0;
   const maxAttempts = 30; 
   
   function attemptFingerprint() {
     attempts++;
     const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`Attempt ${attempts}/${maxAttempts} at ${elapsedSeconds}s`);
     
     if (tryDomScrape()) {
+      clearInterval(creepjsCheckInterval);
       return;
     }
     
@@ -205,6 +276,7 @@
       const delay = attempts < 5 ? 200 : attempts < 15 ? 300 : 500;
       setTimeout(attemptFingerprint, delay);
     } else {
+      clearInterval(creepjsCheckInterval);
       createFallback('max_attempts_reached');
     }
   }
@@ -212,11 +284,12 @@
   setTimeout(() => {
     console.log('🚀 Starting fingerprint detection...');
     attemptFingerprint();
-  }, 1000);
+  }, 2000); // Give CreepJS more time to initialize
   
   setTimeout(() => {
     if (!fingerprintSent) {
       console.error(`⏰ Absolute timeout reached after ${fingerprintTimeoutSeconds} seconds`);
+      clearInterval(creepjsCheckInterval);
       createFallback(`absolute_timeout_${fingerprintTimeoutSeconds}s`);
     }
   }, fingerprintTimeoutSeconds * 1000);
