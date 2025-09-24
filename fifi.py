@@ -6186,12 +6186,16 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             # if DEBUG_MODE:
             if ai_system.openai_client:
                 # st.success("💬 OpenAI: Ready")
+                pass
             elif ai_system.config.OPENAI_API_KEY:
-                st.warning("💬 OpenAI: Error")
+                # st.warning("💬 OpenAI: Error")
+                pass
             else:
-                st.info("💬 OpenAI: Not configured")
+                # st.info("💬 OpenAI: Not configured")
+                pass
         else:
-            st.error("🤖 AI System: Not available")
+            # st.error("🤖 AI System: Not available")
+            pass
         
         # Hide "🚫 CRM Integration: Registered users & verified guests only"
         # if DEBUG_MODE:
