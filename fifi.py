@@ -3430,10 +3430,10 @@ class SessionManager:
 
         logger.info(f"✅ Final inheritance status for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}, pending_type={session.pending_user_type.value if session.pending_user_type else 'None'}, declined_at={session.declined_recognized_email_at}")
         
-    def get_session(self) -> Optional[UserSession]:
+    def get_session(self, create_if_missing: bool = True) -> Optional[UserSession]:
         """Gets or creates the current user session with enhanced validation."""
-        logger.info(f"🔍 get_session() called - current_session_id in state: {st.session_state.get('current_session_id', 'None')}")
-    
+        logger.info(f"🔍 get_session() called - create_if_missing={create_if_missing}, current_session_id in state: {st.session_state.get('current_session_id', 'None')}")
+
         self._periodic_cleanup()
 
         try:
@@ -3443,7 +3443,7 @@ class SessionManager:
                 if st.session_state.get(f'loading_{session_id}', False):
                     logger.warning(f"Session {session_id[:8]} already being loaded, skipping")
                     return None
-    
+
                 st.session_state[f'loading_{session_id}'] = True
                 session = self.db.load_session(session_id)
                 st.session_state[f'loading_{session_id}'] = False
@@ -3477,6 +3477,16 @@ class SessionManager:
                         
                             self.db.save_session(session)
                 
+                    # FIXED: For guests, double-check if fingerprint has been updated in DB
+                    if session.user_type == UserType.GUEST and session.fingerprint_id.startswith(("temp_py_", "temp_fp_")):
+                        # Check if DB has a newer fingerprint
+                        db_session = self.db.load_session(session.session_id)
+                        if db_session and not db_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                            logger.info(f"🔄 Guest session {session.session_id[:8]} has updated fingerprint in DB, reloading")
+                            session = db_session
+                            self._attempt_fingerprint_inheritance(session)
+                            self.db.save_session(session)
+                    
                     fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
                     
                     if session.user_type != UserType.REGISTERED_USER and \
@@ -3495,7 +3505,6 @@ class SessionManager:
                         session.fingerprint_method = "email_primary"
                         self.db.save_session(session)
                         logger.info(f"Registered user {session.session_id[:8]} fingerprint marked as not collected.")
-
 
                     if (session.user_type.value == UserType.GUEST.value and 
                         session.daily_question_count == 0 and 
@@ -3527,10 +3536,9 @@ class SessionManager:
                     
                         ban_type = limit_check.get('ban_type', 'unknown')
                         message = limit_check.get('message', 'Access restricted due to usage policy.')
-                        time_remaining = limit_check.get('time_until_next') # time_until_next is an int (seconds) from RateLimiter or timedelta from QuestionLimitManager
+                        time_remaining = limit_check.get('time_until_next')
 
                         st.error(f"🚫 **Access Restricted**")
-                        # Handle time_remaining based on its type
                         if isinstance(time_remaining, timedelta):
                             hours = max(0, int(time_remaining.total_seconds() // 3600))
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
@@ -3556,6 +3564,11 @@ class SessionManager:
                     if 'current_session_id' in st.session_state:
                         del st.session_state['current_session_id']
 
+            # Only create new session if explicitly requested
+            if not create_if_missing:
+                logger.info("No session exists and create_if_missing=False, returning None")
+                return None
+
             logger.info(f"Creating new session")
             new_session = self._create_new_session()
             st.session_state.current_session_id = new_session.session_id
@@ -3577,6 +3590,8 @@ class SessionManager:
         
         except Exception as e:
             logger.error(f"Failed to get/create session: {e}", exc_info=True)
+            if not create_if_missing:
+                return None
             fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None, login_method='guest')
             fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
             fallback_session.fingerprint_method = "emergency_fallback"
@@ -3584,7 +3599,7 @@ class SessionManager:
             st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
             logger.error(f"Emergency fallback session created {fallback_session.session_id[:8]}")
             return fallback_session
-    
+            
     def sync_registered_user_sessions(self, email: str, current_session_id: str):
         """Sync question counts and tier cycle info across all active sessions for a registered user by email"""
         try:
