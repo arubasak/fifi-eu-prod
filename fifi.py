@@ -6223,7 +6223,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             status = session_manager.woocommerce.test_connection()
             st.markdown("🛒 **12Taste Order Status**") # Changed text
             if status["status"] == "connected":
-                st.success("Connected")
+                st.success("🛒12Taste Order Status: Ready")
             else:
                 st.error(f"{status['status'].replace('_', ' ').title()}")
                 st.caption(status["message"])
