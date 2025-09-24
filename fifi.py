@@ -3365,68 +3365,43 @@ class SessionManager:
             session.pending_wp_token = None
             logger.debug(f"Session {session.session_id[:8]}: No higher privilege found for reverification. Cleared pending status.")
 
-        # FIXED: Separate question count inheritance logic for Guest users
         best_session_for_current_counts = None
         current_max_daily_count = session.daily_question_count
         
-        # For Guest users without email, inherit from ANY session with same fingerprint
-        if session.user_type == UserType.GUEST and not session.email:
-            logger.debug(f"Guest user {session.session_id[:8]} - checking all fingerprint sessions for question count inheritance")
-            
-            for s in all_related_sessions:
-                # Only inherit from same or lower privilege level to avoid Guest inheriting from higher levels
-                if self._get_privilege_level(s.user_type) <= self._get_privilege_level(UserType.GUEST):
-                    if s.last_question_time and (now - s.last_question_time) < DAILY_RESET_WINDOW:
-                        if s.daily_question_count > current_max_daily_count:
-                            current_max_daily_count = s.daily_question_count
-                            best_session_for_current_counts = s
-                            logger.debug(f"Found better count {s.daily_question_count} from session {s.session_id[:8]}")
+        for s in all_related_sessions:
+            if s.email and highest_privilege_candidate and s.email.lower() == highest_privilege_candidate.email.lower():
+                if s.last_question_time and (now - s.last_question_time) < DAILY_RESET_WINDOW:
+                    if s.daily_question_count > current_max_daily_count:
+                        current_max_daily_count = s.daily_question_count
+                        best_session_for_current_counts = s
+                
+                session.total_question_count = max(session.total_question_count, s.total_question_count)
+                if (s.ban_status != BanStatus.NONE and s.ban_end_time and s.ban_end_time > now):
+                    session.ban_status = s.ban_status
+                    session.ban_start_time = s.ban_start_time
+                    session.ban_end_time = s.ban_end_time
+                    session.ban_reason = s.ban_reason
+                    session.question_limit_reached = True
+                    session.current_tier_cycle_id = s.current_tier_cycle_id
+                    session.tier1_completed_in_cycle = s.tier1_completed_in_cycle
+                    session.tier_cycle_started_at = s.tier_cycle_started_at
+                    logger.info(f"Session {session.session_id[:8]}: Inherited active ban from session {s.session_id[:8]}.")
         
-        # For users with emails (or reverification pending with target email), use email-based inheritance
-        elif (session.email or (session.reverification_pending and session.pending_email)):
-            target_email = session.pending_email if session.reverification_pending else session.email
-            logger.debug(f"Email-based inheritance for {session.session_id[:8]} with email {target_email}")
-            
-            for s in all_related_sessions:
-                if s.email and s.email.lower() == target_email.lower():
-                    if s.last_question_time and (now - s.last_question_time) < DAILY_RESET_WINDOW:
-                        if s.daily_question_count > current_max_daily_count:
-                            current_max_daily_count = s.daily_question_count
-                            best_session_for_current_counts = s
-                    
-                    # Also inherit total count and ban status for email-based users
-                    session.total_question_count = max(session.total_question_count, s.total_question_count)
-                    if (s.ban_status != BanStatus.NONE and s.ban_end_time and s.ban_end_time > now):
-                        session.ban_status = s.ban_status
-                        session.ban_start_time = s.ban_start_time
-                        session.ban_end_time = s.ban_end_time
-                        session.ban_reason = s.ban_reason
-                        session.question_limit_reached = True
-                        session.current_tier_cycle_id = s.current_tier_cycle_id
-                        session.tier1_completed_in_cycle = s.tier1_completed_in_cycle
-                        session.tier_cycle_started_at = s.tier_cycle_started_at
-                        logger.info(f"Session {session.session_id[:8]}: Inherited active ban from session {s.session_id[:8]}.")
-        
-        # Apply the inherited counts
         session.daily_question_count = current_max_daily_count
-        if best_session_for_current_counts:
+        if best_session_for_current_counts and best_session_for_current_counts.last_question_time:
             session.last_question_time = best_session_for_current_counts.last_question_time
-            # For registered users, also inherit tier cycle info
-            if session.user_type == UserType.REGISTERED_USER or (session.reverification_pending and session.pending_user_type == UserType.REGISTERED_USER):
-                session.current_tier_cycle_id = best_session_for_current_counts.current_tier_cycle_id
-                session.tier1_completed_in_cycle = best_session_for_current_counts.tier1_completed_in_cycle
-                session.tier_cycle_started_at = best_session_for_current_counts.tier_cycle_started_at
-            
-            logger.info(f"Inherited question count {current_max_daily_count} from session {best_session_for_current_counts.session_id[:8]}")
+            session.current_tier_cycle_id = best_session_for_current_counts.current_tier_cycle_id
+            session.tier1_completed_in_cycle = best_session_for_current_counts.tier1_completed_in_cycle
+            session.tier_cycle_started_at = best_session_for_current_counts.tier_cycle_started_at
         elif not session.last_question_time:
             session.daily_question_count = 0
             session.last_question_time = None
-            if session.user_type == UserType.REGISTERED_USER or (session.reverification_pending and session.pending_user_type == UserType.REGISTERED_USER):
-                if not session.current_tier_cycle_id:
-                    session.current_tier_cycle_id = str(uuid.uuid4())
-                    session.tier1_completed_in_cycle = False
-                    session.tier_cycle_started_at = now
-                    logger.info(f"Session {session.session_id[:8]}: New tier cycle started due to no recent inherited activity.")
+            if not session.current_tier_cycle_id:
+                session.current_tier_cycle_id = str(uuid.uuid4())
+                session.tier1_completed_in_cycle = False
+                session.tier_cycle_started_at = now
+                logger.info(f"Session {session.session_id[:8]}: New tier cycle started due to no recent inherited activity.")
+
 
         logger.info(f"✅ Final inheritance status for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}, pending_type={session.pending_user_type.value if session.pending_user_type else 'None'}, declined_at={session.declined_recognized_email_at}")
         
@@ -4653,7 +4628,7 @@ Respond ONLY with JSON:
                 logger.warning(f"LLM meta-query detection returned invalid JSON: {response_content}. Falling back to keyword.")
                 return self.detect_meta_conversation_query_keyword_fallback(prompt)
 
-            logger.info(f"LLM Meta-query detection: {prompt} → {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
+            logger.info(f"LLM Meta-query detection: {prompt} -> {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
             return result
 
         except Exception as e:
@@ -4838,7 +4813,6 @@ Respond ONLY with JSON:
                 word_lower = word.lower().strip('.,!?')
 
                 if any(indicator in question.lower() for indicator in ingredient_indicators):
-                    # Try to extract capitalized words as potential ingredient names
                     if word.istitle() and len(word) > 3:
                         ingredients_mentioned.add(word)
                 
@@ -4848,7 +4822,6 @@ Respond ONLY with JSON:
                 if word_lower in ['formulation', 'application', 'specification', 'grade', 'purity', 'concentration']:
                     technical_terms.add(word_lower)
 
-        # Re-using logic from _generate_conversation_summary for consistent overall topic view
         temp_topic_words = set()
         for question in user_questions:
             q_lower = question.lower()
@@ -5012,6 +4985,7 @@ Respond ONLY with JSON:
                         except Exception as e:
                             logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
                             return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
+                        
                         # NEW: Use asyncio.run to execute async WooCommerce methods
                         customer = asyncio.run(self.woocommerce.get_customer_by_email(session.email))
                         customer_id = customer.get('id') if customer else None
@@ -5401,7 +5375,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         session.full_name = fresh_session_from_db.full_name
         session.zoho_contact_id = fresh_session_from_db.zoho_contact_id
         session.daily_question_count = fresh_session_from_db.daily_question_count
-        session.total_question_count = fresh_session_from_db.total_question_count # ADDED THIS LINE
+        session.total_question_count = fresh_session_from_db.total_question_count
         session.last_question_time = fresh_session_from_db.last_question_time
         session.display_message_offset = fresh_session_from_db.display_message_offset
         session.reverification_pending = fresh_session_from_db.reverification_pending
