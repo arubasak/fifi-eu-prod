@@ -5982,7 +5982,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
         ℹ️ **What to expect as a Guest:**
         - You get an initial allowance of **{GUEST_QUESTION_LIMIT} questions** to explore FiFi AI's capabilities.
         - After these {GUEST_QUESTION_LIMIT} questions, **email verification will be required** to continue (unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day).
-        - Our system utilizes **universal device fingerprinting** for security and to track usage across sessions.
         - You can always choose to **upgrade to a full registration** later for extended benefits.
         """)
         
@@ -6019,8 +6018,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break")
         tier1_upper_bound = REGISTERED_USER_TIER_1_LIMIT
         st.markdown(f"  - **Tier 2**: Questions {tier1_upper_bound + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset")
-        st.markdown("• Cross-device tracking & chat saving")
-        st.markdown("• • Priority access during high usage")
+
         
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display and login status."""
@@ -6121,8 +6119,8 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         # Show fingerprint status
         if session.fingerprint_id:
             if session.user_type == UserType.REGISTERED_USER and session.fingerprint_id == "not_collected_registered_user":
-                st.markdown("**Device ID:** Not Collected")
-                st.caption("Fingerprinting not applicable for registered users (email primary)")
+                # st.markdown("**Device ID:** Not Collected")
+                # st.caption("Fingerprinting not applicable for registered users (email primary)")
             elif session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
                 st.markdown("**Device ID:** Identifying...")
                 st.caption("Fingerprinting in progress...")                
@@ -6151,7 +6149,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         # Hide "🤖 AI Tools Status" text and its contents
         # if DEBUG_MODE:
         st.divider()
-        st.markdown("**🤖 AI Tools Status**")
+        # st.markdown("**🤖 AI Tools Status**")
         
         ai_system = session_manager.ai
         if ai_system:
@@ -6183,7 +6181,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             # Hide "💬 OpenAI: Ready"
             # if DEBUG_MODE:
             if ai_system.openai_client:
-                st.success("💬 OpenAI: Ready")
+                # st.success("💬 OpenAI: Ready")
             elif ai_system.config.OPENAI_API_KEY:
                 st.warning("💬 OpenAI: Error")
             else:
@@ -6195,15 +6193,15 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         # if DEBUG_MODE:
         if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
             if session.zoho_contact_id: 
-                st.success("🔗 **CRM Linked**")
+                # st.success("🔗 **CRM Linked**")
             else: 
                 st.info("📋 **CRM Ready** (will link on first save)")
             if session.timeout_saved_to_crm:
-                st.caption("💾 Auto-saved to CRM (after inactivity)")
+                # st.caption("💾 Auto-saved to CRM (after inactivity)")
             else:
-                st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
+                # st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
         else: 
-            st.caption("🚫 CRM Integration: Registered users & verified guests only")
+            # st.caption("🚫 CRM Integration: Registered users & verified guests only")
 
         # Display 12Taste Order Status
         if session_manager.woocommerce and session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
