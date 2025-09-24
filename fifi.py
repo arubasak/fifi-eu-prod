@@ -5928,7 +5928,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
         ℹ️ **What to expect as a Guest:**
         - You get an initial allowance of **{GUEST_QUESTION_LIMIT} questions** to explore FiFi AI's capabilities.
         - After these {GUEST_QUESTION_LIMIT} questions, **email verification will be required** to continue (unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day).
-        - Our system utilizes **universal device fingerprinting** for security and to track usage across sessions.
         - You can always choose to **upgrade to a full registration** later for extended benefits.
         """)
         
