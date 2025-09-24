@@ -3,7 +3,7 @@ from datetime import timedelta  # ADD THIS LINE - this was missing!
 
 # (Your existing constants)
 DAILY_RESET_WINDOW_HOURS = 24
-SESSION_TIMEOUT_MINUTES = 60
+SESSION_TIMEOUT_MINUTES = 5
 FINGERPRINT_TIMEOUT_SECONDS = 20 # Keep at 20 seconds, the JS will use this
 TIER_1_BAN_HOURS = 1
 TIER_2_BAN_HOURS = 24
