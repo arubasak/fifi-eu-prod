@@ -31,7 +31,6 @@ from collections import defaultdict
 import requests
 import streamlit.components.v1 as components
 from streamlit_javascript import st_javascript # Keep st_javascript for activity tracker
-import asyncio # Import asyncio
 
 # Import StreamlitSecretNotFoundError for robust secret handling
 from streamlit.errors import StreamlitSecretNotFoundError
@@ -731,7 +730,7 @@ class DatabaseManager:
                  ))
             self.conn.commit()
             
-            logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}")
+            logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}, daily_q={session.daily_question_count}, last_q_time={session.last_question_time}")
             
         except Exception as e:
             logger.error(f"Failed to save session {session.session_id[:8]}: {e}", exc_info=True)
@@ -825,7 +824,7 @@ class DatabaseManager:
                     is_degraded_login=loaded_is_degraded_login, degraded_login_timestamp=loaded_degraded_login_timestamp
                 )
                 
-                logger.debug(f"Successfully loaded any session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
+                logger.debug(f"Successfully loaded any session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}, daily_q={user_session.daily_question_count}, last_q_time={user_session.last_question_time}")
                 return user_session
                 
             except Exception as e:
@@ -945,7 +944,7 @@ class DatabaseManager:
                 degraded_login_timestamp=loaded_degraded_login_timestamp
             )
             
-            logger.debug(f"Successfully loaded active session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
+            logger.debug(f"Successfully loaded active session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}, daily_q={user_session.daily_question_count}, last_q_time={user_session.last_question_time}")
             return user_session
                 
         except Exception as e:
@@ -3273,10 +3272,10 @@ class SessionManager:
         FIXED VERSION: Attempts to inherit session data with more robust logic
         for question count inheritance, especially for Guest users.
         """
-        logger.info(f"🔄 Attempting fingerprint inheritance for session {session.session_id[:8]} (Type: {session.user_type.value}, FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'})...")
+        logger.info(f"🔄 [INHERIT] Attempting fingerprint inheritance for session {session.session_id[:8]} (Type: {session.user_type.value}, FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'})...")
         
         if session.user_type == UserType.REGISTERED_USER:
-            logger.debug(f"Session {session.session_id[:8]} is already REGISTERED_USER. Skipping fingerprint inheritance.")
+            logger.debug(f"🔄 [INHERIT] Session {session.session_id[:8]} is already REGISTERED_USER. Skipping fingerprint inheritance.")
             return
 
         if not session.fingerprint_id or session.fingerprint_id.startswith(("temp_", "fallback_", "temp_py_")):
@@ -3288,7 +3287,7 @@ class SessionManager:
             session.pending_zoho_contact_id = None
             session.pending_wp_token = None
             session.declined_recognized_email_at = None
-            logger.debug(f"Session {session.session_id[:8]} has no stable fingerprint. No historical inheritance possible yet.")
+            logger.debug(f"🔄 [INHERIT] Session {session.session_id[:8]} has no stable fingerprint. No historical inheritance possible yet.")
             return
 
         historical_fp_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
@@ -3312,11 +3311,11 @@ class SessionManager:
             session.pending_zoho_contact_id = None
             session.pending_wp_token = None
             session.declined_recognized_email_at = None
-            logger.info(f"Inheritance complete for new visitor {session.session_id[:8]}. No historical data found.")
+            logger.info(f"🔄 [INHERIT] Inheritance complete for new visitor {session.session_id[:8]}. No historical data found.")
             return
         
         session.visitor_type = "returning_visitor"
-        logger.info(f"Found {len(all_related_sessions)} related sessions for returning visitor")
+        logger.info(f"🔄 [INHERIT] Found {len(all_related_sessions)} related sessions for returning visitor {session.session_id[:8]}")
 
         highest_privilege_candidate = None
         highest_level = self._get_privilege_level(session.user_type)
@@ -3330,7 +3329,7 @@ class SessionManager:
             session.pending_full_name = None
             session.pending_zoho_contact_id = None
             session.pending_wp_token = None
-            logger.info(f"Session {session.session_id[:8]}: User recently declined recognition. Proceeding as current guest.")
+            logger.info(f"🔄 [INHERIT] Session {session.session_id[:8]}: User recently declined recognition. Proceeding as current guest.")
             return
 
         for s in all_related_sessions:
@@ -3349,7 +3348,7 @@ class SessionManager:
         if highest_privilege_candidate and highest_privilege_candidate.email and \
            self._get_privilege_level(highest_privilege_candidate.user_type) > self._get_privilege_level(UserType.GUEST):
             
-            logger.info(f"Session {session.session_id[:8]}: Detected higher privilege: {highest_privilege_candidate.user_type.value} for {highest_privilege_candidate.email}. Setting reverification pending.")
+            logger.info(f"🔄 [INHERIT] Session {session.session_id[:8]}: Detected higher privilege: {highest_privilege_candidate.user_type.value} for {highest_privilege_candidate.email}. Setting reverification pending.")
             session.reverification_pending = True
             session.pending_user_type = highest_privilege_candidate.user_type
             session.pending_email = highest_privilege_candidate.email
@@ -3363,7 +3362,7 @@ class SessionManager:
                session.fingerprint_id.startswith(("temp_", "fallback_", "temp_py_")):
                 session.fingerprint_id = highest_privilege_candidate.fingerprint_id
                 session.fingerprint_method = highest_privilege_candidate.fingerprint_method
-                logger.info(f"Session {session.session_id[:8]}: Updated temporary fingerprint to {session.fingerprint_id[:8]} from highest privilege candidate.")
+                logger.info(f"🔄 [INHERIT] Session {session.session_id[:8]}: Updated temporary fingerprint to {session.fingerprint_id[:8]} from highest privilege candidate.")
 
         else:
             session.reverification_pending = False
@@ -3372,7 +3371,7 @@ class SessionManager:
             session.pending_full_name = None
             session.pending_zoho_contact_id = None
             session.pending_wp_token = None
-            logger.debug(f"Session {session.session_id[:8]}: No higher privilege found for reverification. Cleared pending status.")
+            logger.debug(f"🔄 [INHERIT] Session {session.session_id[:8]}: No higher privilege found for reverification. Cleared pending status.")
 
         # FIXED: More robust question count inheritance logic
         best_session_for_current_counts = None
@@ -3380,39 +3379,39 @@ class SessionManager:
         
         # For Guest users without email, inherit from ANY session with same fingerprint
         if session.user_type == UserType.GUEST and not session.email:
-            logger.debug(f"Guest user {session.session_id[:8]} - checking all fingerprint sessions for question count inheritance")
+            logger.debug(f"🔄 [INHERIT] Guest user {session.session_id[:8]} - checking all fingerprint sessions for question count inheritance")
             
             for s in all_related_sessions:
                 # Only inherit from same or lower privilege level to avoid Guest inheriting from higher levels
                 if self._get_privilege_level(s.user_type) <= self._get_privilege_level(UserType.GUEST):
-                    # FIXED: More lenient inheritance conditions
-                    # Check if session has questions to inherit
+                    logger.debug(f"  -> [INHERIT] Examining historical guest session {s.session_id[:8]}: daily_q={s.daily_question_count}, last_q_time={s.last_question_time}, last_activity={s.last_activity}, created_at={s.created_at}")
+                    
                     if s.daily_question_count > 0:
-                        # If last_question_time exists, check if within reset window
-                        if s.last_question_time:
-                            time_since_last_question = now - s.last_question_time
-                            if time_since_last_question < DAILY_RESET_WINDOW:
+                        relevant_time = s.last_question_time or s.last_activity or s.created_at
+                        
+                        if relevant_time:
+                            time_since_relevant_activity = now - relevant_time
+                            
+                            logger.debug(f"    -> [INHERIT] Current Time: {now.isoformat()}")
+                            logger.debug(f"    -> [INHERIT] Historical Session's Relevant Time: {relevant_time.isoformat()}")
+                            logger.debug(f"    -> [INHERIT] Time Delta: {time_since_relevant_activity}")
+                            logger.debug(f"    -> [INHERIT] Daily Reset Window: {DAILY_RESET_WINDOW}")
+                            logger.debug(f"    -> [INHERIT] Is within window? {time_since_relevant_activity < DAILY_RESET_WINDOW}")
+
+                            if time_since_relevant_activity < DAILY_RESET_WINDOW:
                                 if s.daily_question_count > current_max_daily_count:
                                     current_max_daily_count = s.daily_question_count
                                     best_session_for_current_counts = s
-                                    logger.info(f"✅ Found better count {s.daily_question_count} from session {s.session_id[:8]} (with last_question_time)")
-                        else:
-                            # FIXED: If no last_question_time but has count, check last_activity as fallback
-                            fallback_time = s.last_activity or s.created_at
-                            if fallback_time:
-                                time_since_activity = now - fallback_time
-                                if time_since_activity < DAILY_RESET_WINDOW:
-                                    if s.daily_question_count > current_max_daily_count:
-                                        current_max_daily_count = s.daily_question_count
-                                        best_session_for_current_counts = s
-                                        logger.warning(f"⚠️ Found better count {s.daily_question_count} from session {s.session_id[:8]} (using last_activity fallback)")
+                                    logger.info(f"✅ [INHERIT] Found better count {s.daily_question_count} from session {s.session_id[:8]} (relevant_time: {relevant_time.isoformat()})")
                             else:
-                                logger.warning(f"Session {s.session_id[:8]} has count {s.daily_question_count} but no timestamp reference")
+                                logger.debug(f"    -> [INHERIT] Historical session {s.session_id[:8]} count {s.daily_question_count} is outside DAILY_RESET_WINDOW.")
+                        else:
+                            logger.warning(f"🔄 [INHERIT] Session {s.session_id[:8]} has count {s.daily_question_count} but no valid timestamp reference for window check.")
         
         # For users with emails (or reverification pending with target email), use email-based inheritance
         elif (session.email or (session.reverification_pending and session.pending_email)):
             target_email = session.pending_email if session.reverification_pending else session.email
-            logger.debug(f"Email-based inheritance for {session.session_id[:8]} with email {target_email}")
+            logger.debug(f"🔄 [INHERIT] Email-based inheritance for {session.session_id[:8]} with email {target_email}")
             
             for s in all_related_sessions:
                 if s.email and s.email.lower() == target_email.lower():
@@ -3423,16 +3422,18 @@ class SessionManager:
                             if time_since_last_question < DAILY_RESET_WINDOW:
                                 if s.daily_question_count > current_max_daily_count:
                                     current_max_daily_count = s.daily_question_count
-                                    best_session_for_current_counts = s
-                                    logger.info(f"✅ Found better count {s.daily_question_count} from email session {s.session_id[:8]}")
+                                    most_recent_q_time = s.last_question_time # Ensure most_recent_q_time is updated here
+                                    best_session_for_current_counts = s # Ensure best_session_for_current_counts is updated
+                                    logger.info(f"✅ [INHERIT] Found better count {s.daily_question_count} from email session {s.session_id[:8]}")
                         else:
                             # Fallback to last_activity
                             fallback_time = s.last_activity or s.created_at
                             if fallback_time and (now - fallback_time) < DAILY_RESET_WINDOW:
                                 if s.daily_question_count > current_max_daily_count:
                                     current_max_daily_count = s.daily_question_count
-                                    best_session_for_current_counts = s
-                                    logger.warning(f"⚠️ Found better count {s.daily_question_count} from email session {s.session_id[:8]} (using fallback)")
+                                    most_recent_q_time = fallback_time # Update most_recent_q_time for fallback
+                                    best_session_for_current_counts = s # Ensure best_session_for_current_counts is updated
+                                    logger.warning(f"⚠️ [INHERIT] Found better count {s.daily_question_count} from email session {s.session_id[:8]} (using fallback)")
                     
                     # Also inherit total count and ban status for email-based users
                     session.total_question_count = max(session.total_question_count, s.total_question_count)
@@ -3445,7 +3446,7 @@ class SessionManager:
                         session.current_tier_cycle_id = s.current_tier_cycle_id
                         session.tier1_completed_in_cycle = s.tier1_completed_in_cycle
                         session.tier_cycle_started_at = s.tier_cycle_started_at
-                        logger.info(f"Session {session.session_id[:8]}: Inherited active ban from session {s.session_id[:8]}.")
+                        logger.info(f"🔄 [INHERIT] Session {session.session_id[:8]}: Inherited active ban from session {s.session_id[:8]}.")
         
         # Apply the inherited counts
         session.daily_question_count = current_max_daily_count
@@ -3463,7 +3464,7 @@ class SessionManager:
                 session.tier1_completed_in_cycle = best_session_for_current_counts.tier1_completed_in_cycle
                 session.tier_cycle_started_at = best_session_for_current_counts.tier_cycle_started_at
             
-            logger.info(f"✅ Inherited question count {current_max_daily_count} from session {best_session_for_current_counts.session_id[:8]}")
+            logger.info(f"✅ [INHERIT] Inherited question count {current_max_daily_count} from session {best_session_for_current_counts.session_id[:8]}")
         elif current_max_daily_count == 0:
             # No inheritance needed, reset timing fields
             session.daily_question_count = 0
@@ -3473,13 +3474,13 @@ class SessionManager:
                     session.current_tier_cycle_id = str(uuid.uuid4())
                     session.tier1_completed_in_cycle = False
                     session.tier_cycle_started_at = now
-                    logger.info(f"Session {session.session_id[:8]}: New tier cycle started due to no recent inherited activity.")
+                    logger.info(f"🔄 [INHERIT] Session {session.session_id[:8]}: New tier cycle started due to no recent inherited activity.")
 
-        logger.info(f"✅ Final inheritance status for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}, pending_type={session.pending_user_type.value if session.pending_user_type else 'None'}, declined_at={session.declined_recognized_email_at}")
+        logger.info(f"✅ [INHERIT] Final inheritance status for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}, pending_type={session.pending_user_type.value if session.pending_user_type else 'None'}, declined_at={session.declined_recognized_email_at}")
 
     def get_session(self, create_if_missing: bool = True) -> Optional[UserSession]:
         """Gets or creates the current user session with enhanced validation."""
-        logger.info(f"🔍 get_session() called - create_if_missing={create_if_missing}, current_session_id in state: {st.session_state.get('current_session_id', 'None')}")
+        logger.info(f"🔍 [GET_SESSION] Start for session_id in state: {st.session_state.get('current_session_id', 'None')[:8]} (create_if_missing={create_if_missing})")
 
         self._periodic_cleanup()
 
@@ -3488,17 +3489,19 @@ class SessionManager:
         
             if session_id:
                 if st.session_state.get(f'loading_{session_id}', False):
-                    logger.warning(f"Session {session_id[:8]} already being loaded, skipping")
+                    logger.warning(f"🔍 [GET_SESSION] Session {session_id[:8]} already being loaded, skipping")
                     return None
 
                 st.session_state[f'loading_{session_id}'] = True
                 session = self.db.load_session(session_id)
                 st.session_state[f'loading_{session_id}'] = False
             
+                logger.debug(f"🔍 [GET_SESSION] Loaded session {session_id[:8]} from DB. Daily_Q: {session.daily_question_count if session else 'N/A'}, Last_Q_Time: {session.last_question_time if session else 'N/A'}")
+
                 if session and session.active:
                     if session.ban_status != BanStatus.NONE:
                         if session.ban_end_time and datetime.now() >= session.ban_end_time:
-                            logger.info(f"Ban expired for session {session.session_id[:8]}. Clearing ban status.")
+                            logger.info(f"🚫 [GET_SESSION] Ban expired for session {session.session_id[:8]}. Clearing ban status.")
                         
                             previous_ban_type = session.ban_status
 
@@ -3510,14 +3513,14 @@ class SessionManager:
                             
                             if session.user_type == UserType.REGISTERED_USER:
                                 if previous_ban_type == BanStatus.TWENTY_FOUR_HOUR:
-                                    logger.info(f"🔄 Tier 2 ban expired for {session.session_id[:8]} - starting new tier cycle")
+                                    logger.info(f"🔄 [GET_SESSION] Tier 2 ban expired for {session.session_id[:8]} - starting new tier cycle")
                                     session.daily_question_count = 0
                                     session.last_question_time = None
                                     session.current_tier_cycle_id = str(uuid.uuid4())
                                     session.tier1_completed_in_cycle = False
                                     session.tier_cycle_started_at = datetime.now()
                                 elif previous_ban_type == BanStatus.ONE_HOUR:
-                                    logger.info(f"✅ Tier 1 ban expired for {session.session_id[:8]} - can now proceed to Tier 2")
+                                    logger.info(f"✅ [GET_SESSION] Tier 1 ban expired for {session.session_id[:8]} - can now proceed to Tier 2")
                             else:
                                 session.daily_question_count = 0
                                 session.last_question_time = None
@@ -3525,33 +3528,43 @@ class SessionManager:
                             self.db.save_session(session)
                 
                     # FIXED: For guests, double-check if fingerprint has been updated in DB
+                    # This block now reloads from DB and re-attempts inheritance if the FP was temp
                     if session.user_type == UserType.GUEST and session.fingerprint_id.startswith(("temp_py_", "temp_fp_")):
-                        # Check if DB has a newer fingerprint
-                        db_session = self.db.load_session(session.session_id)
+                        logger.info(f"🔄 [GET_SESSION] Guest session {session.session_id[:8]} still has TEMP FP ({session.fingerprint_id[:8]}). Checking DB for update...")
+                        db_session = self.db.load_session(session.session_id) # Reload to ensure latest FP from DB
                         if db_session and not db_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                            logger.info(f"🔄 Guest session {session.session_id[:8]} has updated fingerprint in DB, reloading")
-                            session = db_session
+                            logger.info(f"🔄 [GET_SESSION] DB has real FP {db_session.fingerprint_id[:8]} for {session.session_id[:8]}. Reloading and re-inheriting.")
+                            session = db_session # Update the in-memory session object
                             self._attempt_fingerprint_inheritance(session)
                             self.db.save_session(session)
+                            logger.info(f"✅ [GET_SESSION] Re-inherited after FP update in DB for {session.session_id[:8]}. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
+                        else:
+                            logger.info(f"ℹ️ [GET_SESSION] Guest session {session.session_id[:8]} still has TEMP FP {session.fingerprint_id[:8]} in DB. Re-running temp FP inheritance.")
+                            # Even if it's still temp in DB, re-attempt inheritance for consistency
+                            self._attempt_fingerprint_inheritance(session)
+                            self.db.save_session(session)
+                            logger.info(f"✅ [GET_SESSION] Temp FP inheritance re-run for {session.session_id[:8]}. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
                     
+                    # This elif block is for when the fingerprint is still temporary and hasn't been checked yet
+                    # It's less likely to hit now with the enhanced logic above, but kept for robustness.
                     fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
-                    
                     if session.user_type != UserType.REGISTERED_USER and \
                        session.fingerprint_id and \
                        session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and \
                        not st.session_state.get(fingerprint_checked_key, False):
                     
+                        logger.info(f"🔄 [GET_SESSION] Running FIRST-TIME/TEMP-FP inheritance check for {session.session_id[:8]}.")
                         self._attempt_fingerprint_inheritance(session)
                         self.db.save_session(session)
                         st.session_state[fingerprint_checked_key] = True
-                        logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
+                        logger.info(f"✅ [GET_SESSION] First-time/Temp-FP inheritance completed for {session.session_id[:8]}. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
                     
                     elif session.user_type == UserType.REGISTERED_USER and \
                          (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_", "fallback_", "not_collected_"))):
                         session.fingerprint_id = "not_collected_registered_user"
                         session.fingerprint_method = "email_primary"
                         self.db.save_session(session)
-                        logger.info(f"Registered user {session.session_id[:8]} fingerprint marked as not collected.")
+                        logger.info(f"✅ [GET_SESSION] Registered user {session.session_id[:8]} fingerprint marked as not collected.")
 
                     if (session.user_type.value == UserType.GUEST.value and 
                         session.daily_question_count == 0 and 
@@ -3567,7 +3580,7 @@ class SessionManager:
                         ]
                         
                         if email_verified_sessions:
-                            logger.info(f"Session {session.session_id[:8]} must verify email - fingerprint previously used with email verification")
+                            logger.info(f"🔍 [GET_SESSION] Session {session.session_id[:8]} must verify email - fingerprint previously used with email verification")
                             st.session_state.must_verify_email_immediately = True
                             st.session_state.skip_email_allowed = False
                             
@@ -3596,27 +3609,28 @@ class SessionManager:
                             st.error(f"Time remaining: {hours}h {minutes}m")
 
                         st.info(message)
-                        logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
+                        logger.info(f"🚫 [GET_SESSION] Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
                 
                         try:
                             self.db.save_session(session)
                         except Exception as e:
-                            logger.error(f"Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
+                            logger.error(f"❌ [GET_SESSION] Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
                     
                         return session
                 
+                    logger.info(f"✅ [GET_SESSION] Returning session {session.session_id[:8]} (active and not banned). Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
                     return session
                 else:
-                    logger.warning(f"Session {session_id[:8]} not found or inactive. Creating new session.")
+                    logger.warning(f"🔍 [GET_SESSION] Session {session_id[:8]} not found or inactive. Creating new session.")
                     if 'current_session_id' in st.session_state:
                         del st.session_state['current_session_id']
 
             # Only create new session if explicitly requested
             if not create_if_missing:
-                logger.info("No session exists and create_if_missing=False, returning None")
+                logger.info("🔍 [GET_SESSION] No session exists and create_if_missing=False, returning None")
                 return None
 
-            logger.info(f"Creating new session")
+            logger.info(f"🔍 [GET_SESSION] Creating new session")
             new_session = self._create_new_session()
             st.session_state.current_session_id = new_session.session_id
         
@@ -3629,14 +3643,14 @@ class SessionManager:
                 new_session.current_tier_cycle_id = str(uuid.uuid4())
                 new_session.tier1_completed_in_cycle = False
                 new_session.tier_cycle_started_at = datetime.now()
-                logger.info(f"New REGISTERED_USER session {new_session.session_id[:8]} fingerprint marked as not collected. New tier cycle started.")
+                logger.info(f"✅ [GET_SESSION] New REGISTERED_USER session {new_session.session_id[:8]} fingerprint marked as not collected. New tier cycle started.")
 
             self.db.save_session(new_session)
-            logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
+            logger.info(f"✅ [GET_SESSION] Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}, Daily_Q: {new_session.daily_question_count}, Last_Q_Time: {new_session.last_question_time}")
             return new_session
         
         except Exception as e:
-            logger.error(f"Failed to get/create session: {e}", exc_info=True)
+            logger.error(f"❌ [GET_SESSION] Failed to get/create session: {e}", exc_info=True)
             if not create_if_missing:
                 return None
             fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None, login_method='guest')
@@ -3644,7 +3658,7 @@ class SessionManager:
             fallback_session.fingerprint_method = "emergency_fallback"
             st.session_state.current_session_id = fallback_session.session_id
             st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
-            logger.error(f"Emergency fallback session created {fallback_session.session_id[:8]}")
+            logger.error(f"🚨 [GET_SESSION] Emergency fallback session created {fallback_session.session_id[:8]}")
             return fallback_session
             
     def sync_registered_user_sessions(self, email: str, current_session_id: str):
@@ -3733,15 +3747,15 @@ class SessionManager:
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]) -> bool:
         """Applies fingerprinting data from custom component to the session with better validation.
         This function will now be called only for non-registered users (Guests)."""
-        logger.debug(f"🔍 APPLYING FINGERPRINT received from JS: {fingerprint_data.get('fingerprint_id', 'None')[:8]} to session {session.session_id[:8]} (UserType: {session.user_type.value})")
+        logger.debug(f"🔍 [FP_APPLY] Start for session {session.session_id[:8]}. Initial FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'}, Daily_Q: {session.daily_question_count}")
         
         if session.user_type == UserType.REGISTERED_USER:
-            logger.warning(f"Attempted to apply fingerprint to REGISTERED_USER {session.session_id[:8]}. Ignoring.")
+            logger.warning(f"🔍 [FP_APPLY] Attempted to apply fingerprint to REGISTERED_USER {session.session_id[:8]}. Ignoring.")
             return False
 
         try:
             if not fingerprint_data or not isinstance(fingerprint_data, dict):
-                logger.warning("Invalid fingerprint data provided to apply_fingerprinting")
+                logger.warning("🔍 [FP_APPLY] Invalid fingerprint data provided to apply_fingerprinting")
                 return False
             
             old_fingerprint_id = session.fingerprint_id
@@ -3753,23 +3767,26 @@ class SessionManager:
             session.recognition_response = None
             
             if not session.fingerprint_id or not session.fingerprint_method:
-                logger.error("Invalid fingerprint data: missing essential fields from JS. Reverting to old fingerprint.")
+                logger.error("🔍 [FP_APPLY] Invalid fingerprint data: missing essential fields from JS. Reverting to old fingerprint.")
                 session.fingerprint_id = old_fingerprint_id
                 session.fingerprint_method = old_method
                 return False
             
+            logger.debug(f"🔍 [FP_APPLY] Session {session.session_id[:8]}. New FP set: {session.fingerprint_id[:8]}..., Daily_Q BEFORE inheritance: {session.daily_question_count}, Last_Q_Time BEFORE inheritance: {session.last_question_time}")
+
             self._attempt_fingerprint_inheritance(session)
             
+            logger.debug(f"🔍 [FP_APPLY] Session {session.session_id[:8]}. Daily_Q AFTER inheritance: {session.daily_question_count}, Last_Q_Time AFTER inheritance: {session.last_question_time}")
             try:
                 self.db.save_session(session)
-                logger.info(f"✅ Fingerprinting applied and inheritance checked for {session.session_id[:8]}: {session.fingerprint_method} (ID: {session.fingerprint_id[:8]}...), active={session.active}, rev_pending={session.reverification_pending}")
+                logger.info(f"✅ [FP_APPLY] Session {session.session_id[:8]} saved after fingerprinting. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}, Rev_Pending: {session.reverification_pending}")
             except Exception as e:
-                logger.error(f"Failed to save session after fingerprinting (JS data received): {e}")
+                logger.error(f"❌ [FP_APPLY] Failed to save session {session.session_id[:8]} after fingerprinting (JS data received): {e}")
                 session.fingerprint_id = old_fingerprint_id
                 session.fingerprint_method = old_method
                 return False
         except Exception as e:
-            logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
+            logger.error(f"❌ [FP_APPLY] Fingerprint processing failed for session {session.session_id[:8]}: {e}", exc_info=True)
             return False
         return True
 
@@ -3799,7 +3816,7 @@ class SessionManager:
             most_privileged_session = None
             for s in existing_sessions:
                 if s.user_type == UserType.REGISTERED_USER:
-                    logger.info(f"Skipping REGISTERED_USER session {s.session_id[:8]} for fingerprint-based recognition.")
+                    logger.info(f"Skipping REGISTERED_USER session {s.session_id[:8]} for fingerprint-based recognition (email is primary identifier).")
                     continue
 
                 if s.email and (most_privileged_session is None or 
@@ -4638,7 +4655,7 @@ Query: "{prompt}"
 
 Order ID:"""
 
-            response = self.ai.openai_client.chat.completions.create(
+            response = self.ai.openai_completions.create( # This was openai_client.chat.completions.create
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "You extract order IDs from queries. Respond only with the numeric ID or NONE."},
