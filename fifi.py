@@ -6121,15 +6121,19 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             if session.user_type == UserType.REGISTERED_USER and session.fingerprint_id == "not_collected_registered_user":
                 # st.markdown("**Device ID:** Not Collected")
                 # st.caption("Fingerprinting not applicable for registered users (email primary)")
+                pass
             elif session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                st.markdown("**Device ID:** Identifying...")
-                st.caption("Fingerprinting in progress...")                
+                # st.markdown("**Device ID:** Identifying...")
+                # st.caption("Fingerprinting in progress...")
+                pass
             else:
-                st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
-                st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
+                # st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
+                # st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
+                pass
         else:
-            st.markdown("**Device ID:** Initializing...")
-            st.caption("Starting fingerprinting...")
+            # st.markdown("**Device ID:** Initializing...")
+            # st.caption("Starting fingerprinting...")
+            pass
 
         # Hide "Last activity"
         # if DEBUG_MODE and session.last_activity is not None:
