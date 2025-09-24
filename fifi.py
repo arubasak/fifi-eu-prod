@@ -6202,14 +6202,19 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
             if session.zoho_contact_id: 
                 # st.success("🔗 **CRM Linked**")
+                pass
             else: 
-                st.info("📋 **CRM Ready** (will link on first save)")
+                # st.info("📋 **CRM Ready** (will link on first save)")
+                pass
             if session.timeout_saved_to_crm:
                 # st.caption("💾 Auto-saved to CRM (after inactivity)")
+                pass
             else:
                 # st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
+                pass
         else: 
             # st.caption("🚫 CRM Integration: Registered users & verified guests only")
+            pass
 
         # Display 12Taste Order Status
         if session_manager.woocommerce and session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
