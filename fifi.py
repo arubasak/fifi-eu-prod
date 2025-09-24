@@ -3486,23 +3486,26 @@ class SessionManager:
 
         try:
             session_id = st.session_state.get('current_session_id')
-        
+            current_session_from_db = None # To hold the freshly loaded session from DB
+
             if session_id:
                 if st.session_state.get(f'loading_{session_id}', False):
                     logger.warning(f"🔍 [GET_SESSION] Session {session_id[:8]} already being loaded, skipping")
                     return None
 
                 st.session_state[f'loading_{session_id}'] = True
-                session = self.db.load_session(session_id)
+                current_session_from_db = self.db.load_session(session_id) # Load the active session
                 st.session_state[f'loading_{session_id}'] = False
             
-                logger.debug(f"🔍 [GET_SESSION] Loaded session {session_id[:8]} from DB. Daily_Q: {session.daily_question_count if session else 'N/A'}, Last_Q_Time: {session.last_question_time if session else 'N/A'}")
+                logger.debug(f"🔍 [GET_SESSION] Loaded session {session_id[:8]} from DB. Daily_Q: {current_session_from_db.daily_question_count if current_session_from_db else 'N/A'}, Last_Q_Time: {current_session_from_db.last_question_time if current_session_from_db else 'N/A'}")
 
-                if session and session.active:
+                if current_session_from_db and current_session_from_db.active:
+                    session = current_session_from_db # Use the loaded session as our working copy
+
                     if session.ban_status != BanStatus.NONE:
                         if session.ban_end_time and datetime.now() >= session.ban_end_time:
                             logger.info(f"🚫 [GET_SESSION] Ban expired for session {session.session_id[:8]}. Clearing ban status.")
-                        
+                            
                             previous_ban_type = session.ban_status
 
                             session.ban_status = BanStatus.NONE
@@ -3524,40 +3527,38 @@ class SessionManager:
                             else:
                                 session.daily_question_count = 0
                                 session.last_question_time = None
-                        
+                            
                             self.db.save_session(session)
-                
-                    # FIXED: For guests, double-check if fingerprint has been updated in DB
-                    # This block now reloads from DB and re-attempts inheritance if the FP was temp
-                    if session.user_type == UserType.GUEST and session.fingerprint_id.startswith(("temp_py_", "temp_fp_")):
-                        logger.info(f"🔄 [GET_SESSION] Guest session {session.session_id[:8]} still has TEMP FP ({session.fingerprint_id[:8]}). Checking DB for update...")
-                        db_session = self.db.load_session(session.session_id) # Reload to ensure latest FP from DB
-                        if db_session and not db_session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                            logger.info(f"🔄 [GET_SESSION] DB has real FP {db_session.fingerprint_id[:8]} for {session.session_id[:8]}. Reloading and re-inheriting.")
-                            session = db_session # Update the in-memory session object
-                            self._attempt_fingerprint_inheritance(session)
-                            self.db.save_session(session)
-                            logger.info(f"✅ [GET_SESSION] Re-inherited after FP update in DB for {session.session_id[:8]}. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
-                        else:
-                            logger.info(f"ℹ️ [GET_SESSION] Guest session {session.session_id[:8]} still has TEMP FP {session.fingerprint_id[:8]} in DB. Re-running temp FP inheritance.")
-                            # Even if it's still temp in DB, re-attempt inheritance for consistency
-                            self._attempt_fingerprint_inheritance(session)
-                            self.db.save_session(session)
-                            logger.info(f"✅ [GET_SESSION] Temp FP inheritance re-run for {session.session_id[:8]}. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
-                    
-                    # This elif block is for when the fingerprint is still temporary and hasn't been checked yet
-                    # It's less likely to hit now with the enhanced logic above, but kept for robustness.
+
+                    # --- CRITICAL FIX: Ensure _attempt_fingerprint_inheritance is called consistently ---
+                    # This block ensures inheritance runs AFTER a stable FP is available for non-registered users.
                     fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
-                    if session.user_type != UserType.REGISTERED_USER and \
-                       session.fingerprint_id and \
-                       session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and \
-                       not st.session_state.get(fingerprint_checked_key, False):
                     
-                        logger.info(f"🔄 [GET_SESSION] Running FIRST-TIME/TEMP-FP inheritance check for {session.session_id[:8]}.")
-                        self._attempt_fingerprint_inheritance(session)
-                        self.db.save_session(session)
-                        st.session_state[fingerprint_checked_key] = True
-                        logger.info(f"✅ [GET_SESSION] First-time/Temp-FP inheritance completed for {session.session_id[:8]}. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
+                    if session.user_type != UserType.REGISTERED_USER:
+                        # If fingerprint is still temporary OR it's a guest and has a real FP but hasn't had inheritance checked yet
+                        if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) or \
+                           (not st.session_state.get(fingerprint_checked_key, False) and 
+                            not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))):
+                            
+                            logger.info(f"🔄 [GET_SESSION] Triggering _attempt_fingerprint_inheritance for session {session.session_id[:8]}. FP: {session.fingerprint_id[:8]}..., Checked_Key: {st.session_state.get(fingerprint_checked_key, False)}")
+                            self._attempt_fingerprint_inheritance(session)
+                            self.db.save_session(session) # Save changes from inheritance
+                            st.session_state[fingerprint_checked_key] = True
+                            logger.info(f"✅ [GET_SESSION] Inheritance check completed for {session.session_id[:8]}. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
+
+                        # If the fingerprint *just* changed from temp to real via FastAPI, re-load and run inheritance
+                        elif st.session_state.get('fingerprint_client_side_completed', False) and \
+                             session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")): # It's still temp but client says it's done, force reload
+                            logger.info(f"🔄 [GET_SESSION] Client-side FP completed, but session still has TEMP FP. Forcing DB reload and re-inheritance for {session.session_id[:8]}.")
+                            reloaded_session_for_fp_update = self.db.load_session(session_id)
+                            if reloaded_session_for_fp_update and not reloaded_session_for_fp_update.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                                session = reloaded_session_for_fp_update # Update working session to the one with real FP
+                                self._attempt_fingerprint_inheritance(session)
+                                self.db.save_session(session)
+                                st.session_state[fingerprint_checked_key] = True
+                                logger.info(f"✅ [GET_SESSION] Forced re-inheritance after real FP update for {session.session_id[:8]}. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
+                            else:
+                                logger.warning(f"⚠️ [GET_SESSION] Client-side FP completed, but DB still has TEMP FP for {session.session_id[:8]}. Proceeding without real FP for now.")
                     
                     elif session.user_type == UserType.REGISTERED_USER and \
                          (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_", "fallback_", "not_collected_"))):
@@ -3566,30 +3567,7 @@ class SessionManager:
                         self.db.save_session(session)
                         logger.info(f"✅ [GET_SESSION] Registered user {session.session_id[:8]} fingerprint marked as not collected.")
 
-                    if (session.user_type.value == UserType.GUEST.value and 
-                        session.daily_question_count == 0 and 
-                        not session.reverification_pending):
-                        historical_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
-                        
-                        email_verified_sessions = [
-                            s for s in historical_sessions 
-                            if s.session_id != session.session_id
-                            and (s.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value or 
-                                 s.user_type.value == UserType.REGISTERED_USER.value or
-                                 s.email is not None)
-                        ]
-                        
-                        if email_verified_sessions:
-                            logger.info(f"🔍 [GET_SESSION] Session {session.session_id[:8]} must verify email - fingerprint previously used with email verification")
-                            st.session_state.must_verify_email_immediately = True
-                            st.session_state.skip_email_allowed = False
-                            
-                            known_emails = set()
-                            for sess in email_verified_sessions:
-                                if sess.email:
-                                    known_emails.add(sess.email.lower())
-                            
-                            st.session_state.known_device_emails = list(known_emails)
+                    # --- End CRITICAL FIX ---
                 
                     limit_check = self.question_limits.is_within_limits(session)
                     if not limit_check.get('allowed', True) and limit_check.get('reason') not in ['guest_limit', 'email_verified_guest_limit', 'registered_user_tier1_limit', 'registered_user_tier2_limit']:
@@ -3660,6 +3638,7 @@ class SessionManager:
             st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
             logger.error(f"🚨 [GET_SESSION] Emergency fallback session created {fallback_session.session_id[:8]}")
             return fallback_session
+    
             
     def sync_registered_user_sessions(self, email: str, current_session_id: str):
         """Sync question counts and tier cycle info across all active sessions for a registered user by email"""
