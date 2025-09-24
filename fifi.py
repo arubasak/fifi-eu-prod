@@ -3214,6 +3214,15 @@ class SessionManager:
         logger.debug(f"🆔 New session created: {session_id[:8]} (NOT saved to DB yet, will be saved in get_session)")
         return session
 
+    def _create_and_save_new_session(self, login_method: str = 'guest') -> UserSession:
+        """Creates and immediately saves a new session to database."""
+        session = self._create_new_session()
+        session.login_method = login_method
+        session.last_activity = datetime.now()
+        self.db.save_session(session)
+        logger.info(f"✅ New session created and saved: {session.session_id[:8]} (method: {login_method})")
+        return session
+
     def _is_crm_save_eligible(self, session: UserSession, trigger_reason: str) -> bool:
         """Enhanced eligibility check for CRM saves including new user types and conditions."""
         try:
