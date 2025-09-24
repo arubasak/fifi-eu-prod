@@ -5962,8 +5962,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break")
         tier1_upper_bound = REGISTERED_USER_TIER_1_LIMIT
         st.markdown(f"  - **Tier 2**: Questions {tier1_upper_bound + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset")
-        st.markdown("• Cross-device tracking & chat saving")
-        st.markdown("• • Priority access during high usage")
+        st.markdown("• Ability to inquire 12Taste Order Status")
         
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display and login status."""
