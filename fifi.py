@@ -3270,11 +3270,10 @@ class SessionManager:
 
     def _attempt_fingerprint_inheritance(self, session: UserSession):
         """
-        CORRECTED & COMPLETE: Attempts to inherit session data by first finding all linked identities
-        (via fingerprint AND email) and then determining the absolute highest privilege level
-        for the current session, setting reverification pending status accordingly.
+        FIXED VERSION: Attempts to inherit session data with more robust logic
+        for question count inheritance, especially for Guest users.
         """
-        logger.info(f"🔄 [CORRECTED LOGIC] Attempting fingerprint inheritance for session {session.session_id[:8]} (Type: {session.user_type.value}, FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'})...")
+        logger.info(f"🔄 Attempting fingerprint inheritance for session {session.session_id[:8]} (Type: {session.user_type.value}, FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'})...")
         
         if session.user_type == UserType.REGISTERED_USER:
             logger.debug(f"Session {session.session_id[:8]} is already REGISTERED_USER. Skipping fingerprint inheritance.")
@@ -3317,6 +3316,7 @@ class SessionManager:
             return
         
         session.visitor_type = "returning_visitor"
+        logger.info(f"Found {len(all_related_sessions)} related sessions for returning visitor")
 
         highest_privilege_candidate = None
         highest_level = self._get_privilege_level(session.user_type)
@@ -3374,7 +3374,7 @@ class SessionManager:
             session.pending_wp_token = None
             logger.debug(f"Session {session.session_id[:8]}: No higher privilege found for reverification. Cleared pending status.")
 
-        # FIXED: Separate question count inheritance logic for Guest users
+        # FIXED: More robust question count inheritance logic
         best_session_for_current_counts = None
         current_max_daily_count = session.daily_question_count
         
@@ -3385,11 +3385,29 @@ class SessionManager:
             for s in all_related_sessions:
                 # Only inherit from same or lower privilege level to avoid Guest inheriting from higher levels
                 if self._get_privilege_level(s.user_type) <= self._get_privilege_level(UserType.GUEST):
-                    if s.last_question_time and (now - s.last_question_time) < DAILY_RESET_WINDOW:
-                        if s.daily_question_count > current_max_daily_count:
-                            current_max_daily_count = s.daily_question_count
-                            best_session_for_current_counts = s
-                            logger.debug(f"Found better count {s.daily_question_count} from session {s.session_id[:8]}")
+                    # FIXED: More lenient inheritance conditions
+                    # Check if session has questions to inherit
+                    if s.daily_question_count > 0:
+                        # If last_question_time exists, check if within reset window
+                        if s.last_question_time:
+                            time_since_last_question = now - s.last_question_time
+                            if time_since_last_question < DAILY_RESET_WINDOW:
+                                if s.daily_question_count > current_max_daily_count:
+                                    current_max_daily_count = s.daily_question_count
+                                    best_session_for_current_counts = s
+                                    logger.info(f"✅ Found better count {s.daily_question_count} from session {s.session_id[:8]} (with last_question_time)")
+                        else:
+                            # FIXED: If no last_question_time but has count, check last_activity as fallback
+                            fallback_time = s.last_activity or s.created_at
+                            if fallback_time:
+                                time_since_activity = now - fallback_time
+                                if time_since_activity < DAILY_RESET_WINDOW:
+                                    if s.daily_question_count > current_max_daily_count:
+                                        current_max_daily_count = s.daily_question_count
+                                        best_session_for_current_counts = s
+                                        logger.warning(f"⚠️ Found better count {s.daily_question_count} from session {s.session_id[:8]} (using last_activity fallback)")
+                            else:
+                                logger.warning(f"Session {s.session_id[:8]} has count {s.daily_question_count} but no timestamp reference")
         
         # For users with emails (or reverification pending with target email), use email-based inheritance
         elif (session.email or (session.reverification_pending and session.pending_email)):
@@ -3398,10 +3416,23 @@ class SessionManager:
             
             for s in all_related_sessions:
                 if s.email and s.email.lower() == target_email.lower():
-                    if s.last_question_time and (now - s.last_question_time) < DAILY_RESET_WINDOW:
-                        if s.daily_question_count > current_max_daily_count:
-                            current_max_daily_count = s.daily_question_count
-                            best_session_for_current_counts = s
+                    # FIXED: Similar lenient logic for email-based inheritance
+                    if s.daily_question_count > 0:
+                        if s.last_question_time:
+                            time_since_last_question = now - s.last_question_time
+                            if time_since_last_question < DAILY_RESET_WINDOW:
+                                if s.daily_question_count > current_max_daily_count:
+                                    current_max_daily_count = s.daily_question_count
+                                    best_session_for_current_counts = s
+                                    logger.info(f"✅ Found better count {s.daily_question_count} from email session {s.session_id[:8]}")
+                        else:
+                            # Fallback to last_activity
+                            fallback_time = s.last_activity or s.created_at
+                            if fallback_time and (now - fallback_time) < DAILY_RESET_WINDOW:
+                                if s.daily_question_count > current_max_daily_count:
+                                    current_max_daily_count = s.daily_question_count
+                                    best_session_for_current_counts = s
+                                    logger.warning(f"⚠️ Found better count {s.daily_question_count} from email session {s.session_id[:8]} (using fallback)")
                     
                     # Also inherit total count and ban status for email-based users
                     session.total_question_count = max(session.total_question_count, s.total_question_count)
@@ -3419,15 +3450,22 @@ class SessionManager:
         # Apply the inherited counts
         session.daily_question_count = current_max_daily_count
         if best_session_for_current_counts:
-            session.last_question_time = best_session_for_current_counts.last_question_time
+            # FIXED: Set last_question_time properly
+            if best_session_for_current_counts.last_question_time:
+                session.last_question_time = best_session_for_current_counts.last_question_time
+            else:
+                # If source session has no last_question_time but has questions, set it to last_activity
+                session.last_question_time = best_session_for_current_counts.last_activity or best_session_for_current_counts.created_at
+            
             # For registered users, also inherit tier cycle info
             if session.user_type == UserType.REGISTERED_USER or (session.reverification_pending and session.pending_user_type == UserType.REGISTERED_USER):
                 session.current_tier_cycle_id = best_session_for_current_counts.current_tier_cycle_id
                 session.tier1_completed_in_cycle = best_session_for_current_counts.tier1_completed_in_cycle
                 session.tier_cycle_started_at = best_session_for_current_counts.tier_cycle_started_at
             
-            logger.info(f"Inherited question count {current_max_daily_count} from session {best_session_for_current_counts.session_id[:8]}")
-        elif not session.last_question_time:
+            logger.info(f"✅ Inherited question count {current_max_daily_count} from session {best_session_for_current_counts.session_id[:8]}")
+        elif current_max_daily_count == 0:
+            # No inheritance needed, reset timing fields
             session.daily_question_count = 0
             session.last_question_time = None
             if session.user_type == UserType.REGISTERED_USER or (session.reverification_pending and session.pending_user_type == UserType.REGISTERED_USER):
@@ -3438,7 +3476,7 @@ class SessionManager:
                     logger.info(f"Session {session.session_id[:8]}: New tier cycle started due to no recent inherited activity.")
 
         logger.info(f"✅ Final inheritance status for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}, pending_type={session.pending_user_type.value if session.pending_user_type else 'None'}, declined_at={session.declined_recognized_email_at}")
-        
+
     def get_session(self, create_if_missing: bool = True) -> Optional[UserSession]:
         """Gets or creates the current user session with enhanced validation."""
         logger.info(f"🔍 get_session() called - create_if_missing={create_if_missing}, current_session_id in state: {st.session_state.get('current_session_id', 'None')}")
