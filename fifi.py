@@ -6024,7 +6024,8 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
     """Enhanced sidebar with tier progression display and login status."""
     with st.sidebar:
         DEBUG_MODE = False # Set to True for debugging, False for production
-        
+        # Terms of Service link
+        st.caption("By using this agent, you agree to our [Terms of Service](https://www.12taste.com/terms-conditions/).")
         st.title("🎛️ Dashboard")
         
         if session.user_type.value == UserType.REGISTERED_USER.value:
