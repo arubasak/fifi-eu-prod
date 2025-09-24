@@ -5730,7 +5730,6 @@ def handle_fingerprint_status_update_from_query():
 # =============================================================================
 # UI COMPONENTS
 # =============================================================================
-
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock and WordPress fallback UI."""
     
@@ -5740,25 +5739,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
     if show_loading_overlay():
         return
     
-    session = session_manager.get_session() if st.session_state.get('current_session_id') else None
-    
-    # Show fingerprint loading for non-REGISTERED users
-    if session and session.user_type != UserType.REGISTERED_USER and \
-       not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
-        
-        current_time_float = time.time()
-        wait_start = st.session_state.get('fingerprint_wait_start')
-        elapsed = current_time_float - wait_start
-        remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed)
-        
-        if remaining > 0:
-            st.info(f"🔒 **Initializing secure session...** ({remaining:.0f}s remaining)")
-            st.caption("Setting up device recognition and security features.")
-        else:
-            st.info("🔒 **Finalizing setup...** Almost ready!")
-        
-        progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
-        st.progress(progress_value, text="Initializing FiFi AI Assistant")
+    # REMOVED: No session needed on welcome page
     
     st.markdown("---")
     tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
@@ -5812,7 +5793,10 @@ def render_welcome_page(session_manager: 'SessionManager'):
                     
                     if submit_email:
                         if fallback_email:
-                            temp_session = session_manager.get_session()
+                            # FIXED: Create session only when email is submitted
+                            temp_session = session_manager._create_and_save_new_session('email_fallback_attempt')
+                            st.session_state.current_session_id = temp_session.session_id
+                            
                             result = session_manager.handle_guest_email_verification(temp_session, fallback_email)
                             
                             if result['success']:
@@ -5928,6 +5912,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
         ℹ️ **What to expect as a Guest:**
         - You get an initial allowance of **{GUEST_QUESTION_LIMIT} questions** to explore FiFi AI's capabilities.
         - After these {GUEST_QUESTION_LIMIT} questions, **email verification will be required** to continue (unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day).
+        - Our system utilizes **universal device fingerprinting** for security and to track usage across sessions.
         - You can always choose to **upgrade to a full registration** later for extended benefits.
         """)
         
@@ -5935,6 +5920,9 @@ def render_welcome_page(session_manager: 'SessionManager'):
         col1, col2, col3 = st.columns(3)
         with col2:
             if st.button("👤 Start as Guest", use_container_width=True):
+                # FIXED: Create session only when guest button is clicked
+                new_session = session_manager._create_and_save_new_session('guest')
+                st.session_state.current_session_id = new_session.session_id
                 st.session_state.loading_reason = 'start_guest'
                 set_loading_state(True, "Setting up your session and initializing AI assistant...")
                 st.rerun()
@@ -5961,7 +5949,8 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break")
         tier1_upper_bound = REGISTERED_USER_TIER_1_LIMIT
         st.markdown(f"  - **Tier 2**: Questions {tier1_upper_bound + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset")
-        st.markdown("• Ability to inquire 12Taste Order Status")
+        st.markdown("• Cross-device tracking & chat saving")
+        st.markdown("• • Priority access during high usage")
         
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display and login status."""
