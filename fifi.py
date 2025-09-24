@@ -6221,7 +6221,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             # Removed await asyncio.to_thread, as test_connection will be called once per render.
             # Using a simple check here is fine. If it's slow, consider caching.
             status = session_manager.woocommerce.test_connection()
-            st.markdown("🛒 **12Taste Order Status**") # Changed text
             if status["status"] == "connected":
                 st.success("🛒12Taste Order Status: Ready")
             else:
