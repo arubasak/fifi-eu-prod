@@ -5705,7 +5705,7 @@ def handle_fingerprint_status_update_from_query():
     event = query_params.get("event")
     session_id = query_params.get("session_id")
     status = query_params.get("status")
-    fp_id_short = query_params.get("fingerprint_id") # Shortened FP ID for logging
+    fp_id_short = query_params.get("fingerprint_id")
 
     if event == "fingerprint_status_update" and session_id:
         logger.info(f"🔍 FINGERPRINT STATUS UPDATE received for session {session_id[:8]}: Status='{status}', FP_ID_Short='{fp_id_short}'")
@@ -5716,16 +5716,24 @@ def handle_fingerprint_status_update_from_query():
             if param in st.query_params:
                 del st.query_params[param]
         
-        # This signals Streamlit that the client-side process is done.
-        # The Python backend (FastAPI) would have already saved the FP to DB.
-        # Now, Streamlit can safely check its own DB for the fingerprint.
-        st.session_state.fingerprint_client_side_completed = True
+        # FIXED: Force inheritance check after fingerprint is captured
+        session_manager = st.session_state.get('session_manager')
+        if session_manager and status == "success":
+            # Load the session fresh from DB to get the updated fingerprint
+            session = session_manager.db.load_session(session_id)
+            if session and session.user_type == UserType.GUEST:
+                logger.info(f"🔄 Re-attempting inheritance for Guest {session_id[:8]} after fingerprint capture")
+                # Re-attempt inheritance with the real fingerprint
+                session_manager._attempt_fingerprint_inheritance(session)
+                session_manager.db.save_session(session)
+                # Update the in-memory session in session_state if it exists
+                if st.session_state.get('current_session_id') == session_id:
+                    st.session_state.temp_session_update = session
         
-        # Trigger a rerun to allow the main logic to pick up the new DB state
+        st.session_state.fingerprint_client_side_completed = True
         st.rerun()
         return True
     return False
-
 
 # =============================================================================
 # UI COMPONENTS
