@@ -966,6 +966,19 @@ class DatabaseManager:
 
         if self.db_type == "memory":
             sessions = [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fingerprint_id]
+            for session in sessions: # Apply backward compatibility for in-memory sessions
+                if not hasattr(session, 'display_message_offset'): session.display_message_offset = 0
+                if not hasattr(session, 'reverification_pending'):
+                    session.reverification_pending = False; session.pending_user_type = None; session.pending_email = None; session.pending_full_name = None; session.pending_zoho_contact_id = None; session.pending_wp_token = None
+                if not hasattr(session, 'declined_recognized_email_at'): session.declined_recognized_email_at = None
+                if not hasattr(session, 'timeout_detected_at'): session.timeout_detected_at = None
+                if not hasattr(session, 'timeout_reason'): session.timeout_reason = None
+                if not hasattr(session, 'current_tier_cycle_id'): session.current_tier_cycle_id = None
+                if not hasattr(session, 'tier1_completed_in_cycle'): session.tier1_completed_in_cycle = False
+                if not hasattr(session, 'tier_cycle_started_at'): session.tier_cycle_started_at = None
+                if not hasattr(session, 'login_method'): session.login_method = None
+                if not hasattr(session, 'is_degraded_login'): session.is_degraded_login = False
+                if not hasattr(session, 'degraded_login_timestamp'): session.degraded_login_timestamp = None
             logger.debug(f"📊 [DB_FP_SEARCH] FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
             for s in sessions: # Added for explicit memory session logging
                 logger.debug(f"  - [DB_FP_SEARCH] (MEMORY) {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}, active={s.active}, rev_pending={s.reverification_pending}, last_q_time={s.last_question_time}")
@@ -978,31 +991,22 @@ class DatabaseManager:
                 self.conn.row_factory = None
 
             cursor = self.conn.execute("SELECT session_id FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
-            
-            found_rows = cursor.fetchall()
-            logger.debug(f"🔍 [DB_FP_SEARCH] Raw database query for FP '{fingerprint_id[:8]}' returned {len(found_rows)} rows from cursor.") # <-- NEW LOG
-            
             sessions = []
-            for row in found_rows: # Iterate through the fetched rows
-                session_id_from_db = row[0] if isinstance(row, (tuple, sqlite3.Row)) else row
-                logger.debug(f"  - [DB_FP_SEARCH] Attempting to load session object for ID: {session_id_from_db[:8]}") # <-- NEW LOG
-                
-                session = self._load_any_session(session_id_from_db) # Use _load_any_session
+            for row in cursor.fetchall():
+                session = self._load_any_session(row[0]) # Use _load_any_session
                 if session:
                     sessions.append(session)
-                else:
-                    logger.warning(f"  - [DB_FP_SEARCH] Failed to load session object for ID: {session_id_from_db[:8]} (returned None from _load_any_session)") # <-- NEW LOG
             
             if self.db_type == "file": # Reset row factory if we set it
                 self.conn.row_factory = None
             
-            logger.debug(f"📊 [DB_FP_SEARCH] FINGERPRINT SEARCH RESULTS (DB, incl. inactive): Found {len(sessions)} hydrated sessions for {fingerprint_id[:8]}")
+            logger.debug(f"📊 [DB_FP_SEARCH] FINGERPRINT SEARCH RESULTS (DB, incl. inactive): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
             for s in sessions:
                 # IMPORTANT: Added last_q_time to this debug log for full diagnostics
                 logger.debug(f"  - [DB_FP_SEARCH] {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}, active={s.active}, rev_pending={s.reverification_pending}, last_q_time={s.last_question_time}")
             return sessions
         except Exception as e:
-            logger.error(f"❌ [DB_FP_SEARCH] Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
+            logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
             return []
     
     def find_sessions_by_email(self, email: str) -> List[UserSession]:
