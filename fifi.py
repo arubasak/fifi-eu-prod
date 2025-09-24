@@ -4653,7 +4653,7 @@ Respond ONLY with JSON:
                 logger.warning(f"LLM meta-query detection returned invalid JSON: {response_content}. Falling back to keyword.")
                 return self.detect_meta_conversation_query_keyword_fallback(prompt)
 
-            logger.info(f"LLM Meta-query detection: {prompt} -> {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
+            logger.info(f"LLM Meta-query detection: {prompt} → {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
             return result
 
         except Exception as e:
@@ -4816,7 +4816,7 @@ Respond ONLY with JSON:
             "analyzed_questions": len(user_questions)
         }
 
-def _analyze_conversation_topics(self, user_questions: List[str], session: UserSession) -> Dict[str, Any]:
+    def _analyze_conversation_topics(self, user_questions: List[str], session: UserSession) -> Dict[str, Any]:
         """Analyze conversation topics using code-based extraction."""
 
         if not user_questions:
@@ -5012,7 +5012,6 @@ def _analyze_conversation_topics(self, user_questions: List[str], session: UserS
                         except Exception as e:
                             logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
                             return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
-                        
                         # NEW: Use asyncio.run to execute async WooCommerce methods
                         customer = asyncio.run(self.woocommerce.get_customer_by_email(session.email))
                         customer_id = customer.get('id') if customer else None
