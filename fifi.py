@@ -6240,7 +6240,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         else:
             st.markdown(f"**Messages in Chat:** {total_messages}")
             
-        st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
+        # st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
         
         if session.ban_status.value != BanStatus.NONE.value:
             st.error(f"🚫 **STATUS: RESTRICTED**")
