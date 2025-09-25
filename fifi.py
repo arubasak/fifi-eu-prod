@@ -5960,7 +5960,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                     
                     col1, col2, col3 = st.columns(3)
                     with col2:
-                    submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
+                        submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
                     
                     if submit_button:
                         if not username or not password:
