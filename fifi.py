@@ -5949,33 +5949,29 @@ def render_welcome_page(session_manager: 'SessionManager'):
                         st.rerun()
 
             else: # Standard WordPress login form
-                # NEW: Use columns to control the width of the form area
-                col_left, col_form, col_right = st.columns([1, 2, 1]) # Adjust ratios here for desired width
-
-                with col_form: # All form elements now go inside this narrower column
-                    with st.form("login_form", clear_on_submit=True):
-                        st.markdown("### 🔐 Sign In to Your Account")
-                        username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
-                        password = st.text_input("Password", type="password", help="Enter your WordPress password.")
-                        
-                        # st.markdown("") # REMOVED: This line for conciseness
-                        
+                with st.form("login_form", clear_on_submit=True):
+                    st.markdown("### 🔐 Sign In to Your Account")
+                    username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
+                    password = st.text_input("Password", type="password", help="Enter your WordPress password.")
+                    
+                    st.markdown("")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col2:
                         submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
-                        
-                        if submit_button:
-                            if not username or not password:
-                                st.error("Please enter both username and password to sign in.")
-                            else:
-                                st.session_state.temp_username = username
-                                st.session_state.temp_password = password
-                                st.session_state.loading_reason = 'authenticate'
-                                set_loading_state(True, "Authenticating and preparing your session...")
-                                st.rerun()
+                    
+                    if submit_button:
+                        if not username or not password:
+                            st.error("Please enter both username and password to sign in.")
+                        else:
+                            st.session_state.temp_username = username
+                            st.session_state.temp_password = password
+                            st.session_state.loading_reason = 'authenticate'
+                            set_loading_state(True, "Authenticating and preparing your session...")
+                            st.rerun()
             
             st.markdown("---")
             st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
-            # NEW: Add Forgot password link here
-            st.markdown("[Forgot your password?](https://www.12taste.com/my-account/lost-password/)")
     
     with tab2:
         st.markdown(f"""
