@@ -5948,16 +5948,16 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             st.error("Error: No email address found for resend. Please restart the login process.")
                         st.rerun()
 
-            else: # Standard WordPress login form
+            else: # Standard WordPress login form - REVERTED TO ORIGINAL LAYOUT
                 with st.form("login_form", clear_on_submit=True):
                     st.markdown("### 🔐 Sign In to Your Account")
                     username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
                     password = st.text_input("Password", type="password", help="Enter your WordPress password.")
                     
-                    st.markdown("")
+                    st.markdown("") # Original blank line for spacing
                     
-                    col1, col2, col3 = st.columns(3)
-                    with col2:
+                    col1, col2, col3 = st.columns(3) # Original columns for centering
+                    with col2: # Original context manager for centering button
                         submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
                     
                     if submit_button:
@@ -5972,6 +5972,8 @@ def render_welcome_page(session_manager: 'SessionManager'):
             
             st.markdown("---")
             st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
+            # NEW: Forgot password link - ADDED HERE
+            st.markdown("[Forgot your password?](https://www.12taste.com/my-account/lost-password/)")
     
     with tab2:
         st.markdown(f"""
