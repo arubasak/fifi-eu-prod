@@ -5809,8 +5809,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
     if show_loading_overlay():
         return
     
-    # REMOVED: No session needed on welcome page
-    
     st.markdown("---")
     tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
     
@@ -5950,31 +5948,32 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             st.error("Error: No email address found for resend. Please restart the login process.")
                         st.rerun()
 
-            else:
-                with st.form("login_form", clear_on_submit=True):
-                    st.markdown("### 🔐 Sign In to Your Account")
-                    username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
-                    password = st.text_input("Password", type="password", help="Enter your WordPress password.")
-                    
-                    st.markdown("")
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col2:
+            else: # Standard WordPress login form
+                # NEW: Use columns to control the width of the form area
+                col_left, col_form, col_right = st.columns([1, 2, 1]) # Adjust ratios here for desired width
+
+                with col_form: # All form elements now go inside this narrower column
+                    with st.form("login_form", clear_on_submit=True):
+                        st.markdown("### 🔐 Sign In to Your Account")
+                        username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
+                        password = st.text_input("Password", type="password", help="Enter your WordPress password.")
+                        
+                        # st.markdown("") # REMOVED: This line for conciseness
+                        
                         submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
-                    
-                    if submit_button:
-                        if not username or not password:
-                            st.error("Please enter both username and password to sign in.")
-                        else:
-                            st.session_state.temp_username = username
-                            st.session_state.temp_password = password
-                            st.session_state.loading_reason = 'authenticate'
-                            set_loading_state(True, "Authenticating and preparing your session...")
-                            st.rerun()
+                        
+                        if submit_button:
+                            if not username or not password:
+                                st.error("Please enter both username and password to sign in.")
+                            else:
+                                st.session_state.temp_username = username
+                                st.session_state.temp_password = password
+                                st.session_state.loading_reason = 'authenticate'
+                                set_loading_state(True, "Authenticating and preparing your session...")
+                                st.rerun()
             
             st.markdown("---")
             st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
-
             # NEW: Add Forgot password link here
             st.markdown("[Forgot your password?](https://www.12taste.com/my-account/lost-password/)")
     
@@ -6021,7 +6020,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break")
         tier1_upper_bound = REGISTERED_USER_TIER_1_LIMIT
         st.markdown(f"  - **Tier 2**: Questions {tier1_upper_bound + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset")
-
         
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display and login status."""
