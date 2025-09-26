@@ -2058,7 +2058,7 @@ Respond ONLY with a JSON object in the following format:
                 max_tokens=200,
                 temperature=0.0
             )
-            response_content = response.choices.message.content.strip()
+            response_content = response.choices[0].message.content.strip()
             response_content = response_content.replace('json', '').replace('```', '').strip()
             
             intent_data = json.loads(response_content)
@@ -4914,7 +4914,7 @@ Respond ONLY with JSON:
                 max_tokens=50,
                 temperature=0.1
             )
-            response_content = response.choices.message.content.strip().replace('```json', '').replace('```', '').strip()
+            response_content = response.choices[0].message.content.strip().replace('```json', '').replace('```', '').strip()
             result = json.loads(response_content)
             
             if not isinstance(result, dict) or 'is_meta' not in result or 'type' not in result:
@@ -5502,7 +5502,7 @@ Respond ONLY with JSON:
             
         except Exception as e:
             logger.error(f"AI response generation failed: {e}", exc_info=True)
-            return {'content': 'I encountered an error processing your request.', 'success': False, 'source': 'Error Handler'}
+            return {'content': 'I encountered an error processing your request.', 'success': False, 'source': 'Error Handler'}    
         
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
