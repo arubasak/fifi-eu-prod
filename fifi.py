@@ -5996,7 +5996,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 set_loading_state(True, "Setting up your session and initializing AI assistant...")
                 st.rerun()
 
-    st.markdown("---")
     st.subheader("🎯 Usage Tiers")
     
     col1, col2, col3 = st.columns(3)
