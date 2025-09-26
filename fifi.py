@@ -5970,7 +5970,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             set_loading_state(True, "Authenticating and preparing your session...")
                             st.rerun()
             
-            st.markdown("---")
             st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
             # NEW: Forgot password link - ADDED HERE
             st.markdown("[Forgot your password?](https://www.12taste.com/my-account/lost-password/)")
