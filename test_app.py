@@ -1989,7 +1989,74 @@ class WooCommerceManager:
         slug_to_name_map = {s.get('id'): s.get('name') for s in available_statuses if s.get('id') and s.get('name')}
         display_names = [slug_to_name_map.get(slug, slug.replace('-', ' ').title()) for slug in slugs]
         return display_names
-    
+
+    async def summarize_order_details_llm(self, order_data: Dict[str, Any], openai_client: Any) -> str:
+        """Generates a human-friendly summary of the order using an LLM."""
+        
+        # Fallback to manual formatting if LLM client is unavailable
+        if not openai_client:
+            # Assuming format_order_for_display is the fallback (pure Markdown/string)
+            return self.format_order_for_display(order_data)
+        
+        # --- Prune and process data for LLM ---
+        pruned_order_data = {
+            'id': order_data.get('id'),
+            'number': order_data.get('number'),
+            'status': order_data.get('status'),
+            'date_created': order_data.get('date_created'),
+            'total': order_data.get('total'),
+            'currency': order_data.get('currency'),
+            'line_items': [{'name': item.get('name'), 'quantity': item.get('quantity'), 'total': item.get('total')} for item in order_data.get('line_items', [])],
+            'billing': {k: order_data['billing'].get(k) for k in ['first_name', 'last_name', 'email', 'phone', 'address_1', 'city', 'kountry']},
+            'shipping': {k: order_data['shipping'].get(k) for k in ['address_1', 'city', 'country']}
+        }
+        
+        # Apply a pre-processing step to the status for the LLM
+        raw_status = pruned_order_data.get('status', 'unknown')
+        # If the status contains a hyphen, extract the part after the first hyphen
+        if '-' in raw_status:
+            display_status_hint = raw_status.split('-', 1)[-1].replace('-', ' ').title()
+        else:
+            display_status_hint = raw_status.replace('-', ' ').title()
+        
+        # Add the cleaner status hint to the data block for the LLM's reference
+        pruned_order_data['display_status_hint'] = display_status_hint
+
+        order_json_str = json.dumps(pruned_order_data, indent=2)
+
+        llm_prompt = f"""You are an intelligent, helpful AI assistant for a B2B food ingredients company. Your task is to generate a concise, user-friendly summary of the following WooCommerce order data.
+
+    **INSTRUCTIONS:**
+    1. Use clear, friendly language.
+    2. Highlight the **Order Number**, **Status**, and **Total** prominently (use Markdown bolding/headers).
+    3. **CRITICAL STATUS RULE:** The raw status in the JSON may contain a technical prefix (e.g., 'ywraq-'). You MUST use the part *after* the prefix (or the provided 'display_status_hint') as the main status. For example, show **'Pending'** or **'Completed'**, NOT 'Ywraq-Pending'.
+    4. List the main items purchased and their quantities.
+    5. Include the Customer Name and the first line of the Billing Address.
+    6. **Do NOT** include any technical IDs (like 'id', 'customer_id' or raw WooCommerce slugs like 'wc-pending').
+    7. Format the output using Markdown for readability.
+
+    **Order Data (JSON):**
+    {order_json_str}
+    """
+        try:
+            response = await asyncio.to_thread(openai_client.chat.completions.create,
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a specialized WooCommerce order summary generator. Generate a concise, well-formatted Markdown summary based ONLY on the provided JSON data. Adhere strictly to the CRITICAL STATUS RULE."},
+                    {"role": "user", "content": llm_prompt}
+                ],
+                max_tokens=400,
+                temperature=0.0
+            )
+            # Use the correct way to access the content
+            summary_content = response.choices[0].message.content.strip()
+            logger.info(f"LLM successfully generated summary for order #{order_data.get('number')} with cleaned status.")
+            return summary_content
+            
+        except Exception as e:
+            logger.error(f"LLM order summary failed: {e}. Falling back to manual formatting.", exc_info=True)
+            # Assuming format_order_for_display is the robust, pure Markdown fallback
+            return self.format_order_for_display(order_data)
     # --- NEW METHOD: detect_order_query_intent_llm ---
     async def detect_order_query_intent_llm(self, prompt: str, openai_client: Any) -> Dict[str, Any]:
         """
