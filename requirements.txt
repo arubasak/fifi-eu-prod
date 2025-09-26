@@ -20,3 +20,4 @@ streamlit-javascript>=0.1.5
 supabase>=2.0.0
 streamlit_js_eval
 httpx>=0.24.0
+asyncio
