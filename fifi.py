@@ -5803,7 +5803,7 @@ def handle_fingerprint_status_update_from_query():
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock and WordPress fallback UI."""
     
-    st.title("Welcome to :rainbow[FiFi]")
+    st.header("Welcome to :rainbow[FiFi]")
     st.subheader("Your :blue[AI sourcing] assistant")
 
     if show_loading_overlay():
