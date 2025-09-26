@@ -15,6 +15,7 @@ import sqlite3
 import hashlib
 import secrets
 import base64
+import asyncio # New import for async/await in SessionManager
 from pathlib import Path
 from enum import Enum
 from urllib.parse import urlparse
@@ -24,7 +25,7 @@ from reportlab.lib.units import inch
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.colors import black, grey, lightgrey
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
-from typing import List, Dict, Optional, Any, Callable
+from typing import List, Dict, Optional, Any, Callable, Tuple
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -527,6 +528,8 @@ class DatabaseManager:
                     last_activity TEXT,
                     messages TEXT DEFAULT '[]',
                     active INTEGER DEFAULT 1,
+                    wp_token TEXT,
+                    timeout_saved_to_crm INTEGER DEFAULT 0,
                     fingerprint_id TEXT,
                     fingerprint_method TEXT,
                     visitor_type TEXT DEFAULT 'new_visitor',
@@ -546,8 +549,6 @@ class DatabaseManager:
                     browser_privacy_level TEXT,
                     registration_prompted INTEGER DEFAULT 0,
                     registration_link_clicked INTEGER DEFAULT 0,
-                    wp_token TEXT,
-                    timeout_saved_to_crm INTEGER DEFAULT 0,
                     recognition_response TEXT,
                     display_message_offset INTEGER DEFAULT 0,
                     reverification_pending INTEGER DEFAULT 0,
@@ -1925,6 +1926,12 @@ class WooCommerceManager:
         self.base_url = f"{config.WOOCOMMERCE_URL}/wp-json/wc/v3"
         self.auth = None
         
+        # --- NEW: Status Caching for LLM Intent Detection ---
+        self.available_wc_statuses_cache: Optional[List[Dict[str, str]]] = None
+        self.last_wc_statuses_fetch: Optional[datetime] = None
+        self.wc_statuses_cache_ttl: timedelta = timedelta(hours=1)
+        # --- END NEW ---
+        
         if self.config.WOOCOMMERCE_ENABLED:
             from requests.auth import HTTPBasicAuth
             self.auth = HTTPBasicAuth(
@@ -1935,6 +1942,152 @@ class WooCommerceManager:
         else:
             logger.warning("⚠️ WooCommerce not enabled - missing configuration")
     
+    # --- NEW METHOD: _fetch_available_order_statuses ---
+    @handle_api_errors("12Taste Order Status", "Fetch Order Statuses", show_to_user=False)
+    async def _fetch_available_order_statuses(self) -> Optional[List[Dict[str, str]]]:
+        """Fetches and caches all available WooCommerce order statuses (slug and name)."""
+        if not self.config.WOOCOMMERCE_ENABLED:
+            return None
+        
+        # Check cache
+        now = datetime.now()
+        if self.available_wc_statuses_cache and self.last_wc_statuses_fetch and \
+           (now - self.last_wc_statuses_fetch < self.wc_statuses_cache_ttl):
+            return self.available_wc_statuses_cache
+
+        try:
+            response = await asyncio.to_thread(
+                requests.get,
+                f"{self.base_url}/orders/statuses",
+                auth=self.auth,
+                timeout=10,
+                headers={
+                    'User-Agent': 'FiFi-AI-Assistant/1.0',
+                    'Accept': 'application/json'
+                }
+            )
+            response.raise_for_status()
+            statuses = response.json()
+            
+            # Cache the result
+            self.available_wc_statuses_cache = statuses
+            self.last_wc_statuses_fetch = now
+            
+            logger.info(f"Successfully fetched {len(statuses)} WooCommerce order statuses.")
+            return statuses
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching WooCommerce order statuses: {e}")
+            return None
+    
+    # --- NEW METHOD: _get_display_names_for_slugs ---
+    async def _get_display_names_for_slugs(self, slugs: List[str]) -> List[str]:
+        """Retrieves human-readable display names for a list of status slugs."""
+        available_statuses = await self._fetch_available_order_statuses()
+        if not available_statuses:
+            return [s.replace('-', ' ').title() for s in slugs] # Fallback to title-casing slugs
+
+        slug_to_name_map = {s.get('id'): s.get('name') for s in available_statuses if s.get('id') and s.get('name')}
+        display_names = [slug_to_name_map.get(slug, slug.replace('-', ' ').title()) for slug in slugs]
+        return display_names
+    
+    # --- NEW METHOD: detect_order_query_intent_llm ---
+    async def detect_order_query_intent_llm(self, prompt: str, openai_client: Any) -> Dict[str, Any]:
+        """
+        Uses an LLM to differentiate between single order, multiple orders (specific status),
+        multiple orders (open), or multiple orders (all), or clarification needed, and extracts relevant details.
+        """
+        # Fallback if LLM client is not available (shouldn't happen if AI is initialized, but for safety)
+        if not openai_client:
+            logger.warning("OpenAI client not available for LLM order intent detection. Returning 'none' intent.")
+            return {
+                "order_query_type": "none",
+                "order_id": None,
+                "requested_statuses": None,
+                "confidence": 0.0,
+                "reason": "LLM client unavailable"
+            }
+
+        available_statuses_data = await self._fetch_available_order_statuses()
+        status_list_for_llm_prompt = ""
+        if available_statuses_data:
+            status_list_for_llm_prompt += "Available WooCommerce Order Statuses (slug: Display Name):\n"
+            for status_obj in available_statuses_data:
+                status_slug = status_obj.get('id')
+                status_name = status_obj.get('name')
+                if status_slug and status_name:
+                    status_list_for_llm_prompt += f"- {status_slug}: {status_name}\n"
+        else:
+            status_list_for_llm_prompt = "Could not retrieve dynamic WooCommerce statuses. Use standard ones: pending, on-hold, processing, completed, cancelled, refunded, failed.\n"
+
+        llm_prompt = f"""You are an intelligent assistant for a WooCommerce store. Your task is to analyze a user's query and determine their intent regarding order status.
+
+{status_list_for_llm_prompt}
+
+Consider "open orders" to mean orders with status slugs: ['pending', 'on-hold', 'processing'].
+
+**User Query:** "{prompt}"
+
+**Instructions:**
+1.  Determine the `order_query_type`:
+    *   `"single_order"`: If the user explicitly asks about a specific order ID/number (e.g., "order 123").
+    *   `"multiple_orders_specific_status"`: If the user asks about multiple orders filtered by one or more specific statuses from the available list (e.g., "my completed orders").
+    *   `"multiple_orders_open"`: If the user asks about generally "open" or "active" orders.
+    *   `"multiple_orders_all"`: If the user asks to list all their orders without specifying a status filter (e.g., "list all my orders").
+    *   `"multiple_orders_clarification"`: If the user's query is generally about their orders, but is too vague to determine if they want a single order, all orders, open orders, or specific statuses (e.g., "Provide my order status?").
+    *   `"none"`: If the query is not related to order status.
+2.  If `order_query_type` is `"single_order"`, extract the exact `order_id` (can be alphanumeric, e.g., "123", "ABC-456").
+3.  If `order_query_type` is `"multiple_orders_specific_status"`, list *all* matching `requested_statuses` slugs from the available list.
+4.  Provide a `confidence` score (0.0-1.0) for your interpretation.
+
+Respond ONLY with a JSON object in the following format:
+```json
+{{
+    "order_query_type": "single_order" | "multiple_orders_specific_status" | "multiple_orders_open" | "multiple_orders_all" | "multiple_orders_clarification" | "none",
+    "order_id": "string" | null,
+    "requested_statuses": ["slug1", "slug2"] | null,
+    "confidence": 0.0-1.0
+}}
+"""
+        try:
+            response = await asyncio.to_thread(openai_client.chat.completions.create,
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a WooCommerce order intent parser. Respond only with a JSON object."},
+                    {"role": "user", "content": llm_prompt}
+                ],
+                max_tokens=200,
+                temperature=0.0
+            )
+            response_content = response.choices[0].message.content.strip()
+            response_content = response_content.replace('json', '').replace('```', '').strip()
+            
+            intent_data = json.loads(response_content)
+            
+            # Basic validation of the LLM output structure
+            valid_types = {"single_order", "multiple_orders_specific_status", "multiple_orders_open", "multiple_orders_all", "multiple_orders_clarification", "none"}
+            if not all(k in intent_data for k in ["order_query_type", "confidence"]) or intent_data["order_query_type"] not in valid_types:
+                logger.error(f"LLM returned invalid order intent JSON: {response_content}. Falling back to 'none' intent.")
+                return {
+                    "order_query_type": "none",
+                    "order_id": None,
+                    "requested_statuses": None,
+                    "confidence": 0.0,
+                    "reason": "LLM output invalid"
+                }
+
+            logger.info(f"LLM order intent for '{prompt}': {intent_data}")
+            return intent_data
+
+        except Exception as e:
+            logger.error(f"LLM order intent detection failed: {e}. Falling back to 'none' intent.", exc_info=True)
+            return {
+                "order_query_type": "none",
+                "order_id": None,
+                "requested_statuses": None,
+                "confidence": 0.0,
+                "reason": f"LLM API error: {e}"
+            }
+
     @handle_api_errors("12Taste Order Status", "Get Order", show_to_user=True)
     async def get_order(self, order_id: str, customer_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Retrieve a single order by ID from WooCommerce, optionally filtered by customer_id."""
@@ -1977,6 +2130,58 @@ class WooCommerceManager:
             logger.error(f"12Taste Order Status API error: {e}")
             return {"error": "api_error", "message": str(e)}
 
+    # --- MODIFIED: list_orders to handle status=None or empty list for ALL orders ---
+    @handle_api_errors("12Taste Order Status", "List Orders", show_to_user=True)
+    async def list_orders(self, customer_id: Optional[int] = None, status: Optional[List[str]] = None, 
+                         per_page: int = 20, page: int = 1) -> Optional[List[Dict[str, Any]]]:
+        """List orders with optional filters for customer and status."""
+        if not self.config.WOOCOMMERCE_ENABLED:
+            return None
+        
+        try:
+            params = {
+                'per_page': per_page,
+                'page': page
+            }
+            
+            if customer_id:
+                params['customer'] = customer_id
+                
+            # --- MODIFICATION START ---
+            # If status is None or empty list, the 'status' parameter is omitted,
+            # which by default returns all orders for the customer.
+            if status is not None and len(status) > 0:
+                # WooCommerce accepts comma-separated statuses
+                params['status'] = ','.join(status)
+            # --- MODIFICATION END ---
+            
+            response = await asyncio.to_thread(
+                requests.get,
+                f"{self.base_url}/orders",
+                auth=self.auth,
+                params=params,
+                timeout=10,
+                headers={
+                    'User-Agent': 'FiFi-AI-Assistant/1.0',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            if response.status_code == 404:
+                logger.info("No orders found")
+                return []
+            
+            response.raise_for_status()
+            orders = response.json()
+            
+            logger.info(f"Successfully retrieved {len(orders)} orders")
+            return orders
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"12Taste Order Status API error listing orders: {e}")
+            return None
+    # --- END MODIFIED list_orders ---
+    
     @handle_api_errors("12Taste Order Status", "Get Customer by Email", show_to_user=False)
     async def get_customer_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         """Retrieve a customer by email from WooCommerce."""
@@ -1985,27 +2190,49 @@ class WooCommerceManager:
         if not email:
             return None
         
+        clean_email = email.lower().strip()
+        
         try:
+            # --- FIX: ADD 'role': 'all' to the parameters for robust customer search ---
+            params = {
+                'email': clean_email,
+                'role': 'all' # Essential fix for reliable customer search by email
+            }
+            
             response = await asyncio.to_thread(
                 requests.get,
                 f"{self.base_url}/customers",
                 auth=self.auth,
-                params={'email': email},
+                params=params, # Use the new params dictionary
                 timeout=10,
                 headers={
                     'User-Agent': 'FiFi-AI-Assistant/1.0',
                     'Accept': 'application/json'
                 }
             )
-            response.raise_for_status()
+            
+            if response.status_code >= 400:
+                logger.error(f"Customer search for {clean_email} failed with status {response.status_code}. Response: {response.text[:200]}")
+                response.raise_for_status() 
+            
             customers = response.json()
-            if customers:
-                logger.info(f"Found customer for email {email}: ID {customers[0]['id']}")
+            
+            if not isinstance(customers, list):
+                logger.error(f"Customer search for {clean_email} returned non-list JSON: {customers}")
+                return None
+                
+            if customers and len(customers) > 0:
+                logger.info(f"✅ Found customer for email {clean_email}: ID {customers[0]['id']} (List Length: {len(customers)})")
                 return customers[0]
-            logger.info(f"No customer found for email {email}")
+            
+            logger.info(f"No customer found for email {clean_email} (API returned empty list: []).")
             return None
+            
         except requests.exceptions.RequestException as e:
-            logger.error(f"12Taste Order Status API error retrieving customer for {email}: {e}")
+            logger.error(f"12Taste Order Status API error retrieving customer for {clean_email}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in get_customer_by_email for {clean_email}: {e}")
             return None
     
     def format_order_for_display(self, order: Dict[str, Any]) -> str:
@@ -2069,6 +2296,64 @@ class WooCommerceManager:
             response += f"\n**Customer Note:** {customer_note}\n"
         
         return response
+    
+    # --- MODIFIED: format_multiple_orders_display to use dynamic filter_type name ---
+    def format_multiple_orders_display(self, orders: List[Dict[str, Any]], filter_type: str = "All") -> str:
+        """Format multiple orders data into a user-friendly markdown string."""
+        if not orders:
+            if filter_type == "Open":
+                return "📦 You have no open orders (Pending payment, On hold, or Processing)."
+            elif filter_type == "All":
+                return "📦 You have no orders."
+            else: # Specific status, e.g., "Pending Payment" or "Custom Completed"
+                return f"📦 You have no orders with status: {filter_type}."
+        
+        # Build header based on filter type
+        response = f"## 📦 Your {filter_type} Orders ({len(orders)} total)\n\n"
+        
+        # Group orders by status (existing logic, good to keep for organization)
+        status_groups = defaultdict(list)
+        for order in orders:
+            status = order.get('status', 'unknown')
+            status_groups[status].append(order)
+        
+        # Display orders grouped by status
+        # Define a consistent order for displaying common statuses
+        common_status_order = ['pending', 'on-hold', 'processing', 'completed', 'cancelled', 'refunded', 'failed']
+        
+        # Get all unique statuses present in the fetched orders, then sort them
+        # ensuring common_status_order items come first.
+        all_present_statuses = sorted(status_groups.keys(), key=lambda x: common_status_order.index(x) if x in common_status_order else len(common_status_order))
+        
+        for status_slug in all_present_statuses:
+            status_formatted = self._format_status(status_slug) # Uses the existing _format_status method
+            response += f"### {status_formatted}\n\n"
+            
+            for order in status_groups[status_slug]:
+                order_number = order.get('number', order.get('id', 'N/A'))
+                date_created = self._format_date(order.get('date_created', ''))
+                total = order.get('total', '0')
+                currency = order.get('currency', 'USD')
+                
+                response += f"**Order #{order_number}**\n"
+                response += f"- Date: {date_created}\n"
+                response += f"- Total: {currency} {total}\n"
+                
+                # Add item summary
+                line_items = order.get('line_items', [])
+                if line_items:
+                    response += f"- Items: "
+                    item_names = [item.get('name', 'Unknown') for item in line_items[:3]]
+                    response += ", ".join(item_names)
+                    if len(line_items) > 3:
+                        response += f" and {len(line_items) - 3} more"
+                    response += "\n"
+                
+                response += "\n"
+        
+        response += "\n---\n*Click on any order number to view full details.*"
+        return response
+    # --- END MODIFIED format_multiple_orders_display ---
     
     def _format_status(self, status: str) -> str:
         """Format order status with emoji."""
@@ -2241,6 +2526,7 @@ def sanitize_input(text: str) -> str:
 # =============================================================================
 
 class PineconeAssistantTool:
+    # ... (PineconeAssistantTool remains unchanged)
     def __init__(self, api_key: str, assistant_name: str):
         if not PINECONE_AVAILABLE: 
             raise ImportError("Pinecone client not available.")
@@ -2375,6 +2661,7 @@ class PineconeAssistantTool:
             return None
     
 class TavilyFallbackAgent:
+    # ... (TavilyFallbackAgent remains unchanged)
     def __init__(self, tavily_api_key: str, openai_api_key: str = None):
         from tavily import TavilyClient
         self.tavily_client = TavilyClient(api_key=tavily_api_key)
@@ -2686,6 +2973,7 @@ OUTPUT: Only the optimized search query, nothing else."""
 class EnhancedAI:
     """Enhanced AI system with improved error handling and bidirectional fallback."""
     
+    # ... (EnhancedAI methods remain unchanged)
     def __init__(self, config: Config):
         self.config = config
         self.openai_client = None
@@ -4491,8 +4779,7 @@ class SessionManager:
             return session
         
         session.login_method = 'email_verified'
-        session.is_degraded_login = False
-        session.degraded_login_timestamp = None
+        session.is_degraded_login_timestamp = None
         session.wp_token = None
         logger.info(f"No registered user history found for {email} - proceeding as email verified guest")
         return session
@@ -4612,67 +4899,8 @@ class SessionManager:
 
         return has_pricing or has_stock
 
-    def extract_order_id_from_query(self, prompt: str) -> Optional[str]:
-        """Extract order ID from natural language query using LLM."""
-        if not self.ai.openai_client:
-            import re
-            patterns = [
-                r'order\s*#?\s*(\d+)',
-                r'#\s*(\d+)',
-                r'order\s*number\s*(\d+)',
-                r'order\s*id\s*(\d+)'
-            ]
-            
-            for pattern in patterns:
-                match = re.search(pattern, prompt.lower())
-                if match:
-                    return match.group(1)
-            return None
-        
-        try:
-            extraction_prompt = f"""Extract the order ID/number from this query. 
-If no order ID is mentioned, respond with "NONE".
-Only return the numeric ID, no other text.
-
-Query: "{prompt}"
-
-Order ID:"""
-
-            response = self.ai.openai_completions.create( # This was openai_client.chat.completions.create
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You extract order IDs from queries. Respond only with the numeric ID or NONE."},
-                    {"role": "user", "content": extraction_prompt}
-                ],
-                max_tokens=20,
-                temperature=0
-            )
-            
-            extracted_id = response.choices[0].message.content.strip()
-            
-            if extracted_id and extracted_id != "NONE":
-                cleaned_id = ''.join(filter(str.isdigit, extracted_id))
-                return cleaned_id if cleaned_id else None
-                
-        except Exception as e:
-            logger.error(f"LLM order ID extraction failed: {e}")
-            
-        return None
-    
-    def is_order_query(self, prompt: str) -> bool:
-        """Check if the query is about retrieving an order."""
-        order_keywords = [
-            'order', 'purchase', 'invoice', 'receipt', 
-            'transaction', 'order status', 'order details',
-            'order number', 'order id', 'check order', 'my order'
-        ]
-        
-        prompt_lower = prompt.lower()
-        
-        has_order_keyword = any(keyword in prompt_lower for keyword in order_keywords)
-        
-        return has_order_keyword
-
+    # --- REMOVED: extract_order_id_from_query (Replaced by LLM in detect_order_query_intent_llm) ---
+    # --- REMOVED: is_order_query (Replaced by LLM in detect_order_query_intent_llm) ---
 
     def detect_meta_conversation_query_llm(self, prompt: str) -> Dict[str, Any]:
         """LLM-powered detection of meta-conversation queries."""
@@ -4970,7 +5198,7 @@ Respond ONLY with JSON:
             "source": "Topic Analysis"
         }
     
-    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+    async def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
         """Gets AI response and manages session state with a corrected processing pipeline."""
         try:
             logger.info(f"Processing prompt: '{prompt[:100]}' | Session: {session.session_id[:8]} | Type: {session.user_type.value}")
@@ -5038,20 +5266,23 @@ Respond ONLY with JSON:
                 self._update_activity(session)
                 return {'content': "", 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
 
-            # 3.5 WooCommerce Order Check (ENHANCED)
-            logger.debug(f"Checking 12Taste Order Status query for: '{prompt}'")
+            # 3.5 WooCommerce Order Check (ENHANCED with LLM Intent)
+            logger.debug(f"Checking 12Taste Order Status query for: '{prompt}' with LLM intent.")
             if hasattr(self, 'woocommerce') and self.woocommerce and self.woocommerce.config.WOOCOMMERCE_ENABLED:
-                expecting_order_id = False
-                if session.messages:
-                    for msg in reversed(session.messages):
-                        if msg.get('role') == 'assistant' and msg.get('source') == '12Taste Order Status':
-                            if 'order ID' in msg.get('content', '') or 'order number' in msg.get('content', ''):
-                                expecting_order_id = True
-                                break
-                        if msg.get('role') == 'user':
-                            break
                 
-                if self.is_order_query(prompt) or (expecting_order_id and prompt.strip().isdigit()):
+                # Use LLM to determine the order query intent
+                order_intent = await self.woocommerce.detect_order_query_intent_llm(
+                    prompt, self.ai.openai_client
+                )
+
+                query_type = order_intent.get("order_query_type")
+                order_id = order_intent.get("order_id")
+                requested_statuses = order_intent.get("requested_statuses")
+                
+                # If the LLM detected an order-related query type (not "none")
+                if query_type != "none":
+                    
+                    # Check authentication
                     if not (session.user_type == UserType.REGISTERED_USER or session.user_type == UserType.EMAIL_VERIFIED_GUEST) or not session.email:
                         message = "To check order status, please sign in as a Registered User or verify your email."
                         session.messages.append({'role': 'user', 'content': prompt})
@@ -5060,36 +5291,33 @@ Respond ONLY with JSON:
                         if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
                         return {'content': message, 'success': False, 'source': '12Taste Order Status'}
 
-                    order_id = self.extract_order_id_from_query(prompt)
-                    if not order_id and expecting_order_id and prompt.strip().isdigit():
-                        order_id = prompt.strip()
+                    # Record question
+                    try:
+                        self.question_limits.record_question_and_check_ban(session, self)
+                    except Exception as e:
+                        logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
+                        return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
+                    
+                    # Get customer ID
+                    customer = await self.woocommerce.get_customer_by_email(session.email)
+                    customer_id = customer.get('id') if customer else None
 
-                    if order_id:
-                        logger.info(f"Order query detected for order ID: {order_id}. User email: {session.email}")
-                        
-                        try:
-                            self.question_limits.record_question_and_check_ban(session, self)
-                        except Exception as e:
-                            logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
-                            return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
-                        
-                        # NEW: Use asyncio.run to execute async WooCommerce methods
-                        customer = asyncio.run(self.woocommerce.get_customer_by_email(session.email))
-                        customer_id = customer.get('id') if customer else None
+                    if not customer_id:
+                        message = f"We could not find a customer account linked to your email ({session.email}). Please ensure you are logged in with the email used for your order."
+                        session.messages.append({'role': 'user', 'content': prompt})
+                        session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                        self._update_activity(session)
+                        if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                        return {
+                            'content': message,
+                            'success': False,
+                            'source': '12Taste Order Status'
+                        }
 
-                        if not customer_id:
-                            message = f"We could not find a customer account linked to your email ({session.email}). Please ensure you are logged in with the email used for your order."
-                            session.messages.append({'role': 'user', 'content': prompt})
-                            session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
-                            self._update_activity(session)
-                            if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
-                            return {
-                                'content': message,
-                                'success': False,
-                                'source': '12Taste Order Status'
-                            }
-
-                        order_data = asyncio.run(self.woocommerce.get_order(order_id, customer_id=customer_id))
+                    # --- Handle different query types based on LLM intent ---
+                    if query_type == "single_order" and order_id:
+                        logger.info(f"LLM detected single order query for order ID: {order_id}. User email: {session.email}")
+                        order_data = await self.woocommerce.get_order(order_id, customer_id=customer_id)
                         
                         if order_data and not order_data.get("error"):
                             formatted_order = self.woocommerce.format_order_for_display(order_data)
@@ -5120,14 +5348,90 @@ Respond ONLY with JSON:
                                 'success': False,
                                 'source': '12Taste Order Status'
                             }
-                    else:
-                        try:
-                            self.question_limits.record_question_and_check_ban(session, self)
-                        except Exception as e:
-                            logger.error(f"Failed to record order ID prompt for {session.session_id[:8]}: {e}")
-                            return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
+                    
+                    # --- Handle multiple order queries ---
+                    elif query_type in ["multiple_orders_all", "multiple_orders_open", "multiple_orders_specific_status"]:
+                        logger.info(f"LLM detected multiple orders query ({query_type}). User email: {session.email}")
                         
-                        message = "I can help with order statuses, but I need the order ID/number. Could you please provide it?"
+                        status_filter = None # Default to all orders if not specified for 'multiple_orders_all'
+                        filter_display_name = ""
+
+                        if query_type == "multiple_orders_all":
+                            filter_display_name = "All"
+                        elif query_type == "multiple_orders_open":
+                            status_filter = ['pending', 'on-hold', 'processing']
+                            filter_display_name = "Open"
+                        elif query_type == "multiple_orders_specific_status" and requested_statuses:
+                            status_filter = requested_statuses
+                            # Get human-readable names for display
+                            display_names = await self.woocommerce._get_display_names_for_slugs(requested_statuses)
+                            if len(display_names) > 1:
+                                filter_display_name = ", ".join(display_names[:-1]) + " & " + display_names[-1]
+                            else:
+                                filter_display_name = display_names if display_names else ""
+                        else:
+                            # This case should ideally be caught by 'multiple_orders_clarification' 
+                            # but serves as a safety net if 'multiple_orders_specific_status' is given
+                            # but requested_statuses is unexpectedly empty.
+                            query_type = "multiple_orders_clarification" 
+                            pass # Fall through to clarification block below
+
+                        if query_type != "multiple_orders_clarification": # Only proceed if the intent is clear
+                            orders = await self.woocommerce.list_orders(
+                                customer_id=customer_id,
+                                status=status_filter, # Will be None for 'all', or a list of slugs
+                                per_page=50 # Adjust as needed, consider pagination for very large results
+                            )
+                            
+                            if orders is not None:
+                                formatted_orders = self.woocommerce.format_multiple_orders_display(orders, filter_display_name)
+                                
+                                session.messages.append({'role': 'user', 'content': prompt})
+                                session.messages.append({
+                                    'role': 'assistant', 
+                                    'content': formatted_orders,
+                                    'source': '12Taste Order Status',
+                                    'order_count': len(orders),
+                                    'filter_type': filter_display_name,
+                                    'specific_statuses': requested_statuses # Log the slugs for debug/tracking
+                                })
+                                self._update_activity(session)
+                                if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                                return {
+                                    'content': formatted_orders,
+                                    'success': True,
+                                    'source': '12Taste Order Status',
+                                    'order_count': len(orders),
+                                    'filter_type': filter_display_name
+                                }
+                            else:
+                                error_message = "Failed to retrieve your orders. Please try again later."
+                                session.messages.append({'role': 'user', 'content': prompt})
+                                session.messages.append({'role': 'assistant', 'content': f"❌ {error_message}", 'source': '12Taste Order Status'})
+                                self._update_activity(session)
+                                if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                                return {
+                                    'content': f"❌ {error_message}",
+                                    'success': False,
+                                    'source': '12Taste Order Status'
+                                }
+
+                    # --- Handle clarification requests (and fallbacks from multiple orders) ---
+                    if query_type == "multiple_orders_clarification" or (query_type in ["multiple_orders_all", "multiple_orders_open", "multiple_orders_specific_status"] and not 'orders' in locals()):
+                        message = "I can help with your orders. Do you want to check a specific order (please provide the ID/number), list all your orders, or filter by a certain status (e.g., 'pending payment')?"
+                        session.messages.append({'role': 'user', 'content': prompt})
+                        session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                        self._update_activity(session)
+                        st.session_state.expecting_order_id = True # Set for potential follow-up if user provides just an ID next.
+                        return {
+                            'content': message,
+                            'success': True,
+                            'source': '12Taste Order Status'
+                        }
+                    
+                    # --- Final safety net for order query types ---
+                    else:
+                        message = "I detected an order-related question but need more clarity. Please provide an order ID, or specify if you want to see all orders, open orders, or orders with a particular status."
                         session.messages.append({'role': 'user', 'content': prompt})
                         session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
                         self._update_activity(session)
@@ -5137,7 +5441,10 @@ Respond ONLY with JSON:
                             'success': True,
                             'source': '12Taste Order Status'
                         }
-            if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                # If query_type is "none", it falls through to the rest of the get_ai_response logic (general AI, etc.)
+            
+            if 'expecting_order_id' in st.session_state: 
+                del st.session_state['expecting_order_id']
 
 
             # 4. LLM-driven Industry context check (NOW RUNS BEFORE META-DETECTION)
@@ -5206,7 +5513,7 @@ Respond ONLY with JSON:
                 logger.error(f"❌ Critical error recording question: {e}")
                 return {'content': 'A critical error occurred while recording your question.', 'success': False, 'source': 'Question Tracking Error'}
             
-            ai_response = self.ai.get_response(sanitized_prompt, session.messages)
+            ai_response = await asyncio.to_thread(self.ai.get_response, sanitized_prompt, session.messages)
             
             user_message = {'role': 'user', 'content': sanitized_prompt}
             assistant_message = {'role': 'assistant', 'content': ai_response.get('content', 'No response.'), 'source': ai_response.get('source'), **ai_response}
@@ -5217,7 +5524,7 @@ Respond ONLY with JSON:
             
         except Exception as e:
             logger.error(f"AI response generation failed: {e}", exc_info=True)
-            return {'content': 'I encountered an error processing your request.', 'success': False, 'source': 'Error Handler'}
+            return {'content': 'I encountered an error processing your request.', 'success': False, 'source': 'Error Handler'}    
         
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
@@ -5934,7 +6241,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                     else:
                         st.error("Please enter a 6-digit code.")
             
-                col_resend_fallback, _ = st.columns([1,2])
+                col_resend_fallback, _ = st.columns()
                 with col_resend_fallback:
                     if st.button("🔄 Resend Code", use_container_width=True, key="resend_fallback_code"):
                         if email:
@@ -6474,7 +6781,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         
         if known_emails:
             if len(known_emails) == 1:
-                st.info(f"This device was previously verified with **{session_manager._mask_email(known_emails[0])}**. Please verify an email to continue.")
+                st.info(f"This device was previously verified with **{session_manager._mask_email(known_emails)}**. Please verify an email to continue.")
             else:
                 st.info("This device was previously verified with multiple emails. Please verify one of your emails to continue:")
                 for email in known_emails[:3]:
@@ -6828,7 +7135,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
         remaining_time = max(0, int(time_until_next - elapsed))
         
-        col1, col2 = st.columns([5, 1])
+        col1, col2 = st.columns()
         with col1:
             if remaining_time > 0:
                 st.error(f"⏱️ **Rate limit exceeded** - Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
@@ -6845,7 +7152,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         categories_text = ', '.join(categories) if categories else 'policy violation'
         message = moderation_info.get('message', 'Your message violates our content policy.')
         
-        col1, col2 = st.columns([5, 1])
+        col1, col2 = st.columns()
         with col1:
             st.error(f"🛡️ **Content Policy Violation** - {categories_text}")
             st.info(f"💡 **Guidance**: {message}")
@@ -6860,7 +7167,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         confidence = context_info.get('confidence', 0.0)
         message = context_info.get('message', '')
         
-        col1, col2 = st.columns([5, 1])
+        col1, col2 = st.columns()
         with col1:
             if category == "unrelated_industry":
                 st.warning(f"🏭 **Outside Food Industry** - This question doesn't relate to food & beverage ingredients.")
@@ -6887,7 +7194,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         query_type = notice_info.get('query_type', 'pricing')
         message = notice_info.get('message', '')
 
-        col1, col2 = st.columns([5, 1])
+        col1, col2 = st.columns()
         with col1:
             if query_type == 'pricing':
                 st.info("💰 **Pricing Information Notice**")
@@ -6943,7 +7250,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         with st.chat_message("assistant", avatar=FIFI_AVATAR_B64):
             with st.spinner("🔍 FiFi is processing your question and we request your patience..."):
                 try:
-                    response = session_manager.get_ai_response(session, prompt)
+                    response = asyncio.run(session_manager.get_ai_response(session, prompt))
                     st.session_state.just_answered = True
                     
                     if response.get('requires_email'):
