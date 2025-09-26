@@ -2190,27 +2190,49 @@ Respond ONLY with a JSON object in the following format:
         if not email:
             return None
         
+        clean_email = email.lower().strip()
+        
         try:
+            # --- FIX: ADD 'role': 'all' to the parameters for robust customer search ---
+            params = {
+                'email': clean_email,
+                'role': 'all' # Essential fix for reliable customer search by email
+            }
+            
             response = await asyncio.to_thread(
                 requests.get,
                 f"{self.base_url}/customers",
                 auth=self.auth,
-                params={'email': email},
+                params=params, # Use the new params dictionary
                 timeout=10,
                 headers={
                     'User-Agent': 'FiFi-AI-Assistant/1.0',
                     'Accept': 'application/json'
                 }
             )
-            response.raise_for_status()
+            
+            if response.status_code >= 400:
+                logger.error(f"Customer search for {clean_email} failed with status {response.status_code}. Response: {response.text[:200]}")
+                response.raise_for_status() 
+            
             customers = response.json()
-            if customers:
-                logger.info(f"Found customer for email {email}: ID {customers[0]['id']}")
+            
+            if not isinstance(customers, list):
+                logger.error(f"Customer search for {clean_email} returned non-list JSON: {customers}")
+                return None
+                
+            if customers and len(customers) > 0:
+                logger.info(f"✅ Found customer for email {clean_email}: ID {customers[0]['id']} (List Length: {len(customers)})")
                 return customers[0]
-            logger.info(f"No customer found for email {email}")
+            
+            logger.info(f"No customer found for email {clean_email} (API returned empty list: []).")
             return None
+            
         except requests.exceptions.RequestException as e:
-            logger.error(f"12Taste Order Status API error retrieving customer for {email}: {e}")
+            logger.error(f"12Taste Order Status API error retrieving customer for {clean_email}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in get_customer_by_email for {clean_email}: {e}")
             return None
     
     def format_order_for_display(self, order: Dict[str, Any]) -> str:
