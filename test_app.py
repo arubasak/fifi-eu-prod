@@ -14,6 +14,9 @@ import copy
 import sqlite3
 import hashlib
 import secrets
+import base64
+import asyncio # New import for async/await in SessionManager
+from pathlib import Path
 from enum import Enum
 from urllib.parse import urlparse
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -22,18 +25,18 @@ from reportlab.lib.units import inch
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.colors import black, grey, lightgrey
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
-from typing import List, Dict, Optional, Any, Callable
+from typing import List, Dict, Optional, Any, Callable, Tuple
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from collections import defaultdict
 import requests
 import streamlit.components.v1 as components
-from streamlit_javascript import st_javascript
+from streamlit_javascript import st_javascript # Keep st_javascript for activity tracker
 
-# NEW: Import StreamlitSecretNotFoundError for robust secret handling
+# Import StreamlitSecretNotFoundError for robust secret handling
 from streamlit.errors import StreamlitSecretNotFoundError
 
-## CHANGE: Import production_config
+# Import production_config
 from production_config import (
     DAILY_RESET_WINDOW_HOURS, SESSION_TIMEOUT_MINUTES, FINGERPRINT_TIMEOUT_SECONDS,
     TIER_1_BAN_HOURS, TIER_2_BAN_HOURS, EMAIL_VERIFIED_BAN_HOURS,
@@ -43,21 +46,46 @@ from production_config import (
     CRM_SAVE_MIN_QUESTIONS, EVASION_BAN_HOURS,
     FASTAPI_EMERGENCY_SAVE_URL, FASTAPI_EMERGENCY_SAVE_TIMEOUT,
     DAILY_RESET_WINDOW, SESSION_TIMEOUT_DELTA,
-    FINGERPRINT_TIMEOUT_SECONDS # <--- ADDED FINGERPRINT_TIMEOUT_SECONDS
+    FASTAPI_FINGERPRINT_URL # Import FastAPI fingerprint URL
 )
 
-# CHANGE 1: REMOVED the streamlit_js_eval import block as it's no longer needed and caused deployment issues.
+# =============================================================================
+# AVATAR LOADING
+# =============================================================================
+
+# Helper function to load and Base64-encode images for stateless deployment
+@st.cache_data
+def get_image_as_base64(file_path):
+    """Loads an image file and returns it as a Base64 encoded string."""
+    try:
+        path = Path(file_path)
+        with path.open("rb") as f:
+            data = f.read()
+        return f"data:image/png;base64,{base64.b64encode(data).decode()}"
+    except FileNotFoundError:
+        logger.error(f"Avatar image not found at {file_path}")
+        return None
+    except Exception as e:
+        logger.error(f"Error loading image {file_path}: {e}")
+        return None
+
+# Load images once using the helper function
+# ASSUMPTION: You have an 'assets' folder with these images next to fifi.py
+FIFI_AVATAR_B64 = get_image_as_base64("assets/fifi-avatar.png")
+USER_AVATAR_B64 = get_image_as_base64("assets/user-avatar.png")
+
 
 # =============================================================================
-# FINAL INTEGRATED FIFI AI - SIMPLIFIED TIMEOUT SYSTEM
+# SETUP
 # =============================================================================
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO, # Keep at INFO unless debugging specific components
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # Graceful fallbacks for optional imports
 OPENAI_AVAILABLE = False
@@ -83,7 +111,6 @@ except ImportError:
     pass
 
 try:
-    # MODIFIED: Import TavilySearch instead of TavilyClient for Langchain integration
     from langchain_tavily import TavilySearch
     TAVILY_AVAILABLE = True
 except ImportError:
@@ -147,6 +174,10 @@ def show_loading_overlay():
     """Show loading overlay that blocks all interaction"""
     if is_loading():
         loading_message = st.session_state.get('loading_message', 'Loading...')
+        
+        # Don't show overlay for fingerprinting operations
+        if loading_message.startswith("Setting up device recognition..."): # Changed to startsWith
+            return False
         
         # Create a full-screen overlay using HTML/CSS
         overlay_html = f"""
@@ -230,9 +261,19 @@ class Config:
         self.SUPABASE_ANON_KEY = _get_secret("SUPABASE_ANON_KEY")
         self.SUPABASE_ENABLED = all([SUPABASE_AVAILABLE, self.SUPABASE_URL, self.SUPABASE_ANON_KEY])
 
+        # WooCommerce Configuration
+        self.WOOCOMMERCE_URL = self._validate_url(_get_secret("WOOCOMMERCE_URL", ""))
+        self.WOOCOMMERCE_CONSUMER_KEY = _get_secret("WOOCOMMERCE_CONSUMER_KEY")
+        self.WOOCOMMERCE_CONSUMER_SECRET = _get_secret("WOOCOMMERCE_CONSUMER_SECRET")
+        self.WOOCOMMERCE_ENABLED = all([
+            self.WOOCOMMERCE_URL, 
+            self.WOOCOMMERCE_CONSUMER_KEY, 
+            self.WOOCOMMERCE_CONSUMER_SECRET
+        ])
+
     def _validate_url(self, url: str) -> str:
         if url and not url.startswith(('http://', 'https://')):
-            logger.warning(f"Invalid URL format for WORDPRESS_URL: {url}. Disabling feature.")
+            logger.warning(f"Invalid URL format for {url}. Disabling feature.")
             return ""
         return url.rstrip('/')
 
@@ -261,7 +302,6 @@ class EnhancedErrorHandler:
     def __init__(self):
         self.error_history = []
         self.component_status = {}
-        ## CHANGE: Memory leak fix - limit error history size
         self.MAX_ERROR_HISTORY_SIZE = MAX_ERROR_HISTORY
 
     def handle_api_error(self, component: str, operation: str, error: Exception) -> ErrorContext:
@@ -269,8 +309,7 @@ class EnhancedErrorHandler:
         
         # Check if the error is a requests.exceptions.ReadTimeout for Zoho token
         if isinstance(error, requests.exceptions.ReadTimeout) and component == "ZohoCRMManager" and operation == "get_access_token":
-             # This specific timeout often means the Zoho auth server is just slow. Not critical.
-            severity, message = ErrorSeverity.LOW, "token request timed out but may still be processing."
+             severity, message = ErrorSeverity.LOW, "token request timed out but may still be processing."
         elif "timeout" in error_str:
             severity, message = ErrorSeverity.MEDIUM, "is responding slowly."
         elif "unauthorized" in error_str or "401" in error_str or "403" in error_str:
@@ -283,7 +322,7 @@ class EnhancedErrorHandler:
             severity, message = ErrorSeverity.MEDIUM, "encountered an unexpected error."
 
         return ErrorContext(
-            component=component, operation=operation, error_type=type(error).__name__, # Fix: Use type(error).__name__
+            component=component, operation=operation, error_type=type(error).__name__,
             severity=severity, user_message=f"{component} {message}",
             technical_details=str(error),
             recovery_suggestions=["Try again", "Check your internet", "Contact support if issue persists"],
@@ -304,7 +343,6 @@ class EnhancedErrorHandler:
             "severity": error_context.severity.value, "details": error_context.technical_details
         })
         self.component_status[error_context.component] = "error"
-        ## CHANGE: Memory leak fix - limit error history size
         if len(self.error_history) > self.MAX_ERROR_HISTORY_SIZE: 
             self.error_history.pop(0)
 
@@ -357,14 +395,13 @@ class UserSession:
     wp_token: Optional[str] = None
     messages: List[Dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
-    # Changed last_activity default to None for timer start logic
     last_activity: Optional[datetime] = None
     timeout_saved_to_crm: bool = False
     
     # Universal Fingerprinting (ALL sessions)
     fingerprint_id: Optional[str] = None
     fingerprint_method: Optional[str] = None
-    visitor_type: str = "new_visitor" # Default value
+    visitor_type: str = "new_visitor"
     recognition_response: Optional[str] = None
     
     # Question Tracking (Activity-Based)
@@ -409,7 +446,6 @@ class UserSession:
     # NEW: Flag to allow guest questions after declining a recognized email
     declined_recognized_email_at: Optional[datetime] = None
 
-    ## CHANGE: Add timeout tracking fields for FastAPI beacon to record
     timeout_detected_at: Optional[datetime] = None
     timeout_reason: Optional[str] = None
 
@@ -419,35 +455,31 @@ class UserSession:
     tier_cycle_started_at: Optional[datetime] = None
 
     # NEW: Login method tracking
-    login_method: Optional[str] = None  # 'wordpress', 'email_fallback', 'guest', 'email_verified'
-    is_degraded_login: bool = False  # True when registered user logged in via email instead of WordPress
+    login_method: Optional[str] = None
+    is_degraded_login: bool = False
     degraded_login_timestamp: Optional[datetime] = None
 
 
 class DatabaseManager:
     def __init__(self, connection_string: Optional[str]):
         self.conn = None
-        self._connection_string = connection_string ## CHANGE: Store connection string for reconnects
+        self._connection_string = connection_string
         self._last_health_check = None
         self._health_check_interval = timedelta(minutes=5)
-        self._max_reconnect_attempts = 3 ## CHANGE: Added for better reconnect logic
+        self._max_reconnect_attempts = 3
         logger.info("🔄 INITIALIZING DATABASE MANAGER")
         
-        # Prioritize SQLite Cloud if configured and available
         if connection_string and SQLITECLOUD_AVAILABLE:
             self.conn, self.db_type = self._try_sqlite_cloud(connection_string)
         
-        # Fallback to local SQLite
         if not self.conn:
             self.conn, self.db_type = self._try_local_sqlite()
         
-        # Final fallback to in-memory if all else fails
         if not self.conn:
             logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED. FALLING BACK TO NON-PERSISTENT IN-MEMORY STORAGE.")
             self.db_type = "memory"
             self.local_sessions = {}
         
-        # Initialize database schema
         if self.conn:
             try:
                 self._init_complete_database()
@@ -493,9 +525,11 @@ class DatabaseManager:
                     full_name TEXT,
                     zoho_contact_id TEXT,
                     created_at TEXT DEFAULT '',
-                    last_activity TEXT, -- Changed to allow NULL initially
+                    last_activity TEXT,
                     messages TEXT DEFAULT '[]',
                     active INTEGER DEFAULT 1,
+                    wp_token TEXT,
+                    timeout_saved_to_crm INTEGER DEFAULT 0,
                     fingerprint_id TEXT,
                     fingerprint_method TEXT,
                     visitor_type TEXT DEFAULT 'new_visitor',
@@ -515,27 +549,20 @@ class DatabaseManager:
                     browser_privacy_level TEXT,
                     registration_prompted INTEGER DEFAULT 0,
                     registration_link_clicked INTEGER DEFAULT 0,
-                    wp_token TEXT,
-                    timeout_saved_to_crm INTEGER DEFAULT 0,
                     recognition_response TEXT,
                     display_message_offset INTEGER DEFAULT 0,
-                    -- NEW: Re-verification fields
                     reverification_pending INTEGER DEFAULT 0,
                     pending_user_type TEXT,
                     pending_email TEXT,
                     pending_full_name TEXT,
                     pending_zoho_contact_id TEXT,
                     pending_wp_token TEXT,
-                    -- NEW: Declined recognized email
                     declined_recognized_email_at TEXT,
-                    -- NEW: Timeout tracking fields for FastAPI beacon to record
                     timeout_detected_at TEXT,
                     timeout_reason TEXT,
-                    -- NEW: Tier cycle tracking columns
                     current_tier_cycle_id TEXT,
                     tier1_completed_in_cycle INTEGER DEFAULT 0,
                     tier_cycle_started_at TEXT,
-                    -- NEW: Login method tracking
                     login_method TEXT,
                     is_degraded_login INTEGER DEFAULT 0,
                     degraded_login_timestamp TEXT
@@ -552,14 +579,14 @@ class DatabaseManager:
                 ("pending_zoho_contact_id", "TEXT"),
                 ("pending_wp_token", "TEXT"),
                 ("declined_recognized_email_at", "TEXT"),
-                ("timeout_detected_at", "TEXT"), ## CHANGE: Added new column
-                ("timeout_reason", "TEXT"), ## CHANGE: Added new column
-                ("current_tier_cycle_id", "TEXT"), # NEW
-                ("tier1_completed_in_cycle", "INTEGER DEFAULT 0"), # NEW
-                ("tier_cycle_started_at", "TEXT"), # NEW
-                ("login_method", "TEXT"), # NEW
-                ("is_degraded_login", "INTEGER DEFAULT 0"), # NEW
-                ("degraded_login_timestamp", "TEXT"), # NEW
+                ("timeout_detected_at", "TEXT"),
+                ("timeout_reason", "TEXT"),
+                ("current_tier_cycle_id", "TEXT"),
+                ("tier1_completed_in_cycle", "INTEGER DEFAULT 0"),
+                ("tier_cycle_started_at", "TEXT"),
+                ("login_method", "TEXT"),
+                ("is_degraded_login", "INTEGER DEFAULT 0"),
+                ("degraded_login_timestamp", "TEXT"),
             ]
             for col_name, col_type in new_columns:
                 try:
@@ -598,7 +625,6 @@ class DatabaseManager:
             logger.error(f"Database health check failed: {e}")
             return False
     
-    ## CHANGE: Improved reconnect logic
     def _reconnect(self):
         """Reconnect with exponential backoff"""
         for attempt in range(self._max_reconnect_attempts):
@@ -616,35 +642,33 @@ class DatabaseManager:
                     self.conn = sqlite3.connect("fifi_sessions_v2.db", check_same_thread=False)
                     self.db_type = "file"
                 
-                self._init_complete_database() # Re-init schema in case of changes
+                self._init_complete_database()
                 logger.info(f"Database reconnected on attempt {attempt + 1}")
                 return
             except Exception as e:
-                wait_time = 2 ** attempt  # Exponential backoff
+                wait_time = 2 ** attempt
                 logger.error(f"Reconnect attempt {attempt + 1} failed, waiting {wait_time}s: {e}")
                 time.sleep(wait_time)
         
-        # Final fallback to in-memory
-        logger.critical("🚨 All reconnection attempts failed, falling back to in-memory storage")
+        logger.critical("🚨 ALL DATABASE CONNECTIONS FAILED. FALLING BACK TO NON-PERSISTENT IN-MEMORY STORAGE.")
         self.db_type = "memory"
         self.local_sessions = {}
 
-    ## CHANGE: Simplified _ensure_connection_healthy to use _reconnect
     def _ensure_connection_healthy(self):
         """Ensure database connection is healthy, reconnect if needed"""
         if not self._check_connection_health():
             logger.warning("Database connection unhealthy, attempting reconnection...")
             self._reconnect()
-            if not self.conn: # If reconnect failed, ensure in-memory is ready
+            if not self.conn:
                 if not hasattr(self, 'local_sessions'):
                     self.local_sessions = {}
 
     @handle_api_errors("Database", "Save Session")
     def save_session(self, session: UserSession):
         """Save session with SQLite Cloud compatibility and connection health check"""
-        logger.debug(f"💾 SAVING SESSION TO DB: {session.session_id[:8]} | user_type={session.user_type.value} | email={session.email} | messages={len(session.messages)} | fp_id={session.fingerprint_id[:8] if session.fingerprint_id else 'None'} | active={session.active}") ## CHANGE: Handle None for FP ID
+        logger.debug(f"💾 SAVING SESSION TO DB: {session.session_id[:8]} | user_type={session.user_type.value} | email={session.email} | messages={len(session.messages)} | fp_id={session.fingerprint_id[:8] if session.fingerprint_id else 'None'} | active={session.active}")
         
-        self._ensure_connection_healthy() ## CHANGE: Simplified call
+        self._ensure_connection_healthy()
         
         if self.db_type == "memory":
             self.local_sessions[session.session_id] = copy.deepcopy(session)
@@ -652,16 +676,13 @@ class DatabaseManager:
             return
         
         try:
-            # NEVER set row_factory for save operations
             if hasattr(self.conn, 'row_factory'): 
                 self.conn.row_factory = None
             
-            # Validate messages before saving
             if not isinstance(session.messages, list):
                 logger.warning(f"Invalid messages field for session {session.session_id[:8]}, resetting to empty list")
                 session.messages = []
             
-            # Ensure JSON serializable data
             try:
                 json_messages = json.dumps(session.messages)
                 json_emails_used = json.dumps(session.email_addresses_used)
@@ -672,26 +693,19 @@ class DatabaseManager:
                 session.messages = []
                 session.email_addresses_used = []
             
-            # Handle None for last_activity before saving
             last_activity_iso = session.last_activity.isoformat() if session.last_activity else None
-            # Handle None for declined_recognized_email_at before saving
             declined_recognized_email_at_iso = session.declined_recognized_email_at.isoformat() if session.declined_recognized_email_at else None
-            ## CHANGE: Handle None for new timeout tracking fields
             timeout_detected_at_iso = session.timeout_detected_at.isoformat() if session.timeout_detected_at else None
-            
-            # NEW: Handle None for new cycle tracking fields
             tier_cycle_started_at_iso = session.tier_cycle_started_at.isoformat() if session.tier_cycle_started_at else None
-
-            # NEW: Handle None for new login tracking fields
             degraded_login_timestamp_iso = session.degraded_login_timestamp.isoformat() if session.degraded_login_timestamp else None
 
             self.conn.execute(
-                '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at, login_method, is_degraded_login, degraded_login_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                '''REPLACE INTO sessions (session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at, login_method, is_degraded_login, degraded_login_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (session.session_id, session.user_type.value, session.email, session.full_name,
                  session.zoho_contact_id, session.created_at.isoformat(),
                  last_activity_iso, json_messages, int(session.active),
                  session.wp_token, int(session.timeout_saved_to_crm), session.fingerprint_id,
-                 session.fingerprint_method, session.visitor_type, # This is the corrected line for fingerprint_method
+                 session.fingerprint_method, session.visitor_type,
                  session.daily_question_count,
                  session.total_question_count, 
                  session.last_question_time.isoformat() if session.last_question_time else None,
@@ -706,83 +720,152 @@ class DatabaseManager:
                  session.pending_user_type.value if session.pending_user_type else None,
                  session.pending_email, session.pending_full_name,
                  session.pending_zoho_contact_id, session.pending_wp_token,
-                 declined_recognized_email_at_iso, ## CHANGE: NEW field
-                 timeout_detected_at_iso, ## CHANGE: NEW field
-                 session.timeout_reason, # NEW field
-                 session.current_tier_cycle_id, # NEW
-                 int(session.tier1_completed_in_cycle), # NEW
-                 tier_cycle_started_at_iso, # NEW
-                 session.login_method, # NEW
-                 int(session.is_degraded_login), # NEW
-                 degraded_login_timestamp_iso # NEW
+                 declined_recognized_email_at_iso,
+                 timeout_detected_at_iso,
+                 session.timeout_reason,
+                 session.current_tier_cycle_id,
+                 int(session.tier1_completed_in_cycle),
+                 tier_cycle_started_at_iso,
+                 session.login_method,
+                 int(session.is_degraded_login),
+                 degraded_login_timestamp_iso
                  ))
             self.conn.commit()
             
-            logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}")
+            logger.debug(f"Successfully saved session {session.session_id[:8]}: user_type={session.user_type.value}, active={session.active}, rev_pending={session.reverification_pending}, daily_q={session.daily_question_count}, last_q_time={session.last_question_time}")
             
         except Exception as e:
             logger.error(f"Failed to save session {session.session_id[:8]}: {e}", exc_info=True)
-            # Try to fallback to in-memory on save failure
             if not hasattr(self, 'local_sessions'):
                 self.local_sessions = {}
             self.local_sessions[session.session_id] = copy.deepcopy(session)
             logger.info(f"Fallback: Saved session {session.session_id[:8]} to in-memory storage")
             raise
 
+    def _load_any_session(self, session_id: str) -> Optional[UserSession]:
+            """Loads a session by its ID, regardless of its 'active' status. For internal historical lookups."""
+            self._ensure_connection_healthy()
+            if self.db_type == "memory":
+                session = self.local_sessions.get(session_id)
+                # Ensure backward compatibility for in-memory sessions
+                if session:
+                    if isinstance(session.user_type, str):
+                        try: session.user_type = UserType(session.user_type)
+                        except ValueError: session.user_type = UserType.GUEST
+                    if not hasattr(session, 'display_message_offset'): session.display_message_offset = 0
+                    if not hasattr(session, 'reverification_pending'):
+                        session.reverification_pending = False; session.pending_user_type = None; session.pending_email = None; session.pending_full_name = None; session.pending_zoho_contact_id = None; session.pending_wp_token = None
+                    if not hasattr(session, 'declined_recognized_email_at'): session.declined_recognized_email_at = None
+                    if not hasattr(session, 'timeout_detected_at'): session.timeout_detected_at = None
+                    if not hasattr(session, 'timeout_reason'): session.timeout_reason = None
+                    if not hasattr(session, 'current_tier_cycle_id'): session.current_tier_cycle_id = None
+                    if not hasattr(session, 'tier1_completed_in_cycle'): session.tier1_completed_in_cycle = False
+                    if not hasattr(session, 'tier_cycle_started_at'): session.tier_cycle_started_at = None
+                    if not hasattr(session, 'login_method'): session.login_method = None
+                    if not hasattr(session, 'is_degraded_login'): session.is_degraded_login = False
+                    if not hasattr(session, 'degraded_login_timestamp'): session.degraded_login_timestamp = None
+                return copy.deepcopy(session)
+
+            try:
+                if self.db_type == "file": # Only set row_factory for local sqlite
+                    self.conn.row_factory = sqlite3.Row
+                else: # For sqlitecloud, use default tuple
+                    self.conn.row_factory = None
+
+                cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at, login_method, is_degraded_login, degraded_login_timestamp FROM sessions WHERE session_id = ?", (session_id,))
+                row = cursor.fetchone()
+                
+                if not row:
+                    logger.debug(f"No session (active or inactive) found for ID {session_id[:8]}.")
+                    return None
+                
+                # Reset row factory if we set it
+                if self.db_type == "file":
+                    self.conn.row_factory = None
+
+                # Safely create the UserSession object from the row data
+                loaded_display_message_offset = row[31] if len(row) > 31 else 0
+                loaded_reverification_pending = bool(row[32]) if len(row) > 32 else False
+                loaded_pending_user_type = UserType(row[33]) if len(row) > 33 and row[33] else None
+                loaded_pending_email = row[34] if len(row) > 34 else None
+                loaded_pending_full_name = row[35] if len(row) > 35 else None
+                loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
+                loaded_pending_wp_token = row[37] if len(row) > 37 else None
+                loaded_declined_recognized_email_at = datetime.fromisoformat(row[38]) if len(row) > 38 and row[38] else None
+                loaded_timeout_detected_at = datetime.fromisoformat(row[39]) if len(row) > 39 and row[39] else None
+                loaded_timeout_reason = row[40] if len(row) > 40 else None
+                loaded_current_tier_cycle_id = row[41] if len(row) > 41 else None
+                loaded_tier1_completed_in_cycle = bool(row[42]) if len(row) > 42 else False
+                loaded_tier_cycle_started_at = datetime.fromisoformat(row[43]) if len(row) > 43 and row[43] else None
+                loaded_login_method = row[44] if len(row) > 44 else None
+                loaded_is_degraded_login = bool(row[45]) if len(row) > 45 else False
+                loaded_degraded_login_timestamp = datetime.fromisoformat(row[46]) if len(row) > 46 and row[46] else None
+                loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
+
+                user_session = UserSession(
+                    session_id=row[0], user_type=UserType(row[1]) if row[1] else UserType.GUEST, email=row[2], full_name=row[3],
+                    zoho_contact_id=row[4], created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
+                    last_activity=loaded_last_activity, messages=safe_json_loads(row[7], default_value=[]), active=bool(row[8]),
+                    wp_token=row[9], timeout_saved_to_crm=bool(row[10]), fingerprint_id=row[11], fingerprint_method=row[12],
+                    visitor_type=row[13] or 'new_visitor', daily_question_count=row[14] or 0, total_question_count=row[15] or 0,
+                    last_question_time=datetime.fromisoformat(row[16]) if row[16] else None, question_limit_reached=bool(row[17]),
+                    ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
+                    ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
+                    ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None, ban_reason=row[21],
+                    evasion_count=row[22] or 0, current_penalty_hours=row[23] or 0, escalation_level=row[24] or 0,
+                    email_addresses_used=safe_json_loads(row[25], default_value=[]), email_switches_count=row[26] or 0,
+                    browser_privacy_level=row[27], registration_prompted=bool(row[28]), registration_link_clicked=bool(row[29]),
+                    recognition_response=row[30], display_message_offset=loaded_display_message_offset,
+                    reverification_pending=loaded_reverification_pending, pending_user_type=loaded_pending_user_type,
+                    pending_email=loaded_pending_email, pending_full_name=loaded_pending_full_name,
+                    pending_zoho_contact_id=loaded_pending_zoho_contact_id, pending_wp_token=loaded_pending_wp_token,
+                    declined_recognized_email_at=loaded_declined_recognized_email_at,
+                    timeout_detected_at=loaded_timeout_detected_at, timeout_reason=loaded_timeout_reason,
+                    current_tier_cycle_id=loaded_current_tier_cycle_id, tier1_completed_in_cycle=loaded_tier1_completed_in_cycle,
+                    tier_cycle_started_at=loaded_tier_cycle_started_at, login_method=loaded_login_method,
+                    is_degraded_login=loaded_is_degraded_login, degraded_login_timestamp=loaded_degraded_login_timestamp
+                )
+                
+                logger.debug(f"Successfully loaded any session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}, daily_q={user_session.daily_question_count}, last_q_time={user_session.last_question_time}")
+                return user_session
+                
+            except Exception as e:
+                logger.error(f"Failed to _load_any_session for {session_id[:8]}: {e}", exc_info=True)
+                return None
+
+
     @handle_api_errors("Database", "Load Session")
     def load_session(self, session_id: str) -> Optional[UserSession]:
-        """Load session with complete SQLite Cloud compatibility and connection health check"""
-        self._ensure_connection_healthy() ## CHANGE: Simplified call
+        """Load session with complete SQLite Cloud compatibility and connection health check (only active sessions)"""
+        self._ensure_connection_healthy()
 
         if self.db_type == "memory":
             session = self.local_sessions.get(session_id)
-            if session and isinstance(session.user_type, str):
-                try:
-                    session.user_type = UserType(session.user_type)
-                except ValueError:
-                    session.user_type = UserType.GUEST
-            
-            # Ensure backward compatibility for in-memory sessions too
-            if session and not hasattr(session, 'display_message_offset'):
-                session.display_message_offset = 0
-            if session and not hasattr(session, 'reverification_pending'):
-                session.reverification_pending = False
-                session.pending_user_type = None
-                session.pending_email = None
-                session.pending_full_name = None
-                session.pending_zoho_contact_id = None
-                session.pending_wp_token = None
-                logger.debug(f"Added missing re-verification fields to in-memory session {session_id[:8]}")
-            if session and not hasattr(session, 'declined_recognized_email_at'): # NEW field
-                session.declined_recognized_email_at = None
-            ## CHANGE: Add compatibility for new timeout tracking fields
-            if session and not hasattr(session, 'timeout_detected_at'):
-                session.timeout_detected_at = None
-            if session and not hasattr(session, 'timeout_reason'):
-                session.timeout_reason = None
-            # NEW: Add compatibility for new cycle tracking fields
-            if session and not hasattr(session, 'current_tier_cycle_id'):
-                session.current_tier_cycle_id = None
-            if session and not hasattr(session, 'tier1_completed_in_cycle'):
-                session.tier1_completed_in_cycle = False
-            if session and not hasattr(session, 'tier_cycle_started_at'):
-                session.tier_cycle_started_at = None
-            # NEW: Add compatibility for new login tracking fields
-            if session and not hasattr(session, 'login_method'):
-                session.login_method = None
-            if session and not hasattr(session, 'is_degraded_login'):
-                session.is_degraded_login = False
-            if session and not hasattr(session, 'degraded_login_timestamp'):
-                session.degraded_login_timestamp = None
-
+            if session and not session.active: return None # Filter inactive in memory too
+            if session: # Apply backward compatibility for in-memory sessions too
+                if isinstance(session.user_type, str):
+                    try: session.user_type = UserType(session.user_type)
+                    except ValueError: session.user_type = UserType.GUEST
+                if not hasattr(session, 'display_message_offset'): session.display_message_offset = 0
+                if not hasattr(session, 'reverification_pending'):
+                    session.reverification_pending = False; session.pending_user_type = None; session.pending_email = None; session.pending_full_name = None; session.pending_zoho_contact_id = None; session.pending_wp_token = None
+                if not hasattr(session, 'declined_recognized_email_at'): session.declined_recognized_email_at = None
+                if not hasattr(session, 'timeout_detected_at'): session.timeout_detected_at = None
+                if not hasattr(session, 'timeout_reason'): session.timeout_reason = None
+                if not hasattr(session, 'current_tier_cycle_id'): session.current_tier_cycle_id = None
+                if not hasattr(session, 'tier1_completed_in_cycle'): session.tier1_completed_in_cycle = False
+                if not hasattr(session, 'tier_cycle_started_at'): session.tier_cycle_started_at = None
+                if not hasattr(session, 'login_method'): session.login_method = None
+                if not hasattr(session, 'is_degraded_login'): session.is_degraded_login = False
+                if not hasattr(session, 'degraded_login_timestamp'): session.degraded_login_timestamp = None
             return copy.deepcopy(session)
         
         try:
-            # NEVER set row_factory for cloud connections - always use raw tuples
-            if hasattr(self.conn, 'row_factory'):
+            if self.db_type == "file": # Only set row_factory for local sqlite
+                self.conn.row_factory = sqlite3.Row
+            else: # For sqlitecloud, use default tuple
                 self.conn.row_factory = None
-            
-            ## CHANGE: Update SELECT statement to include new fields (timeout_detected_at, timeout_reason, cycle tracking, login_method, is_degraded_login, degraded_login_timestamp)
+
             cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at, login_method, is_degraded_login, degraded_login_timestamp FROM sessions WHERE session_id = ? AND active = 1", (session_id,))
             row = cursor.fetchone()
             
@@ -790,258 +873,159 @@ class DatabaseManager:
                 logger.debug(f"No active session found for ID {session_id[:8]}.")
                 return None
             
-            ## CHANGE: Update expected columns for new fields (now 47)
-            expected_min_cols = 47
-            if len(row) < expected_min_cols:
-                logger.error(f"Row has insufficient columns: {len(row)} (expected at least {expected_min_cols}). Data corruption suspected or old schema.")
-                pass 
-                
-            try:
-                # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
-                loaded_display_message_offset = row[31] if len(row) > 31 else 0
-                
-                # NEW: Safely get re-verification fields, defaulting if columns are missing
-                loaded_reverification_pending = bool(row[32]) if len(row) > 32 else False
-                loaded_pending_user_type = UserType(row[33]) if len(row) > 33 and row[33] else None
-                loaded_pending_email = row[34] if len(row) > 34 else None
-                loaded_pending_full_name = row[35] if len(row) > 35 else None
-                loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
-                loaded_pending_wp_token = row[37] if len(row) > 37 else None
-                # NEW: Safely get declined_recognized_email_at
-                loaded_declined_recognized_email_at = datetime.fromisoformat(row[38]) if len(row) > 38 and row[38] else None
-                ## CHANGE: Safely get timeout tracking fields
-                loaded_timeout_detected_at = datetime.fromisoformat(row[39]) if len(row) > 39 and row[39] else None
-                loaded_timeout_reason = row[40] if len(row) > 40 else None
-                # NEW: Safely get cycle tracking fields
-                loaded_current_tier_cycle_id = row[41] if len(row) > 41 else None
-                loaded_tier1_completed_in_cycle = bool(row[42]) if len(row) > 42 else False
-                loaded_tier_cycle_started_at = datetime.fromisoformat(row[43]) if len(row) > 43 and row[43] else None
-                # NEW: Safely get login tracking fields
-                loaded_login_method = row[44] if len(row) > 44 else None
-                loaded_is_degraded_login = bool(row[45]) if len(row) > 45 else False
-                loaded_degraded_login_timestamp = datetime.fromisoformat(row[46]) if len(row) > 46 and row[46] else None
+            # Reset row factory if we set it
+            if self.db_type == "file":
+                self.conn.row_factory = None
 
-                loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
+            # Safely create the UserSession object from the row data
+            loaded_display_message_offset = row[31] if len(row) > 31 else 0
+            loaded_reverification_pending = bool(row[32]) if len(row) > 32 else False
+            loaded_pending_user_type = UserType(row[33]) if len(row) > 33 and row[33] else None
+            loaded_pending_email = row[34] if len(row) > 34 else None
+            loaded_pending_full_name = row[35] if len(row) > 35 else None
+            loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
+            loaded_pending_wp_token = row[37] if len(row) > 37 else None
+            loaded_declined_recognized_email_at = datetime.fromisoformat(row[38]) if len(row) > 38 and row[38] else None
+            loaded_timeout_detected_at = datetime.fromisoformat(row[39]) if len(row) > 39 and row[39] else None
+            loaded_timeout_reason = row[40] if len(row) > 40 else None
+            loaded_current_tier_cycle_id = row[41] if len(row) > 41 else None
+            loaded_tier1_completed_in_cycle = bool(row[42]) if len(row) > 42 else False
+            loaded_tier_cycle_started_at = datetime.fromisoformat(row[43]) if row[43] else None
+            loaded_login_method = row[44] if len(row) > 44 else None
+            loaded_is_degraded_login = bool(row[45]) if len(row) > 45 else False
+            loaded_degraded_login_timestamp = datetime.fromisoformat(row[46]) if len(row) > 46 and row[46] else None
+            loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
 
-                user_session = UserSession(
-                    session_id=row[0], 
-                    user_type=UserType(row[1]) if row[1] else UserType.GUEST,
-                    email=row[2], 
-                    full_name=row[3],
-                    zoho_contact_id=row[4],
-                    created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
-                    last_activity=loaded_last_activity, # Use the safely loaded value
-                    messages=safe_json_loads(row[7], default_value=[]),
-                    active=bool(row[8]), 
-                    wp_token=row[9],
-                    timeout_saved_to_crm=bool(row[10]),
-                    fingerprint_id=row[11],
-                    fingerprint_method=row[12],
-                    visitor_type=row[13] or 'new_visitor', # This line loads the *old* value from DB
-                    daily_question_count=row[14] or 0,
-                    total_question_count=row[15] or 0,
-                    last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
-                    question_limit_reached=bool(row[17]),
-                    ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
-                    ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
-                    ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
-                    ban_reason=row[21],
-                    evasion_count=row[22] or 0,
-                    current_penalty_hours=row[23] or 0,
-                    escalation_level=row[24] or 0,
-                    email_addresses_used=safe_json_loads(row[25], default_value=[]),
-                    email_switches_count=row[26] or 0,
-                    browser_privacy_level=row[27],
-                    registration_prompted=bool(row[28]),
-                    registration_link_clicked=bool(row[29]),
-                    recognition_response=row[30],
-                    display_message_offset=loaded_display_message_offset, # Use the safely loaded value
-                    reverification_pending=loaded_reverification_pending, # NEW
-                    pending_user_type=loaded_pending_user_type, # NEW
-                    pending_email=loaded_pending_email, # NEW
-                    pending_full_name=loaded_pending_full_name, # NEW
-                    pending_zoho_contact_id=loaded_pending_zoho_contact_id, # NEW
-                    pending_wp_token=loaded_pending_wp_token, # NEW
-                    declined_recognized_email_at=loaded_declined_recognized_email_at, # NEW
-                    timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
-                    timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
-                    current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
-                    tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # NEW
-                    tier_cycle_started_at=loaded_tier_cycle_started_at, # NEW
-                    login_method=loaded_login_method, # NEW
-                    is_degraded_login=loaded_is_degraded_login, # NEW
-                    degraded_login_timestamp=loaded_degraded_login_timestamp # NEW
-                )
-                
-                logger.debug(f"Successfully loaded session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}")
-                return user_session
-                
-            except Exception as e:
-                logger.error(f"Failed to create UserSession object from row for session {session_id[:8]}: {e}", exc_info=True)
-                logger.error(f"Problematic row data (truncated): {str(row)[:200]}")
-                return None
+            user_session = UserSession(
+                session_id=row[0], 
+                user_type=UserType(row[1]) if row[1] else UserType.GUEST,
+                email=row[2], 
+                full_name=row[3],
+                zoho_contact_id=row[4],
+                created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
+                last_activity=loaded_last_activity,
+                messages=safe_json_loads(row[7], default_value=[]),
+                active=bool(row[8]), 
+                wp_token=row[9],
+                timeout_saved_to_crm=bool(row[10]),
+                fingerprint_id=row[11],
+                fingerprint_method=row[12],
+                visitor_type=row[13] or 'new_visitor',
+                daily_question_count=row[14] or 0,
+                total_question_count=row[15] or 0,
+                last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
+                question_limit_reached=bool(row[17]),
+                ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
+                ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
+                ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
+                ban_reason=row[21],
+                evasion_count=row[22] or 0,
+                current_penalty_hours=row[23] or 0,
+                escalation_level=row[24] or 0,
+                email_addresses_used=safe_json_loads(row[25], default_value=[]),
+                email_switches_count=row[26] or 0,
+                browser_privacy_level=row[27],
+                registration_prompted=bool(row[28]),
+                registration_link_clicked=bool(row[29]),
+                recognition_response=row[30],
+                display_message_offset=loaded_display_message_offset,
+                reverification_pending=loaded_reverification_pending,
+                pending_user_type=loaded_pending_user_type,
+                pending_email=loaded_pending_email,
+                pending_full_name=loaded_pending_full_name,
+                pending_zoho_contact_id=loaded_pending_zoho_contact_id,
+                pending_wp_token=loaded_pending_wp_token,
+                declined_recognized_email_at=loaded_declined_recognized_email_at,
+                timeout_detected_at=loaded_timeout_detected_at,
+                timeout_reason=loaded_timeout_reason,
+                current_tier_cycle_id=loaded_current_tier_cycle_id,
+                tier1_completed_in_cycle=loaded_tier1_completed_in_cycle,
+                tier_cycle_started_at=loaded_tier_cycle_started_at,
+                login_method=loaded_login_method,
+                is_degraded_login=loaded_is_degraded_login,
+                degraded_login_timestamp=loaded_degraded_login_timestamp
+            )
+            
+            logger.debug(f"Successfully loaded active session {session_id[:8]}: user_type={user_session.user_type.value}, messages={len(user_session.messages)}, active={user_session.active}, rev_pending={user_session.reverification_pending}, daily_q={user_session.daily_question_count}, last_q_time={user_session.last_question_time}")
+            return user_session
                 
         except Exception as e:
-            logger.error(f"Failed to load session {session_id[:8]}: {e}", exc_info=True)
+            logger.error(f"Failed to create UserSession object from row for active session {session_id[:8]}: {e}", exc_info=True)
+            logger.error(f"Problematic row data (truncated): {str(row)[:200]}")
+            return None
+                
+
+        except Exception as e:
+            logger.error(f"Failed to load active session {session_id[:8]}: {e}", exc_info=True)
             return None
 
     @handle_api_errors("Database", "Find by Fingerprint")
     def find_sessions_by_fingerprint(self, fingerprint_id: str) -> List[UserSession]:
-        """Find all sessions with the same fingerprint_id. Includes inactive sessions."""
-        logger.debug(f"🔍 SEARCHING FOR FINGERPRINT: {fingerprint_id[:8]}...")
-        self._ensure_connection_healthy() ## CHANGE: Simplified call
+        """Find all sessions with the same fingerprint_id, including inactive ones."""
+        logger.info(f"🔍 [DB_FP_SEARCH] Searching for fingerprint (including inactive): {fingerprint_id[:8]}...")
+        self._ensure_connection_healthy()
 
         if self.db_type == "memory":
             sessions = [copy.deepcopy(s) for s in self.local_sessions.values() if s.fingerprint_id == fingerprint_id]
-            # Ensure backward compatibility for in-memory sessions
-            for session in sessions:
-                if not hasattr(session, 'display_message_offset'):
-                    session.display_message_offset = 0
+            for session in sessions: # Apply backward compatibility for in-memory sessions
+                if not hasattr(session, 'display_message_offset'): session.display_message_offset = 0
                 if not hasattr(session, 'reverification_pending'):
-                    session.reverification_pending = False
-                    session.pending_user_type = None
-                    session.pending_email = None
-                    session.pending_full_name = None
-                    session.pending_zoho_contact_id = None
-                    session.pending_wp_token = None
-                if not hasattr(session, 'declined_recognized_email_at'): # NEW field
-                    session.declined_recognized_email_at = None
-                ## CHANGE: Add compatibility for new timeout tracking fields
-                if not hasattr(session, 'timeout_detected_at'):
-                    session.timeout_detected_at = None
-                if not hasattr(session, 'timeout_reason'):
-                    session.timeout_reason = None
-                # NEW: Add compatibility for new cycle tracking fields
-                if not hasattr(session, 'current_tier_cycle_id'):
-                    session.current_tier_cycle_id = None
-                if not hasattr(session, 'tier1_completed_in_cycle'):
-                    session.tier1_completed_in_cycle = False
-                if not hasattr(session, 'tier_cycle_started_at'):
-                    session.tier_cycle_started_at = None
-                # NEW: Add compatibility for new login tracking fields
-                if not hasattr(session, 'login_method'):
-                    session.login_method = None
-                if not hasattr(session, 'is_degraded_login'):
-                    session.is_degraded_login = False
-                if not hasattr(session, 'degraded_login_timestamp'):
-                    session.degraded_login_timestamp = None
-            logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
+                    session.reverification_pending = False; session.pending_user_type = None; session.pending_email = None; session.pending_full_name = None; session.pending_zoho_contact_id = None; session.pending_wp_token = None
+                if not hasattr(session, 'declined_recognized_email_at'): session.declined_recognized_email_at = None
+                if not hasattr(session, 'timeout_detected_at'): session.timeout_detected_at = None
+                if not hasattr(session, 'timeout_reason'): session.timeout_reason = None
+                if not hasattr(session, 'current_tier_cycle_id'): session.current_tier_cycle_id = None
+                if not hasattr(session, 'tier1_completed_in_cycle'): session.tier1_completed_in_cycle = False
+                if not hasattr(session, 'tier_cycle_started_at'): session.tier_cycle_started_at = None
+                if not hasattr(session, 'login_method'): session.login_method = None
+                if not hasattr(session, 'is_degraded_login'): session.is_degraded_login = False
+                if not hasattr(session, 'degraded_login_timestamp'): session.degraded_login_timestamp = None
+            logger.debug(f"📊 [DB_FP_SEARCH] FINGERPRINT SEARCH RESULTS (MEMORY): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
+            for s in sessions: # Added for explicit memory session logging
+                logger.debug(f"  - [DB_FP_SEARCH] (MEMORY) {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}, active={s.active}, rev_pending={s.reverification_pending}, last_q_time={s.last_question_time}")
             return sessions
         
         try:
-            if hasattr(self.conn, 'row_factory'):
+            if self.db_type == "file": # Only set row_factory for local sqlite
+                self.conn.row_factory = sqlite3.Row
+            else: # For sqlitecloud, use default tuple
                 self.conn.row_factory = None
 
-            ## CHANGE: Update SELECT statement to include new fields (timeout_detected_at, timeout_reason, cycle tracking, login tracking)
-            cursor = self.conn.execute("SELECT session_id, user_type, email, full_name, zoho_contact_id, created_at, last_activity, messages, active, wp_token, timeout_saved_to_crm, fingerprint_id, fingerprint_method, visitor_type, daily_question_count, total_question_count, last_question_time, question_limit_reached, ban_status, ban_start_time, ban_end_time, ban_reason, evasion_count, current_penalty_hours, escalation_level, email_addresses_used, email_switches_count, browser_privacy_level, registration_prompted, registration_link_clicked, recognition_response, display_message_offset, reverification_pending, pending_user_type, pending_email, pending_full_name, pending_zoho_contact_id, pending_wp_token, declined_recognized_email_at, timeout_detected_at, timeout_reason, current_tier_cycle_id, tier1_completed_in_cycle, tier_cycle_started_at, login_method, is_degraded_login, degraded_login_timestamp FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
+            cursor = self.conn.execute("SELECT session_id FROM sessions WHERE fingerprint_id = ? ORDER BY last_activity DESC", (fingerprint_id,))
             sessions = []
             for row in cursor.fetchall():
-                ## CHANGE: Update expected columns for new fields (now 47)
-                expected_min_cols = 47
-                if len(row) < expected_min_cols:
-                    logger.warning(f"Row has insufficient columns in find_sessions_by_fingerprint: {len(row)} (expected at least {expected_min_cols}). Skipping row.")
-                    continue
-                try:
-                    # Safely get display_message_offset, defaulting to 0 if column is missing (backward compatibility)
-                    loaded_display_message_offset = row[31] if len(row) > 31 else 0
-                    
-                    # NEW: Safely get re-verification fields, defaulting if columns are missing
-                    loaded_reverification_pending = bool(row[32]) if len(row) > 32 else False
-                    loaded_pending_user_type = UserType(row[33]) if len(row) > 33 and row[33] else None
-                    loaded_pending_email = row[34] if len(row) > 34 else None
-                    loaded_pending_full_name = row[35] if len(row) > 35 else None
-                    loaded_pending_zoho_contact_id = row[36] if len(row) > 36 else None
-                    loaded_pending_wp_token = row[37] if len(row) > 37 else None
-                    # NEW: Safely get declined_recognized_email_at
-                    loaded_declined_recognized_email_at = datetime.fromisoformat(row[38]) if len(row) > 38 and row[38] else None
-                    ## CHANGE: Safely get timeout tracking fields
-                    loaded_timeout_detected_at = datetime.fromisoformat(row[39]) if len(row) > 39 and row[39] else None
-                    loaded_timeout_reason = row[40] if len(row) > 40 else None
-                    # NEW: Safely get cycle tracking fields
-                    loaded_current_tier_cycle_id = row[41] if len(row) > 41 else None
-                    loaded_tier1_completed_in_cycle = bool(row[42]) if len(row) > 42 else False
-                    loaded_tier_cycle_started_at = datetime.fromisoformat(row[43]) if len(row) > 43 and row[43] else None
-                    # NEW: Safely get login tracking fields
-                    loaded_login_method = row[44] if len(row) > 44 else None
-                    loaded_is_degraded_login = bool(row[45]) if len(row) > 45 else False
-                    loaded_degraded_login_timestamp = datetime.fromisoformat(row[46]) if len(row) > 46 and row[46] else None
-
-                    loaded_last_activity = datetime.fromisoformat(row[6]) if row[6] else None
-
-                    s = UserSession(
-                        session_id=row[0], 
-                        user_type=UserType(row[1]) if row[1] else UserType.GUEST,
-                        email=row[2], 
-                        full_name=row[3],
-                        zoho_contact_id=row[4],
-                        created_at=datetime.fromisoformat(row[5]) if row[5] else datetime.now(),
-                        last_activity=loaded_last_activity, # Use the safely loaded value
-                        messages=safe_json_loads(row[7], default_value=[]),
-                        active=bool(row[8]), 
-                        wp_token=row[9],
-                        timeout_saved_to_crm=bool(row[10]),
-                        fingerprint_id=row[11],
-                        fingerprint_method=row[12],
-                        visitor_type=row[13] or 'new_visitor', # This line loads the *old* value from DB
-                        daily_question_count=row[14] or 0,
-                        total_question_count=row[15] or 0,
-                        last_question_time=datetime.fromisoformat(row[16]) if row[16] else None,
-                        question_limit_reached=bool(row[17]),
-                        ban_status=BanStatus(row[18]) if row[18] else BanStatus.NONE,
-                        ban_start_time=datetime.fromisoformat(row[19]) if row[19] else None,
-                        ban_end_time=datetime.fromisoformat(row[20]) if row[20] else None,
-                        ban_reason=row[21],
-                        evasion_count=row[22] or 0,
-                        current_penalty_hours=row[23] or 0,
-                        escalation_level=row[24] or 0,
-                        email_addresses_used=safe_json_loads(row[25], default_value=[]),
-                        email_switches_count=row[26] or 0,
-                        browser_privacy_level=row[27],
-                        registration_prompted=bool(row[28]),
-                        registration_link_clicked=bool(row[29]),
-                        recognition_response=row[30],
-                        display_message_offset=loaded_display_message_offset, # Use the safely loaded value
-                        reverification_pending=loaded_reverification_pending, # NEW
-                        pending_user_type=loaded_pending_user_type, # NEW
-                        pending_email=loaded_pending_email, # NEW
-                        pending_full_name=loaded_pending_full_name, # NEW
-                        pending_zoho_contact_id=loaded_pending_zoho_contact_id, # NEW
-                        pending_wp_token=loaded_pending_wp_token, # NEW
-                        declined_recognized_email_at=loaded_declined_recognized_email_at, # NEW
-                        timeout_detected_at=loaded_timeout_detected_at, ## CHANGE: NEW field
-                        timeout_reason=loaded_timeout_reason, ## CHANGE: NEW field
-                        current_tier_cycle_id=loaded_current_tier_cycle_id, # NEW
-                        tier1_completed_in_cycle=loaded_tier1_completed_in_cycle, # NEW
-                        tier_cycle_started_at=loaded_tier_cycle_started_at, # NEW
-                        login_method=loaded_login_method, # NEW
-                        is_degraded_login=loaded_is_degraded_login, # NEW
-                        degraded_login_timestamp=loaded_degraded_login_timestamp # NEW
-                    )
-                    sessions.append(s)
-                except Exception as e:
-                    logger.error(f"Error converting row to UserSession in find_sessions_by_fingerprint: {e}", exc_info=True)
-                    continue
-            logger.debug(f"📊 FINGERPRINT SEARCH RESULTS (DB): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
+                session = self._load_any_session(row[0]) # Use _load_any_session
+                if session:
+                    sessions.append(session)
+            
+            if self.db_type == "file": # Reset row factory if we set it
+                self.conn.row_factory = None
+            
+            logger.debug(f"📊 [DB_FP_SEARCH] FINGERPRINT SEARCH RESULTS (DB, incl. inactive): Found {len(sessions)} sessions for {fingerprint_id[:8]}")
             for s in sessions:
-                logger.debug(f"  - {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}, active={s.active}, rev_pending={s.reverification_pending}")
+                # IMPORTANT: Added last_q_time to this debug log for full diagnostics
+                logger.debug(f"  - [DB_FP_SEARCH] {s.session_id[:8]}: type={s.user_type.value}, email={s.email}, daily_q={s.daily_question_count}, total_q={s.total_question_count}, last_activity={s.last_activity}, active={s.active}, rev_pending={s.reverification_pending}, last_q_time={s.last_question_time}")
             return sessions
         except Exception as e:
             logger.error(f"Failed to find sessions by fingerprint '{fingerprint_id[:8]}...': {e}", exc_info=True)
             return []
-
+    
     def find_sessions_by_email(self, email: str) -> List[UserSession]:
-        """Find all sessions with the same email address."""
+        """Find all sessions with the same email address, including inactive ones."""
         if not email:
             return []
             
         email_lower = email.lower()
+        self._ensure_connection_healthy()
         
         if self.db_type == "memory":
             return [copy.deepcopy(s) for s in self.local_sessions.values() 
                     if s.email and s.email.lower() == email_lower]
         
         try:
-            if hasattr(self.conn, 'row_factory'):
+            if self.db_type == "file": # Only set row_factory for local sqlite
+                self.conn.row_factory = sqlite3.Row
+            else: # For sqlitecloud, use default tuple
                 self.conn.row_factory = None
                 
             cursor = self.conn.execute(
@@ -1053,22 +1037,23 @@ class DatabaseManager:
             
             sessions = []
             for row in cursor.fetchall():
-                session = self.load_session(row[0])
+                session = self._load_any_session(row[0]) # Use _load_any_session
                 if session:
                     sessions.append(session)
                     
+            if self.db_type == "file": # Reset row factory if we set it
+                self.conn.row_factory = None
+            
             return sessions
             
         except Exception as e:
             logger.error(f"Failed to find sessions by email '{email}': {e}")
             return []
     
-    ## CHANGE: Added cleanup for old inactive sessions
     def cleanup_old_inactive_sessions(self):
         """Remove old inactive sessions from the database."""
         try:
             if self.db_type == "memory":
-                # For in-memory, just clear older than 1 day for simplicity or a smaller threshold
                 cutoff = datetime.now() - timedelta(days=1)
                 self.local_sessions = {k: v for k, v in self.local_sessions.items() if v.created_at >= cutoff}
             else:
@@ -1093,9 +1078,8 @@ class DatabaseManager:
         def __init__(self):
             self.fingerprint_cache = {}
             self.component_attempts = defaultdict(int)
-            ## CHANGE: Memory leak fix - limit cache and attempts size
             self.MAX_CACHE_SIZE = MAX_FINGERPRINT_CACHE_SIZE
-            self.MAX_ATTEMPTS = MAX_RATE_LIMIT_TRACKING # Reusing for attempts, could be a separate constant
+            self.MAX_ATTEMPTS = MAX_RATE_LIMIT_TRACKING
 
         def render_fingerprint_component(self, session_id: str):
             """Renders fingerprinting component using external HTML component file."""
@@ -1108,7 +1092,8 @@ class DatabaseManager:
                 if not os.path.exists(html_file_path):
                     logger.error(f"❌ Fingerprint component file NOT FOUND at {html_file_path}")
                     logger.info(f"📁 Current directory contents: {os.listdir(current_dir)}")
-                    return self._generate_fallback_fingerprint()
+                    # No longer needs to return a fallback FP, handled by Python session object
+                    return
 
                 logger.debug(f"✅ Fingerprint component file found, reading content...")
 
@@ -1117,43 +1102,23 @@ class DatabaseManager:
 
                 logger.debug(f"📄 Read {len(html_content)} characters from fingerprint component file")
 
-                ## CHANGE: JavaScript Injection Fix - Use json.dumps to safely embed session_id
-                original_content = html_content
-                html_content = html_content.replace('{SESSION_ID}', session_id)
+                # Inject dynamic values into the HTML
+                html_content = html_content.replace('{SESSION_ID}', json.dumps(session_id))
+                html_content = html_content.replace('{FASTAPI_FINGERPRINT_URL}', json.dumps(FASTAPI_FINGERPRINT_URL))
+                html_content = html_content.replace('{FINGERPRINT_TIMEOUT_SECONDS}', str(FINGERPRINT_TIMEOUT_SECONDS))
 
-                if original_content == html_content:
-                    logger.warning(f"⚠️ No {{SESSION_ID}} placeholder found in HTML content!")
-                else:
-                    logger.debug(f"✅ Replaced {{SESSION_ID}} placeholder with {session_id[:8]}...")
-
-                # NEW: Wrap the component in a completely invisible container
-                # This ensures the fingerprint JavaScript runs without affecting page layout
-                hidden_wrapper = f"""
-                <div style="
-                    position: absolute;
-                    visibility: hidden;
-                    height: 0;
-                    width: 0;
-                    overflow: hidden;
-                    pointer-events: none;
-                    z-index: -9999;
-                ">
-                    {html_content}
-                </div>
-                """
-
-                # Render with zero height to ensure no visual impact
-                logger.debug(f"🔄 Rendering fingerprint component for session {session_id[:8]}...")
-                st.components.v1.html(hidden_wrapper, height=1, width=0, scrolling=False)
+                # Render with minimal height to ensure no visual impact
+                logger.debug(f"Generated fingerprint HTML (first 500 chars): {html_content[:500]}...")
+                st.components.v1.html(html_content, height=1, width=1, scrolling=False) # Changed height to 1, width to 1
 
                 logger.info(f"✅ External fingerprint component rendered for session {session_id[:8]}")
 
             except Exception as e:
                 logger.error(f"❌ Failed to render external fingerprint component: {e}", exc_info=True)
-                return self._generate_fallback_fingerprint()
+                # No return needed here, fallback FP will be generated in Python if this fails
 
         def process_fingerprint_data(self, fingerprint_data: Dict[str, Any]) -> Dict[str, Any]:
-            """Processes fingerprint data received from the custom component."""
+            """Processes fingerprint data received from the custom component (not directly used by the new FastAPI flow, kept for compatibility)."""
             if not fingerprint_data or fingerprint_data.get('error'):
                 logger.warning("Fingerprint component returned error. Using fallback.")
                 return self._generate_fallback_fingerprint()
@@ -1166,24 +1131,24 @@ class DatabaseManager:
                 logger.warning("Invalid fingerprint data received. Using fallback.")
                 return self._generate_fallback_fingerprint()
             
+            # visitor_type determination should happen during inheritance in SessionManager
+            # For now, it's just a placeholder here if this method is invoked by old logic
             visitor_type = "returning_visitor" if fingerprint_id in self.fingerprint_cache else "new_visitor"
             self.fingerprint_cache[fingerprint_id] = {'last_seen': datetime.now()}
             
-            ## CHANGE: Memory leak fix - cleanup cache if too large
             if len(self.fingerprint_cache) > self.MAX_CACHE_SIZE:
                 sorted_items = sorted(self.fingerprint_cache.items(), 
                                     key=lambda x: x[1].get('last_seen', datetime.min), 
-                                    reverse=True)[:self.MAX_CACHE_SIZE // 2] # Keep half the size
+                                    reverse=True)[:self.MAX_CACHE_SIZE // 2]
                 self.fingerprint_cache = dict(sorted_items)
 
-            ## CHANGE: Memory leak fix - cleanup component_attempts if too large
             if len(self.component_attempts) > self.MAX_ATTEMPTS:
                 self.component_attempts.clear()
             
             return {
                 'fingerprint_id': fingerprint_id,
                 'fingerprint_method': fingerprint_method,
-                'visitor_type': visitor_type, # <-- This is where process_fingerprint_data sets visitor_type
+                'visitor_type': visitor_type,
                 'browser_privacy_level': privacy_level,
                 'working_methods': fingerprint_data.get('working_methods', [])
             }
@@ -1240,10 +1205,8 @@ class DatabaseManager:
                     
             except Exception as e:
                 error_str = str(e).lower()
-                # Special handling for timeout errors
                 if "timeout" in error_str or "timed out" in error_str:
                     logger.warning(f"Supabase OTP request timed out for {email}, but email may have been sent: {e}")
-                    # Return True since OTP is likely sent despite timeout
                     st.warning("Verification code is being sent. If you don't receive it within 1 minute, please try again.")
                     return True
                 else:
@@ -1281,13 +1244,11 @@ class DatabaseManager:
         """Enhanced question limit manager with tier system and evasion detection."""
         
         def __init__(self):
-            ## CHANGE: Use constants for question limits
             self.question_limits = {
                 UserType.GUEST.value: GUEST_QUESTION_LIMIT,
                 UserType.EMAIL_VERIFIED_GUEST.value: EMAIL_VERIFIED_QUESTION_LIMIT,
                 UserType.REGISTERED_USER.value: REGISTERED_USER_QUESTION_LIMIT
             }
-            ## CHANGE: Use constants for evasion penalties (in hours)
             self.evasion_penalties = EVASION_BAN_HOURS 
 
         def detect_guest_email_evasion(self, session: UserSession, db_manager) -> bool:
@@ -1311,25 +1272,21 @@ class DatabaseManager:
                         'reason': 'banned',
                         'ban_type': session.ban_status.value,
                         'time_remaining': time_remaining,
-                        'message': self._get_ban_message(session, session.ban_status.value) # Pass ban_status as reason for message
+                        'message': self._get_ban_message(session, session.ban_status.value)
                     }
                 else:
                     logger.info(f"Ban for session {session.session_id[:8]} expired. Resetting status and counters.")
                     
-                    # Store the previous ban type before clearing
                     previous_ban_type = session.ban_status
                     
-                    # Clear ban status
                     session.ban_status = BanStatus.NONE
                     session.ban_start_time = None
                     session.ban_end_time = None
                     session.ban_reason = None
                     session.question_limit_reached = False
                     
-                    # Handle post-ban transitions based on ban type
                     if session.user_type == UserType.REGISTERED_USER:
                         if previous_ban_type == BanStatus.TWENTY_FOUR_HOUR:
-                            # Coming back from Tier 2 (24-hour ban) - full reset to new cycle
                             logger.info(f"🔄 Tier 2 ban expired for {session.session_id[:8]} - starting new tier cycle")
                             session.daily_question_count = 0
                             session.last_question_time = None
@@ -1337,40 +1294,31 @@ class DatabaseManager:
                             session.tier1_completed_in_cycle = False
                             session.tier_cycle_started_at = datetime.now()
                         elif previous_ban_type == BanStatus.ONE_HOUR:
-                            # Coming back from Tier 1 (1-hour ban) - proceed to Tier 2
                             logger.info(f"✅ Tier 1 ban expired for {session.session_id[:8]} - can now proceed to Tier 2")
-                            # Keep the same cycle ID and tier1_completed_in_cycle=True
-                            # Don't reset counts - they should continue from 10
                     else:
-                        # For non-registered users, just reset daily count
                         session.daily_question_count = 0
                         session.last_question_time = None
             
-            # Check for daily reset window (only if not just cleared from ban expiry)
             if session.last_question_time:
                 time_since_last = datetime.now() - session.last_question_time
                 if time_since_last >= DAILY_RESET_WINDOW:
                     logger.info(f"Daily question count reset for session {session.session_id[:8]} due to {DAILY_RESET_WINDOW_HOURS}-hour window expiration.")
                     session.daily_question_count = 0
                     session.question_limit_reached = False
-                    # Also reset cycle for registered users
                     if session.user_type == UserType.REGISTERED_USER:
                         session.current_tier_cycle_id = str(uuid.uuid4())
                         session.tier1_completed_in_cycle = False
                         session.tier_cycle_started_at = datetime.now()
             
-            # ENHANCED: Tier-based logic for registered users
             if session.user_type.value == UserType.REGISTERED_USER.value:
-                if session.daily_question_count >= user_limit: # For registered, user_limit is 20
+                if session.daily_question_count >= user_limit:
                     reason_str = 'registered_user_tier2_limit'
                     return {
                         'allowed': False,
-                        'reason': reason_str, # New specific reason
+                        'reason': reason_str,
                         'message': self._get_ban_message(session, reason_str)
                     }
-                ## CHANGE: Use REGISTERED_USER_TIER_1_LIMIT for tier logic
                 elif session.daily_question_count >= REGISTERED_USER_TIER_1_LIMIT:
-                    ## CHANGE: Use BanStatus.ONE_HOUR for Tier 1 ban
                     if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
                         time_remaining = session.ban_end_time - datetime.now()
                         return {
@@ -1380,16 +1328,14 @@ class DatabaseManager:
                             'time_remaining': time_remaining,
                             'message': self._get_ban_message(session, 'registered_user_tier1_limit')
                         }
-                    ## CHANGE: Use REGISTERED_USER_TIER_1_LIMIT for exact check
                     elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
-                        # At Q10, if ban is not active, allow them to ask it, which will trigger the ban in record_question
                         return {
                             'allowed': True,
                             'tier': 1,
                             'remaining': 0,
                             'warning': f"Next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2."
                         }
-                    else: # Questions 11-19 (already past Tier 1 limit, in Tier 2 progression)
+                    else:
                         remaining = user_limit - session.daily_question_count
                         return {
                             'allowed': True,
@@ -1397,7 +1343,7 @@ class DatabaseManager:
                             'remaining': remaining,
                             'warning': f"Tier 2: {remaining} questions until {TIER_2_BAN_HOURS}-hour limit."
                         }
-                else: # Tier 1: Questions 1-9
+                else:
                     remaining = REGISTERED_USER_TIER_1_LIMIT - session.daily_question_count
                     return {
                         'allowed': True,
@@ -1405,9 +1351,8 @@ class DatabaseManager:
                         'remaining': remaining
                     }
             
-            # Original logic for other user types
             if session.user_type.value == UserType.GUEST.value:
-                if session.daily_question_count >= user_limit: # user_limit is 4 for GUEST
+                if session.daily_question_count >= user_limit:
                     reason_str = 'guest_limit'
                     return {
                         'allowed': False,
@@ -1416,21 +1361,19 @@ class DatabaseManager:
                     }
             
             elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
-                if session.daily_question_count >= user_limit: # user_limit is 10 for EMAIL_VERIFIED_GUEST
+                if session.daily_question_count >= user_limit:
                     reason_str = 'email_verified_guest_limit'
                     return {
                         'allowed': False,
-                        'reason': reason_str, # New specific reason
+                        'reason': reason_str,
                         'message': self._get_ban_message(session, reason_str)
                     }
             
             return {'allowed': True}
         
-        ## START <<<<<<<<<<<<<<<< REPLACEMENT 1 OF 3
         def record_question_and_check_ban(self, session: UserSession, session_manager: 'SessionManager') -> Dict[str, Any]:
             """Atomically check for ban trigger BEFORE recording question with proper tier cycle tracking."""
             try:
-                # NEW: For registered users, check if ANY session with same email already has an active ban
                 if session.user_type == UserType.REGISTERED_USER and session.email:
                     email_sessions = session_manager.db.find_sessions_by_email(session.email)
                     now = datetime.now()
@@ -1439,14 +1382,12 @@ class DatabaseManager:
                         if (email_session.ban_status != BanStatus.NONE and 
                             email_session.ban_end_time and 
                             email_session.ban_end_time > now):
-                            # Active ban found - inherit it instead of creating a new one
                             session.ban_status = email_session.ban_status
                             session.ban_start_time = email_session.ban_start_time
                             session.ban_end_time = email_session.ban_end_time
                             session.ban_reason = email_session.ban_reason
                             session.question_limit_reached = True
                             
-                            # Also inherit cycle information (CRITICAL for multi-session sync)
                             session.current_tier_cycle_id = email_session.current_tier_cycle_id
                             session.tier1_completed_in_cycle = email_session.tier1_completed_in_cycle
                             session.tier_cycle_started_at = email_session.tier_cycle_started_at
@@ -1456,7 +1397,6 @@ class DatabaseManager:
                             logger.info(f"✅ Found existing ban for email {session.email}, inherited instead of creating new: {session.ban_status.value} until {session.ban_end_time}")
                             return {"recorded": False, "ban_applied": False, "existing_ban_inherited": True, "ban_type": session.ban_status.value}
                 
-                # Initialize tier cycle if needed (for registered users)
                 if session.user_type == UserType.REGISTERED_USER:
                     if not session.current_tier_cycle_id:
                         session.current_tier_cycle_id = str(uuid.uuid4())
@@ -1464,53 +1404,43 @@ class DatabaseManager:
                         session.tier_cycle_started_at = datetime.now()
                         logger.info(f"🔄 New tier cycle started for {session.session_id[:8]}: {session.current_tier_cycle_id[:8]}")
                 
-                # CHECK FOR BAN TRIGGER FIRST (before incrementing)
                 ban_applied = False
                 ban_type = BanStatus.NONE
                 ban_reason = ""
                 ban_duration_hours = 0
                 
                 if session.user_type == UserType.REGISTERED_USER:
-                    # Tier 1 ban check (at question 10)
-                    if session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:  # Currently at 10
+                    if session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
                         if not session.tier1_completed_in_cycle:
-                            # First time hitting Tier 1 limit in this cycle - apply ban
                             ban_type = BanStatus.ONE_HOUR
                             ban_reason = f"Registered user Tier 1 limit reached ({REGISTERED_USER_TIER_1_LIMIT} questions)"
                             ban_duration_hours = TIER_1_BAN_HOURS
                             ban_applied = True
-                            session.tier1_completed_in_cycle = True # Mark that Tier 1 ban has been applied for this cycle
+                            session.tier1_completed_in_cycle = True
                             logger.info(f"🚫 Tier 1 ban triggered for {session.session_id[:8]} in cycle {session.current_tier_cycle_id[:8]}")
                         else:
-                            # Already completed Tier 1 in this cycle (meaning 1-hour ban was served)
-                            # Allow progression to Tier 2 without re-banning
                             logger.debug(f"Session {session.session_id[:8]} at question 10, but Tier 1 ban already served in cycle {session.current_tier_cycle_id[:8]}. Proceeding to Tier 2.")
                             
-                    # Tier 2 ban check (at question 20)
-                    elif session.daily_question_count == REGISTERED_USER_QUESTION_LIMIT:  # Currently at 20
+                    elif session.daily_question_count == REGISTERED_USER_QUESTION_LIMIT:
                         ban_type = BanStatus.TWENTY_FOUR_HOUR
                         ban_reason = f"Registered user daily limit reached ({REGISTERED_USER_QUESTION_LIMIT} questions)"
                         ban_duration_hours = TIER_2_BAN_HOURS
                         ban_applied = True
-                        # Don't reset cycle here - let it happen when the 24-hour ban expires
                         logger.info(f"🚫 Tier 2 ban triggered for {session.session_id[:8]} in cycle {session.current_tier_cycle_id[:8]}")
                         
                 elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
-                    if session.daily_question_count == EMAIL_VERIFIED_QUESTION_LIMIT:  # Currently at 10
+                    if session.daily_question_count == EMAIL_VERIFIED_QUESTION_LIMIT:
                         ban_type = BanStatus.TWENTY_FOUR_HOUR
                         ban_reason = f"Email-verified daily limit reached ({EMAIL_VERIFIED_QUESTION_LIMIT} questions)"
                         ban_duration_hours = EMAIL_VERIFIED_BAN_HOURS
                         ban_applied = True
                 
-                # If ban should be applied, apply it WITHOUT incrementing the count
                 if ban_applied:
                     self._apply_ban(session, ban_type, ban_reason)
                     logger.info(f"✅ Ban applied WITHOUT counting question: {session.session_id[:8]} -> {ban_type.value} for {ban_duration_hours}h")
                     
-                    # Save session with ban but WITHOUT incrementing question count
                     session_manager._save_session_with_retry(session)
                     
-                    # NEW: Also update all other sessions with same email for registered users AND EMAIL_VERIFIED_GUEST
                     if session.user_type == UserType.REGISTERED_USER and session.email:
                         session_manager.sync_ban_for_registered_user(session.email, session)
                     elif session.user_type == UserType.EMAIL_VERIFIED_GUEST and session.email:
@@ -1518,12 +1448,10 @@ class DatabaseManager:
                     
                     return {"recorded": False, "ban_applied": True, "ban_type": ban_type.value}
                 
-                # No ban needed, NOW record the question
                 session.daily_question_count += 1
                 session.total_question_count += 1
                 session.last_question_time = datetime.now()
                 
-                # Sync counts for registered users AND email-verified guests
                 if (session.user_type == UserType.REGISTERED_USER or 
                     session.user_type == UserType.EMAIL_VERIFIED_GUEST) and session.email:
                     if session.user_type == UserType.REGISTERED_USER:
@@ -1531,7 +1459,6 @@ class DatabaseManager:
                     else:
                         session_manager.sync_email_verified_sessions(session.email, session.session_id)
                 
-                # Save session with updated counts
                 session_manager._save_session_with_retry(session)
                 
                 logger.debug(f"Question recorded for {session.session_id[:8]}: daily={session.daily_question_count}, total={session.total_question_count}")
@@ -1541,16 +1468,12 @@ class DatabaseManager:
             except Exception as e:
                 logger.error(f"Failed to check ban and record question for {session.session_id[:8]}: {e}", exc_info=True)
                 raise
-        ## END <<<<<<<<<<<<<<<< REPLACEMENT 1 OF 3
         
-        ## CHANGE: Removed original record_question method
-
         def _apply_ban(self, session: UserSession, ban_type: BanStatus, reason: str, start_time: Optional[datetime] = None):
             """Applies a ban to the session for a specified duration with immediate database persistence."""
-            ## CHANGE: Use constants for ban durations
             ban_hours = {
                 BanStatus.ONE_HOUR.value: TIER_1_BAN_HOURS,
-                BanStatus.TWENTY_FOUR_HOUR.value: TIER_2_BAN_HOURS,  # Used for both Tier 2 and email verified
+                BanStatus.TWENTY_FOUR_HOUR.value: TIER_2_BAN_HOURS,
                 BanStatus.EVASION_BLOCK.value: session.current_penalty_hours
             }.get(ban_type.value, TIER_1_BAN_HOURS)
 
@@ -1560,9 +1483,7 @@ class DatabaseManager:
             session.ban_reason = reason
             session.question_limit_reached = True
         
-            # CRITICAL: Save to database immediately
             try:
-                # Access the session manager's db attribute for saving
                 st.session_state.session_manager.db.save_session(session)
                 logger.info(f"✅ Ban applied and saved to DB: {session.session_id[:8]} -> {ban_type.value} for {ban_hours}h")
             except Exception as e:
@@ -1577,22 +1498,19 @@ class DatabaseManager:
             """
             if session.ban_status.value == BanStatus.EVASION_BLOCK.value:
                 return "Access restricted due to policy violation. Please try again later."
-            ## CHANGE: Use constants for tier limit messages
             elif ban_reason_from_limit_check == 'registered_user_tier1_limit' or session.ban_status.value == BanStatus.ONE_HOUR.value:
                 return f"You've reached the Tier 1 limit ({REGISTERED_USER_TIER_1_LIMIT} questions). Please wait {TIER_1_BAN_HOURS} hour{'s' if TIER_1_BAN_HOURS > 1 else ''} to access Tier 2."
             elif ban_reason_from_limit_check == 'registered_user_tier2_limit' or (session.user_type.value == UserType.REGISTERED_USER.value and session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value):
                 return f"Daily limit of {REGISTERED_USER_QUESTION_LIMIT} questions reached. Please retry in {TIER_2_BAN_HOURS} hours."
             elif ban_reason_from_limit_check == 'email_verified_guest_limit' or (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value and session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value):
                 return self._get_email_verified_limit_message()
-            # Generic catch-all for other 24-hour bans (if any apply to non-registered)
             elif session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value:
                 return f"Daily limit reached. Please retry in {TIER_2_BAN_HOURS} hours."
-            else: # Fallback, should not be hit if all cases are covered
+            else:
                 return "Access restricted due to usage policy."
         
         def _get_email_verified_limit_message(self) -> str:
             """Specific message for email-verified guests hitting their daily limit."""
-            ## CHANGE: Use constants for email verified limit message
             return (f"You've reached your daily limit of {EMAIL_VERIFIED_QUESTION_LIMIT} questions. "
                     f"Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hour{'s' if EMAIL_VERIFIED_BAN_HOURS > 1 else ''}. "
                     f"To increase the limit, please Register: https://www.12taste.com/in/my-account/ and come back here to the Welcome page to Sign In.")
@@ -1606,39 +1524,35 @@ class PDFExporter:
     def __init__(self):
         self.styles = getSampleStyleSheet()
         
-        # Modify the existing 'Normal' style from the sample stylesheet
         self.styles['Normal'].fontName = 'Helvetica'
         self.styles['Normal'].fontSize = 10
-        self.styles['Normal'].leading = 14  # Increased line spacing (1.4 * font size)
-        self.styles['Normal'].spaceAfter = 6 # Space after each paragraph
+        self.styles['Normal'].leading = 14
+        self.styles['Normal'].spaceAfter = 6
         
-        # Header style (can still be added, as it's a new name)
         self.styles.add(ParagraphStyle(
             name='ChatHeader',
-            parent=self.styles['Normal'], # Inherit from the modified 'Normal'
+            parent=self.styles['Normal'],
             alignment=TA_CENTER,
             fontSize=18,
             leading=22,
             spaceAfter=12
         ))
         
-        # User message style with light grey background
         self.styles.add(ParagraphStyle(
             name='UserMessage',
-            parent=self.styles['Normal'], # Inherit from the modified 'Normal'
+            parent=self.styles['Normal'],
             backColor=lightgrey,
             leftIndent=5,
             rightIndent=5,
             borderPadding=3,
             borderRadius=3,
-            spaceBefore=8, # Add space before user message block
+            spaceBefore=8,
             spaceAfter=8
         ))
         
-        # Small caption style for sources
         self.styles.add(ParagraphStyle(
             name='Caption',
-            parent=self.styles['Normal'], # Inherit from the modified 'Normal'
+            parent=self.styles['Normal'],
             fontSize=8,
             leading=10,
             textColor=grey,
@@ -1654,9 +1568,8 @@ class PDFExporter:
         
         story = []
         story.append(Paragraph("FiFi AI Chat Transcript", self.styles['ChatHeader']))
-        story.append(Spacer(1, 12)) # Additional space after header
+        story.append(Spacer(1, 12))
 
-        ## CHANGE: PDF Memory Bomb fix - Limit messages to prevent memory issues
         messages_to_include = session.messages[-MAX_PDF_MESSAGES:]
         
         if len(session.messages) > MAX_PDF_MESSAGES:
@@ -1665,14 +1578,11 @@ class PDFExporter:
 
         for msg in messages_to_include:
             role = str(msg.get('role', 'unknown')).capitalize()
-            # Clean content from HTML/Markdown before putting into PDF Paragraph
             content = str(msg.get('content', ''))
-            # Remove any HTML tags that might be in the content
-            content = re.sub(r'<[^>]+>', '', content) 
-            # Replace Markdown bold/italics with ReportLab's equivalents or just remove
-            content = content.replace('**', '<b>').replace('__', '<b>') # Simple bold conversion
-            content = content.replace('*', '<i>').replace('_', '<i>') # Simple italic conversion
-            content = html.escape(content) # HTML escape what's left
+            content = re.sub(r'<[^>]+>', '', content)
+            content = content.replace('**', '<b>').replace('__', '<b>')
+            content = content.replace('*', '<i>').replace('_', '<i>')
+            content = html.escape(content)
 
             
             style = self.styles['UserMessage'] if role == 'User' else self.styles['Normal']
@@ -1682,8 +1592,7 @@ class PDFExporter:
             if msg.get("source"):
                 story.append(Paragraph(f"<i>Source: {msg['source']}</i>", self.styles['Caption']))
             
-            # Add a bit more space between messages if not handled by spaceAfter
-            if style.spaceAfter is None: # Only add if the style doesn't already define spaceAfter
+            if style.spaceAfter is None:
                 story.append(Spacer(1, 10)) 
                 
         doc.build(story)
@@ -1869,7 +1778,7 @@ class ZohoCRMManager:
                 "Parent_Id": contact_id,
                 "Note_Title": note_title,
                 "Note_Content": note_content,
-                "se_module": "Contacts"  # ADDED: Explicitly set the parent module
+                "se_module": "Contacts"
             }]
         }
         
@@ -1884,7 +1793,7 @@ class ZohoCRMManager:
                     if not access_token:
                         return False
                     headers['Authorization'] = f'Zoho-oauthtoken {access_token}'
-                    continue # Retry with new token
+                    continue
                 
                 response.raise_for_status()
                 data = response.json()
@@ -1894,7 +1803,7 @@ class ZohoCRMManager:
                     return True
                 else:
                     logger.error("Failed to add note to Zoho contact.")
-                    if attempt < (2 - 1): # Fixed to use explicit value, not a local variable
+                    if attempt < (2 - 1):
                         time.sleep(2 ** attempt)
                     else:
                         logger.error("Max retries for note addition reached. Aborting save.")
@@ -1908,17 +1817,16 @@ class ZohoCRMManager:
                     logger.error("Max retries for note addition reached. Aborting save.")
                     return False
         
-        return False # Should only be reached if all note retries fail.
+        return False
 
     def save_chat_transcript_sync(self, session: UserSession, trigger_reason: str) -> bool:
         """Synchronously saves the chat transcript to Zoho CRM."""
         logger.info("=" * 80)
         logger.info(f"ZOHO SAVE START - Trigger: {trigger_reason}")
         
-        ## CHANGE: Use CRM_SAVE_MIN_QUESTIONS for eligibility
         if (session.user_type.value not in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] or 
             not session.email or 
-            len(session.messages) < CRM_SAVE_MIN_QUESTIONS or ## CHANGE: Use constant for minimum messages
+            len(session.messages) < CRM_SAVE_MIN_QUESTIONS or
             not self.config.ZOHO_ENABLED):
             logger.info(f"ZOHO SAVE SKIPPED: Not eligible. (UserType: {session.user_type.value}, Email: {bool(session.email)}, Messages: {len(session.messages)}, Zoho Enabled: {self.config.ZOHO_ENABLED})")
             return False
@@ -1966,13 +1874,13 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries_note - 1:
-                    time.sleep(2 ** attempt_note)
+                if attempt_note < max_retries - 1:
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
                     return False
         
-        return False # Should only be reached if all note retries fail.
+        return False
 
     def _generate_note_content(self, session: UserSession, attachment_uploaded: bool, trigger_reason: str) -> str:
         """Generates the text content for the Zoho CRM note."""
@@ -2009,19 +1917,527 @@ class ZohoCRMManager:
                 
         return note_content
 
+
+class WooCommerceManager:
+    """Manages WooCommerce integration for order retrieval."""
+    
+    def __init__(self, config: Config):
+        self.config = config
+        self.base_url = f"{config.WOOCOMMERCE_URL}/wp-json/wc/v3"
+        self.auth = None
+        
+        # --- NEW: Status Caching for LLM Intent Detection ---
+        self.available_wc_statuses_cache: Optional[List[Dict[str, str]]] = None
+        self.last_wc_statuses_fetch: Optional[datetime] = None
+        self.wc_statuses_cache_ttl: timedelta = timedelta(hours=1)
+        # --- END NEW ---
+        
+        if self.config.WOOCOMMERCE_ENABLED:
+            from requests.auth import HTTPBasicAuth
+            self.auth = HTTPBasicAuth(
+                self.config.WOOCOMMERCE_CONSUMER_KEY,
+                self.config.WOOCOMMERCE_CONSUMER_SECRET
+            )
+            logger.info("✅ WooCommerce manager initialized")
+        else:
+            logger.warning("⚠️ WooCommerce not enabled - missing configuration")
+    
+    # --- NEW METHOD: _fetch_available_order_statuses ---
+    @handle_api_errors("12Taste Order Status", "Fetch Order Statuses", show_to_user=False)
+    async def _fetch_available_order_statuses(self) -> Optional[List[Dict[str, str]]]:
+        """Fetches and caches all available WooCommerce order statuses (slug and name)."""
+        if not self.config.WOOCOMMERCE_ENABLED:
+            return None
+        
+        # Check cache
+        now = datetime.now()
+        if self.available_wc_statuses_cache and self.last_wc_statuses_fetch and \
+           (now - self.last_wc_statuses_fetch < self.wc_statuses_cache_ttl):
+            return self.available_wc_statuses_cache
+
+        try:
+            response = await asyncio.to_thread(
+                requests.get,
+                f"{self.base_url}/orders/statuses",
+                auth=self.auth,
+                timeout=10,
+                headers={
+                    'User-Agent': 'FiFi-AI-Assistant/1.0',
+                    'Accept': 'application/json'
+                }
+            )
+            response.raise_for_status()
+            statuses = response.json()
+            
+            # Cache the result
+            self.available_wc_statuses_cache = statuses
+            self.last_wc_statuses_fetch = now
+            
+            logger.info(f"Successfully fetched {len(statuses)} WooCommerce order statuses.")
+            return statuses
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching WooCommerce order statuses: {e}")
+            return None
+    
+    # --- NEW METHOD: _get_display_names_for_slugs ---
+    async def _get_display_names_for_slugs(self, slugs: List[str]) -> List[str]:
+        """Retrieves human-readable display names for a list of status slugs."""
+        available_statuses = await self._fetch_available_order_statuses()
+        if not available_statuses:
+            return [s.replace('-', ' ').title() for s in slugs] # Fallback to title-casing slugs
+
+        slug_to_name_map = {s.get('id'): s.get('name') for s in available_statuses if s.get('id') and s.get('name')}
+        display_names = [slug_to_name_map.get(slug, slug.replace('-', ' ').title()) for slug in slugs]
+        return display_names
+    
+    # --- NEW METHOD: detect_order_query_intent_llm ---
+    async def detect_order_query_intent_llm(self, prompt: str, openai_client: Any) -> Dict[str, Any]:
+        """
+        Uses an LLM to differentiate between single order, multiple orders (specific status),
+        multiple orders (open), or multiple orders (all), or clarification needed, and extracts relevant details.
+        """
+        # Fallback if LLM client is not available (shouldn't happen if AI is initialized, but for safety)
+        if not openai_client:
+            logger.warning("OpenAI client not available for LLM order intent detection. Returning 'none' intent.")
+            return {
+                "order_query_type": "none",
+                "order_id": None,
+                "requested_statuses": None,
+                "confidence": 0.0,
+                "reason": "LLM client unavailable"
+            }
+
+        available_statuses_data = await self._fetch_available_order_statuses()
+        status_list_for_llm_prompt = ""
+        if available_statuses_data:
+            status_list_for_llm_prompt += "Available WooCommerce Order Statuses (slug: Display Name):\n"
+            for status_obj in available_statuses_data:
+                status_slug = status_obj.get('id')
+                status_name = status_obj.get('name')
+                if status_slug and status_name:
+                    status_list_for_llm_prompt += f"- {status_slug}: {status_name}\n"
+        else:
+            status_list_for_llm_prompt = "Could not retrieve dynamic WooCommerce statuses. Use standard ones: pending, on-hold, processing, completed, cancelled, refunded, failed.\n"
+
+        llm_prompt = f"""You are an intelligent assistant for a WooCommerce store. Your task is to analyze a user's query and determine their intent regarding order status.
+
+{status_list_for_llm_prompt}
+
+Consider "open orders" to mean orders with status slugs: ['pending', 'on-hold', 'processing'].
+
+**User Query:** "{prompt}"
+
+**Instructions:**
+1.  Determine the `order_query_type`:
+    *   `"single_order"`: If the user explicitly asks about a specific order ID/number (e.g., "order 123").
+    *   `"multiple_orders_specific_status"`: If the user asks about multiple orders filtered by one or more specific statuses from the available list (e.g., "my completed orders").
+    *   `"multiple_orders_open"`: If the user asks about generally "open" or "active" orders.
+    *   `"multiple_orders_all"`: If the user asks to list all their orders without specifying a status filter (e.g., "list all my orders").
+    *   `"multiple_orders_clarification"`: If the user's query is generally about their orders, but is too vague to determine if they want a single order, all orders, open orders, or specific statuses (e.g., "Provide my order status?").
+    *   `"none"`: If the query is not related to order status.
+2.  If `order_query_type` is `"single_order"`, extract the exact `order_id` (can be alphanumeric, e.g., "123", "ABC-456").
+3.  If `order_query_type` is `"multiple_orders_specific_status"`, list *all* matching `requested_statuses` slugs from the available list.
+4.  Provide a `confidence` score (0.0-1.0) for your interpretation.
+
+Respond ONLY with a JSON object in the following format:
+```json
+{{
+    "order_query_type": "single_order" | "multiple_orders_specific_status" | "multiple_orders_open" | "multiple_orders_all" | "multiple_orders_clarification" | "none",
+    "order_id": "string" | null,
+    "requested_statuses": ["slug1", "slug2"] | null,
+    "confidence": 0.0-1.0
+}}
+"""
+        try:
+            response = await asyncio.to_thread(openai_client.chat.completions.create,
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a WooCommerce order intent parser. Respond only with a JSON object."},
+                    {"role": "user", "content": llm_prompt}
+                ],
+                max_tokens=200,
+                temperature=0.0
+            )
+            response_content = response.choices.message.content.strip()
+            response_content = response_content.replace('json', '').replace('```', '').strip()
+            
+            intent_data = json.loads(response_content)
+            
+            # Basic validation of the LLM output structure
+            valid_types = {"single_order", "multiple_orders_specific_status", "multiple_orders_open", "multiple_orders_all", "multiple_orders_clarification", "none"}
+            if not all(k in intent_data for k in ["order_query_type", "confidence"]) or intent_data["order_query_type"] not in valid_types:
+                logger.error(f"LLM returned invalid order intent JSON: {response_content}. Falling back to 'none' intent.")
+                return {
+                    "order_query_type": "none",
+                    "order_id": None,
+                    "requested_statuses": None,
+                    "confidence": 0.0,
+                    "reason": "LLM output invalid"
+                }
+
+            logger.info(f"LLM order intent for '{prompt}': {intent_data}")
+            return intent_data
+
+        except Exception as e:
+            logger.error(f"LLM order intent detection failed: {e}. Falling back to 'none' intent.", exc_info=True)
+            return {
+                "order_query_type": "none",
+                "order_id": None,
+                "requested_statuses": None,
+                "confidence": 0.0,
+                "reason": f"LLM API error: {e}"
+            }
+
+    @handle_api_errors("12Taste Order Status", "Get Order", show_to_user=True)
+    async def get_order(self, order_id: str, customer_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Retrieve a single order by ID from WooCommerce, optionally filtered by customer_id."""
+        if not self.config.WOOCOMMERCE_ENABLED:
+            return None
+        
+        try:
+            clean_order_id = str(order_id).replace('#', '').strip()
+            params = {}
+            if customer_id:
+                params['customer'] = customer_id
+
+            response = await asyncio.to_thread(
+                requests.get,
+                f"{self.base_url}/orders/{clean_order_id}",
+                auth=self.auth,
+                params=params,
+                timeout=10,
+                headers={
+                    'User-Agent': 'FiFi-AI-Assistant/1.0',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            if response.status_code == 404:
+                logger.info(f"Order {clean_order_id} not found")
+                return {"error": "not_found", "message": f"Order #{clean_order_id} not found."}
+            
+            response.raise_for_status()
+            order_data = response.json()
+
+            if customer_id and order_data.get('customer_id') != customer_id:
+                logger.warning(f"Order {clean_order_id} found but does not belong to customer {customer_id}.")
+                return {"error": "mismatch", "message": f"Order #{clean_order_id} does not belong to your account or was not found."}
+            
+            logger.info(f"Successfully retrieved order #{clean_order_id}")
+            return order_data
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"12Taste Order Status API error: {e}")
+            return {"error": "api_error", "message": str(e)}
+
+    # --- MODIFIED: list_orders to handle status=None or empty list for ALL orders ---
+    @handle_api_errors("12Taste Order Status", "List Orders", show_to_user=True)
+    async def list_orders(self, customer_id: Optional[int] = None, status: Optional[List[str]] = None, 
+                         per_page: int = 20, page: int = 1) -> Optional[List[Dict[str, Any]]]:
+        """List orders with optional filters for customer and status."""
+        if not self.config.WOOCOMMERCE_ENABLED:
+            return None
+        
+        try:
+            params = {
+                'per_page': per_page,
+                'page': page
+            }
+            
+            if customer_id:
+                params['customer'] = customer_id
+                
+            # --- MODIFICATION START ---
+            # If status is None or empty list, the 'status' parameter is omitted,
+            # which by default returns all orders for the customer.
+            if status is not None and len(status) > 0:
+                # WooCommerce accepts comma-separated statuses
+                params['status'] = ','.join(status)
+            # --- MODIFICATION END ---
+            
+            response = await asyncio.to_thread(
+                requests.get,
+                f"{self.base_url}/orders",
+                auth=self.auth,
+                params=params,
+                timeout=10,
+                headers={
+                    'User-Agent': 'FiFi-AI-Assistant/1.0',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            if response.status_code == 404:
+                logger.info("No orders found")
+                return []
+            
+            response.raise_for_status()
+            orders = response.json()
+            
+            logger.info(f"Successfully retrieved {len(orders)} orders")
+            return orders
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"12Taste Order Status API error listing orders: {e}")
+            return None
+    # --- END MODIFIED list_orders ---
+    
+    @handle_api_errors("12Taste Order Status", "Get Customer by Email", show_to_user=False)
+    async def get_customer_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a customer by email from WooCommerce."""
+        if not self.config.WOOCOMMERCE_ENABLED:
+            return None
+        if not email:
+            return None
+        
+        try:
+            response = await asyncio.to_thread(
+                requests.get,
+                f"{self.base_url}/customers",
+                auth=self.auth,
+                params={'email': email},
+                timeout=10,
+                headers={
+                    'User-Agent': 'FiFi-AI-Assistant/1.0',
+                    'Accept': 'application/json'
+                }
+            )
+            response.raise_for_status()
+            customers = response.json()
+            if customers:
+                logger.info(f"Found customer for email {email}: ID {customers[0]['id']}")
+                return customers[0]
+            logger.info(f"No customer found for email {email}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"12Taste Order Status API error retrieving customer for {email}: {e}")
+            return None
+    
+    def format_order_for_display(self, order: Dict[str, Any]) -> str:
+        """Format order data into a user-friendly markdown string."""
+        if "error" in order:
+            if order["error"] == "not_found":
+                return f"❌ {order['message']}"
+            else:
+                return f"⚠️ Error retrieving order: {order['message']}"
+        
+        order_id = order.get('id', 'N/A')
+        order_number = order.get('number', order_id)
+        status = order.get('status', 'unknown')
+        date_created = order.get('date_created', '')
+        total = order.get('total', '0')
+        currency = order.get('currency', 'USD')
+        
+        billing = order.get('billing', {})
+        customer_name = f"{billing.get('first_name', '')} {billing.get('last_name', '')}".strip()
+        customer_email = billing.get('email', 'N/A')
+        
+        response = f"""## 📦 Order #{order_number}
+
+**Status:** {self._format_status(status)}
+**Date:** {self._format_date(date_created)}
+**Total:** {currency} {total}
+
+### 👤 Customer Information
+- **Name:** {customer_name or 'N/A'}
+- **Email:** {customer_email}
+- **Phone:** {billing.get('phone', 'N/A')}
+
+### 📍 Billing Address
+{self._format_address(billing)}
+
+"""
+        
+        shipping = order.get('shipping', {})
+        if shipping and shipping != billing:
+            response += f"""### 📍 Shipping Address
+{self._format_address(shipping)}
+
+"""
+        
+        line_items = order.get('line_items', [])
+        if line_items:
+            response += "### 🛒 Order Items\n"
+            for item in line_items:
+                name = item.get('name', 'Unknown')
+                quantity = item.get('quantity', 0)
+                price = item.get('price', '0')
+                total = item.get('total', '0')
+                response += f"- **{name}** × {quantity} @ {currency} {price} = {currency} {total}\n"
+            response += "\n"
+        
+        payment_method = order.get('payment_method_title', 'N/A')
+        response += f"**Payment Method:** {payment_method}\n"
+        
+        customer_note = order.get('customer_note', '')
+        if customer_note:
+            response += f"\n**Customer Note:** {customer_note}\n"
+        
+        return response
+    
+    # --- MODIFIED: format_multiple_orders_display to use dynamic filter_type name ---
+    def format_multiple_orders_display(self, orders: List[Dict[str, Any]], filter_type: str = "All") -> str:
+        """Format multiple orders data into a user-friendly markdown string."""
+        if not orders:
+            if filter_type == "Open":
+                return "📦 You have no open orders (Pending payment, On hold, or Processing)."
+            elif filter_type == "All":
+                return "📦 You have no orders."
+            else: # Specific status, e.g., "Pending Payment" or "Custom Completed"
+                return f"📦 You have no orders with status: {filter_type}."
+        
+        # Build header based on filter type
+        response = f"## 📦 Your {filter_type} Orders ({len(orders)} total)\n\n"
+        
+        # Group orders by status (existing logic, good to keep for organization)
+        status_groups = defaultdict(list)
+        for order in orders:
+            status = order.get('status', 'unknown')
+            status_groups[status].append(order)
+        
+        # Display orders grouped by status
+        # Define a consistent order for displaying common statuses
+        common_status_order = ['pending', 'on-hold', 'processing', 'completed', 'cancelled', 'refunded', 'failed']
+        
+        # Get all unique statuses present in the fetched orders, then sort them
+        # ensuring common_status_order items come first.
+        all_present_statuses = sorted(status_groups.keys(), key=lambda x: common_status_order.index(x) if x in common_status_order else len(common_status_order))
+        
+        for status_slug in all_present_statuses:
+            status_formatted = self._format_status(status_slug) # Uses the existing _format_status method
+            response += f"### {status_formatted}\n\n"
+            
+            for order in status_groups[status_slug]:
+                order_number = order.get('number', order.get('id', 'N/A'))
+                date_created = self._format_date(order.get('date_created', ''))
+                total = order.get('total', '0')
+                currency = order.get('currency', 'USD')
+                
+                response += f"**Order #{order_number}**\n"
+                response += f"- Date: {date_created}\n"
+                response += f"- Total: {currency} {total}\n"
+                
+                # Add item summary
+                line_items = order.get('line_items', [])
+                if line_items:
+                    response += f"- Items: "
+                    item_names = [item.get('name', 'Unknown') for item in line_items[:3]]
+                    response += ", ".join(item_names)
+                    if len(line_items) > 3:
+                        response += f" and {len(line_items) - 3} more"
+                    response += "\n"
+                
+                response += "\n"
+        
+        response += "\n---\n*Click on any order number to view full details.*"
+        return response
+    # --- END MODIFIED format_multiple_orders_display ---
+    
+    def _format_status(self, status: str) -> str:
+        """Format order status with emoji."""
+        status_map = {
+            'pending': '🕐 Pending',
+            'processing': '⚙️ Processing',
+            'on-hold': '⏸️ On Hold',
+            'completed': '✅ Completed',
+            'cancelled': '❌ Cancelled',
+            'refunded': '💰 Refunded',
+            'failed': '❌ Failed'
+        }
+        return status_map.get(status, status.title())
+    
+    def _format_date(self, date_str: str) -> str:
+        """Format ISO date string to readable format."""
+        try:
+            if date_str:
+                date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                return date_obj.strftime("%B %d, %Y at %I:%M %p")
+        except:
+            pass
+        return date_str
+    
+    def _format_address(self, address_data: Dict[str, Any]) -> str:
+        """Format address data into readable string."""
+        parts = []
+        if address_data.get('company'): parts.append(address_data['company'])
+        if address_data.get('address_1'): parts.append(address_data['address_1'])
+        if address_data.get('address_2'): parts.append(address_data['address_2'])
+        
+        city_state_zip = []
+        if address_data.get('city'): city_state_zip.append(address_data['city'])
+        if address_data.get('state'): city_state_zip.append(address_data['state'])
+        if address_data.get('postcode'): city_state_zip.append(address_data['postcode'])
+        if city_state_zip: parts.append(', '.join(city_state_zip))
+        
+        if address_data.get('country'): parts.append(address_data['country'])
+        
+        return '\n'.join(parts) if parts else 'N/A'
+    
+    @handle_api_errors("12Taste Order Status", "Test Connection", show_to_user=False)
+    def test_connection(self) -> Dict[str, Any]:
+        """Test WooCommerce API connection and return status information."""
+        if not self.config.WOOCOMMERCE_ENABLED:
+            return {
+                "status": "disabled",
+                "message": "12Taste Order Status integration is not enabled"
+            }
+        
+        try:
+            response = requests.get(
+                f"{self.base_url}/system_status",
+                auth=self.auth,
+                timeout=5,
+                headers={
+                    'User-Agent': 'FiFi-AI-Assistant/1.0',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            if response.status_code == 200:
+                return {
+                    "status": "connected",
+                    "message": "12Taste Order Status API is working correctly",
+                    "api_url": self.base_url
+                }
+            elif response.status_code == 401:
+                return {
+                    "status": "authentication_failed",
+                    "message": "12Taste Order Status authentication failed. Check API credentials."
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"12Taste Order Status API returned status code: {response.status_code}"
+                }
+                
+        except requests.exceptions.Timeout:
+            return {
+                "status": "timeout",
+                "message": "12Taste Order Status API request timed out"
+            }
+        except requests.exceptions.ConnectionError:
+            return {
+                "status": "connection_error",
+                "message": "Could not connect to 12Taste Order Status API"
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"12Taste Order Status API error: {str(e)}"
+            }
+
+
 # =============================================================================
 # RATE LIMITER & AI SYSTEM
 # =============================================================================
 
 class RateLimiter:
     """Simple in-memory rate limiter to prevent abuse."""
-    ## CHANGE: Use constants for RateLimiter init
     def __init__(self, max_requests: int = RATE_LIMIT_REQUESTS, window_seconds: int = RATE_LIMIT_WINDOW_SECONDS):
         self.requests = defaultdict(list)
-        self._lock = threading.Lock() # This is a separate RateLimiter specific lock, not the DB one
+        self._lock = threading.Lock()
         self.max_requests = max_requests
         self.window_seconds = window_seconds
-        ## CHANGE: Memory leak fix - limit tracked IDs
         self.MAX_TRACKED_IDS = MAX_RATE_LIMIT_TRACKING
 
     def is_allowed(self, identifier: str) -> Dict[str, Any]:
@@ -2030,12 +2446,11 @@ class RateLimiter:
             now = time.time()
             self.requests[identifier] = [t for t in self.requests[identifier] if t > now - self.window_seconds]
             
-            ## CHANGE: Memory leak fix - cleanup cache if too large
             if len(self.requests) > self.MAX_TRACKED_IDS:
                 sorted_items = sorted(self.requests.items(), 
                                     key=lambda x: max(x[1]) if x[1] else 0,
-                                    reverse=False) # Oldest first
-                for old_id, _ in sorted_items[:self.MAX_TRACKED_IDS // 10]: # Remove 10% of max
+                                    reverse=False)
+                for old_id, _ in sorted_items[:self.MAX_TRACKED_IDS // 10]:
                     del self.requests[old_id]
             
             if len(self.requests[identifier]) < self.max_requests:
@@ -2049,8 +2464,13 @@ class RateLimiter:
                     'time_until_next': 0
                 }
             else:
-                # Calculate time until next request is allowed
-                oldest_request = min(self.requests[identifier])
+                for req_time in sorted(self.requests[identifier]):
+                    if req_time > now - self.window_seconds:
+                        oldest_request = req_time
+                        break
+                else: # Fallback if list is empty or all requests are too old (should not happen with the filter above)
+                    oldest_request = now
+                
                 time_until_next = max(0, int((oldest_request + self.window_seconds) - now))
                 
                 logger.warning(f"Rate limit exceeded for {identifier[:8]}... ({len(self.requests[identifier])}/{self.max_requests} within {self.window_seconds}s)")
@@ -2062,25 +2482,16 @@ class RateLimiter:
                     'time_until_next': time_until_next
                 }
 
-## CHANGE: Enhanced sanitize_input with full validation (from earlier discussion)
 def sanitize_input(text: str) -> str:
     """Enhanced input sanitization to prevent XSS and limit length."""
     if not isinstance(text, str):
         return ""
     
-    # Remove null bytes
     text = text.replace('\x00', '')
-    
-    # Strip control characters
     text = ''.join(char for char in text if ord(char) >= 32 or char in '\n\r\t')
-    
-    # HTML escape
     text = html.escape(text)
-    
-    # Limit length (using global constant)
     text = text[:MAX_MESSAGE_LENGTH].strip()
     
-    # Check for SQL injection patterns (logging only, not blocking)
     sql_patterns = ['DROP TABLE', 'DELETE FROM', 'INSERT INTO', 'UPDATE SET', 'SELECT * FROM']
     for pattern in sql_patterns:
         if pattern in text.upper():
@@ -2093,6 +2504,7 @@ def sanitize_input(text: str) -> str:
 # =============================================================================
 
 class PineconeAssistantTool:
+    # ... (PineconeAssistantTool remains unchanged)
     def __init__(self, api_key: str, assistant_name: str):
         if not PINECONE_AVAILABLE: 
             raise ImportError("Pinecone client not available.")
@@ -2100,7 +2512,6 @@ class PineconeAssistantTool:
         self.assistant_name = assistant_name
         self.assistant = self.initialize_assistant()
 
-    # CHANGE 3: Pinecone Assistant with Business Rules
     def initialize_assistant(self):
         try:
             instructions = (
@@ -2135,7 +2546,6 @@ class PineconeAssistantTool:
             assistants_list = self.pc.assistant.list_assistants()
             if self.assistant_name not in [a.name for a in assistants_list]:
                 logger.warning(f"Assistant '{self.assistant_name}' not found. Creating...")
-                # Create new assistant
                 self.pc.assistant.create_assistant(
                     assistant_name=self.assistant_name, 
                     instructions=instructions
@@ -2143,7 +2553,6 @@ class PineconeAssistantTool:
                 logger.info(f"✅ Created assistant '{self.assistant_name}'")
             else:
                 logger.info(f"Found existing assistant: '{self.assistant_name}'")
-                # Update instructions using the correct method
                 try:
                     result = self.pc.assistant.update_assistant(
                         assistant_name=self.assistant_name,
@@ -2154,10 +2563,8 @@ class PineconeAssistantTool:
                 except Exception as e:
                     logger.warning(f"⚠️ Could not update instructions: {e}")
         
-            # Create assistant instance for chat operations
             assistant_obj = self.pc.assistant.Assistant(assistant_name=self.assistant_name)
         
-            # Verify assistant status using correct method
             try:
                 status = self.pc.assistant.describe_assistant(
                     assistant_name=self.assistant_name
@@ -2186,7 +2593,6 @@ class PineconeAssistantTool:
             response = self.assistant.chat(messages=pinecone_messages, model="gpt-4o")
             content = response.message.content
         
-            # Process content to add UTM parameters to all links
             import re
             def add_utm_to_url(match):
                 url = match.group(2)
@@ -2195,13 +2601,10 @@ class PineconeAssistantTool:
                     return f'{match.group(1)}({url}{separator}utm_source=fifi-eu)'
                 return match.group(0)
         
-            # Add UTM to all markdown links in content
             content = re.sub(r'(\[.*?\])\((https?://[^)]+)\)', add_utm_to_url, content)
         
-            # Check if content already has a Sources section
             has_sources_section = "**Sources:**" in content or "**sources:**" in content.lower()
         
-            # If no Sources section exists, extract URLs and add one
             if not has_sources_section:
                 url_pattern = r'\[.*?\]\((https?://[^)]+)\)'
                 found_urls = re.findall(url_pattern, content)
@@ -2218,7 +2621,6 @@ class PineconeAssistantTool:
                     if numbered_citations:
                         content += citations_header + "\n".join(numbered_citations)
         
-            # Determine if we have citations based on URLs in content
             has_citations = bool(re.findall(r'\[.*?\]\((https?://[^)]+)\)', content))
         
             return {
@@ -2236,14 +2638,13 @@ class PineconeAssistantTool:
             logger.error(f"Pinecone Assistant error: {str(e)}", exc_info=True)
             return None
     
-# CHANGE: LLM-Powered Query Reformulation (Replaces old TavilyFallbackAgent entirely)
 class TavilyFallbackAgent:
+    # ... (TavilyFallbackAgent remains unchanged)
     def __init__(self, tavily_api_key: str, openai_api_key: str = None):
         from tavily import TavilyClient
         self.tavily_client = TavilyClient(api_key=tavily_api_key)
-        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key, include_answer=True) # Keep both for now to avoid breaking existing calls
+        self.tavily_tool = TavilySearch(max_results=5, api_key=tavily_api_key, include_answer=True)
 
-        # NEW: Store OpenAI API key for query reformulation
         self.openai_api_key = openai_api_key
         self.openai_client = None
 
@@ -2259,32 +2660,26 @@ class TavilyFallbackAgent:
     def reformulate_query_for_search(self, current_question: str, conversation_history: List[BaseMessage]) -> str:
         """LLM-powered query reformulation for better search results, focused on F&B industry."""
         try:
-            # For very complete, specific queries, minimal reformulation needed
             if len(current_question.split()) > 10 and not any(indicator in current_question.lower() 
                                                               for indicator in ["what about", "how about", "any", "tell me", "more about"]):
                 logger.debug(f"Query is detailed enough, using as-is: {current_question}")
                 return current_question
             
-            # If no OpenAI client available, fallback to code-based
             if not self.openai_client:
                 logger.warning("OpenAI client not available, using code-based reformulation fallback")
                 return self._fallback_reformulation(current_question, conversation_history)
 
-            # Build conversation context efficiently
             context_parts = []
             if conversation_history:
-                # Get last 3 exchanges (6 messages max) for context efficiency
                 recent_messages = conversation_history[-6:] if len(conversation_history) > 6 else conversation_history
                 for msg in recent_messages:
                     if hasattr(msg, 'content') and msg.content:
-                        # Truncate long messages to save tokens
                         content = msg.content[:120] + "..." if len(msg.content) > 120 else msg.content
                         role = "User" if isinstance(msg, HumanMessage) else "Assistant"
                         context_parts.append(f"{role}: {content}")
             
             conversation_context = "\n".join(context_parts) if context_parts else "No prior conversation"
 
-            # Optimized LLM prompt for query reformulation (UPDATED FOR F&B INDUSTRY)
             reformulation_prompt = f"""Transform this question into an optimized web search query for the food and beverage industry.
 
 CONVERSATION CONTEXT:
@@ -2304,30 +2699,26 @@ RULES:
 
 OUTPUT: Only the optimized search query, nothing else."""
 
-            # Make LLM call with token limits
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "You are a search query optimizer. Respond only with the optimized search query."},
                     {"role": "user", "content": reformulation_prompt}
                 ],
-                max_tokens=30, # Keep very low for cost efficiency
-                temperature=0.1 # Low temperature for consistent results
+                max_tokens=30,
+                temperature=0.1
             )
             
             reformulated = response.choices[0].message.content.strip()
 
-            # Validation: Ensure reformulated query is reasonable
             if not reformulated or len(reformulated) < 3:
                 logger.warning(f"LLM returned invalid reformulation: '{reformulated}', using fallback")
                 return self._fallback_reformulation(current_question, conversation_history)
             
-            # Ensure query isn't too long (waste of tokens/poor search results)
-            if len(reformulated.split()) > 15 or len(reformulated) > 120: # Adjusted word limit
+            if len(reformulated.split()) > 15 or len(reformulated) > 120:
                 logger.warning(f"LLM reformulation too long: '{reformulated}', using fallback")
                 return self._fallback_reformulation(current_question, conversation_history)
             
-            # Success case
             logger.info(f"✅ LLM reformulated: '{current_question}' → '{reformulated}'")
             return reformulated
             
@@ -2339,7 +2730,6 @@ OUTPUT: Only the optimized search query, nothing else."""
         """Fallback to code-based reformulation if LLM fails."""
         logger.debug("Using code-based reformulation fallback")
 
-        # Simple follow-up detection
         follow_up_indicators = [
             "what about", "how about", "what are", "any", "tell me about",
             "pricing", "cost", "price", "suppliers", "where", "who", "availability"
@@ -2352,45 +2742,40 @@ OUTPUT: Only the optimized search query, nothing else."""
         )
 
         if not is_likely_followup or not conversation_history:
-            # Standalone query - add food ingredients context if missing
-            if "food" not in current_question_lower and "ingredient" not in current_question_lower and "beverage" not in current_question_lower: # Updated
-                return f"{current_question} food beverage industry" # Updated
+            if "food" not in current_question_lower and "ingredient" not in current_question_lower and "beverage" not in current_question_lower:
+                return f"{current_question} food beverage industry"
             return current_question
 
-        # Extract context keywords from recent messages
         context_keywords = []
         if conversation_history:
             for msg in conversation_history[-3:]:
                 if hasattr(msg, 'content'):
-                    # Simple keyword extraction
                     words = re.findall(r'\b[A-Z][a-z]+\b', msg.content)
-                    context_keywords.extend(words[:2]) # Limit to avoid over-expansion
+                    context_keywords.extend(words[:2])
 
-        # Apply context-based reformulation
         if any(word in current_question_lower for word in ["pricing", "cost", "price"]):
             if context_keywords:
-                return f"{' '.join(context_keywords[:2])} pricing costs food beverage industry" # Updated
+                return f"{' '.join(context_keywords[:2])} pricing costs food beverage industry"
             else:
-                return f"{current_question} food beverage industry pricing market" # Updated
+                return f"{current_question} food beverage industry pricing market"
 
         elif any(word in current_question_lower for word in ["suppliers", "supplier", "source", "where"]):
             if context_keywords:
-                return f"{' '.join(context_keywords[:2])} suppliers food beverage industry sourcing" # Updated
+                return f"{' '.join(context_keywords[:2])} suppliers food beverage industry sourcing"
             else:
-                return f"{current_question} food beverage industry suppliers" # Updated
+                return f"{current_question} food beverage industry suppliers"
 
         elif any(word in current_question_lower for word in ["availability", "stock", "available"]):
             if context_keywords:
-                return f"{' '.join(context_keywords[:2])} availability food beverage industry market" # Updated
+                return f"{' '.join(context_keywords[:2])} availability food beverage industry market"
             else:
-                return f"{current_question} food beverage industry availability" # Updated
+                return f"{current_question} food beverage industry availability"
         
         else:
-            # General follow-up
             if context_keywords:
-                return f"{current_question} {' '.join(context_keywords[:2])} food beverage industry" # Updated
+                return f"{current_question} {' '.join(context_keywords[:2])} food beverage industry"
             else:
-                return f"{current_question} food beverage industry" # Updated
+                return f"{current_question} food beverage industry"
 
     def add_utm_to_links(self, content: str) -> str:
         """Finds all Markdown links in a string and appends the UTM parameters."""
@@ -2413,17 +2798,15 @@ OUTPUT: Only the optimized search query, nothing else."""
             
         except Exception as e:
             logger.error(f"🔍 UTM processing failed: {e}")
-            return content  # Always return original content if processing fails
+            return content
 
     def synthesize_search_results(self, results, query: str) -> str:
         """Enhanced synthesis using Tavily's answer + sources."""
         
-        # Handle dict response from TavilySearch tool
         if isinstance(results, dict):
             tavily_answer = results.get('answer', '')
             tavily_results = results.get('results', [])
 
-            # If we have Tavily's synthesized answer, use it + add sources
             if tavily_answer and tavily_results:
                 response_parts = [tavily_answer]
                 response_parts.append("\n\n**Sources:**")
@@ -2434,7 +2817,6 @@ OUTPUT: Only the optimized search query, nothing else."""
 
                 return "\n".join(response_parts)
             
-            # Fallback: extract results array if no answer
             elif tavily_results:
                 results = tavily_results
             elif tavily_answer:
@@ -2443,7 +2825,6 @@ OUTPUT: Only the optimized search query, nothing else."""
                 logger.warning(f"Unexpected dict format from Tavily: {results.keys()}")
                 return f"I found some information but couldn't format it properly."
 
-        # Rest of existing list handling code stays the same...
         if not isinstance(results, list):
             logger.warning(f"Tavily returned unexpected results type: {type(results)}")
             return "I couldn't process the search results properly."
@@ -2466,36 +2847,31 @@ OUTPUT: Only the optimized search query, nothing else."""
     def determine_search_strategy(self, question: str, pinecone_error_type: str = None) -> Dict[str, Any]:
         """Determine search strategy based on Pinecone status"""
         
-        # ONLY when Pinecone is DOWN/ERROR
-        if pinecone_error_type and pinecone_error_type != "healthy" and pinecone_error_type != "recency_direct_route": # Add recency_direct_route as a special case where we don't apply 12taste.com filter
+        if pinecone_error_type and pinecone_error_type != "healthy" and pinecone_error_type != "recency_direct_route":
             logger.info(f"🔒 Pinecone {pinecone_error_type} - restricting Tavily to 12taste.com domain only")
             return {
                 "strategy": "domain_restricted_12taste",
-                "include_domains": ["12taste.com"],  # ONLY 12taste.com
+                "include_domains": ["12taste.com"],
                 "exclude_domains": None,
                 "reason": f"Pinecone {pinecone_error_type} - using 12taste.com as fallback source"
             }
         
-        # Normal operation - Pinecone is healthy or we are directly routing due to recency
         logger.info("🌐 Using standard Tavily search with competitor exclusions")
         return {
             "strategy": "worldwide_with_exclusions",
-            "include_domains": None,  # Search ALL domains...
-            "exclude_domains": DEFAULT_EXCLUDED_DOMAINS,  # ...EXCEPT competitors
+            "include_domains": None,
+            "exclude_domains": DEFAULT_EXCLUDED_DOMAINS,
             "reason": "Standard web search with competitor exclusion"
         }
 
     def query(self, prompt: str, chat_history: List[BaseMessage], pinecone_error_type: str = None) -> Dict[str, Any]:
         """Query Tavily with two-step fallback when Pinecone is down"""
         try:
-            # Reformulate the query
             reformulated_query = self.reformulate_query_for_search(prompt, chat_history)
             logger.info(f"🔍 Original query: '{prompt}' → Reformulated: '{reformulated_query}'")
             
-            # Determine initial search strategy
             strategy = self.determine_search_strategy(reformulated_query, pinecone_error_type)
             
-            # Build search parameters
             sdk_params = {
                 "query": reformulated_query,
                 "max_results": 5,
@@ -2504,7 +2880,6 @@ OUTPUT: Only the optimized search query, nothing else."""
                 "include_raw_content": "text"
             }
             
-            # Apply domain strategy
             if strategy.get("include_domains"):
                 sdk_params["include_domains"] = strategy["include_domains"]
                 logger.info(f"🔍 Tavily domain-restricted search: {strategy['include_domains']}")
@@ -2512,10 +2887,8 @@ OUTPUT: Only the optimized search query, nothing else."""
                 sdk_params["exclude_domains"] = strategy["exclude_domains"]
                 logger.info(f"🌐 Tavily worldwide search excluding {len(strategy['exclude_domains'])} competitor domains")
             
-            # Execute search
             search_results = self.tavily_client.search(**sdk_params)
             
-            # NEW: Check if 12taste.com-only search returned no results
             if (strategy["strategy"] == "domain_restricted_12taste" and 
                 (not search_results or 
                  not search_results.get('results') or 
@@ -2523,35 +2896,28 @@ OUTPUT: Only the optimized search query, nothing else."""
                 
                 logger.warning("⚠️ No results found on 12taste.com, falling back to regular web search")
                 
-                # Retry with standard worldwide search (excluding competitors)
                 sdk_params_fallback = {
                     "query": reformulated_query,
                     "max_results": 5,
                     "include_answer": "advanced",
                     "search_depth": "advanced",
                     "include_raw_content": "text",
-                    "exclude_domains": DEFAULT_EXCLUDED_DOMAINS  # Exclude competitors only
+                    "exclude_domains": DEFAULT_EXCLUDED_DOMAINS
                 }
                 
-                # Remove include_domains for worldwide search
                 sdk_params_fallback.pop("include_domains", None)
                 
                 logger.info(f"🌐 Retrying with worldwide search excluding {len(DEFAULT_EXCLUDED_DOMAINS)} competitor domains")
                 search_results = self.tavily_client.search(**sdk_params_fallback)
                 
-                # Update strategy for response metadata
                 strategy = {
                     "strategy": "worldwide_with_exclusions_after_12taste_fallback",
                     "reason": "No results from 12taste.com, expanded to worldwide search"
                 }
             
-            # Synthesize the results
             synthesized_content = self.synthesize_search_results(search_results, reformulated_query)
-            
-            # Add UTM parameters to all links
             final_content = self.add_utm_to_links(synthesized_content)
             
-            # Add note if we had to fallback
             if strategy.get("strategy") == "worldwide_with_exclusions_after_12taste_fallback":
                 final_content = f"*Note: No specific information found on 12taste.com, showing results from other industry sources.*\n\n{final_content}"
             
@@ -2585,13 +2951,13 @@ OUTPUT: Only the optimized search query, nothing else."""
 class EnhancedAI:
     """Enhanced AI system with improved error handling and bidirectional fallback."""
     
+    # ... (EnhancedAI methods remain unchanged)
     def __init__(self, config: Config):
         self.config = config
         self.openai_client = None
         self.pinecone_tool = None
         self.tavily_agent = None
         
-        # Initialize OpenAI client (for both AI responses and content moderation)
         if OPENAI_AVAILABLE and self.config.OPENAI_API_KEY:
             try:
                 self.openai_client = openai.OpenAI(api_key=self.config.OPENAI_API_KEY)
@@ -2599,7 +2965,6 @@ class EnhancedAI:
             except Exception as e:
                 logger.error(f"OpenAI client initialization failed: {e}")
         
-        # Initialize Pinecone tool
         if PINECONE_AVAILABLE and self.config.PINECONE_API_KEY and self.config.PINECONE_ASSISTANT_NAME:
             try:
                 self.pinecone_tool = PineconeAssistantTool(
@@ -2613,12 +2978,11 @@ class EnhancedAI:
                 self.pinecone_tool = None
                 error_handler.log_error(error_handler.handle_api_error("Pinecone", "Initialize", e))
         
-        # Initialize Tavily agent WITH OpenAI key for reformulation (UPDATED)
         if TAVILY_AVAILABLE and self.config.TAVILY_API_KEY:
             try:
                 self.tavily_agent = TavilyFallbackAgent(
                     self.config.TAVILY_API_KEY, 
-                    self.config.OPENAI_API_KEY # NEW: Pass OpenAI key
+                    self.config.OPENAI_API_KEY
                 )
                 logger.info("✅ Tavily Web Search initialized successfully with LLM reformulation")
                 error_handler.mark_component_healthy("Tavily")
@@ -2631,7 +2995,6 @@ class EnhancedAI:
         """NEW: Enhanced Pinecone error detection with specific HTTP codes."""
         error_str = str(error).lower()
         
-        # Check for specific HTTP status codes that indicate different issues
         if any(code in error_str for code in ['401', '403']):
             error_handler.component_status["Pinecone"] = "authentication_error"
             return "authentication_error"
@@ -2644,7 +3007,7 @@ class EnhancedAI:
         elif any(keyword in error_str for keyword in ['500', '503']): 
             error_handler.component_status["Pinecone"] = "server_error"
             return "server_error"
-        elif any(keyword in error_str for keyword in ['timeout', 'connection', 'network']): # FIXED: Changed 'code' to 'keyword' to match other lines
+        elif any(keyword in error_str for keyword in ['timeout', 'connection', 'network']):
             error_handler.component_status["Pinecone"] = "connectivity_error"
             return "connectivity_error"
         else:
@@ -2660,21 +3023,18 @@ class EnhancedAI:
         """Get current Pinecone error type for Tavily strategy determination."""
         return error_handler.component_status.get("Pinecone", "healthy")
 
-    # NEW: _needs_current_information method
     def _needs_current_information(self, prompt: str) -> bool:
         """Check if query needs current/updated information"""
         prompt_lower = prompt.lower()
         
-        # Time-based indicators
         time_indicators = [
             "latest", "newest", "recent", "current", "today", "yesterday",
             "this week", "last week", "this month", "last month",
-            "2024", "2025", "2026",  # Current and near-future years
+            "2024", "2025", "2026",
             "update", "updates", "updated",
             "now", "nowadays", "presently", "currently"
         ]
         
-        # News and market indicators  
         market_indicators = [
             "news", "breaking", "announcement", "announced",
             "trend", "trends", "trending", "forecast",
@@ -2682,7 +3042,6 @@ class EnhancedAI:
             "just released"
         ]
         
-        # Regulatory updates
         regulatory_indicators = [
             "new regulation", "updated regulation", "revised",
             "amendment", "change in law", "policy update"
@@ -2692,7 +3051,6 @@ class EnhancedAI:
         
         return any(indicator in prompt_lower for indicator in all_indicators)
 
-    # CHANGE 5: Updated Fallback Logic for Business Rules
     def should_use_web_fallback(self, pinecone_response: Dict[str, Any], original_question: str) -> bool:
         """
         Determines if a fallback to web search is needed based on strict business rules.
@@ -2704,13 +3062,12 @@ class EnhancedAI:
         logger.warning("🔍 FALLBACK DEBUG START")
         logger.warning(f"   Question: '{original_question}'")
         logger.warning(f"   Content length: {len(content)}")
-        logger.warning(f"   Content preview: {content[:300]}...")  # First 300 chars
+        logger.warning(f"   Content preview: {content[:300]}...")
         logger.warning(f"   Response source: {pinecone_response.get('source', 'Unknown')}")
         logger.warning(f"   Has citations flag: {pinecone_response.get('has_citations', False)}")
         logger.warning(f"   Success flag: {pinecone_response.get('success', False)}")
         logger.warning("=" * 50)
 
-        # DEBUG: Log the citation detection issue
         has_citation_markers = "[1]" in content or "**sources:**" in content
         has_citations_flag = pinecone_response.get("has_citations", False)
 
@@ -2718,15 +3075,11 @@ class EnhancedAI:
             logger.warning(f"🔍 CITATION DEBUG: Found markers in content, has_citations={has_citations_flag}")
             logger.warning(f"Content preview: {content[:200]}...")
 
-        # RULE 1: NEVER fallback if Pinecone provides the business redirect for pricing/stock.
-        # This is the desired final answer for these questions.
         if "sales-eu@12taste.com" in content or "contact our sales team" in content:
             logger.warning("✅ Fallback SKIPPED: Pinecone provided the correct business redirect for pricing/stock.")
             return False
         logger.warning("✅ Business redirect check PASSED (no sales redirect found)")
 
-        # RULE 2: ALWAYS fallback if Pinecone explicitly states it doesn't know about a topic.
-        # This indicates a product/topic not found in the knowledge base.
         not_found_indicators = [
             "don't have specific information",
             "could not find specific information",
@@ -2739,7 +3092,7 @@ class EnhancedAI:
             "does not provide specific information",
             "search results do not provide",
             "results do not provide",
-            "do not contain specific information", # ADD THIS LINE
+            "do not contain specific information",
             "does not contain specific information",
             "search results do not contain",
             "results do not contain"
@@ -2750,15 +3103,12 @@ class EnhancedAI:
                 return True
         logger.warning("✅ Not found indicators check PASSED")
 
-        # RULE 3: Fallback on critical safety issues like fake citations.
-        # (This logic can be preserved from your original implementation)
         if "[1]" in content or "**sources:**" in content:
             if not pinecone_response.get("has_citations", False):
                 logger.warning("🚨 SAFETY OVERRIDE: Detected fake citations. Switching to web search.")
                 return True
         logger.warning("✅ Citation safety check PASSED")
 
-        # RULE 4: Force web search for regulatory topics without citations
         regulatory_indicators = ["regulation", "directive", "compliance", "legal"]
         is_regulatory = any(indicator in original_lower for indicator in regulatory_indicators)
 
@@ -2767,23 +3117,16 @@ class EnhancedAI:
             return True
         logger.warning(f"✅ Regulatory check PASSED (is_regulatory={is_regulatory})")
 
-        # DEFAULT: Do not fallback. Assume Pinecone's answer is correct if it's not a "not found" response
-        # and doesn't violate business rules.
         logger.warning("✅ ALL CHECKS PASSED - Should NOT fallback.")
         return False
     
-    # CHANGE 6: Business-First Routing (Always Try Pinecone First)
     @handle_api_errors("AI System", "Get Response", show_to_user=True)
     def get_response(self, prompt: str, chat_history: List[Dict] = None) -> Dict[str, Any]:
-        """
-        AI response flow that prioritizes Pinecone and adheres to strict business rules for fallback.
-        Now includes direct Tavily routing for recency questions.
-        """
-        # Convert chat history to LangChain format
+        """Gets AI response and manages session state with a corrected processing pipeline."""
         def _convert_to_langchain_format(history: List[Dict]) -> List[BaseMessage]:
             langchain_history_converted = []
             if history:
-                for msg in history[-10:]: # Limit to last 10 messages
+                for msg in history[-10:]:
                     role = msg.get("role")
                     content = msg.get("content", "")
                     if role == "user":
@@ -2795,17 +3138,15 @@ class EnhancedAI:
         langchain_history = _convert_to_langchain_format(chat_history)
         langchain_history.append(HumanMessage(content=prompt))
 
-        # NEW: Check for recency indicators FIRST (Direct Tavily Routing)
         if self._needs_current_information(prompt):
             logger.info("🚀 Recency keywords detected - routing directly to Tavily")
             
             if self.tavily_agent:
                 try:
-                    # Pass "recency_direct_route" as error type to prevent 12taste.com-only filter
                     web_response = self.tavily_agent.query(
                         prompt, 
                         langchain_history,
-                        "recency_direct_route"  # Special indicator
+                        "recency_direct_route"
                     )
                     
                     if web_response and web_response.get("success"):
@@ -2815,11 +3156,9 @@ class EnhancedAI:
                         
                 except Exception as e:
                     logger.error(f"Direct Tavily search for recency failed: {e}. Falling back to normal flow.")
-                    # Continue to Pinecone/Tavily fallback if direct Tavily fails
             else:
                 logger.warning("Tavily agent not initialized, cannot handle recency query directly.")
 
-        # --- Primary Flow: Always try Pinecone first (for non-recency queries) ---
         if self.pinecone_tool:
             try:
                 logger.info("🧠 Querying Pinecone knowledge base (primary)...")
@@ -2834,7 +3173,6 @@ class EnhancedAI:
                     logger.error("🚨 PINECONE RETURNED NULL!")
 
                 if pinecone_response and pinecone_response.get("success"):
-                    # Use the new business-aware logic to decide if a fallback is needed
                     if not self.should_use_web_fallback(pinecone_response, prompt):
                         logger.info("✅ Using Pinecone response (passed business logic checks).")
                         error_handler.mark_component_healthy("Pinecone")
@@ -2846,11 +3184,9 @@ class EnhancedAI:
                 error_type = self._detect_pinecone_error_type(e)
                 logger.error(f"Pinecone query failed ({error_type}): {e}. Proceeding to web fallback.")
 
-        # --- Fallback Flow: Use Tavily web search if needed ---
         if self.tavily_agent:
             try:
                 logger.info("🌐 Falling back to FiFi web search...")
-                # Pass the full history for context-aware query reformulation
                 web_response = self.tavily_agent.query(prompt, langchain_history, self._get_current_pinecone_error_type())
                 
                 if web_response and web_response.get("success"):
@@ -2862,7 +3198,6 @@ class EnhancedAI:
                 logger.error(f"FiFi Web search failed: {e}", exc_info=True)
                 error_handler.log_error(error_handler.handle_api_error("Tavily", "Query", e))
         
-        # --- Final Fallback: If all systems fail ---
         logger.warning("⚠️ All AI tools failed. Using final system fallback response.")
         return {
             "content": "I apologize, but I'm unable to process your request at the moment due to technical issues. Please try again later.",
@@ -2900,7 +3235,6 @@ def check_content_moderation(prompt: str, client: Optional[openai.OpenAI]) -> Op
     
     return {"flagged": False}
 
-# CHANGE 2: Replace `check_industry_context` with the enhanced version.
 @handle_api_errors("Industry Context Check", "Validate Question Context", show_to_user=False)
 def check_industry_context(prompt: str, chat_history: List[Dict] = None, client: Optional[openai.OpenAI] = None) -> Optional[Dict[str, Any]]:
     """
@@ -2911,19 +3245,17 @@ def check_industry_context(prompt: str, chat_history: List[Dict] = None, client:
         logger.debug("OpenAI client not available for industry context check. Allowing question.")
         return {"relevant": True, "reason": "context_check_unavailable"}
 
-    # Build conversation context from the last 6 messages (3 exchanges)
     conversation_context = ""
     if chat_history and len(chat_history) > 0:
         recent_history = chat_history[-6:]
         context_parts = []
         for msg in recent_history:
             role = msg.get('role', 'unknown').capitalize()
-            content = msg.get('content', '')[:200] # Truncate for brevity
+            content = msg.get('content', '')[:200]
             context_parts.append(f"{role}: {content}")
         conversation_context = "\n".join(context_parts)
 
     try:
-        # UPDATED: More comprehensive prompt for 12taste.com context
         context_check_prompt = f"""You are an industry context validator for 12taste.com, a B2B marketplace connecting food & beverage manufacturers with ingredient suppliers.
 
 **CONVERSATION HISTORY (for context):**
@@ -2943,6 +3275,7 @@ def check_industry_context(prompt: str, chat_history: List[Dict] = None, client:
 - Market trends in food & beverage industry
 - Follow-up questions that relate to previous context
 - Meta-conversation queries (summarize chat, count questions, list topics)
+- Order status queries (e.g., "Where is my order 123?")
 
 **FLAG ONLY:**
 - Consumer/home cooking recipes or diet advice
@@ -2959,7 +3292,7 @@ Respond with ONLY a JSON object in this exact format:
 {{
     "relevant": true/false,
     "confidence": 0.0-1.0,
-    "category": "food_ingredients" | "supplier_sourcing" | "follow_up" | "meta_conversation" | "off_topic" | "unrelated_industry" | "greeting_or_polite",
+    "category": "food_ingredients" | "supplier_sourcing" | "follow_up" | "meta_conversation" | "order_query" | "off_topic" | "unrelated_industry" | "greeting_or_polite",
     "reason": "Brief explanation."
 }}"""
 
@@ -2998,9 +3331,10 @@ class SessionManager:
     
     def __init__(self, config: Config, db_manager: DatabaseManager, 
                  zoho_manager: ZohoCRMManager, ai_system: EnhancedAI, 
-                 rate_limiter: RateLimiter, fingerprinting_manager: DatabaseManager.FingerprintingManager, # Corrected type hint
-                 email_verification_manager: DatabaseManager.EmailVerificationManager, # Corrected type hint
-                 question_limit_manager: DatabaseManager.QuestionLimitManager): # Corrected type hint
+                 rate_limiter: RateLimiter, fingerprinting_manager: DatabaseManager.FingerprintingManager,
+                 email_verification_manager: DatabaseManager.EmailVerificationManager,
+                 question_limit_manager: DatabaseManager.QuestionLimitManager,
+                 woocommerce_manager: Optional['WooCommerceManager'] = None):
         self.config = config
         self.db = db_manager
         self.zoho = zoho_manager
@@ -3009,21 +3343,19 @@ class SessionManager:
         self.fingerprinting = fingerprinting_manager
         self.email_verification = email_verification_manager
         self.question_limits = question_limit_manager
+        self.woocommerce = woocommerce_manager
         self._cleanup_interval = timedelta(hours=1)
         self._last_cleanup = datetime.now()
         
-        # FIX 3: For multi-session ban sync locking
         self._ban_sync_locks = {}
-        self._ban_lock_timeout = timedelta(seconds=5) # Lock timeout to prevent indefinite blocks
+        self._ban_lock_timeout = timedelta(seconds=5)
 
         logger.info("✅ SessionManager initialized with all component managers.")
 
     def get_session_timeout_minutes(self) -> int:
         """Returns the configured session timeout duration in minutes."""
-        ## CHANGE: Use constant for session timeout
         return SESSION_TIMEOUT_MINUTES
     
-    # Helper to get privilege level for user types
     def _get_privilege_level(self, user_type: UserType) -> int:
         if user_type == UserType.REGISTERED_USER:
             return 2
@@ -3039,7 +3371,6 @@ class SessionManager:
             return
             
         try:
-            # Clean up fingerprinting cache
             if hasattr(self.fingerprinting, 'fingerprint_cache'):
                 old_entries = []
                 for fp_id, data in self.fingerprinting.fingerprint_cache.items():
@@ -3052,7 +3383,6 @@ class SessionManager:
                 if old_entries:
                     logger.info(f"Cleaned up {len(old_entries)} old fingerprint cache entries")
             
-            # Clean up rate limiter
             if hasattr(self.rate_limiter, 'requests'):
                 old_limit_entries = []
                 for identifier, timestamps in self.rate_limiter.requests.items():
@@ -3068,12 +3398,10 @@ class SessionManager:
                 if old_limit_entries:
                     logger.info(f"Cleaned up {len(old_limit_entries)} old rate limiter entries")
             
-            # Clean up error history
-            if hasattr(st.session_state, 'error_handler') and hasattr(st.session_state.error_handler, 'error_history') and len(st.session_state.error_handler.error_history) > MAX_ERROR_HISTORY: ## CHANGE: Use constant for error history limit
-                st.session_state.error_handler.error_history = st.session_state.error_handler.error_history[-MAX_ERROR_HISTORY // 2:] ## CHANGE: Keep half the max size
+            if hasattr(st.session_state, 'error_handler') and hasattr(st.session_state.error_handler, 'error_history') and len(st.session_state.error_handler.error_history) > MAX_ERROR_HISTORY:
+                st.session_state.error_handler.error_history = st.session_state.error_handler.error_history[-MAX_ERROR_HISTORY // 2:]
                 logger.info("Cleaned up error history")
             
-            ## CHANGE: Call database cleanup for old inactive sessions
             self.db.cleanup_old_inactive_sessions()
 
             self._last_cleanup = now
@@ -3119,7 +3447,7 @@ class SessionManager:
     
     def _clear_error_notifications(self):
         """Clear all error notification states when a successful question is processed."""
-        error_keys = ['rate_limit_hit', 'moderation_flagged', 'context_flagged', 'pricing_stock_notice'] # Added 'pricing_stock_notice'
+        error_keys = ['rate_limit_hit', 'moderation_flagged', 'context_flagged', 'pricing_stock_notice']
         cleared_errors = []
     
         for key in error_keys:
@@ -3136,7 +3464,6 @@ class SessionManager:
         import traceback
         import inspect
         
-        # Get the calling function info
         frame = inspect.currentframe()
         caller = inspect.getframeinfo(frame.f_back)
         
@@ -3147,21 +3474,26 @@ class SessionManager:
             logger.debug(line.strip())
         
         session_id = str(uuid.uuid4())
-        session = UserSession(session_id=session_id, last_activity=None, login_method='guest') # NEW: Default login method
+        session = UserSession(session_id=session_id, last_activity=None, login_method='guest')
         
         # For new sessions, always start with a temporary fingerprint
-        # This will be replaced by a real one for Guests, or marked as 'not_collected_registered' for Registered Users later.
         session.fingerprint_id = f"temp_py_{secrets.token_hex(8)}"
         session.fingerprint_method = "temporary_fallback_python"
         
         logger.debug(f"🆔 New session created: {session_id[:8]} (NOT saved to DB yet, will be saved in get_session)")
         return session
 
-    ## CHANGE: Removed _check_15min_eligibility as it's no longer used for timeout saves.
+    def _create_and_save_new_session(self, login_method: str = 'guest') -> UserSession:
+        """Creates and immediately saves a new session to database."""
+        session = self._create_new_session()
+        session.login_method = login_method
+        session.last_activity = datetime.now()
+        self.db.save_session(session)
+        logger.info(f"✅ New session created and saved: {session.session_id[:8]} (method: {login_method})")
+        return session
 
     def _is_crm_save_eligible(self, session: UserSession, trigger_reason: str) -> bool:
-        """Enhanced eligibility check for CRM saves including new user types and conditions.
-        Removed 15-minute activity requirement for timeout saves."""
+        """Enhanced eligibility check for CRM saves including new user types and conditions."""
         try:
             if not session.email or not session.messages:
                 logger.debug(f"CRM save not eligible - missing email ({bool(session.email)}) or messages ({bool(session.messages)}) for {session.session_id[:8]}")
@@ -3175,7 +3507,6 @@ class SessionManager:
                 logger.debug(f"CRM save not eligible - user type {session.user_type.value} for {session.session_id[:8]}")
                 return False
             
-            ## CHANGE: Use CRM_SAVE_MIN_QUESTIONS constant
             if len(session.messages) < CRM_SAVE_MIN_QUESTIONS:
                 logger.debug(f"CRM save not eligible - messages less than {CRM_SAVE_MIN_QUESTIONS} for {session.session_id[:8]}")
                 return False
@@ -3196,7 +3527,6 @@ class SessionManager:
             if session.user_type.value not in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
                 return False
             
-            ## CHANGE: Use CRM_SAVE_MIN_QUESTIONS constant
             if len(session.messages) < CRM_SAVE_MIN_QUESTIONS:
                 return False
             
@@ -3209,454 +3539,377 @@ class SessionManager:
 
     def _attempt_fingerprint_inheritance(self, session: UserSession):
         """
-        Attempts to inherit session data with EMAIL as primary identifier for registered users.
-        For non-registered users, it uses fingerprint.
+        FIXED VERSION: Attempts to inherit session data with more robust logic
+        for question count inheritance, especially for Guest users.
         """
-        logger.info(f"🔄 Attempting inheritance for session {session.session_id[:8]} (Type: {session.user_type.value}) with FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'}...")
+        logger.info(f"🔄 [INHERIT] Attempting fingerprint inheritance for session {session.session_id[:8]} (Type: {session.user_type.value}, FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'})...")
+        
+        if session.user_type == UserType.REGISTERED_USER:
+            logger.debug(f"🔄 [INHERIT] Session {session.session_id[:8]} is already REGISTERED_USER. Skipping fingerprint inheritance.")
+            return
 
-        try:
-            # PRIORITY 1: For REGISTERED_USER, use EMAIL-based inheritance ONLY
-            if session.user_type == UserType.REGISTERED_USER and session.email:
-                logger.info(f"📧 Using EMAIL-based inheritance for registered user {session.email}")
-                
-                email_sessions = self.db.find_sessions_by_email(session.email)
-                email_sessions = [s for s in email_sessions if s.session_id != session.session_id]
-                
-                if email_sessions:
-                    # Find most recent session with same email to inherit counts from
-                    most_recent = max(email_sessions, key=lambda s: s.last_question_time or s.last_activity or s.created_at)
+        if not session.fingerprint_id or session.fingerprint_id.startswith(("temp_", "fallback_", "temp_py_")):
+            session.visitor_type = "new_visitor"
+            session.reverification_pending = False
+            session.pending_user_type = None
+            session.pending_email = None
+            session.pending_full_name = None
+            session.pending_zoho_contact_id = None
+            session.pending_wp_token = None
+            session.declined_recognized_email_at = None
+            logger.debug(f"🔄 [INHERIT] Session {session.session_id[:8]} has no stable fingerprint. No historical inheritance possible yet.")
+            return
+
+        historical_fp_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
+        unique_emails_from_fp = {s.email.lower() for s in historical_fp_sessions if s.email}
+        all_related_sessions = list(historical_fp_sessions)
+        
+        for email in unique_emails_from_fp:
+            email_history = self.db.find_sessions_by_email(email)
+            for s in email_history:
+                if s.session_id not in {sess.session_id for sess in all_related_sessions}:
+                    all_related_sessions.append(s)
+
+        all_related_sessions = [s for s in all_related_sessions if s.session_id != session.session_id]
+
+        if not all_related_sessions:
+            session.visitor_type = "new_visitor"
+            session.reverification_pending = False
+            session.pending_user_type = None
+            session.pending_email = None
+            session.pending_full_name = None
+            session.pending_zoho_contact_id = None
+            session.pending_wp_token = None
+            session.declined_recognized_email_at = None
+            logger.info(f"🔄 [INHERIT] Inheritance complete for new visitor {session.session_id[:8]}. No historical data found.")
+            return
+        
+        session.visitor_type = "returning_visitor"
+        logger.info(f"🔄 [INHERIT] Found {len(all_related_sessions)} related sessions for returning visitor {session.session_id[:8]}")
+
+        highest_privilege_candidate = None
+        highest_level = self._get_privilege_level(session.user_type)
+
+        now = datetime.now()
+
+        if session.declined_recognized_email_at and (now - session.declined_recognized_email_at) < timedelta(minutes=60):
+            session.reverification_pending = False
+            session.pending_user_type = None
+            session.pending_email = None
+            session.pending_full_name = None
+            session.pending_zoho_contact_id = None
+            session.pending_wp_token = None
+            logger.info(f"🔄 [INHERIT] Session {session.session_id[:8]}: User recently declined recognition. Proceeding as current guest.")
+            return
+
+        for s in all_related_sessions:
+            current_s_level = self._get_privilege_level(s.user_type)
+            if current_s_level > highest_level:
+                highest_level = current_s_level
+                highest_privilege_candidate = s
+            elif current_s_level == highest_level and highest_privilege_candidate:
+                s_activity = s.last_activity or s.created_at
+                hpc_activity = highest_privilege_candidate.last_activity or highest_privilege_candidate.created_at
+                if s_activity and hpc_activity and s_activity > hpc_activity:
+                    highest_privilege_candidate = s
+                elif not hpc_activity and s_activity:
+                     highest_privilege_candidate = s
+
+        if highest_privilege_candidate and highest_privilege_candidate.email and \
+           self._get_privilege_level(highest_privilege_candidate.user_type) > self._get_privilege_level(UserType.GUEST):
+            
+            logger.info(f"🔄 [INHERIT] Session {session.session_id[:8]}: Detected higher privilege: {highest_privilege_candidate.user_type.value} for {highest_privilege_candidate.email}. Setting reverification pending.")
+            session.reverification_pending = True
+            session.pending_user_type = highest_privilege_candidate.user_type
+            session.pending_email = highest_privilege_candidate.email
+            session.pending_full_name = highest_privilege_candidate.full_name
+            session.pending_zoho_contact_id = highest_privilege_candidate.zoho_contact_id
+            session.pending_wp_token = highest_privilege_candidate.wp_token
+            session.declined_recognized_email_at = None
+
+            if highest_privilege_candidate.fingerprint_id and \
+               not highest_privilege_candidate.fingerprint_id.startswith(("temp_", "fallback_", "not_collected_")) and \
+               session.fingerprint_id.startswith(("temp_", "fallback_", "temp_py_")):
+                session.fingerprint_id = highest_privilege_candidate.fingerprint_id
+                session.fingerprint_method = highest_privilege_candidate.fingerprint_method
+                logger.info(f"🔄 [INHERIT] Session {session.session_id[:8]}: Updated temporary fingerprint to {session.fingerprint_id[:8]} from highest privilege candidate.")
+
+        else:
+            session.reverification_pending = False
+            session.pending_user_type = None
+            session.pending_email = None
+            session.pending_full_name = None
+            session.pending_zoho_contact_id = None
+            session.pending_wp_token = None
+            logger.debug(f"🔄 [INHERIT] Session {session.session_id[:8]}: No higher privilege found for reverification. Cleared pending status.")
+
+        # FIXED: More robust question count inheritance logic
+        best_session_for_current_counts = None
+        current_max_daily_count = session.daily_question_count
+        
+        # For Guest users without email, inherit from ANY session with same fingerprint
+        if session.user_type == UserType.GUEST and not session.email:
+            logger.debug(f"🔄 [INHERIT] Guest user {session.session_id[:8]} - checking all fingerprint sessions for question count inheritance")
+            
+            for s in all_related_sessions:
+                # Only inherit from same or lower privilege level to avoid Guest inheriting from higher levels
+                if self._get_privilege_level(s.user_type) <= self._get_privilege_level(UserType.GUEST):
+                    logger.debug(f"  -> [INHERIT] Examining historical guest session {s.session_id[:8]}: daily_q={s.daily_question_count}, last_q_time={s.last_question_time}, last_activity={s.last_activity}, created_at={s.created_at}")
                     
-                    now = datetime.now()
-                    if (most_recent.last_question_time and (now - most_recent.last_question_time) < DAILY_RESET_WINDOW) or \
-                       (not most_recent.last_question_time and most_recent.last_activity and (now - most_recent.last_activity) < DAILY_RESET_WINDOW):
-                        # Inherit counts
-                        session.daily_question_count = most_recent.daily_question_count
-                        session.total_question_count = max(session.total_question_count, most_recent.total_question_count)
-                        session.last_question_time = most_recent.last_question_time
+                    if s.daily_question_count > 0:
+                        relevant_time = s.last_question_time or s.last_activity or s.created_at
                         
-                        # NEW: Also inherit cycle information
-                        session.current_tier_cycle_id = most_recent.current_tier_cycle_id
-                        session.tier1_completed_in_cycle = most_recent.tier1_completed_in_cycle
-                        session.tier_cycle_started_at = most_recent.tier_cycle_started_at
+                        if relevant_time:
+                            time_since_relevant_activity = now - relevant_time
+                            
+                            logger.debug(f"    -> [INHERIT] Current Time: {now.isoformat()}")
+                            logger.debug(f"    -> [INHERIT] Historical Session's Relevant Time: {relevant_time.isoformat()}")
+                            logger.debug(f"    -> [INHERIT] Time Delta: {time_since_relevant_activity}")
+                            logger.debug(f"    -> [INHERIT] Daily Reset Window: {DAILY_RESET_WINDOW}")
+                            logger.debug(f"    -> [INHERIT] Is within window? {time_since_relevant_activity < DAILY_RESET_WINDOW}")
 
-                        # Inherit Zoho contact ID
-                        if not session.zoho_contact_id and most_recent.zoho_contact_id:
-                            session.zoho_contact_id = most_recent.zoho_contact_id
-                        
-                        logger.info(f"✅ REGISTERED_USER EMAIL inheritance successful: {most_recent.daily_question_count} questions from {most_recent.session_id[:8]}")
-                    else:
-                        session.daily_question_count = 0
-                        session.total_question_count = 0
-                        session.last_question_time = None
-                        # NEW: Reset cycle for an old session
-                        session.current_tier_cycle_id = str(uuid.uuid4())
-                        session.tier1_completed_in_cycle = False
-                        session.tier_cycle_started_at = datetime.now()
-                        logger.info(f"🕐 REGISTERED_USER Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count AND tier cycle")
-                else:
-                    session.daily_question_count = 0
-                    session.total_question_count = 0
-                    session.last_question_time = None
-                    # NEW: Always initialize cycle for a fresh start
+                            if time_since_relevant_activity < DAILY_RESET_WINDOW:
+                                if s.daily_question_count > current_max_daily_count:
+                                    current_max_daily_count = s.daily_question_count
+                                    best_session_for_current_counts = s
+                                    logger.info(f"✅ [INHERIT] Found better count {s.daily_question_count} from session {s.session_id[:8]} (relevant_time: {relevant_time.isoformat()})")
+                            else:
+                                logger.debug(f"    -> [INHERIT] Historical session {s.session_id[:8]} count {s.daily_question_count} is outside DAILY_RESET_WINDOW.")
+                        else:
+                            logger.warning(f"🔄 [INHERIT] Session {s.session_id[:8]} has count {s.daily_question_count} but no valid timestamp reference for window check.")
+        
+        # For users with emails (or reverification pending with target email), use email-based inheritance
+        elif (session.email or (session.reverification_pending and session.pending_email)):
+            target_email = session.pending_email if session.reverification_pending else session.email
+            logger.debug(f"🔄 [INHERIT] Email-based inheritance for {session.session_id[:8]} with email {target_email}")
+            
+            for s in all_related_sessions:
+                if s.email and s.email.lower() == target_email.lower():
+                    # FIXED: Similar lenient logic for email-based inheritance
+                    if s.daily_question_count > 0:
+                        if s.last_question_time:
+                            time_since_last_question = now - s.last_question_time
+                            if time_since_last_question < DAILY_RESET_WINDOW:
+                                if s.daily_question_count > current_max_daily_count:
+                                    current_max_daily_count = s.daily_question_count
+                                    most_recent_q_time = s.last_question_time # Ensure most_recent_q_time is updated here
+                                    best_session_for_current_counts = s # Ensure best_session_for_current_counts is updated
+                                    logger.info(f"✅ [INHERIT] Found better count {s.daily_question_count} from email session {s.session_id[:8]}")
+                        else:
+                            # Fallback to last_activity
+                            fallback_time = s.last_activity or s.created_at
+                            if fallback_time and (now - fallback_time) < DAILY_RESET_WINDOW:
+                                if s.daily_question_count > current_max_daily_count:
+                                    current_max_daily_count = s.daily_question_count
+                                    most_recent_q_time = fallback_time # Update most_recent_q_time for fallback
+                                    best_session_for_current_counts = s # Ensure best_session_for_current_counts is updated
+                                    logger.warning(f"⚠️ [INHERIT] Found better count {s.daily_question_count} from email session {s.session_id[:8]} (using fallback)")
+                    
+                    # Also inherit total count and ban status for email-based users
+                    session.total_question_count = max(session.total_question_count, s.total_question_count)
+                    if (s.ban_status != BanStatus.NONE and s.ban_end_time and s.ban_end_time > now):
+                        session.ban_status = s.ban_status
+                        session.ban_start_time = s.ban_start_time
+                        session.ban_end_time = s.ban_end_time
+                        session.ban_reason = s.ban_reason
+                        session.question_limit_reached = True
+                        session.current_tier_cycle_id = s.current_tier_cycle_id
+                        session.tier1_completed_in_cycle = s.tier1_completed_in_cycle
+                        session.tier_cycle_started_at = s.tier_cycle_started_at
+                        logger.info(f"🔄 [INHERIT] Session {session.session_id[:8]}: Inherited active ban from session {s.session_id[:8]}.")
+        
+        # Apply the inherited counts
+        session.daily_question_count = current_max_daily_count
+        if best_session_for_current_counts:
+            # FIXED: Set last_question_time properly
+            if best_session_for_current_counts.last_question_time:
+                session.last_question_time = best_session_for_current_counts.last_question_time
+            else:
+                # If source session has no last_question_time but has questions, set it to last_activity
+                session.last_question_time = best_session_for_current_counts.last_activity or best_session_for_current_counts.created_at
+            
+            # For registered users, also inherit tier cycle info
+            if session.user_type == UserType.REGISTERED_USER or (session.reverification_pending and session.pending_user_type == UserType.REGISTERED_USER):
+                session.current_tier_cycle_id = best_session_for_current_counts.current_tier_cycle_id
+                session.tier1_completed_in_cycle = best_session_for_current_counts.tier1_completed_in_cycle
+                session.tier_cycle_started_at = best_session_for_current_counts.tier_cycle_started_at
+            
+            logger.info(f"✅ [INHERIT] Inherited question count {current_max_daily_count} from session {best_session_for_current_counts.session_id[:8]}")
+        elif current_max_daily_count == 0:
+            # No inheritance needed, reset timing fields
+            session.daily_question_count = 0
+            session.last_question_time = None
+            if session.user_type == UserType.REGISTERED_USER or (session.reverification_pending and session.pending_user_type == UserType.REGISTERED_USER):
+                if not session.current_tier_cycle_id:
                     session.current_tier_cycle_id = str(uuid.uuid4())
                     session.tier1_completed_in_cycle = False
-                    session.tier_cycle_started_at = datetime.now()
-                    logger.info(f"🆕 REGISTERED_USER no same-email history found, starting fresh (new tier cycle)")
-                
-                return
+                    session.tier_cycle_started_at = now
+                    logger.info(f"🔄 [INHERIT] Session {session.session_id[:8]}: New tier cycle started due to no recent inherited activity.")
 
-            # PRIORITY 1.5: For EMAIL_VERIFIED_GUEST, also use EMAIL-based inheritance
-            elif session.user_type == UserType.EMAIL_VERIFIED_GUEST and session.email:
-                logger.info(f"📧 Using EMAIL-based inheritance for email-verified guest {session.email}")
-                
-                email_sessions = self.db.find_sessions_by_email(session.email)
-                email_sessions = [s for s in email_sessions if s.session_id != session.session_id]
-                
-                if email_sessions:
-                    # Find most recent session with same email to inherit counts from
-                    most_recent = max(email_sessions, key=lambda s: s.last_question_time or s.last_activity or s.created_at)
-                    
-                    now = datetime.now()
-                    if (most_recent.last_question_time and (now - most_recent.last_question_time) < DAILY_RESET_WINDOW):
-                        # Inherit counts
-                        session.daily_question_count = most_recent.daily_question_count
-                        session.total_question_count = max(session.total_question_count, most_recent.total_question_count)
-                        session.last_question_time = most_recent.last_question_time
-                        
-                        # Inherit ban if active
-                        if (most_recent.ban_status != BanStatus.NONE and 
-                            most_recent.ban_end_time and 
-                            most_recent.ban_end_time > now):
-                            session.ban_status = most_recent.ban_status
-                            session.ban_start_time = most_recent.ban_start_time
-                            session.ban_end_time = most_recent.ban_end_time
-                            session.ban_reason = most_recent.ban_reason
-                            session.question_limit_reached = True
-                        
-                        logger.info(f"✅ EMAIL_VERIFIED_GUEST EMAIL inheritance successful: {most_recent.daily_question_count} questions from {most_recent.session_id[:8]}")
-                    else:
-                        logger.info(f"🕐 EMAIL_VERIFIED_GUEST Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count")
-                        session.daily_question_count = 0
-                        session.last_question_time = None
-                
-                return  # Skip fingerprint-based inheritance for email-verified guests
+        logger.info(f"✅ [INHERIT] Final inheritance status for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}, pending_type={session.pending_user_type.value if session.pending_user_type else 'None'}, declined_at={session.declined_recognized_email_at}")
 
-            # PRIORITY 2: For non-registered users (Guest), use fingerprint
-            if not session.fingerprint_id or session.fingerprint_id.startswith(("temp_", "fallback_")):
-                logger.info("No valid fingerprint yet or temporary, skipping fingerprint-based inheritance for non-registered.")
-                session.visitor_type = "new_visitor"
-                return
-
-            historical_fp_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
-            historical_fp_sessions = [s for s in historical_fp_sessions if s.session_id != session.session_id]
-
-            if not historical_fp_sessions:
-                session.visitor_type = "new_visitor"
-                logger.info(f"Inheritance complete for new visitor {session.session_id[:8]}. No historical sessions found for fingerprint.")
-                session.reverification_pending = False
-                session.pending_user_type = None
-                session.pending_email = None
-                session.pending_full_name = None
-                session.pending_zoho_contact_id = None
-                session.pending_wp_token = None
-                session.declined_recognized_email_at = None
-                return
-
-            session.visitor_type = "returning_visitor"
-            
-            current_email = session.email.lower() if session.email else None
-            
-            # Separate identity inheritance from count inheritance
-            all_sessions_for_identity = [session] + historical_fp_sessions
-            sessions_for_count_inheritance = []
-            
-            # UPDATED LOGIC: For count inheritance
-            if current_email:
-                # If current session has email, inherit from same email sessions
-                sessions_for_count_inheritance = [
-                    s for s in historical_fp_sessions 
-                    if s.email and s.email.lower() == current_email
-                ]
-            else:
-                # NEW: If current session is GUEST (no email), inherit from other GUEST sessions
-                sessions_for_count_inheritance = [
-                    s for s in historical_fp_sessions 
-                    if s.user_type == UserType.GUEST and not s.email
-                ]
-                logger.info(f"🎯 GUEST inheriting from {len(sessions_for_count_inheritance)} previous GUEST sessions with same fingerprint")
-            
-            # --- Initialize values for merging ---
-            merged_total_question_count = session.total_question_count
-            merged_last_question_time = session.last_question_time
-            merged_daily_question_count = session.daily_question_count
-            source_for_identity = session
-            most_recent_ban_session = None
-            now = datetime.now()
-
-            # --- Pass 1: Find the highest privilege identity from ALL sessions ---
-            unique_emails_in_history = set()
-            highest_user_type_seen = UserType.GUEST
-            
-            for s in all_sessions_for_identity:
-                if s.email:
-                    unique_emails_in_history.add(s.email.lower())
-
-                if self._get_privilege_level(s.user_type) > self._get_privilege_level(highest_user_type_seen):
-                    highest_user_type_seen = s.user_type
-
-                if self._get_privilege_level(s.user_type) > self._get_privilege_level(source_for_identity.user_type):
-                    source_for_identity = s
-                elif self._get_privilege_level(s.user_type) == self._get_privilege_level(source_for_identity.user_type):
-                    if s.last_activity and (not source_for_identity.last_activity or s.last_activity > source_for_identity.last_activity):
-                        source_for_identity = s
-
-            # --- Apply multiple email detection for recognition purposes ---
-            if len(unique_emails_in_history) > 1:
-                logger.info(f"🚨 Multiple emails ({len(unique_emails_in_history)}) detected for fingerprint - disabling explicit recognition prompt.")
-                session.recognition_response = "multiple_emails_detected"
-                session.reverification_pending = False
-                session.pending_user_type = None
-                session.pending_email = None
-                session.pending_full_name = None
-                session.pending_zoho_contact_id = None
-                session.pending_wp_token = None
-            
-            # --- User type precedence - always offer highest seen type ---
-            if highest_user_type_seen == UserType.REGISTERED_USER and session.user_type != UserType.REGISTERED_USER:
-                registered_session = next((s for s in all_sessions_for_identity if s.user_type == UserType.REGISTERED_USER), None)
-                if registered_session and registered_session.email:
-                    session.reverification_pending = True
-                    session.pending_user_type = UserType.REGISTERED_USER
-                    session.pending_email = registered_session.email
-                    session.pending_full_name = registered_session.full_name
-                    session.pending_zoho_contact_id = registered_session.zoho_contact_id
-                    session.pending_wp_token = registered_session.wp_token
-                    logger.info(f"🔄 Offering REGISTERED_USER re-verification for {session.session_id[:8]} (highest precedence)")
-                    return
-            
-            # --- Pass 2: Find ban and count info from appropriate sessions ---
-            for s in sessions_for_count_inheritance:
-                # Find the single most recent ban to evaluate
-                if s.ban_status != BanStatus.NONE and s.ban_end_time:
-                    if most_recent_ban_session is None or s.ban_end_time > most_recent_ban_session.ban_end_time:
-                        most_recent_ban_session = s
-                
-                # Merge total count and last question time
-                merged_total_question_count = max(merged_total_question_count, s.total_question_count)
-                if s.last_question_time and (not merged_last_question_time or s.last_question_time > merged_last_question_time):
-                    merged_last_question_time = s.last_question_time
-
-            # --- Pass 3: Determine daily count and ban status ---
-            ban_is_active = most_recent_ban_session and now < most_recent_ban_session.ban_end_time
-            
-            if ban_is_active:
-                logger.info(f"Inheritance: Found ACTIVE ban. Applying to session {session.session_id[:8]}.")
-                session.ban_status = most_recent_ban_session.ban_status
-                session.ban_start_time = most_recent_ban_session.ban_start_time
-                session.ban_end_time = most_recent_ban_session.ban_end_time
-                session.ban_reason = most_recent_ban_session.ban_reason
-                session.question_limit_reached = True
-                
-                # Find the max daily count from sessions within the reset window
-                for s in sessions_for_count_inheritance:
-                    if s.daily_question_count and s.last_question_time and (now - s.last_question_time < DAILY_RESET_WINDOW):
-                        merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
-            else:
-                logger.info(f"Inheritance: No active ban found. Evaluating question count reset.")
-                session.ban_status = BanStatus.NONE
-                session.ban_start_time = None
-                session.ban_end_time = None
-                session.ban_reason = None
-                session.question_limit_reached = False
-
-                # Check if the daily count should be reset based on last question time
-                if merged_last_question_time and (now - merged_last_question_time) < DAILY_RESET_WINDOW:
-                    # The last question was recent
-                    for s in sessions_for_count_inheritance:
-                        if s.daily_question_count and s.last_question_time and (now - s.last_question_time < DAILY_RESET_WINDOW):
-                            merged_daily_question_count = max(merged_daily_question_count, s.daily_question_count)
-                    logger.info(f"✅ Inherited daily count: {merged_daily_question_count} from previous sessions")
-                else:
-                    logger.info(f"Inheritance: Last question time is > {DAILY_RESET_WINDOW_HOURS}h ago OR no questions. Resetting daily count to 0.")
-                    merged_daily_question_count = 0
-                    merged_last_question_time = None
-            
-            # --- Apply all merged and determined values to the current session ---
-            session.total_question_count = merged_total_question_count
-            session.daily_question_count = merged_daily_question_count
-            session.last_question_time = merged_last_question_time
-
-            # Apply identity (considering multiple emails and privilege levels)
-            if (len(unique_emails_in_history) <= 1 or 
-                self._get_privilege_level(source_for_identity.user_type) > self._get_privilege_level(session.user_type)):
-                
-                source_email = source_for_identity.email.lower() if source_for_identity.email else None
-                session_email = session.email.lower() if session.email else None
-                
-                if (not session_email or not source_email or source_email == session_email):
-                    if self._get_privilege_level(source_for_identity.user_type) > self._get_privilege_level(session.user_type):
-                        # Higher privilege found, set reverification pending
-                        session.reverification_pending = True
-                        session.pending_user_type = source_for_identity.user_type
-                        session.pending_email = source_for_identity.email
-                        session.pending_full_name = source_for_identity.full_name
-                        session.pending_zoho_contact_id = source_for_identity.zoho_contact_id
-                        session.pending_wp_token = source_for_identity.wp_token
-                        logger.info(f"🔄 Offering REGISTERED_USER re-verification for {session.session_id[:8]} (highest precedence)")
-                    else:
-                        # Same or lower privilege, just inherit the details if available
-                        session.user_type = source_for_identity.user_type
-                        session.email = source_for_identity.email
-                        session.full_name = source_for_identity.full_name
-                        session.zoho_contact_id = source_for_identity.zoho_contact_id
-                        session.wp_token = source_for_identity.wp_token
-                else:
-                    logger.info(f"Inheritance: Identity not transferred due to email mismatch: source={source_email}, session={session_email}")
-            else:
-                logger.info(f"Inheritance: Identity not fully transferred due to multiple emails and no privilege upgrade for {session.session_id[:8]}.")
-
-            # Update fingerprint if necessary
-            if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and not source_for_identity.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                session.fingerprint_id = source_for_identity.fingerprint_id
-                session.fingerprint_method = source_for_identity.fingerprint_method
-            
-            logger.info(f"✅ Inheritance complete for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}")
-
-        except Exception as e:
-            logger.error(f"Error during fingerprint inheritance for session {session.session_id[:8]}: {e}", exc_info=True)
-        
-    def get_session(self) -> Optional[UserSession]:
+    def get_session(self, create_if_missing: bool = True) -> Optional[UserSession]:
         """Gets or creates the current user session with enhanced validation."""
-        logger.info(f"🔍 get_session() called - current_session_id in state: {st.session_state.get('current_session_id', 'None')}")
-    
-        # Perform periodic cleanup
+        logger.info(f"🔍 [GET_SESSION] Start for session_id in state: {st.session_state.get('current_session_id', 'None')[:8]} (create_if_missing={create_if_missing})")
+
         self._periodic_cleanup()
 
         try:
             session_id = st.session_state.get('current_session_id')
-        
+            current_session_from_db = None # To hold the freshly loaded session from DB
+
             if session_id:
-                # ADD THIS: Check if session loading is already in progress
                 if st.session_state.get(f'loading_{session_id}', False):
-                    logger.warning(f"Session {session_id[:8]} already being loaded, skipping")
+                    logger.warning(f"🔍 [GET_SESSION] Session {session_id[:8]} already being loaded, skipping")
                     return None
-    
+
                 st.session_state[f'loading_{session_id}'] = True
-                session = self.db.load_session(session_id)
-                st.session_state[f'loading_{session_id}'] = False  # Clear the flag
+                current_session_from_db = self.db.load_session(session_id) # Load the active session
+                st.session_state[f'loading_{session_id}'] = False
             
-                if session and session.active:
-                    # NEW: Check if any bans have expired
+                logger.debug(f"🔍 [GET_SESSION] Loaded session {session_id[:8]} from DB. Daily_Q: {current_session_from_db.daily_question_count if current_session_from_db else 'N/A'}, Last_Q_Time: {current_session_from_db.last_question_time if current_session_from_db else 'N/A'}")
+
+                if current_session_from_db and current_session_from_db.active:
+                    session = current_session_from_db # Use the loaded session as our working copy
+
                     if session.ban_status != BanStatus.NONE:
                         if session.ban_end_time and datetime.now() >= session.ban_end_time:
-                            logger.info(f"Ban expired for session {session.session_id[:8]}. Clearing ban status.")
-                        
-                            # Store the previous ban type before clearing
+                            logger.info(f"🚫 [GET_SESSION] Ban expired for session {session.session_id[:8]}. Clearing ban status.")
+                            
                             previous_ban_type = session.ban_status
 
-                            # Clear the ban
                             session.ban_status = BanStatus.NONE
                             session.ban_start_time = None
                             session.ban_end_time = None
                             session.ban_reason = None
                             session.question_limit_reached = False
                             
-                            # Handle post-ban transitions for registered users
                             if session.user_type == UserType.REGISTERED_USER:
                                 if previous_ban_type == BanStatus.TWENTY_FOUR_HOUR:
-                                    logger.info(f"🔄 Tier 2 ban expired for {session.session_id[:8]} - starting new tier cycle")
+                                    logger.info(f"🔄 [GET_SESSION] Tier 2 ban expired for {session.session_id[:8]} - starting new tier cycle")
                                     session.daily_question_count = 0
                                     session.last_question_time = None
                                     session.current_tier_cycle_id = str(uuid.uuid4())
                                     session.tier1_completed_in_cycle = False
                                     session.tier_cycle_started_at = datetime.now()
                                 elif previous_ban_type == BanStatus.ONE_HOUR:
-                                    logger.info(f"✅ Tier 1 ban expired for {session.session_id[:8]} - can now proceed to Tier 2")
-                                    # Counts and cycle info remain, as tier1_completed_in_cycle is already True
+                                    logger.info(f"✅ [GET_SESSION] Tier 1 ban expired for {session.session_id[:8]} - can now proceed to Tier 2")
                             else:
                                 session.daily_question_count = 0
                                 session.last_question_time = None
-                        
-                            # Save the updated session
+                            
                             self.db.save_session(session)
-                
-                    # NEW: Immediately attempt fingerprint inheritance if session has a temporary fingerprint
-                    # And this check hasn't been performed for this session yet in the current rerun cycle.
+
+                    # --- CRITICAL FIX: Ensure _attempt_fingerprint_inheritance is called consistently ---
+                    # This block ensures inheritance runs AFTER a stable FP is available for non-registered users.
                     fingerprint_checked_key = f'fingerprint_checked_for_inheritance_{session.session_id}'
                     
-                    ## CHANGE: Only attempt fingerprint inheritance for NON-REGISTERED users
-                    if session.user_type != UserType.REGISTERED_USER and \
-                       session.fingerprint_id and \
-                       session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and \
-                       not st.session_state.get(fingerprint_checked_key, False):
+                    if session.user_type != UserType.REGISTERED_USER:
+                        # If fingerprint is still temporary OR it's a guest and has a real FP but hasn't had inheritance checked yet
+                        if session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) or \
+                           (not st.session_state.get(fingerprint_checked_key, False) and 
+                            not session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))):
+                            
+                            logger.info(f"🔄 [GET_SESSION] Triggering _attempt_fingerprint_inheritance for session {session.session_id[:8]}. FP: {session.fingerprint_id[:8]}..., Checked_Key: {st.session_state.get(fingerprint_checked_key, False)}")
+                            self._attempt_fingerprint_inheritance(session)
+                            self.db.save_session(session) # Save changes from inheritance
+                            st.session_state[fingerprint_checked_key] = True
+                            logger.info(f"✅ [GET_SESSION] Inheritance check completed for {session.session_id[:8]}. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
+
+                        # If the fingerprint *just* changed from temp to real via FastAPI, re-load and run inheritance
+                        elif st.session_state.get('fingerprint_client_side_completed', False) and \
+                             session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")): # It's still temp but client says it's done, force reload
+                            logger.info(f"🔄 [GET_SESSION] Client-side FP completed, but session still has TEMP FP. Forcing DB reload and re-inheritance for {session.session_id[:8]}.")
+                            reloaded_session_for_fp_update = self.db.load_session(session_id)
+                            if reloaded_session_for_fp_update and not reloaded_session_for_fp_update.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                                session = reloaded_session_for_fp_update # Update working session to the one with real FP
+                                self._attempt_fingerprint_inheritance(session)
+                                self.db.save_session(session)
+                                st.session_state[fingerprint_checked_key] = True
+                                logger.info(f"✅ [GET_SESSION] Forced re-inheritance after real FP update for {session.session_id[:8]}. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
+                            else:
+                                logger.warning(f"⚠️ [GET_SESSION] Client-side FP completed, but DB still has TEMP FP for {session.session_id[:8]}. Proceeding without real FP for now.")
                     
-                        self._attempt_fingerprint_inheritance(session)
-                        # Save session after potential inheritance to persist updated user type/counts
-                        self.db.save_session(session) # Crucial to save here
-                        st.session_state[fingerprint_checked_key] = True # Mark as checked for this session
-                        logger.info(f"Fingerprint inheritance check and save completed for {session.session_id[:8]}")
-                    
-                    ## CHANGE: For REGISTERED USERS, ensure FP is marked as not collected/not applicable
                     elif session.user_type == UserType.REGISTERED_USER and \
-                         (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_", "fallback_", "temp_py_"))): # Also check temp_py_
+                         (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_", "fallback_", "not_collected_"))):
                         session.fingerprint_id = "not_collected_registered_user"
                         session.fingerprint_method = "email_primary"
-                        self.db.save_session(session) # Save immediately
-                        logger.info(f"Registered user {session.session_id[:8]} fingerprint marked as not collected.")
+                        self.db.save_session(session)
+                        logger.info(f"✅ [GET_SESSION] Registered user {session.session_id[:8]} fingerprint marked as not collected.")
 
-
-                    # NEW: Check if guest needs forced verification
-                    if session.user_type.value == UserType.GUEST.value and session.daily_question_count == 0:
-                        # Find all historical sessions for this fingerprint
-                        historical_sessions = self.db.find_sessions_by_fingerprint(session.fingerprint_id)
-                        
-                        # UPDATED LOGIC: Check if ANY session with this fingerprint was email-verified
-                        email_verified_sessions = [
-                            s for s in historical_sessions 
-                            if s.session_id != session.session_id # Must be a different session
-                            and (s.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value or 
-                                 s.user_type.value == UserType.REGISTERED_USER.value or
-                                 s.email is not None) # Any session that had email
-                        ]
-                        
-                        if email_verified_sessions:
-                            # This device has been email-verified before - no more free Guest access
-                            logger.info(f"Session {session.session_id[:8]} must verify email - fingerprint previously used with email verification")
-                            st.session_state.must_verify_email_immediately = True
-                            st.session_state.skip_email_allowed = False # No skipping for forced verification
-                            
-                            # Get list of known emails for this device
-                            known_emails = set()
-                            for sess in email_verified_sessions:
-                                if sess.email:
-                                    known_emails.add(sess.email.lower())
-                            
-                            # Store for display in the verification prompt
-                            st.session_state.known_device_emails = list(known_emails)
-
-                    # Check limits and handle bans. This is where the 24-hour reset happens.
+                    # --- End CRITICAL FIX ---
+                
                     limit_check = self.question_limits.is_within_limits(session)
-                    if not limit_check.get('allowed', True) and limit_check.get('reason') != 'guest_limit':
+                    if not limit_check.get('allowed', True) and limit_check.get('reason') not in ['guest_limit', 'email_verified_guest_limit', 'registered_user_tier1_limit', 'registered_user_tier2_limit']:
                     
                         ban_type = limit_check.get('ban_type', 'unknown')
                         message = limit_check.get('message', 'Access restricted due to usage policy.')
-                        time_remaining = limit_check.get('time_remaining')
-                    
+                        time_remaining = limit_check.get('time_until_next')
+
                         st.error(f"🚫 **Access Restricted**")
-                        if time_remaining:
+                        if isinstance(time_remaining, timedelta):
                             hours = max(0, int(time_remaining.total_seconds() // 3600))
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
+                        elif isinstance(time_remaining, (int, float)):
+                            hours = max(0, int(time_remaining // 3600))
+                            minutes = int((time_remaining % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+
                         st.info(message)
-                        logger.info(f"Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
+                        logger.info(f"🚫 [GET_SESSION] Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
                 
                         try:
                             self.db.save_session(session)
                         except Exception as e:
-                            logger.error(f"Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
+                            logger.error(f"❌ [GET_SESSION] Failed to save banned session {session.session_id[:8]}: {e}", exc_info=True)
                     
                         return session
                 
+                    logger.info(f"✅ [GET_SESSION] Returning session {session.session_id[:8]} (active and not banned). Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}")
                     return session
                 else:
-                    logger.warning(f"Session {session_id[:8]} not found or inactive. Creating new session.")
+                    logger.warning(f"🔍 [GET_SESSION] Session {session_id[:8]} not found or inactive. Creating new session.")
                     if 'current_session_id' in st.session_state:
                         del st.session_state['current_session_id']
 
-            logger.info(f"Creating new session")
+            # Only create new session if explicitly requested
+            if not create_if_missing:
+                logger.info("🔍 [GET_SESSION] No session exists and create_if_missing=False, returning None")
+                return None
+
+            logger.info(f"🔍 [GET_SESSION] Creating new session")
             new_session = self._create_new_session()
             st.session_state.current_session_id = new_session.session_id
         
-            # Immediately attempt fingerprint inheritance for the *newly created* session
-            # This is critical if a user starts a new session but has an existing fingerprint
-            ## CHANGE: Only attempt fingerprint inheritance for NON-REGISTERED users; otherwise mark as not collected
             if new_session.user_type != UserType.REGISTERED_USER:
-                self._attempt_fingerprint_inheritance(new_session) # <--- This call will now also correctly set visitor_type
+                self._attempt_fingerprint_inheritance(new_session)
                 st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
-            else: # For newly created REGISTERED_USER, mark FP as not collected
+            else:
                 new_session.fingerprint_id = "not_collected_registered_user"
                 new_session.fingerprint_method = "email_primary"
-                # NEW: Initialize cycle tracking for new registered user
                 new_session.current_tier_cycle_id = str(uuid.uuid4())
                 new_session.tier1_completed_in_cycle = False
                 new_session.tier_cycle_started_at = datetime.now()
-                logger.info(f"New REGISTERED_USER session {new_session.session_id[:8]} fingerprint marked as not collected. New tier cycle started.")
+                logger.info(f"✅ [GET_SESSION] New REGISTERED_USER session {new_session.session_id[:8]} fingerprint marked as not collected. New tier cycle started.")
 
-            self.db.save_session(new_session) # Save the new session (potentially updated by inheritance)
-            logger.info(f"Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}")
+            self.db.save_session(new_session)
+            logger.info(f"✅ [GET_SESSION] Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}, Daily_Q: {new_session.daily_question_count}, Last_Q_Time: {new_session.last_question_time}")
             return new_session
         
         except Exception as e:
-            logger.error(f"Failed to get/create session: {e}", exc_info=True)
+            logger.error(f"❌ [GET_SESSION] Failed to get/create session: {e}", exc_info=True)
+            if not create_if_missing:
+                return None
             fallback_session = UserSession(session_id=str(uuid.uuid4()), user_type=UserType.GUEST, last_activity=None, login_method='guest')
             fallback_session.fingerprint_id = f"emergency_fp_{fallback_session.session_id[:8]}"
             fallback_session.fingerprint_method = "emergency_fallback"
             st.session_state.current_session_id = fallback_session.session_id
             st.error("⚠️ Failed to create or load session. Operating in emergency fallback mode. Chat history may not persist.")
-            logger.error(f"Emergency fallback session created {fallback_session.session_id[:8]}")
+            logger.error(f"🚨 [GET_SESSION] Emergency fallback session created {fallback_session.session_id[:8]}")
             return fallback_session
     
-    ## CHANGE: Sync method for registered users
+            
     def sync_registered_user_sessions(self, email: str, current_session_id: str):
         """Sync question counts and tier cycle info across all active sessions for a registered user by email"""
         try:
@@ -3667,7 +3920,6 @@ class SessionManager:
             if not active_registered_sessions:
                 return
             
-            # Find the session with the highest question count within the DAILY_RESET_WINDOW
             max_count_session = None
             now = datetime.now()
             for sess in active_registered_sessions:
@@ -3675,23 +3927,21 @@ class SessionManager:
                     if max_count_session is None or sess.daily_question_count > max_count_session.daily_question_count:
                         max_count_session = sess
             
-            if max_count_session is None: # No recent sessions, or all counts expired
+            if max_count_session is None:
                 logger.info(f"No recent active sessions for {email} to sync. Counts will reset for new activity.")
                 return
             
-            # Update all other sessions to match the max_count_session
             for sess in active_registered_sessions:
                 if sess.session_id != max_count_session.session_id:
                     sess.daily_question_count = max_count_session.daily_question_count
                     sess.total_question_count = max_count_session.total_question_count
                     sess.last_question_time = max_count_session.last_question_time
                     
-                    # Also sync tier cycle information
                     sess.current_tier_cycle_id = max_count_session.current_tier_cycle_id
                     sess.tier1_completed_in_cycle = max_count_session.tier1_completed_in_cycle
                     sess.tier_cycle_started_at = max_count_session.tier_cycle_started_at
 
-                    self.db.save_session(sess) # Save immediately
+                    self.db.save_session(sess)
                     logger.debug(f"Synced session {sess.session_id[:8]} to {max_count_session.daily_question_count} daily questions from {max_count_session.session_id[:8]}")
             
             logger.info(f"Synced {len(active_registered_sessions)} sessions for registered user {email}")
@@ -3711,7 +3961,6 @@ class SessionManager:
             if not active_email_verified_sessions:
                 return
             
-            # Find the session with the highest question count within the DAILY_RESET_WINDOW
             max_count_session = None
             now = datetime.now()
             for sess in active_email_verified_sessions:
@@ -3723,14 +3972,12 @@ class SessionManager:
                 logger.info(f"No recent active sessions for email-verified {email} to sync.")
                 return
             
-            # Update all other sessions to match the max_count_session
             for sess in active_email_verified_sessions:
                 if sess.session_id != max_count_session.session_id:
                     sess.daily_question_count = max_count_session.daily_question_count
                     sess.total_question_count = max_count_session.total_question_count
                     sess.last_question_time = max_count_session.last_question_time
                     
-                    # Also sync ban information if any
                     if max_count_session.ban_status != BanStatus.NONE:
                         sess.ban_status = max_count_session.ban_status
                         sess.ban_start_time = max_count_session.ban_start_time
@@ -3749,90 +3996,76 @@ class SessionManager:
     def apply_fingerprinting(self, session: UserSession, fingerprint_data: Dict[str, Any]) -> bool:
         """Applies fingerprinting data from custom component to the session with better validation.
         This function will now be called only for non-registered users (Guests)."""
-        logger.debug(f"🔍 APPLYING FINGERPRINT received from JS: {fingerprint_data.get('fingerprint_id', 'None')[:8]} to session {session.session_id[:8]} (UserType: {session.user_type.value})")
+        logger.debug(f"🔍 [FP_APPLY] Start for session {session.session_id[:8]}. Initial FP: {session.fingerprint_id[:8] if session.fingerprint_id else 'None'}, Daily_Q: {session.daily_question_count}")
         
-        # Guard against applying fingerprint data to registered users
         if session.user_type == UserType.REGISTERED_USER:
-            logger.warning(f"Attempted to apply fingerprint to REGISTERED_USER {session.session_id[:8]}. Ignoring.")
+            logger.warning(f"🔍 [FP_APPLY] Attempted to apply fingerprint to REGISTERED_USER {session.session_id[:8]}. Ignoring.")
             return False
 
         try:
             if not fingerprint_data or not isinstance(fingerprint_data, dict):
-                logger.warning("Invalid fingerprint data provided to apply_fingerprinting")
+                logger.warning("🔍 [FP_APPLY] Invalid fingerprint data provided to apply_fingerprinting")
                 return False
             
             old_fingerprint_id = session.fingerprint_id
             old_method = session.fingerprint_method
             
-            # Store the *new, real* fingerprint data
             session.fingerprint_id = fingerprint_data.get('fingerprint_id')
             session.fingerprint_method = fingerprint_data.get('fingerprint_method')
-            # session.visitor_type is determined by apply_fingerprinting after inheritance check
             session.browser_privacy_level = fingerprint_data.get('browser_privacy_level', 'standard')
-            session.recognition_response = None # Clear any previous recognition response
+            session.recognition_response = None
             
             if not session.fingerprint_id or not session.fingerprint_method:
-                logger.error("Invalid fingerprint data: missing essential fields from JS. Reverting to old fingerprint.")
+                logger.error("🔍 [FP_APPLY] Invalid fingerprint data: missing essential fields from JS. Reverting to old fingerprint.")
                 session.fingerprint_id = old_fingerprint_id
                 session.fingerprint_method = old_method
                 return False
             
-            # Now that the current session has its *real* fingerprint from JS,
-            # run the inheritance logic to see if this fingerprint has a history.
-            # This will update user_type, question counts, etc., based on the definitive fingerprint.
-            self._attempt_fingerprint_inheritance(session) # <--- This call will now also update visitor_type
+            logger.debug(f"🔍 [FP_APPLY] Session {session.session_id[:8]}. New FP set: {session.fingerprint_id[:8]}..., Daily_Q BEFORE inheritance: {session.daily_question_count}, Last_Q_Time BEFORE inheritance: {session.last_question_time}")
+
+            self._attempt_fingerprint_inheritance(session)
             
-            # Save session with new fingerprint data and inherited properties
+            logger.debug(f"🔍 [FP_APPLY] Session {session.session_id[:8]}. Daily_Q AFTER inheritance: {session.daily_question_count}, Last_Q_Time AFTER inheritance: {session.last_question_time}")
             try:
                 self.db.save_session(session)
-                logger.info(f"✅ Fingerprinting applied and inheritance checked for {session.session_id[:8]}: {session.fingerprint_method} (ID: {session.fingerprint_id[:8]}...), active={session.active}, rev_pending={session.reverification_pending}")
+                logger.info(f"✅ [FP_APPLY] Session {session.session_id[:8]} saved after fingerprinting. Final Daily_Q: {session.daily_question_count}, Last_Q_Time: {session.last_question_time}, Rev_Pending: {session.reverification_pending}")
             except Exception as e:
-                logger.error(f"Failed to save session after fingerprinting (JS data received): {e}")
-                # If save fails, revert to old fingerprint to avoid inconsistent state
+                logger.error(f"❌ [FP_APPLY] Failed to save session {session.session_id[:8]} after fingerprinting (JS data received): {e}")
                 session.fingerprint_id = old_fingerprint_id
                 session.fingerprint_method = old_method
                 return False
         except Exception as e:
-            logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
+            logger.error(f"❌ [FP_APPLY] Fingerprint processing failed for session {session.session_id[:8]}: {e}", exc_info=True)
             return False
         return True
 
     def check_fingerprint_history(self, fingerprint_id: str) -> Dict[str, Any]:
-        """Check if a fingerprint has historical sessions and return relevant information, now handling multiple emails.
-        This function will primarily be used for non-registered users."""
+        """Check if a fingerprint has historical sessions and return relevant information, now handling multiple emails."""
         
-        # For registered users, fingerprint history is not relevant for primary identification
-        # We don't have the session object here, so we assume this is only called in contexts where
-        # fingerprint is relevant (i.e., for guest recognition flows).
-
         try:
             existing_sessions = self.db.find_sessions_by_fingerprint(fingerprint_id)
             
             if not existing_sessions:
                 return {'has_history': False}
             
-            # Get unique emails
             unique_emails = set()
             for s in existing_sessions:
                 if s.email:
                     unique_emails.add(s.email.lower())
             
-            # Multiple email detection
             if len(unique_emails) > 1:
                 logger.info(f"🚨 Multiple emails ({len(unique_emails)}) detected for fingerprint {fingerprint_id[:8]}: {unique_emails}")
                 return {
                     'has_history': True,
                     'multiple_emails': True,
                     'email_count': len(unique_emails),
-                    'skip_recognition': True  # Don't show recognition dialog
+                    'skip_recognition': True
                 }
             
-            # Single email - show recognition
             most_privileged_session = None
             for s in existing_sessions:
-                # Ensure we don't try to recognize a REGISTERED_USER based on FP if email is primary
                 if s.user_type == UserType.REGISTERED_USER:
-                    logger.info(f"Skipping REGISTERED_USER session {s.session_id[:8]} for fingerprint-based recognition.")
+                    logger.info(f"Skipping REGISTERED_USER session {s.session_id[:8]} for fingerprint-based recognition (email is primary identifier).")
                     continue
 
                 if s.email and (most_privileged_session is None or 
@@ -3847,7 +4080,7 @@ class SessionManager:
                     'full_name': most_privileged_session.full_name,
                     'user_type': most_privileged_session.user_type.value,
                     'last_activity': most_privileged_session.last_activity,
-                    'daily_question_count': most_privileged_session.daily_question_count # Also pass the count from history
+                    'daily_question_count': most_privileged_session.daily_question_count
                 }
             
             return {'has_history': False}
@@ -3861,7 +4094,7 @@ class SessionManager:
         try:
             local, domain = email.split('@')
             if len(local) <= 2:
-                masked_local = local[0] + '*' * (len(local) - 1) # Mask remaining chars
+                masked_local = local[0] + '*' * (len(local) - 1)
             else:
                 masked_local = local[:2] + '*' * (len(local) - 2)
             return f"{masked_local}@{domain}"
@@ -3871,27 +4104,22 @@ class SessionManager:
     def handle_guest_email_verification(self, session: UserSession, email: str) -> Dict[str, Any]:
         """Email verification - allows unlimited email switches with OTP verification. No evasion penalties."""
         try:
-            sanitized_email = sanitize_input(email).lower().strip() ## CHANGE: Use global sanitize_input
+            sanitized_email = sanitize_input(email).lower().strip()
             
             if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', sanitized_email):
                 logger.debug(f"handle_guest_email_verification returning FAILURE: Invalid email format for {email}")
                 return {'success': False, 'message': 'Please enter a valid email address.'}
             
-            # UPDATED: Removed evasion check as per requirement: email switching is allowed.
-            
-            # Track email usage for this session
             if sanitized_email not in session.email_addresses_used:
                 session.email_addresses_used.append(sanitized_email)
             
-            # Update session email (if not already set by re-verification pending)
             if not session.reverification_pending:
                 if session.email and session.email != sanitized_email:
-                    session.email_switches_count += 1 # Increment for tracking, no penalty
+                    session.email_switches_count += 1
                 session.email = sanitized_email
-                session.login_method = 'email_verified' # NEW: Set login method for guests who verify email directly
+                session.login_method = 'email_verified'
             elif session.reverification_pending and sanitized_email != session.pending_email:
-                # If reverification is pending but they enter a different email, treat as new email path
-                session.email_switches_count += 1 # Increment for tracking, no penalty
+                session.email_switches_count += 1
                 session.email = sanitized_email
                 session.reverification_pending = False
                 session.pending_user_type = None
@@ -3899,17 +4127,14 @@ class SessionManager:
                 session.pending_full_name = None
                 session.pending_zoho_contact_id = None
                 session.pending_wp_token = None
-                session.login_method = 'email_verified' # NEW: Set login method for guests who verify email directly
+                session.login_method = 'email_verified'
                 logger.warning(f"Session {session.session_id[:8]} switched email during pending re-verification. Resetting pending state.")
 
-            # Clear `declined_recognized_email_at` if they are now proceeding with *any* email verification
             session.declined_recognized_email_at = None
             
-            # Set last_activity if not already set (first time starting chat)
             if session.last_activity is None:
                 session.last_activity = datetime.now()
 
-            # Save session before sending verification
             try:
                 self.db.save_session(session)
             except Exception as e:
@@ -3921,7 +4146,6 @@ class SessionManager:
                 logger.debug(f"handle_guest_email_verification returning FAILURE (DB Save): {final_result}")
                 return final_result
             
-            # Send verification code
             code_sent = self.email_verification.send_verification_code(sanitized_email)
             
             if code_sent:
@@ -3948,15 +4172,19 @@ class SessionManager:
             logger.debug(f"handle_guest_email_verification returning FAILURE (Unexpected Exception): {final_result}")
             return final_result
 
+
     def verify_email_code(self, session: UserSession, code: str) -> Dict[str, Any]:
         """
         Verifies the email verification code and upgrades user status.
-        Updated to properly track email-verified users across devices.
+        Now correctly handles both:
+        1. User declining recognition then verifying same email.
+        2. Inheriting the HIGHEST question count during re-verification.
         """
         try:
             email_to_verify = session.pending_email if session.reverification_pending else session.email
 
             if not email_to_verify:
+                logger.error(f"VERIFY EMAIL: No email_to_verify found for session {session.session_id[:8]}.")
                 return {'success': False, 'message': 'No email address found for verification.'}
             
             sanitized_code = sanitize_input(code).strip()
@@ -3967,165 +4195,238 @@ class SessionManager:
             verification_success = self.email_verification.verify_code(email_to_verify, sanitized_code)
             
             if verification_success:
-                # NEW: For email-verified guests, ALWAYS check global email history first
-                should_check_global_email_history = (
-                    not session.reverification_pending and  # Not reclaiming existing account
-                    session.user_type == UserType.GUEST     # Currently a guest
+                logger.info(f"VERIFY EMAIL: OTP successful for {email_to_verify} in session {session.session_id[:8]}.")
+
+                user_is_reclaiming_declined_account = (
+                    session.recognition_response == "no_declined_reco" and
+                    session.pending_email and
+                    email_to_verify.lower() == session.pending_email.lower()
                 )
-                
-                if should_check_global_email_history:
-                    # Check ALL sessions with this email across ALL devices
-                    all_email_sessions = self.db.find_sessions_by_email(email_to_verify)
-                    email_verified_sessions = [
-                        s for s in all_email_sessions 
-                        if s.user_type == UserType.EMAIL_VERIFIED_GUEST and
-                        s.session_id != session.session_id  # Exclude current session
-                    ]
-                    
-                    # Find the session with highest usage within the reset window
-                    max_daily_count = 0
-                    max_total_count = 0
-                    most_recent_question_time = None
-                    inherit_ban = False
-                    ban_info = None
-                    
-                    now = datetime.now()
-                    for email_session in email_verified_sessions:
-                        # Check if within reset window
-                        if (email_session.last_question_time and 
-                            (now - email_session.last_question_time) < DAILY_RESET_WINDOW):
-                            
-                            # Track highest daily count
-                            if email_session.daily_question_count > max_daily_count:
-                                max_daily_count = email_session.daily_question_count
-                                most_recent_question_time = email_session.last_question_time
-                            
-                            # Check for active bans
-                            if (email_session.ban_status == BanStatus.TWENTY_FOUR_HOUR and 
-                                email_session.ban_end_time and 
-                                email_session.ban_end_time > now):
-                                inherit_ban = True
-                                ban_info = {
-                                    'status': email_session.ban_status,
-                                    'start_time': email_session.ban_start_time,
-                                    'end_time': email_session.ban_end_time,
-                                    'reason': email_session.ban_reason
-                                }
-                        
-                        # Track total count regardless of reset window
-                        max_total_count = max(max_total_count, email_session.total_question_count)
-                    
-                    logger.info(f"📧 Email verification for {email_to_verify}: Found {len(email_verified_sessions)} existing email-verified sessions")
-                    logger.info(f"📊 Max daily count across all devices: {max_daily_count}, Has active ban: {inherit_ban}")
-                
-                # Handle reverification (existing flow)
+
+                if user_is_reclaiming_declined_account:
+                    logger.warning(f"VERIFY EMAIL: OVERRIDE - User declined recognition for {session.pending_email} but is now verifying it. Re-enabling reverification logic.")
+                    session.reverification_pending = True
+
                 if session.reverification_pending:
-                    # Existing reverification logic remains unchanged
-                    session.user_type = session.pending_user_type if session.pending_user_type else UserType.EMAIL_VERIFIED_GUEST
+                    logger.info(f"VERIFY EMAIL: Entering reverification_pending path for session {session.session_id[:8]}.")
+                    
+                    current_guest_daily_q = session.daily_question_count
+                    current_guest_total_q = session.total_question_count
+                    current_guest_last_q_time = session.last_question_time
+
+                    all_email_sessions_for_inheritance = self.db.find_sessions_by_email(email_to_verify)
+                    
+                    highest_daily_count = current_guest_daily_q
+                    highest_total_count = current_guest_total_q
+                    most_recent_q_time = current_guest_last_q_time
+                    inherited_ban_info = None
+                    inherited_tier_cycle_id = None
+                    inherited_tier1_completed = False
+                    inherited_tier_cycle_started_at = None
+
+                    now = datetime.now()
+
+                    for s in all_email_sessions_for_inheritance:
+                        if not session.zoho_contact_id and s.zoho_contact_id:
+                            session.zoho_contact_id = s.zoho_contact_id
+                            logger.debug(f"VERIFY EMAIL: Inherited Zoho Contact ID {s.zoho_contact_id} from session {s.session_id[:8]}.")
+
+                        if s.last_question_time and (now - s.last_question_time) < DAILY_RESET_WINDOW:
+                            if s.daily_question_count > highest_daily_count:
+                                highest_daily_count = s.daily_question_count
+                                most_recent_q_time = s.last_question_time
+                            
+                            highest_total_count = max(highest_total_count, s.total_question_count)
+
+                            if s.current_tier_cycle_id:
+                                inherited_tier_cycle_id = s.current_tier_cycle_id
+                                inherited_tier1_completed = s.tier1_completed_in_cycle
+                                inherited_tier_cycle_started_at = s.tier_cycle_started_at
+
+                        if (s.ban_status != BanStatus.NONE and s.ban_end_time and s.ban_end_time > now):
+                            inherited_ban_info = {
+                                'status': s.ban_status,
+                                'start_time': s.ban_start_time,
+                                'end_time': s.ban_end_time,
+                                'reason': s.ban_reason
+                            }
+                            inherited_tier_cycle_id = s.current_tier_cycle_id
+                            inherited_tier1_completed = s.tier1_completed_in_cycle
+                            inherited_tier_cycle_started_at = s.tier_cycle_started_at
+                            logger.info(f"VERIFY EMAIL: Inherited active ban from session {s.session_id[:8]}.")
+                    
+                    session.user_type = session.pending_user_type
                     session.email = session.pending_email
                     session.full_name = session.pending_full_name
-                    session.zoho_contact_id = session.pending_zoho_contact_id
                     session.wp_token = session.pending_wp_token
+                    
+                    session.daily_question_count = highest_daily_count
+                    session.total_question_count = highest_total_count
+                    session.last_question_time = most_recent_q_time
+
+                    if inherited_ban_info:
+                        session.ban_status = inherited_ban_info['status']
+                        session.ban_start_time = inherited_ban_info['start_time']
+                        session.ban_end_time = inherited_ban_info['end_time']
+                        session.ban_reason = inherited_ban_info['reason']
+                        session.question_limit_reached = True
+                    else:
+                        session.ban_status = BanStatus.NONE # Clear any temporary ban status
+                        session.question_limit_reached = False
+
+                    # Apply tier cycle info
+                    session.current_tier_cycle_id = inherited_tier_cycle_id if inherited_tier_cycle_id else str(uuid.uuid4())
+                    session.tier1_completed_in_cycle = inherited_tier1_completed
+                    session.tier_cycle_started_at = inherited_tier_cycle_started_at if inherited_tier_cycle_started_at else now
+
+                    # Clean up all pending and recognition flags
                     session.reverification_pending = False
+                    session.recognition_response = "reclaimed_successfully" # Track this state
                     session.pending_user_type = None
                     session.pending_email = None
                     session.pending_full_name = None
                     session.pending_zoho_contact_id = None
                     session.pending_wp_token = None
+                    session.declined_recognized_email_at = None # Ensure this is cleared on successful verification
                     
-                    session.login_method = 'email_verified' # NEW: Set login method
-                    session.is_degraded_login = False
+                    session.login_method = 'email_verified'
+                    session.is_degraded_login = False # Reclaiming an account is not degraded by definition
                     session.degraded_login_timestamp = None
 
-                    logger.info(f"✅ User {session.session_id[:8]} reclaimed higher privilege: {session.user_type.value} via re-verification for {session.email}")
+                    logger.info(f"VERIFY EMAIL: ✅ User {session.session_id[:8]} reclaimed {session.user_type.value} for {session.email}. Daily_Q: {session.daily_question_count}.")
+
                 else:
-                    # New email verification or upgrade from guest
-                    old_daily_count = session.daily_question_count  # Preserve current count
-                    session.user_type = UserType.EMAIL_VERIFIED_GUEST
+                    logger.info(f"VERIFY EMAIL: Entering standard guest-to-upgrade path for session {session.session_id[:8]}.")
+                    # New email verification or upgrade from guest to a non-reclaimed account.
+                    old_daily_count = session.daily_question_count # Preserve current count for potential same-session upgrade
                     
-                    # NEW: Apply global email-based inheritance for email-verified guests
-                    if should_check_global_email_history and (max_daily_count > 0 or inherit_ban):
-                        logger.info(f"🌍 GLOBAL EMAIL INHERITANCE: Applying cross-device limits for {email_to_verify}")
+                    # This call will determine if it's a REGISTERED_USER or keeps it non-registered
+                    # It will also set the login_method and is_degraded_login if applicable.
+                    session = self._check_and_upgrade_to_registered(session, email_to_verify, is_fallback_from_wordpress=False)
+                    
+                    if session.user_type != UserType.REGISTERED_USER:
+                        # If not upgraded to Registered, proceed with Email Verified Guest logic
+                        session.user_type = UserType.EMAIL_VERIFIED_GUEST
+                        session.email = email_to_verify # Ensure email is set on the session
                         
-                        # Inherit the highest daily count from any device
-                        session.daily_question_count = max_daily_count
-                        session.total_question_count = max(session.total_question_count, max_total_count)
-                        session.last_question_time = most_recent_question_time
-                        
-                        # Inherit any active ban
-                        if inherit_ban and ban_info:
-                            session.ban_status = ban_info['status']
-                            session.ban_start_time = ban_info['start_time']
-                            session.ban_end_time = ban_info['end_time']
-                            session.ban_reason = ban_info['reason']
-                            session.question_limit_reached = True
-                            logger.info(f"🚫 Inherited active ban until {ban_info['end_time']}")
-                    else:
-                        # Check if this is same session upgrade (GUEST -> EMAIL_VERIFIED_GUEST)
-                        is_same_session_upgrade = (
-                            not session.reverification_pending and  
-                            session.user_type == UserType.GUEST and  
-                            old_daily_count > 0  # Has asked questions in this session
+                        # Apply global email-based inheritance for email-verified guests (from any *other* email_verified_guest sessions)
+                        should_check_global_email_history_for_guest_upgrade = (
+                            session.user_type == UserType.EMAIL_VERIFIED_GUEST # Must be EVG after _check_and_upgrade_to_registered
                         )
                         
-                        if is_same_session_upgrade:
-                            logger.info(f"🔄 SAME SESSION UPGRADE: Preserving question count {old_daily_count} from GUEST to EMAIL_VERIFIED_GUEST for {session.session_id[:8]}")
-                            # Keep existing counts - don't reset anything
-                            session.daily_question_count = old_daily_count
+                        max_daily_count_global = 0
+                        max_total_count_global = 0
+                        most_recent_question_time_global = None
+                        inherit_ban_global = False
+                        ban_info_global = None
+
+                        if should_check_global_email_history_for_guest_upgrade:
+                            all_email_sessions_for_global_check = self.db.find_sessions_by_email(email_to_verify)
+                            for email_session_check in all_email_sessions_for_global_check:
+                                # Only consider other EVG sessions or current session itself for max counts
+                                if email_session_check.user_type == UserType.EMAIL_VERIFIED_GUEST:
+                                    if (email_session_check.last_question_time and 
+                                        (now - email_session_check.last_question_time) < DAILY_RESET_WINDOW):
+                                        if email_session_check.daily_question_count > max_daily_count_global:
+                                            max_daily_count_global = email_session_check.daily_question_count
+                                            most_recent_question_time_global = email_session_check.last_question_time
+                                        
+                                        if (email_session_check.ban_status == BanStatus.TWENTY_FOUR_HOUR and 
+                                            email_session_check.ban_end_time and 
+                                            email_session_check.ban_end_time > now):
+                                            inherit_ban_global = True
+                                            ban_info_global = {
+                                                'status': email_session_check.ban_status,
+                                                'start_time': email_session_check.ban_start_time,
+                                                'end_time': email_session_check.ban_end_time,
+                                                'reason': email_session_check.ban_reason
+                                            }
+                                    max_total_count_global = max(max_total_count_global, email_session_check.total_question_count)
+                        
+                        if should_check_global_email_history_for_guest_upgrade and (max_daily_count_global > 0 or inherit_ban_global):
+                            logger.info(f"VERIFY EMAIL: 🌍 GLOBAL EMAIL INHERITANCE: Applying cross-device limits for {email_to_verify} as EMAIL_VERIFIED_GUEST.")
+                            session.daily_question_count = max_daily_count_global
+                            session.total_question_count = max(session.total_question_count, max_total_count_global)
+                            session.last_question_time = most_recent_question_time_global
+                            
+                            if inherit_ban_global and ban_info_global:
+                                session.ban_status = ban_info_global['status']
+                                session.ban_start_time = ban_info_global['start_time']
+                                session.ban_end_time = ban_info_global['end_time']
+                                session.ban_reason = ban_info_global['reason']
+                                session.question_limit_reached = True
+                                logger.info(f"VERIFY EMAIL: 🚫 Inherited active ban until {ban_info_global['end_time']}")
                         else:
-                            # First time using this email anywhere - true clean slate
-                            logger.info(f"🆕 FIRST TIME EMAIL: {email_to_verify} gets fresh start")
-                            session.daily_question_count = 0
-                            session.total_question_count = 0
-                            session.last_question_time = None
-                            session.question_limit_reached = False
-                            session.ban_status = BanStatus.NONE
-                            session.ban_start_time = None
-                            session.ban_end_time = None
-                            session.ban_reason = None
-                    
-                    session.login_method = 'email_verified' # NEW: Set login method
-                    session.is_degraded_login = False
-                    session.degraded_login_timestamp = None
+                            is_same_session_upgrade = (
+                                session.user_type == UserType.GUEST and # Was a guest just before this upgrade
+                                old_daily_count > 0 # And had asked questions in *this* guest session
+                            )
+                            
+                            if is_same_session_upgrade:
+                                logger.info(f"VERIFY EMAIL: 🔄 SAME SESSION UPGRADE: Preserving question count {old_daily_count} from GUEST to EMAIL_VERIFIED_GUEST for {session.session_id[:8]}")
+                                session.daily_question_count = old_daily_count
+                            else:
+                                logger.info(f"VERIFY EMAIL: 🆕 FIRST TIME EMAIL: {email_to_verify} gets fresh start as EMAIL_VERIFIED_GUEST.")
+                                session.daily_question_count = 0
+                                session.total_question_count = 0
+                                session.last_question_time = None
+                                session.question_limit_reached = False
+                                session.ban_status = BanStatus.NONE
+                                session.ban_start_time = None
+                                session.ban_end_time = None
+                                session.ban_reason = None
+                        
+                        session.login_method = 'email_verified'
+                        session.is_degraded_login = False
+                        session.degraded_login_timestamp = None
 
-                    logger.info(f"✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email} with {session.daily_question_count} questions")
+                        logger.info(f"VERIFY EMAIL: ✅ User {session.session_id[:8]} upgraded to EMAIL_VERIFIED_GUEST: {session.email} with {session.daily_question_count} questions")
+                    else:
+                        logger.info(f"VERIFY EMAIL: ✅ User {session.session_id[:8]} restored to REGISTERED_USER status via email verification (from _check_and_upgrade_to_registered).")
 
+                # Ensure these are cleared on successful verification regardless of path
                 session.question_limit_reached = False
                 session.declined_recognized_email_at = None 
             
                 if session.last_activity is None:
-                    session.last_activity = datetime.now()
+                    session.last_activity = now # Use current time
 
                 try:
                     self.db.save_session(session)
-                    
-                    # NEW: If email-verified and has active sessions, sync the new session with others
-                    if session.user_type == UserType.EMAIL_VERIFIED_GUEST and session.email:
+                    # Sync with other sessions based on the final user type
+                    if session.user_type == UserType.REGISTERED_USER:
+                        self.sync_registered_user_sessions(session.email, session.session_id)
+                    elif session.user_type == UserType.EMAIL_VERIFIED_GUEST:
                         self.sync_email_verified_sessions(session.email, session.session_id)
                         
                 except Exception as e:
-                    logger.error(f"Failed to save upgraded session: {e}")
+                    logger.error(f"VERIFY EMAIL: Failed to save upgraded session {session.session_id[:8]}: {e}", exc_info=True)
             
                 return {
                     'success': True,
                     'message': '✅ Email verified successfully!'
                 }
             else:
+                logger.warning(f"VERIFY EMAIL: OTP verification failed for {email_to_verify} in session {session.session_id[:8]}.")
                 return {
                     'success': False,
                     'message': 'Invalid verification code. Please check the code and try again.'
                 }
             
         except Exception as e:
-            logger.error(f"Email code verification failed: {e}")
+            logger.error(f"VERIFY EMAIL: Email code verification failed for session {session.session_id[:8]}: {e}", exc_info=True)
             return {
                 'success': False,
-                'message': 'Verification failed. Please try again.'
+                'message': 'Verification failed due to an unexpected error. Please try again.'
             }
-
-    ## START <<<<<<<<<<<<<<<< REPLACEMENT 2 OF 3
     def authenticate_with_wordpress(self, username: str, password: str) -> Optional[UserSession]:
-        """Enhanced WordPress authentication with Email Verified fallback option"""
+        """
+        CORRECTED & COMPLETE: Enhanced WordPress authentication with Email Verified fallback option.
+        Now prioritizes inheriting question counts from the current in-memory guest session
+        before checking the database, preventing race conditions, and fully preserving
+        all ban, reset, and tier cycle inheritance logic from the original method.
+        Includes extensive debug logging for question count inheritance.
+        """
         if not self.config.WORDPRESS_URL:
             st.error("WordPress authentication is not configured. Please contact support.")
             logger.warning("WordPress authentication attempted but URL not configured.")
@@ -4142,7 +4443,7 @@ class SessionManager:
             if response.status_code == 200:
                 content_type = response.headers.get('Content-Type', '').lower()
                 if 'application/json' not in content_type:
-                    logger.error(f"WordPress authentication received unexpected Content-Type '{content_type}' with 200 status. Expected application/json. Response text: '{response.text[:200]}'", exc_info=True)
+                    logger.error(f"WordPress authentication received unexpected Content-Type '{content_type}' with 200 status. Expected application/json. Response text: '{response.text[:200]}'")
                     return self._handle_wordpress_error_with_fallback(
                         "API Response Error", 
                         "WordPress returned an unexpected response. The JWT plugin might be misconfigured.",
@@ -4152,7 +4453,7 @@ class SessionManager:
                 try:
                     data = response.json()
                 except requests.exceptions.JSONDecodeError as e:
-                    logger.error(f"WordPress authentication received non-JSON response with 200 status, despite Content-Type possibly being JSON. Response text: '{response.text[:200]}'. Error: {e}", exc_info=True)
+                    logger.error(f"WordPress authentication received non-JSON response with 200 status. Error: {e}")
                     return self._handle_wordpress_error_with_fallback(
                         "JSON Parse Error", 
                         "WordPress returned invalid data. Please try again or contact support.",
@@ -4165,119 +4466,139 @@ class SessionManager:
                 
                 if wp_token and user_email:
                     current_session = self.get_session()
+                    now = datetime.now()
                     
-                    ## CHANGE: Explicitly set fingerprint to not collected/not applicable for REGISTERED_USER
+                    logger.debug(f"DEBUG AUTH: --- Start authenticate_with_wordpress for session {current_session.session_id[:8]} ---")
+                    logger.debug(f"DEBUG AUTH: Initial current_session (from get_session) daily_q: {current_session.daily_question_count}, total_q: {current_session.total_question_count}, last_q_time: {current_session.last_question_time}")
+
+                    inherited_daily_count_from_current_session = 0
+                    inherited_total_count_from_current_session = 0
+                    inherited_last_question_time_from_current_session = None
+                    
+                    if current_session.user_type == UserType.GUEST and current_session.daily_question_count > 0:
+                        logger.debug(f"DEBUG AUTH: Capturing from in-memory guest: daily={current_session.daily_question_count}, total={current_session.total_question_count}")
+                        inherited_daily_count_from_current_session = current_session.daily_question_count
+                        inherited_total_count_from_current_session = current_session.total_question_count
+                        inherited_last_question_time_from_current_session = current_session.last_question_time
+                    else:
+                        logger.debug(f"DEBUG AUTH: In-memory guest count is 0 or not a guest ({current_session.user_type.value}).")
+
                     current_session.fingerprint_id = "not_collected_registered_user"
                     current_session.fingerprint_method = "email_primary"
                     logger.info(f"Registered user {current_session.session_id[:8]} fingerprint marked as not collected/email primary.")
 
-                    ## CHANGE: Always check email-based history for registered users
                     all_email_sessions = self.db.find_sessions_by_email(user_email)
                     
-                    # FIX 1: Determine visitor type based on email history
                     if all_email_sessions and any(s.session_id != current_session.session_id for s in all_email_sessions):
                         current_session.visitor_type = "returning_visitor"
-                        logger.info(f"Registered user {user_email} marked as returning_visitor (found {len(all_email_sessions)} past sessions)")
+                        logger.info(f"Registered user {user_email} marked as returning_visitor (found {len(all_email_sessions)} past sessions).")
                     else:
                         current_session.visitor_type = "new_visitor" 
-                        logger.info(f"Registered user {user_email} marked as new_visitor (first login)")
+                        logger.info(f"Registered user {user_email} marked as new_visitor (first login).")
 
-
-                    # Find the most recent session with same email to inherit counts, BANS AND CYCLE INFO from
                     most_recent_ban_session = None
-                    most_recent_session_for_counts_and_cycle = None
+                    most_recent_db_session_for_counts_and_cycle = None
                     
                     if all_email_sessions:
-                        # Sort by last activity/question time to find the most recent
                         sorted_sessions = sorted(all_email_sessions, 
                                                key=lambda s: s.last_question_time or s.last_activity or s.created_at, 
                                                reverse=True)
                         
-                        # Find most recent session for counts and cycle
-                        most_recent_session_for_counts_and_cycle = sorted_sessions[0] if sorted_sessions else None
+                        if sorted_sessions:
+                            most_recent_db_session_for_counts_and_cycle = sorted_sessions[0]
+                            logger.debug(f"DEBUG AUTH: Most recent DB session for counts: {most_recent_db_session_for_counts_and_cycle.session_id[:8]} daily_q: {most_recent_db_session_for_counts_and_cycle.daily_question_count}, last_q_time: {most_recent_db_session_for_counts_and_cycle.last_question_time}")
                         
-                        # NEW: Find any session with an ACTIVE ban
-                        now = datetime.now()
                         for sess in sorted_sessions:
-                            if (sess.ban_status != BanStatus.NONE and 
-                                sess.ban_end_time and 
-                                sess.ban_end_time > now):
+                            if (sess.ban_status != BanStatus.NONE and sess.ban_end_time and sess.ban_end_time > now):
                                 most_recent_ban_session = sess
-                                logger.info(f"Found active ban in session {sess.session_id[:8]}: {sess.ban_status.value} until {sess.ban_end_time}")
+                                logger.info(f"DEBUG AUTH: Found active ban in session {sess.session_id[:8]}: {sess.ban_status.value} until {sess.ban_end_time}.")
                                 break
-                        
-                        # Inherit question counts and cycle info
-                        if most_recent_session_for_counts_and_cycle:
-                            time_check = most_recent_session_for_counts_and_cycle.last_question_time or \
-                                         most_recent_session_for_counts_and_cycle.last_activity or \
-                                         most_recent_session_for_counts_and_cycle.created_at
-                            
-                            if time_check and (now - time_check) < DAILY_RESET_WINDOW:
-                                # Inherit question counts and cycle info from most recent same-email session
-                                current_session.daily_question_count = most_recent_session_for_counts_and_cycle.daily_question_count
-                                current_session.total_question_count = max(current_session.total_question_count, 
-                                                                          most_recent_session_for_counts_and_cycle.total_question_count)
-                                current_session.last_question_time = most_recent_session_for_counts_and_cycle.last_question_time
-                                
-                                # NEW: Inherit cycle info
-                                current_session.current_tier_cycle_id = most_recent_session_for_counts_and_cycle.current_tier_cycle_id
-                                current_session.tier1_completed_in_cycle = most_recent_session_for_counts_and_cycle.tier1_completed_in_cycle
-                                current_session.tier_cycle_started_at = most_recent_session_for_counts_and_cycle.tier_cycle_started_at
-
-                                logger.info(f"✅ Email-based inheritance: Inherited {most_recent_session_for_counts_and_cycle.daily_question_count} questions from {most_recent_session_for_counts_and_cycle.session_id[:8]} (same email: {user_email})")
-                            else:
-                                logger.info(f"🕐 Email session found but >{DAILY_RESET_WINDOW_HOURS}h old, resetting daily count AND tier cycle")
-                                current_session.daily_question_count = 0
-                                current_session.last_question_time = None
-                                # NEW: Reset cycle to a fresh start
-                                current_session.current_tier_cycle_id = str(uuid.uuid4())
-                                current_session.tier1_completed_in_cycle = False
-                                current_session.tier_cycle_started_at = datetime.now()
-                        
-                        # NEW: Inherit active ban if found
-                        if most_recent_ban_session:
-                            current_session.ban_status = most_recent_ban_session.ban_status
-                            current_session.ban_start_time = most_recent_ban_session.ban_start_time
-                            current_session.ban_end_time = most_recent_ban_session.ban_end_time
-                            current_session.ban_reason = most_recent_ban_session.ban_reason
-                            current_session.question_limit_reached = True
-                            # NEW: Also inherit cycle information from the banned session
-                            current_session.current_tier_cycle_id = most_recent_ban_session.current_tier_cycle_id
-                            current_session.tier1_completed_in_cycle = most_recent_ban_session.tier1_completed_in_cycle
-                            current_session.tier_cycle_started_at = most_recent_ban_session.tier_cycle_started_at
-                            logger.info(f"✅ Inherited active ban: {current_session.ban_status.value} until {current_session.ban_end_time}")
-                        
-                        # Also inherit Zoho contact ID if available
-                        if not current_session.zoho_contact_id:
-                            for sess in sorted_sessions:
-                                if sess.zoho_contact_id:
-                                    current_session.zoho_contact_id = sess.zoho_contact_id
-                                    logger.info(f"Inherited Zoho contact ID from session {sess.session_id[:8]}")
-                                    break
                     else:
-                        # No email history found
-                        current_session.daily_question_count = 0
-                        current_session.total_question_count = 0
-                        current_session.last_question_time = None
-                        # NEW: Initialize cycle for a completely fresh start
+                        logger.debug("DEBUG AUTH: No historical email sessions found in DB.")
+
+                    final_daily_count = inherited_daily_count_from_current_session
+                    final_total_count = inherited_total_count_from_current_session
+                    final_last_question_time = inherited_last_question_time_from_current_session
+                    
+                    logger.debug(f"DEBUG AUTH: final_daily_count initialized to in-memory guest count: {final_daily_count}")
+
+                    if most_recent_db_session_for_counts_and_cycle:
+                        db_time_check = most_recent_db_session_for_counts_and_cycle.last_question_time or \
+                                        most_recent_db_session_for_counts_and_cycle.last_activity or \
+                                        most_recent_db_session_for_counts_and_cycle.created_at
+                        
+                        time_diff = now - db_time_check if db_time_check else timedelta.max
+                        logger.debug(f"DEBUG AUTH: Time difference to DB session ({most_recent_db_session_for_counts_and_cycle.session_id[:8]}): {time_diff} (DAILY_RESET_WINDOW: {DAILY_RESET_WINDOW})")
+
+                        if db_time_check and time_diff < DAILY_RESET_WINDOW:
+                            if most_recent_db_session_for_counts_and_cycle.daily_question_count > final_daily_count:
+                                logger.info(f"DEBUG AUTH: Inherited higher daily count ({most_recent_db_session_for_counts_and_cycle.daily_question_count}) from DB session {most_recent_db_session_for_counts_and_cycle.session_id[:8]} (email: {user_email}).")
+                                final_daily_count = most_recent_db_session_for_counts_and_cycle.daily_question_count
+                                final_last_question_time = most_recent_db_session_for_counts_and_cycle.last_question_time
+                                current_session.current_tier_cycle_id = most_recent_db_session_for_counts_and_cycle.current_tier_cycle_id
+                                current_session.tier1_completed_in_cycle = most_recent_db_session_for_counts_and_cycle.tier1_completed_in_cycle
+                                current_session.tier_cycle_started_at = most_recent_db_session_for_counts_and_cycle.tier_cycle_started_at
+                            else:
+                                logger.debug(f"DEBUG AUTH: DB session is recent but current session's count ({final_daily_count}) is higher/equal. No change to daily count from DB.")
+                        else:
+                            logger.debug("DEBUG AUTH: DB session is outside DAILY_RESET_WINDOW or has no time check. Checking in-memory.")
+                            if not final_last_question_time or (now - final_last_question_time) >= DAILY_RESET_WINDOW:
+                                logger.info(f"DEBUG AUTH: Resetting daily count to 0 for fresh start as no recent activity found to inherit (DB or in-memory).")
+                                final_daily_count = 0
+                                final_last_question_time = None
+                                current_session.current_tier_cycle_id = str(uuid.uuid4()) 
+                                current_session.tier1_completed_in_cycle = False
+                                current_session.tier_cycle_started_at = now
+                    else:
+                        logger.debug("DEBUG AUTH: No most_recent_db_session_for_counts_and_cycle found.")
+                        if not final_last_question_time or (now - final_last_question_time) >= DAILY_RESET_WINDOW:
+                            logger.info(f"DEBUG AUTH: Resetting daily count to 0 as no historical DB or recent in-memory activity found.")
+                            final_daily_count = 0
+                            final_last_question_time = None
+                            current_session.current_tier_cycle_id = str(uuid.uuid4())
+                            current_session.tier1_completed_in_cycle = False
+                            current_session.tier_cycle_started_at = now
+
+                    current_session.daily_question_count = final_daily_count
+                    current_session.total_question_count = max(current_session.total_question_count, final_total_count)
+                    current_session.last_question_time = final_last_question_time
+                    
+                    logger.debug(f"DEBUG AUTH: Final daily_question_count after aggregation: {current_session.daily_question_count}")
+
+                    if not current_session.current_tier_cycle_id or not current_session.tier_cycle_started_at:
                         current_session.current_tier_cycle_id = str(uuid.uuid4())
                         current_session.tier1_completed_in_cycle = False
-                        current_session.tier_cycle_started_at = datetime.now()
-                        logger.info(f"🆕 No email history found for {user_email}, starting fresh (new tier cycle)")
+                        current_session.tier_cycle_started_at = now
+                        logger.info(f"DEBUG AUTH: Initializing new tier cycle for {user_email} as no active cycle found/inherited.")
 
-                    # Clear evasion tracking (these can always be cleared on successful login)
+
+                    if most_recent_ban_session:
+                        current_session.ban_status = most_recent_ban_session.ban_status
+                        current_session.ban_start_time = most_recent_ban_session.ban_start_time
+                        current_session.ban_end_time = most_recent_ban_session.ban_end_time
+                        current_session.ban_reason = most_recent_ban_session.ban_reason
+                        current_session.question_limit_reached = True
+                        current_session.current_tier_cycle_id = most_recent_ban_session.current_tier_cycle_id
+                        current_session.tier1_completed_in_cycle = most_recent_ban_session.tier1_completed_in_cycle
+                        current_session.tier_cycle_started_at = most_recent_ban_session.tier_cycle_started_at
+                        logger.info(f"DEBUG AUTH: Inherited active ban: {current_session.ban_status.value} until {current_session.ban_end_time}.")
+                    
+                    if not current_session.zoho_contact_id:
+                        for sess in all_email_sessions:
+                            if sess.zoho_contact_id:
+                                current_session.zoho_contact_id = sess.zoho_contact_id
+                                logger.info(f"DEBUG AUTH: Inherited Zoho contact ID from session {sess.session_id[:8]}.")
+                                break
+
                     current_session.evasion_count = 0
                     current_session.current_penalty_hours = 0
                     current_session.escalation_level = 0
                     
-                    # Set REGISTERED_USER attributes
                     current_session.user_type = UserType.REGISTERED_USER
                     current_session.email = user_email
                     current_session.full_name = user_display_name
                     current_session.wp_token = wp_token
-                    current_session.last_activity = datetime.now()
-                    
-                    # NEW: Set login method
+                    current_session.last_activity = now
                     current_session.login_method = 'wordpress'
                     current_session.is_degraded_login = False
                     current_session.degraded_login_timestamp = None
@@ -4286,7 +4607,6 @@ class SessionManager:
                         "has_wp_token": bool(wp_token)
                     })
 
-                    # Clear ALL re-verification flags if login is successful
                     current_session.reverification_pending = False
                     current_session.pending_user_type = None
                     current_session.pending_email = None
@@ -4295,21 +4615,22 @@ class SessionManager:
                     current_session.pending_wp_token = None
                     current_session.declined_recognized_email_at = None
 
-                    ## CHANGE: Enable chat immediately for registered users
                     st.session_state.is_chat_ready = True
-                    st.session_state.fingerprint_wait_start = None # Ensure any FP wait is cleared for this user
+                    st.session_state.fingerprint_wait_start = None
 
-                    # Save the updated session
                     try:
                         self.db.save_session(current_session)
-                        ## CHANGE: Use constant in log message
+                        logger.info(f"DEBUG AUTH: Session {current_session.session_id[:8]} saved after WordPress login. Final daily_q: {current_session.daily_question_count}.")
                         logger.info(f"✅ REGISTERED_USER setup complete: {user_email}, {current_session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT} questions. Chat enabled immediately.")
                         
+                        self.sync_registered_user_sessions(user_email, current_session.session_id)
+
                     except Exception as e:
-                        logger.error(f"Failed to save authenticated session: {e}")
+                        logger.error(f"DEBUG AUTH: Failed to save authenticated session {current_session.session_id[:8]}: {e}", exc_info=True)
                         st.error("Authentication succeeded but session could not be saved. Please try again.")
                         return None
                     
+                    logger.debug(f"DEBUG AUTH: --- End authenticate_with_wordpress for session {current_session.session_id[:8]} ---")
                     return current_session
                 else:
                     logger.error(f"WordPress authentication successful (status 200) but missing token or email in response. Response: {data}")
@@ -4324,15 +4645,15 @@ class SessionManager:
                 return None
             
         except requests.exceptions.SSLError as e:
-            logger.error(f"WordPress SSL/Port 443 error: {e}")
+            logger.error(f"WordPress SSL/Port 443 error: {e}", exc_info=True)
             return self._handle_wordpress_error_with_fallback(
                 "SSL/Connection Error", 
                 "Cannot establish secure connection to the authentication server (e.g., Port 443 issue).",
-                username  # Pass username to potentially use as email
+                username
             )
             
         except requests.exceptions.Timeout as e:
-            logger.error(f"WordPress authentication timed out: {e}")
+            logger.error(f"WordPress authentication timed out: {e}", exc_info=True)
             return self._handle_wordpress_error_with_fallback(
                 "Timeout Error",
                 "The authentication service is not responding in time. The server may be down or overloaded.",
@@ -4340,7 +4661,7 @@ class SessionManager:
             )
             
         except requests.exceptions.ConnectionError as e:
-            logger.error(f"WordPress authentication connection error: {e}")
+            logger.error(f"WordPress authentication connection error: {e}", exc_info=True)
             return self._handle_wordpress_error_with_fallback(
                 "Connection Error",
                 "Could not connect to the authentication service. Please check your internet connection or the service may be down.",
@@ -4354,121 +4675,107 @@ class SessionManager:
                 "An unexpected error occurred during authentication. Please try again later.",
                 username
             )
-    ## END <<<<<<<<<<<<<<<< REPLACEMENT 2 OF 3
-
     def _handle_wordpress_error_with_fallback(self, error_type: str, error_message: str, username: str) -> Optional[UserSession]:
         """Handle WordPress errors with email verification fallback option."""
         
-        # Store error info for display
         st.session_state.wordpress_error = {
             'type': error_type,
             'message': error_message,
             'username': username,
-            'show_fallback': True
+             'show_fallback': True
         }
         
-        return None  # Return None to trigger the fallback UI
+        return None
 
     def _check_and_upgrade_to_registered(self, session: UserSession, email: str, 
                                         is_fallback_from_wordpress: bool = False) -> UserSession:
-        """Check if email belongs to a registered user and upgrade if found.
-           Sets degraded login flag if originating from WordPress fallback."""
+        """
+        Check if email belongs to a registered user and upgrade if found.
+        NEW: Now also synchronizes the current session's fingerprint across all of the
+        registered user's historical sessions to permanently merge the identities.
+        """
         
-        # Find all sessions with this email
         email_sessions = self.db.find_sessions_by_email(email)
         
-        # Look for any registered user sessions
         registered_sessions = [s for s in email_sessions 
                               if s.user_type == UserType.REGISTERED_USER
                               and s.session_id != session.session_id]
         
         if registered_sessions:
-            # Found registered user history - upgrade current session
-            most_recent = max(registered_sessions, 
-                             key=lambda s: s.last_activity or s.created_at)
+            most_recent_registered = max(registered_sessions, 
+                                         key=lambda s: s.last_activity or s.created_at)
             
-            logger.info(f"🎯 Found registered user history for {email} - upgrading session")
+            logger.info(f"🎯 Found registered user history for {email} - upgrading session {session.session_id[:8]}")
             
-            # Upgrade to registered user
             session.user_type = UserType.REGISTERED_USER
-            session.full_name = most_recent.full_name
-            session.zoho_contact_id = most_recent.zoho_contact_id
+            session.full_name = most_recent_registered.full_name
+            session.zoho_contact_id = most_recent_registered.zoho_contact_id
             
-            # NEW: Track degraded login
             if is_fallback_from_wordpress:
                 session.is_degraded_login = True
                 session.degraded_login_timestamp = datetime.now()
                 session.login_method = 'email_fallback'
-                session.wp_token = None # Ensure no WP token is carried over for degraded login
-                log_security_event("DEGRADED_LOGIN", session, {
-                    "reason": "wordpress_auth_failure_fallback",
-                    "original_method": "wordpress",
-                    "fallback_method": "email_otp"
-                })
-                logger.warning(f"⚠️ Degraded login for registered user {email} - no WordPress token")
+                session.wp_token = None
+                log_security_event("DEGRADED_LOGIN", session, {"reason": "wordpress_auth_failure_fallback"})
+                logger.warning(f"⚠️ Degraded login for registered user {email}")
             else:
-                session.login_method = 'email_verified' # This path for re-verification through fingerprint or direct guest email verification
+                session.login_method = 'email_verified'
                 session.is_degraded_login = False
             
-            # Note: wp_token is NOT set for email-only login (handled above for is_fallback_from_wordpress)
-            
-            # Inherit question counts and ban status
             now = datetime.now()
-            if (most_recent.last_question_time and 
-                (now - most_recent.last_question_time) < DAILY_RESET_WINDOW):
-                session.daily_question_count = most_recent.daily_question_count
-                session.total_question_count = most_recent.total_question_count
-                session.last_question_time = most_recent.last_question_time
+            if (most_recent_registered.last_question_time and 
+                (now - most_recent_registered.last_question_time) < DAILY_RESET_WINDOW):
+                session.daily_question_count = most_recent_registered.daily_question_count
+                session.total_question_count = most_recent_registered.total_question_count
+                session.last_question_time = most_recent_registered.last_question_time
+                session.current_tier_cycle_id = most_recent_registered.current_tier_cycle_id
+                session.tier1_completed_in_cycle = most_recent_registered.tier1_completed_in_cycle
+                session.tier_cycle_started_at = most_recent_registered.tier_cycle_started_at
                 
-                # Inherit tier cycle info
-                session.current_tier_cycle_id = most_recent.current_tier_cycle_id
-                session.tier1_completed_in_cycle = most_recent.tier1_completed_in_cycle
-                session.tier_cycle_started_at = most_recent.tier_cycle_started_at
-                
-                # Check for active bans
-                if (most_recent.ban_status != BanStatus.NONE and
-                    most_recent.ban_end_time and
-                    most_recent.ban_end_time > now):
-                    session.ban_status = most_recent.ban_status
-                    session.ban_start_time = most_recent.ban_start_time
-                    session.ban_end_time = most_recent.ban_end_time
-                    session.ban_reason = most_recent.ban_reason
+                if (most_recent_registered.ban_status != BanStatus.NONE and
+                    most_recent_registered.ban_end_time and
+                    most_recent_registered.ban_end_time > now):
+                    session.ban_status = most_recent_registered.ban_status
+                    session.ban_start_time = most_recent_registered.ban_start_time
+                    session.ban_end_time = most_recent_registered.ban_end_time
+                    session.ban_reason = most_recent_registered.ban_reason
             
-            # Save upgraded session
+            current_fingerprint = session.fingerprint_id
+            if current_fingerprint and not current_fingerprint.startswith(("temp_", "fallback_", "not_collected_")):
+                logger.info(f"🔗 Merging identities: Linking fingerprint {current_fingerprint[:8]} to email {email}")
+                for reg_session in registered_sessions:
+                    if reg_session.fingerprint_id != current_fingerprint:
+                        reg_session.fingerprint_id = current_fingerprint
+                        reg_session.fingerprint_method = session.fingerprint_method
+                        self.db.save_session(reg_session)
+                        logger.debug(f"  - Updated fingerprint for historical session {reg_session.session_id[:8]}")
+
             self.db.save_session(session)
             
-            # Sync with other registered user sessions
             self.sync_registered_user_sessions(email, session.session_id)
-            
+                
             return session
         
-        # No registered user history - remain as email verified guest
         session.login_method = 'email_verified'
-        session.is_degraded_login = False # Ensure this is false for guests
-        session.degraded_login_timestamp = None
-        session.wp_token = None # Ensure no WP token if just email verified guest
-        logger.info(f"No registered user history found for {email} - keeping as email verified guest")
+        session.is_degraded_login_timestamp = None
+        session.wp_token = None
+        logger.info(f"No registered user history found for {email} - proceeding as email verified guest")
         return session
 
-    # NEW: Add Ban Synchronization Method
     def sync_ban_for_registered_user(self, email: str, banned_session: UserSession):
         """Sync ban status with distributed lock to prevent race conditions"""
         try:
-            # Use email as lock key to prevent concurrent modifications
             lock_key = f"ban_sync_{email}"
             now = datetime.now()
             
-            # Check if lock exists and is still valid
             if lock_key in self._ban_sync_locks:
                 lock_time = self._ban_sync_locks[lock_key]
                 if now - lock_time < self._ban_lock_timeout:
                     logger.warning(f"Ban sync already in progress for {email}, skipping")
                     return
                 else:
-                    # Lock expired, remove it
                     del self._ban_sync_locks[lock_key]
             
-            # Acquire lock
             self._ban_sync_locks[lock_key] = now
             
             try:
@@ -4480,7 +4787,6 @@ class SessionManager:
                 if not active_registered_sessions:
                     return
                 
-                # Apply the same ban and cycle info to all other sessions
                 for sess in active_registered_sessions:
                     sess.ban_status = banned_session.ban_status
                     sess.ban_start_time = banned_session.ban_start_time
@@ -4488,7 +4794,6 @@ class SessionManager:
                     sess.ban_reason = banned_session.ban_reason
                     sess.question_limit_reached = banned_session.question_limit_reached
                     
-                    # Also sync tier cycle information
                     sess.current_tier_cycle_id = banned_session.current_tier_cycle_id
                     sess.tier1_completed_in_cycle = banned_session.tier1_completed_in_cycle
                     sess.tier_cycle_started_at = banned_session.tier_cycle_started_at
@@ -4499,17 +4804,14 @@ class SessionManager:
                 logger.info(f"Synced ban across {len(active_registered_sessions)} sessions for registered user {email}")
                 
             finally:
-                # Release lock
                 if lock_key in self._ban_sync_locks:
                     del self._ban_sync_locks[lock_key]
                     
         except Exception as e:
             logger.error(f"Failed to sync ban for registered user {email}: {e}")
-            # Clean up lock on error
             if lock_key in self._ban_sync_locks:
                 del self._ban_sync_locks[lock_key]
 
-    # NEW: Add Ban Synchronization Method
     def sync_email_verified_sessions(self, email: str, current_session_id: str):
         """Sync question counts across all active email-verified sessions with the same email"""
         try:
@@ -4522,7 +4824,6 @@ class SessionManager:
             if not active_email_verified_sessions:
                 return
             
-            # Find the session with the highest question count within the DAILY_RESET_WINDOW
             max_count_session = None
             now = datetime.now()
             for sess in active_email_verified_sessions:
@@ -4534,14 +4835,12 @@ class SessionManager:
                 logger.info(f"No recent active sessions for email-verified {email} to sync.")
                 return
             
-            # Update all other sessions to match the max_count_session
             for sess in active_email_verified_sessions:
                 if sess.session_id != max_count_session.session_id:
                     sess.daily_question_count = max_count_session.daily_question_count
                     sess.total_question_count = max_count_session.total_question_count
                     sess.last_question_time = max_count_session.last_question_time
                     
-                    # Also sync ban information if any
                     if max_count_session.ban_status != BanStatus.NONE:
                         sess.ban_status = max_count_session.ban_status
                         sess.ban_start_time = max_count_session.ban_start_time
@@ -4578,7 +4877,9 @@ class SessionManager:
 
         return has_pricing or has_stock
 
-    # CHANGE 11: Solution 1 - Meta-Question Detection (LLM Driven)
+    # --- REMOVED: extract_order_id_from_query (Replaced by LLM in detect_order_query_intent_llm) ---
+    # --- REMOVED: is_order_query (Replaced by LLM in detect_order_query_intent_llm) ---
+
     def detect_meta_conversation_query_llm(self, prompt: str) -> Dict[str, Any]:
         """LLM-powered detection of meta-conversation queries."""
         if not self.ai.openai_client:
@@ -4603,7 +4904,7 @@ INDUSTRY QUESTIONS (NOT META):
 - Any actual business question
 
 Respond ONLY with JSON:
-{{"is_meta": true/false, "type": "summarize|count|list|analyze|general|none", "confidence": 0.0-1.0}}"""
+{{"is_meta": true, "type": "summarize|count|list|analyze|general|none", "confidence": 0.0-1.0}}"""
 
         try:
             response = self.ai.openai_client.chat.completions.create(
@@ -4613,7 +4914,7 @@ Respond ONLY with JSON:
                 max_tokens=50,
                 temperature=0.1
             )
-            response_content = response.choices[0].message.content.strip().replace('```json', '').replace('```', '').strip()
+            response_content = response.choices.message.content.strip().replace('```json', '').replace('```', '').strip()
             result = json.loads(response_content)
             
             if not isinstance(result, dict) or 'is_meta' not in result or 'type' not in result:
@@ -4627,44 +4928,39 @@ Respond ONLY with JSON:
             logger.error(f"LLM meta-query detection failed: {e}. Falling back to keyword-based detection.", exc_info=True)
             return self.detect_meta_conversation_query_keyword_fallback(prompt)
 
-    # Fallback for meta-conversation detection (old static method)
     def detect_meta_conversation_query_keyword_fallback(self, prompt: str) -> Dict[str, Any]:
         """Detect if user is asking about conversation history using static keywords (fallback)."""
-
         prompt_lower = prompt.lower().strip()
+    
+        if prompt_lower.isdigit():
+            return {"is_meta": False, "type": "none", "confidence": 1.0}
 
-        # Summary patterns
         summary_patterns = [
             "summarize", "summary of", "give me a summary", "can you summarize",
             "overview of", "recap of", "sum up"
         ]
 
-        # Question listing patterns
         question_patterns = [
             "what did i ask", "what all did i ask", "what have i asked", 
             "all my questions", "my previous questions", "my questions",
             "list my questions", "show my questions", "questions i asked"
         ]
 
-        # Count/stats patterns
         count_patterns = [
             "how many questions", "count my questions", "number of questions",
             "how many times", "total questions"
         ]
 
-        # Topic analysis patterns
         topic_patterns = [
             "what topics", "what have we discussed", "topics we covered",
             "what did we talk about", "conversation topics", "discussion topics"
         ]
 
-        # General conversation patterns
         conversation_patterns = [
             "conversation history", "chat history", "our conversation", 
             "this conversation", "our chat", "this chat", "my session"
         ]
 
-        # Check each pattern type
         if any(pattern in prompt_lower for pattern in summary_patterns):
             return {"is_meta": True, "type": "summarize", "scope": "all"}
         elif any(pattern in prompt_lower for pattern in question_patterns):
@@ -4681,12 +4977,10 @@ Respond ONLY with JSON:
     def handle_meta_conversation_query(self, session: UserSession, query_type: str, scope: str) -> Dict[str, Any]:
         """Handle meta-conversation queries with code-based analysis (zero token cost)."""
         
-        # Get all visible messages (respecting soft clear offset)
         visible_messages = session.messages[session.display_message_offset:]
         user_questions = [msg['content'] for msg in visible_messages if msg.get('role') == 'user']
 
         if query_type == "count":
-            ## CHANGE: Use constants in meta-query responses
             return {
                 "content": f"""📊 **Session Statistics:**
 
@@ -4694,7 +4988,7 @@ Respond ONLY with JSON:
 • **Total Messages**: {len(visible_messages)}
 • **Session Started**: {session.created_at.strftime('%B %d, %Y at %H:%M')}
 • **User Type**: {session.user_type.value.replace('_', ' ').title()}
-• **Daily Usage**: {session.daily_question_count}/{self.question_limits.question_limits[session.user_type.value]} questions today""", ## CHANGE: Use dynamic limit
+• **Daily Usage**: {session.daily_question_count}/{self.question_limits.question_limits[session.user_type.value]} questions today""",
                 "success": True,
                 "source": "Session Analytics"
             }
@@ -4707,13 +5001,11 @@ Respond ONLY with JSON:
                     "source": "Session History"
                 }
             
-            # Limit to last 20 questions to avoid very long responses
             questions_to_show = user_questions[-20:] if len(user_questions) > 20 else user_questions
             start_number = len(user_questions) - len(questions_to_show) + 1 if len(user_questions) > 20 else 1
 
             questions_list = []
             for i, q in enumerate(questions_to_show):
-                # Truncate very long questions for readability
                 display_q = q[:100] + "..." if len(q) > 100 else q
                 questions_list.append(f"{start_number + i}. {display_q}")
 
@@ -4747,7 +5039,6 @@ Respond ONLY with JSON:
                 "source": "Session Summary"
             }
 
-        # Extract key topics using simple word analysis
         topic_words = set()
         question_categories = {
             'pricing': 0, 'suppliers': 0, 'technical': 0, 'regulatory': 0, 'applications': 0
@@ -4756,9 +5047,8 @@ Respond ONLY with JSON:
         for question in user_questions:
             q_lower = question.lower()
             words = [w for w in q_lower.split() if len(w) > 4 and w not in ['what', 'where', 'when', 'about', 'would', 'could', 'should', 'which']]
-            topic_words.update(words[:3]) # Top 3 meaningful words per question
+            topic_words.update(words[:3])
 
-            # Categorize questions
             if any(word in q_lower for word in ['price', 'pricing', 'cost', 'expensive']):
                 question_categories['pricing'] += 1
             elif any(word in q_lower for word in ['supplier', 'source', 'vendor', 'manufacturer']):
@@ -4770,11 +5060,9 @@ Respond ONLY with JSON:
             else:
                 question_categories['technical'] += 1
 
-        # Get top topics
         key_topics = list(topic_words)[:8]
         active_categories = {k: v for k, v in question_categories.items() if v > 0}
 
-        # Build summary
         summary_parts = [
             f"📈 **Conversation Summary:**\n",
             f"• **Total Questions**: {len(user_questions)}",
@@ -4806,12 +5094,10 @@ Respond ONLY with JSON:
                 "source": "Topic Analysis"
             }
 
-        # Topic extraction and categorization
         ingredients_mentioned = set()
         business_aspects = set()
         technical_terms = set()
 
-        # Common ingredient patterns
         ingredient_indicators = ['extract', 'powder', 'oil', 'acid', 'syrup', 'sweetener', 'flavor', 'color']
 
         for question in user_questions:
@@ -4819,24 +5105,16 @@ Respond ONLY with JSON:
             for i, word in enumerate(words):
                 word_lower = word.lower().strip('.,!?')
 
-                # Look for ingredients (capitalized words near ingredient indicators)
                 if any(indicator in question.lower() for indicator in ingredient_indicators):
                     if word.istitle() and len(word) > 3:
                         ingredients_mentioned.add(word)
                 
-                # Business terms
                 if word_lower in ['supplier', 'vendor', 'sourcing', 'pricing', 'cost', 'availability', 'stock']:
                     business_aspects.add(word_lower)
 
-                # Technical terms
                 if word_lower in ['formulation', 'application', 'specification', 'grade', 'purity', 'concentration']:
                     technical_terms.add(word_lower)
 
-        # Get top topics
-        # Assuming topic_words is defined from _generate_conversation_summary context
-        # In a real scenario, this would be re-calculated or passed from there.
-        # For this snippet, just use a dummy or skip if not available.
-        # For simplicity, I'll re-calculate basic topic words here.
         temp_topic_words = set()
         for question in user_questions:
             q_lower = question.lower()
@@ -4844,7 +5122,6 @@ Respond ONLY with JSON:
             temp_topic_words.update(words[:3])
 
         key_topics = list(temp_topic_words)[:8]
-        # Same for question_categories
         temp_question_categories = {
             'pricing': 0, 'suppliers': 0, 'technical': 0, 'regulatory': 0, 'applications': 0
         }
@@ -4863,7 +5140,6 @@ Respond ONLY with JSON:
 
         active_categories = {k: v for k, v in temp_question_categories.items() if v > 0}
 
-        # Build analysis
         analysis_parts = [
             f"🔍 **Topic Analysis:**\n",
             f"• **Questions Analyzed**: {len(user_questions)}"
@@ -4878,7 +5154,6 @@ Respond ONLY with JSON:
         if technical_terms:
             analysis_parts.append(f"• **Technical Focus**: {', '.join(list(technical_terms))}")
 
-        # Industry focus
         focus_areas = []
         combined_text = ' '.join(user_questions).lower()
 
@@ -4901,11 +5176,10 @@ Respond ONLY with JSON:
             "source": "Topic Analysis"
         }
     
-    # CHANGE 3: Reordered pipeline to correctly handle greetings, meta-queries, and off-topic questions
-    def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+    async def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
         """Gets AI response and manages session state with a corrected processing pipeline."""
         try:
-            # Determine rate limiter ID
+            logger.info(f"Processing prompt: '{prompt[:100]}' | Session: {session.session_id[:8]} | Type: {session.user_type.value}")
             rate_limiter_id = session.fingerprint_id
             if (session.user_type in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]) and session.email:
                 rate_limiter_id = f"email_{session.email.lower()}"
@@ -4953,6 +5227,7 @@ Respond ONLY with JSON:
                 }
 
             # 3. Pricing/Stock check
+            logger.debug(f"Checking pricing/stock query for: '{prompt}'")
             if self.detect_pricing_stock_question(prompt):
                 try:
                     self.question_limits.record_question_and_check_ban(session, self)
@@ -4964,12 +5239,194 @@ Respond ONLY with JSON:
                 st.session_state.pricing_stock_notice = {
                     'timestamp': datetime.now(),
                     'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost']) else 'stock',
-                    'message': """**Important Notice About Pricing & Stock Information:** ..."""
+                    'message': """Thank you for your interest in pricing information. For the most accurate and up-to-date pricing and quotes, please visit the product page directly on our website or contact our sales team at sales-eu@12taste.com for personalized assistance."""
                 }
                 self._update_activity(session)
                 return {'content': "", 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
 
+            # 3.5 WooCommerce Order Check (ENHANCED with LLM Intent)
+            logger.debug(f"Checking 12Taste Order Status query for: '{prompt}' with LLM intent.")
+            if hasattr(self, 'woocommerce') and self.woocommerce and self.woocommerce.config.WOOCOMMERCE_ENABLED:
+                
+                # Use LLM to determine the order query intent
+                order_intent = await self.woocommerce.detect_order_query_intent_llm(
+                    prompt, self.ai.openai_client
+                )
+
+                query_type = order_intent.get("order_query_type")
+                order_id = order_intent.get("order_id")
+                requested_statuses = order_intent.get("requested_statuses")
+                
+                # If the LLM detected an order-related query type (not "none")
+                if query_type != "none":
+                    
+                    # Check authentication
+                    if not (session.user_type == UserType.REGISTERED_USER or session.user_type == UserType.EMAIL_VERIFIED_GUEST) or not session.email:
+                        message = "To check order status, please sign in as a Registered User or verify your email."
+                        session.messages.append({'role': 'user', 'content': prompt})
+                        session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                        self._update_activity(session)
+                        if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                        return {'content': message, 'success': False, 'source': '12Taste Order Status'}
+
+                    # Record question
+                    try:
+                        self.question_limits.record_question_and_check_ban(session, self)
+                    except Exception as e:
+                        logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
+                        return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
+                    
+                    # Get customer ID
+                    customer = await self.woocommerce.get_customer_by_email(session.email)
+                    customer_id = customer.get('id') if customer else None
+
+                    if not customer_id:
+                        message = f"We could not find a customer account linked to your email ({session.email}). Please ensure you are logged in with the email used for your order."
+                        session.messages.append({'role': 'user', 'content': prompt})
+                        session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                        self._update_activity(session)
+                        if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                        return {
+                            'content': message,
+                            'success': False,
+                            'source': '12Taste Order Status'
+                        }
+
+                    # --- Handle different query types based on LLM intent ---
+                    if query_type == "single_order" and order_id:
+                        logger.info(f"LLM detected single order query for order ID: {order_id}. User email: {session.email}")
+                        order_data = await self.woocommerce.get_order(order_id, customer_id=customer_id)
+                        
+                        if order_data and not order_data.get("error"):
+                            formatted_order = self.woocommerce.format_order_for_display(order_data)
+                            
+                            session.messages.append({'role': 'user', 'content': prompt})
+                            session.messages.append({
+                                'role': 'assistant', 
+                                'content': formatted_order,
+                                'source': '12Taste Order Status',
+                                'order_id': order_id
+                            })
+                            self._update_activity(session)
+                            if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                            return {
+                                'content': formatted_order,
+                                'success': True,
+                                'source': '12Taste Order Status',
+                                'order_id': order_id
+                            }
+                        else:
+                            error_message = order_data.get("message", "Order not found or does not belong to your account.")
+                            session.messages.append({'role': 'user', 'content': prompt})
+                            session.messages.append({'role': 'assistant', 'content': f"❌ {error_message}", 'source': '12Taste Order Status'})
+                            self._update_activity(session)
+                            if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                            return {
+                                'content': f"❌ {error_message}",
+                                'success': False,
+                                'source': '12Taste Order Status'
+                            }
+                    
+                    # --- Handle multiple order queries ---
+                    elif query_type in ["multiple_orders_all", "multiple_orders_open", "multiple_orders_specific_status"]:
+                        logger.info(f"LLM detected multiple orders query ({query_type}). User email: {session.email}")
+                        
+                        status_filter = None # Default to all orders if not specified for 'multiple_orders_all'
+                        filter_display_name = ""
+
+                        if query_type == "multiple_orders_all":
+                            filter_display_name = "All"
+                        elif query_type == "multiple_orders_open":
+                            status_filter = ['pending', 'on-hold', 'processing']
+                            filter_display_name = "Open"
+                        elif query_type == "multiple_orders_specific_status" and requested_statuses:
+                            status_filter = requested_statuses
+                            # Get human-readable names for display
+                            display_names = await self.woocommerce._get_display_names_for_slugs(requested_statuses)
+                            if len(display_names) > 1:
+                                filter_display_name = ", ".join(display_names[:-1]) + " & " + display_names[-1]
+                            else:
+                                filter_display_name = display_names if display_names else ""
+                        else:
+                            # This case should ideally be caught by 'multiple_orders_clarification' 
+                            # but serves as a safety net if 'multiple_orders_specific_status' is given
+                            # but requested_statuses is unexpectedly empty.
+                            query_type = "multiple_orders_clarification" 
+                            pass # Fall through to clarification block below
+
+                        if query_type != "multiple_orders_clarification": # Only proceed if the intent is clear
+                            orders = await self.woocommerce.list_orders(
+                                customer_id=customer_id,
+                                status=status_filter, # Will be None for 'all', or a list of slugs
+                                per_page=50 # Adjust as needed, consider pagination for very large results
+                            )
+                            
+                            if orders is not None:
+                                formatted_orders = self.woocommerce.format_multiple_orders_display(orders, filter_display_name)
+                                
+                                session.messages.append({'role': 'user', 'content': prompt})
+                                session.messages.append({
+                                    'role': 'assistant', 
+                                    'content': formatted_orders,
+                                    'source': '12Taste Order Status',
+                                    'order_count': len(orders),
+                                    'filter_type': filter_display_name,
+                                    'specific_statuses': requested_statuses # Log the slugs for debug/tracking
+                                })
+                                self._update_activity(session)
+                                if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                                return {
+                                    'content': formatted_orders,
+                                    'success': True,
+                                    'source': '12Taste Order Status',
+                                    'order_count': len(orders),
+                                    'filter_type': filter_display_name
+                                }
+                            else:
+                                error_message = "Failed to retrieve your orders. Please try again later."
+                                session.messages.append({'role': 'user', 'content': prompt})
+                                session.messages.append({'role': 'assistant', 'content': f"❌ {error_message}", 'source': '12Taste Order Status'})
+                                self._update_activity(session)
+                                if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                                return {
+                                    'content': f"❌ {error_message}",
+                                    'success': False,
+                                    'source': '12Taste Order Status'
+                                }
+
+                    # --- Handle clarification requests (and fallbacks from multiple orders) ---
+                    if query_type == "multiple_orders_clarification" or (query_type in ["multiple_orders_all", "multiple_orders_open", "multiple_orders_specific_status"] and not 'orders' in locals()):
+                        message = "I can help with your orders. Do you want to check a specific order (please provide the ID/number), list all your orders, or filter by a certain status (e.g., 'pending payment')?"
+                        session.messages.append({'role': 'user', 'content': prompt})
+                        session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                        self._update_activity(session)
+                        st.session_state.expecting_order_id = True # Set for potential follow-up if user provides just an ID next.
+                        return {
+                            'content': message,
+                            'success': True,
+                            'source': '12Taste Order Status'
+                        }
+                    
+                    # --- Final safety net for order query types ---
+                    else:
+                        message = "I detected an order-related question but need more clarity. Please provide an order ID, or specify if you want to see all orders, open orders, or orders with a particular status."
+                        session.messages.append({'role': 'user', 'content': prompt})
+                        session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                        self._update_activity(session)
+                        st.session_state.expecting_order_id = True
+                        return {
+                            'content': message,
+                            'success': True,
+                            'source': '12Taste Order Status'
+                        }
+                # If query_type is "none", it falls through to the rest of the get_ai_response logic (general AI, etc.)
+            
+            if 'expecting_order_id' in st.session_state: 
+                del st.session_state['expecting_order_id']
+
+
             # 4. LLM-driven Industry context check (NOW RUNS BEFORE META-DETECTION)
+            logger.debug(f"Checking industry context for: '{prompt}'")
             context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
             if context_result:
                 category = context_result.get("category")
@@ -4989,15 +5446,16 @@ Respond ONLY with JSON:
                     self._update_activity(session)
                     return friendly_response
                 
-                # B. Block irrelevant questions, but specifically ALLOW meta_conversation queries to pass
-                elif not is_relevant and category != "meta_conversation":
+                # B. Block irrelevant questions, but specifically ALLOW meta_conversation and order_queries to pass
+                elif not is_relevant and category not in ["meta_conversation", "order_query"]:
                     confidence = context_result.get("confidence", 0.0)
                     reason = context_result.get("reason", "Not relevant")
-                    context_message = "I'm specialized in helping food & beverage industry professionals..."
+                    context_message = "I'm specialized in helping food & beverage industry professionals. Please ask me about ingredients, suppliers, or market trends."
                     st.session_state.context_flagged = {'timestamp': datetime.now(), 'category': category, 'confidence': confidence, 'reason': reason, 'message': context_message}
                     return {"content": context_message, "success": False, "source": "Industry Context Filter", "used_search": False, "used_pinecone": False, "has_citations": False, "has_inline_citations": False, "safety_override": False}
 
             # 5. LLM-driven Meta-conversation query detection (NOW RUNS AFTER CONTEXT CHECK)
+            logger.debug(f"Checking meta-conversation for: '{prompt}'")
             meta_detection = self.detect_meta_conversation_query_llm(prompt)
             if meta_detection["is_meta"]:
                 logger.info(f"Meta-conversation query detected: {meta_detection['type']}")
@@ -5015,8 +5473,8 @@ Respond ONLY with JSON:
             # --- If we've reached here, it's a valid, on-topic industry question ---
             limit_check = self.question_limits.is_within_limits(session)
             if not limit_check['allowed']:
-                # ... (existing ban/limit logic) ...
-                return { ... }
+                message = limit_check.get('message', 'Access restricted due to usage policy.')
+                return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': limit_check.get('time_until_next')} # Ensure consistent key
 
             self._clear_error_notifications()
             sanitized_prompt = sanitize_input(prompt)
@@ -5026,13 +5484,14 @@ Respond ONLY with JSON:
             try:
                 question_record_status = self.question_limits.record_question_and_check_ban(session, self)
                 if question_record_status.get("ban_applied") or question_record_status.get("existing_ban_inherited"):
-                    # ... (return ban message logic) ...
-                    return { ... }
+                    message = self.question_limits._get_ban_message(session, question_record_status.get("ban_type"))
+                    time_remaining_td = session.ban_end_time - datetime.now() if session.ban_end_time else None
+                    return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': time_remaining_td}
             except Exception as e:
                 logger.error(f"❌ Critical error recording question: {e}")
                 return {'content': 'A critical error occurred while recording your question.', 'success': False, 'source': 'Question Tracking Error'}
             
-            ai_response = self.ai.get_response(sanitized_prompt, session.messages)
+            ai_response = await asyncio.to_thread(self.ai.get_response, sanitized_prompt, session.messages)
             
             user_message = {'role': 'user', 'content': sanitized_prompt}
             assistant_message = {'role': 'assistant', 'content': ai_response.get('content', 'No response.'), 'source': ai_response.get('source'), **ai_response}
@@ -5048,15 +5507,11 @@ Respond ONLY with JSON:
     def clear_chat_history(self, session: UserSession):
         """Clears chat history using soft clear mechanism."""
         try:
-            # Attempt CRM save if eligible, as clear chat effectively ends a "segment" of conversation
-            if self._is_manual_crm_save_eligible(session): # Using manual eligibility as this is user-initiated
+            if self._is_manual_crm_save_eligible(session):
                 logger.info(f"CRM Save triggered by Clear Chat for session {session.session_id[:8]}")
                 self.zoho.save_chat_transcript_sync(session, "Clear Chat")
             
-            # Soft clear: set offset to hide all current messages
             session.display_message_offset = len(session.messages)
-            
-            # Save the updated session
             self.db.save_session(session)
             
             logger.info(f"Soft cleared chat for session {session.session_id[:8]}: offset set to {session.display_message_offset}")
@@ -5088,7 +5543,6 @@ Respond ONLY with JSON:
     def end_session(self, session: UserSession):
         """Ends the current session and performs cleanup."""
         try:
-            # Attempt CRM save for eligible users (manual save - no 15-minute requirement)
             if self._is_manual_crm_save_eligible(session):
                 with st.spinner("Saving your conversation..."):
                     try:
@@ -5101,21 +5555,17 @@ Respond ONLY with JSON:
                         logger.error(f"CRM save during sign out failed: {e}")
                         st.warning("⚠️ Conversation save failed, but sign out will continue.")
             
-            # Mark session as inactive
             session.active = False
-            session.last_activity = datetime.now() # Use now() for datetime objects
+            session.last_activity = datetime.now()
             
-            # Save final session state
             try:
                 self.db.save_session(session)
             except Exception as e:
                 logger.error(f"Failed to save session during end_session: {e}")
             
-            # Clear Streamlit session state
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             
-            # Reset to welcome page
             st.session_state['page'] = None
             
             st.success("👋 You have been signed out successfully!")
@@ -5123,7 +5573,6 @@ Respond ONLY with JSON:
             
         except Exception as e:
             logger.error(f"Session end failed: {e}")
-            # Force clear session state even if save fails
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.session_state['page'] = None
@@ -5140,40 +5589,30 @@ Respond ONLY with JSON:
             reason = limit_check.get('reason')
             message = limit_check.get('message', 'Access restricted due to usage policy.')
             
-            # Only block and show messages for ACTIVE bans (already in database)
             if reason == 'banned':
                 ban_type = limit_check.get('ban_type', 'unknown')
-                time_remaining = limit_check.get('time_remaining')
+                time_remaining = limit_check.get('time_until_next')
                 
                 st.error("🚫 **Access Restricted**")
-                if time_remaining:
-                    hours = max(0, int(time_remaining.total_seconds() // 3600))
-                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                if time_remaining: # time_until_next is an int in seconds here
+                    hours = time_remaining // 3600
+                    minutes = (time_remaining % 3600) // 60
                     st.error(f"Time remaining: {hours}h {minutes}m")
                 st.info(message)
                 return True
                 
-            # Handle guest limit (email verification required)
             elif reason == 'guest_limit':
                 st.error("🛑 **Guest Limit Reached**")
-                ## CHANGE: Use GUEST_QUESTION_LIMIT constant
                 st.info(f"You've used your {GUEST_QUESTION_LIMIT} guest questions. Please verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} more questions per day!")
                 return True
 
-            # Handle email verified guest daily limit
             elif reason == 'email_verified_guest_limit':
                 st.error("🛑 **Daily Limit Reached**")
-                ## CHANGE: Use EMAIL_VERIFIED_QUESTION_LIMIT constant
-                st.info(f"You've used your {EMAIL_VERIFIED_QUESTION_LIMIT} questions for today. Your questions reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!") ## CHANGE: Use constants
+                st.info(f"You've used your {EMAIL_VERIFIED_QUESTION_LIMIT} questions for today. Your questions reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
                 return True
-                
-            # DON'T BLOCK for registered user tier limits - let them attempt the question
-            # This allows users at 10/20 to type and submit question #11
-            # The ban will be applied in get_ai_response after submission
             
         return False
 
-# NEW: Log security events function
 def log_security_event(event_type: str, session: UserSession, details: Dict[str, Any]):
     """Log security-relevant events for audit trail"""
     logger.info(f"SECURITY_EVENT: {event_type} | "
@@ -5191,16 +5630,14 @@ def render_simple_activity_tracker(session_id: str):
         logger.warning("render_simple_activity_tracker called without session_id")
         return None
     
-    # Create a unique, filesystem-safe key for this session
     safe_session_id = session_id.replace('-', '_')
     component_key = f"activity_tracker_{safe_session_id}"
 
     simple_tracker_js = f"""
     (() => {{
-        const sessionId = {json.dumps(session_id)}; // CHANGE: Safely embed sessionId
+        const sessionId = {json.dumps(session_id)};
         const stateKey = 'fifi_activity_{safe_session_id}';
         
-        // Initialize or get existing state
         if (!window[stateKey]) {{
             window[stateKey] = {{
                 lastActivity: Date.now(),
@@ -5211,7 +5648,6 @@ def render_simple_activity_tracker(session_id: str):
         
         const state = window[stateKey];
         
-        // Setup activity listeners (only once per browser session lifecycle)
         if (!state.listenersInitialized) {{
             console.log('📍 Simple activity tracker starting for', sessionId.substring(0, 8));
             
@@ -5219,13 +5655,11 @@ def render_simple_activity_tracker(session_id: str):
                 state.lastActivity = Date.now();
             }}
             
-            // Monitor user activity
             const events = ['mousedown', 'mousemove', 'keydown', 'click', 'scroll', 'touchstart', 'focus'];
             events.forEach(eventType => {{
                 document.addEventListener(eventType, updateActivity, {{ passive: true, capture: true }});
             }});
             
-            // Try to monitor parent document (for iframes)
             try {{
                 if (window.parent && window.parent !== window && window.parent.document) {{
                     events.forEach(eventType => {{
@@ -5240,7 +5674,6 @@ def render_simple_activity_tracker(session_id: str):
             console.log('✅ Simple activity tracker initialized');
         }}
         
-        // Return current activity status
         const now = Date.now();
         const timeSinceActivity = now - state.lastActivity;
         const minutesSinceActivity = Math.floor(timeSinceActivity / 60000);
@@ -5266,18 +5699,47 @@ def render_simple_activity_tracker(session_id: str):
         logger.error(f"Problematic key in render_simple_activity_tracker: {component_key}")
         return None
 
-# CHANGE 4: Replace `check_timeout_and_trigger_reload` with the non-blocking version.
+def handle_emergency_save_requests_from_query():
+    """
+    Checks for and processes emergency save requests sent via URL query parameters.
+    This acts as a fallback if the FastAPI beacon failed.
+    """
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    reason = query_params.get("reason")
+    fallback_flag = query_params.get("fallback")
+
+    if event == "emergency_close" and session_id and reason and fallback_flag == "true":
+        logger.info(f"🚨 Received emergency_close event from query params (fallback mode) for session {session_id[:8]} (Reason: {reason})")
+        
+        # Clear query parameters to prevent re-triggering this logic on subsequent reruns
+        params_to_clear = ["event", "session_id", "reason", "fallback"]
+        for param in params_to_clear:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        # Process the emergency save using the Streamlit backend logic
+        processed_successfully = process_emergency_save_from_query(session_id, reason)
+        if processed_successfully:
+            logger.info(f"✅ Emergency save from query params processed successfully for session {session_id[:8]}.")
+        else:
+            logger.error(f"❌ Emergency save from query params failed to process for session {session_id[:8]}.")
+        
+        # Trigger a rerun if this was handled, to ensure UI state reflects the change
+        st.rerun()
+        return True
+    return False
+
 def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]) -> bool:
     """Check if timeout has occurred and trigger browser reload using a robust, non-blocking method."""
     if not session or not session.session_id:
         logger.debug("No valid session for timeout check.")
         return False
     
-    # Load fresh session from DB to get the most accurate last_activity
     fresh_session_from_db = session_manager.db.load_session(session.session_id)
     
     if fresh_session_from_db:
-        # Update current in-memory session object with latest from DB
         session.last_activity = fresh_session_from_db.last_activity
         session.active = fresh_session_from_db.active
         session.user_type = fresh_session_from_db.user_type
@@ -5307,11 +5769,9 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         logger.warning(f"Session {session.session_id[:8]} from st.session_state not found in database. Forcing reset.")
         session.active = False
 
-    # If the session is already inactive, force a reload
     if not session.active:
         logger.info(f"Session {session.session_id[:8]} is inactive. Triggering reload to welcome page.")
         
-        # Clear Streamlit session state fully
         for key in list(st.session_state.keys()):
             del st.session_state[key]
 
@@ -5319,7 +5779,7 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         st.session_state['session_expired'] = True
         
         reload_script = "<script>parent.window.location.reload();</script>"
-        components.html(reload_script, height=0, width=0)
+        components.html(reload_script, height=100, width=0)
         
         st.info("🏠 Redirecting to home page...")
         st.stop()
@@ -5390,7 +5850,6 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
     
     return False
 
-# NEW: Define process_emergency_save_from_query function at a top level
 def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
     """
     Processes an emergency save request received via URL query parameters.
@@ -5408,21 +5867,18 @@ def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
     
     logger.info(f"🚨 Processing emergency save for session '{session_id[:8]}' (Reason: {reason})")
     
-    # Update session activity and mark as inactive
     session.last_activity = datetime.now()
     session.active = False
-    session.timeout_detected_at = datetime.now() # Mark when detected by Streamlit
-    session.timeout_reason = reason # Store the reason for the save
+    session.timeout_detected_at = datetime.now()
+    session.timeout_reason = reason
 
-    # Attempt to save to CRM if eligible
     crm_saved = False
     try:
-        # Check eligibility with "emergency_fallback" reason, which can be seen by _is_crm_save_eligible
         if session_manager._is_crm_save_eligible(session, "emergency_fallback"):
             logger.info(f"Attempting CRM save from Streamlit query fallback for {session.session_id[:8]}")
             crm_saved = session_manager.zoho.save_chat_transcript_sync(session, reason)
             if crm_saved:
-                session.timeout_saved_to_crm = True # Mark as saved if successful
+                session.timeout_saved_to_crm = True
             else:
                 logger.warning(f"CRM save failed during Streamlit query fallback for {session.session_id[:8]}.")
         else:
@@ -5430,11 +5886,10 @@ def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
     except Exception as e:
         logger.error(f"Error during CRM save from Streamlit query fallback for {session.session_id[:8]}: {e}")
     
-    # Save the session state (active=False, updated activity/timeout info)
     try:
         session_manager.db.save_session(session)
         logger.info(f"✅ Session '{session_id[:8]}' marked inactive and saved in DB (query fallback). CRM_saved: {crm_saved}")
-        return True # Indicate that the session state was updated
+        return True
     except Exception as e:
         logger.error(f"❌ Failed to save session '{session_id[:8]}' during emergency query fallback: {e}")
         return False
@@ -5454,20 +5909,18 @@ def render_simplified_browser_close_detection(session_id: str):
         logger.debug(f"No session found for browser close detection: {session_id[:8]}")
         return
             
-    ## CHANGE: Use CRM_SAVE_MIN_QUESTIONS for eligibility check
     if not session_manager._is_crm_save_eligible(session, "browser_close_check"):
         logger.info(f"🚫 Session {session.session_id[:8]} not eligible for CRM save - skipping browser close detection")
         return
 
     logger.info(f"✅ Setting up browser close detection for eligible session {session_id[:8]}")
 
-    ## CHANGE: Enhanced JS for emergency save redundancy
     enhanced_close_js = f"""
     <script>
     (function() {{
-        const sessionId = {json.dumps(session_id)}; // CHANGE: Safely embed sessionId
-        const FASTAPI_URL = {json.dumps(FASTAPI_EMERGENCY_SAVE_URL)}; // CHANGE: Use constant and safely embed
-        const FASTAPI_TIMEOUT_MS = {FASTAPI_EMERGENCY_SAVE_TIMEOUT * 1000}; // CHANGE: Use constant
+        const sessionId = {json.dumps(session_id)};
+        const FASTAPI_URL = {json.dumps(FASTAPI_EMERGENCY_SAVE_URL)};
+        const FASTAPI_TIMEOUT_MS = {FASTAPI_EMERGENCY_SAVE_TIMEOUT * 1000};
         const STREAMLIT_FALLBACK_URL = window.location.origin + window.location.pathname; 
         
         if (window.fifi_close_enhanced_initialized) return;
@@ -5478,7 +5931,6 @@ def render_simplified_browser_close_detection(session_id: str):
         console.log('🛡️ Enhanced browser close detection initialized for eligible user');
         
         function sendBeaconOrFetch(data) {{
-            // PRIMARY: Try navigator.sendBeacon
             if (navigator.sendBeacon) {{
                 try {{
                     const sent = navigator.sendBeacon(
@@ -5496,7 +5948,6 @@ def render_simplified_browser_close_detection(session_id: str):
                 }}
             }}
             
-            // FALLBACK 1: Try fetch with keepalive and short timeout
             try {{
                 fetch(FASTAPI_URL, {{
                     method: 'POST',
@@ -5534,7 +5985,6 @@ def render_simplified_browser_close_detection(session_id: str):
             
             const sentViaNetwork = sendBeaconOrFetch(emergencyData);
 
-            // ALWAYS trigger Streamlit fallback via image, for maximum redundancy
             const fallbackUrl = STREAMLIT_FALLBACK_URL + 
                 '?event=emergency_close' +
                 '&session_id=' + sessionId + 
@@ -5543,35 +5993,31 @@ def render_simplified_browser_close_detection(session_id: str):
             
             const img = new Image();
             img.src = fallbackUrl;
-            img.style.display = 'none'; // Keep image invisible
-            document.body.appendChild(img); // Append to DOM to ensure request is sent
+            img.style.display = 'none';
+            document.body.appendChild(img);
             
             console.log('✅ Streamlit fallback image beacon initiated');
         }}
         
-        // Listen for actual browser close events
         window.addEventListener('beforeunload', () => triggerEmergencySave('beforeunload'), {{ capture: true, passive: true }});
         window.addEventListener('unload', () => triggerEmergencySave('unload'), {{ capture: true, passive: true }});
         window.addEventListener('pagehide', () => triggerEmergencySave('pagehide'), {{ capture: true, passive: true }});
         
-        // Listen for visibility changes (tab switching detection)
         document.addEventListener('visibilitychange', function() {{
             if (document.visibilityState === 'hidden') {{
                 console.log('📱 Tab became hidden - scheduling potential save');
-                // Use a timeout to differentiate between tab switch and actual close
                 setTimeout(() => {{
                     if (document.visibilityState === 'hidden') {{
                         console.log('🚨 Tab still hidden after delay - likely closed or backgrounded');
                         triggerEmergencySave('visibility_hidden_background');
                     }} else {{
                         console.log('✅ Tab became visible during delay - canceling save');
-                        saveAttempted = false; // Reset if it was just a tab switch
+                        saveAttempted = false;
                     }}
-                }}, 5000); // 5-second delay to confirm
+                }}, 5000);
             }}
         }});
         
-        // Try to monitor parent window as well for robustness in iframes
         try {{
             if (window.parent && window.parent !== window) {{
                 window.parent.addEventListener('beforeunload', () => triggerEmergencySave('parent_beforeunload'), {{ capture: true, passive: true }});
@@ -5592,227 +6038,69 @@ def render_simplified_browser_close_detection(session_id: str):
     except Exception as e:
         logger.error(f"Failed to render enhanced browser close detection: {e}")
 
-def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
-    """Processes fingerprint data received via URL query parameters.
-    This function now explicitly guards against processing for REGISTERED_USERs."""
-    try:
+# THIS FUNCTION IS REMOVED as per the new FastAPI beacon strategy
+# def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
+#     pass # This function is no longer used.
+
+# THIS FUNCTION IS REMOVED as per the new FastAPI beacon strategy
+# def handle_fingerprint_requests_from_query():
+#     pass # This function is no longer used.
+
+def handle_fingerprint_status_update_from_query():
+    """Checks for and processes fingerprint status update requests sent via URL query parameters (image beacon)."""
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    status = query_params.get("status")
+    fp_id_short = query_params.get("fingerprint_id")
+
+    if event == "fingerprint_status_update" and session_id:
+        logger.info(f"🔍 FINGERPRINT STATUS UPDATE received for session {session_id[:8]}: Status='{status}', FP_ID_Short='{fp_id_short}'")
+        
+        # Clear specific query parameters to prevent re-triggering this logic immediately
+        params_to_clear = ["event", "session_id", "status", "fingerprint_id"]
+        for param in params_to_clear:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        # FIXED: Force inheritance check after fingerprint is captured
         session_manager = st.session_state.get('session_manager')
-        if not session_manager:
-            logger.error("❌ Session manager not available during fingerprint processing from query.")
-            return False
+        if session_manager and status == "success":
+            # Load the session fresh from DB to get the updated fingerprint
+            session = session_manager.db.load_session(session_id)
+            if session and session.user_type == UserType.GUEST:
+                logger.info(f"🔄 Re-attempting inheritance for Guest {session_id[:8]} after fingerprint capture")
+                # Re-attempt inheritance with the real fingerprint
+                session_manager._attempt_fingerprint_inheritance(session)
+                session_manager.db.save_session(session)
+                # Update the in-memory session in session_state if it exists
+                if st.session_state.get('current_session_id') == session_id:
+                    st.session_state.temp_session_update = session
         
-        session = session_manager.db.load_session(session_id)
-        if not session:
-            logger.error(f"❌ Fingerprint processing: Session '{session_id[:8]}' not found in database.")
-            return False
-        
-        ## CHANGE: Guard against processing fingerprint data for REGISTERED_USERs
-        if session.user_type == UserType.REGISTERED_USER:
-            logger.warning(f"Attempted to process fingerprint from query for REGISTERED_USER {session.session_id[:8]}. Ignoring as fingerprint is not collected for this user type.")
-            # Ensure chat is ready and clear any FP wait if this happens for a registered user
-            st.session_state.is_chat_ready = True
-            st.session_state.fingerprint_status = 'not_applicable'
-            if 'fingerprint_wait_start' in st.session_state:
-                del st.session_state['fingerprint_wait_start']
-            return False # Indicate that fingerprint was not applied
-        
-        logger.info(f"✅ Processing fingerprint for session '{session_id[:8]}': ID={fingerprint_id[:8]}, Method={method}, Privacy={privacy}")
-        
-        # The apply_fingerprinting method will now handle both setting the fingerprint
-        # and checking for inheritance based on this new 'real' fingerprint.
-        processed_data = {
-            'fingerprint_id': fingerprint_id,
-            'fingerprint_method': method,
-            'browser_privacy_level': privacy,
-            'working_methods': working_methods
-            # visitor_type is determined by apply_fingerprinting after inheritance check
-        }
-        
-        success = session_manager.apply_fingerprinting(session, processed_data)
-        
-        if success:
-            logger.info(f"✅ Fingerprint applied successfully to session '{session_id[:8]}'")
-            st.session_state.is_chat_ready = True # Explicitly unlock chat input here
-            st.session_state.fingerprint_status = 'done' # Mark fingerprinting as done definitively
-            # --- NEW: Ensure fingerprint_wait_start is cleared on successful completion ---
-            if 'fingerprint_wait_start' in st.session_state:
-                del st.session_state['fingerprint_wait_start']
-            st.session_state.fingerprint_just_completed = True # NEW: Flag for a final clean rerun in main_fixed
-            logger.info(f"Chat input unlocked for session {session.session_id[:8]} after successful JS fingerprinting.")
-            return True
-        else:
-            logger.warning(f"⚠️ Fingerprint application failed for session '{session_id[:8]}'")
-            # If it failed, ensure we still enable chat, but with 'failed' status
-            st.session_state.is_chat_ready = True
-            st.session_state.fingerprint_status = 'failed'
-            if 'fingerprint_wait_start' in st.session_state: # Clear on failure too
-                del st.session_state['fingerprint_wait_start']
-            return False
-        
-    except Exception as e:
-        logger.error(f"Fingerprint processing failed: {e}", exc_info=True)
-        return False
-
-def handle_emergency_save_requests_from_query():
-    """Checks for and processes emergency save requests sent via URL query parameters."""
-    logger.info("🔍 EMERGENCY SAVE HANDLER: Checking for query parameter requests for emergency save...")
-    
-    query_params = st.query_params
-    event = query_params.get("event")
-    session_id = query_params.get("session_id")
-    reason = query_params.get("reason", "unknown")
-    fallback = query_params.get("fallback", "false")
-
-    if event == "emergency_close" and session_id:
-        logger.info("=" * 80)
-        logger.info("🚨 EMERGENCY SAVE REQUEST DETECTED VIA URL QUERY PARAMETERS!")
-        logger.info(f"Session ID: {session_id}, Event: {event}, Reason: {reason}")
-        if fallback == "true":
-            logger.warning("⚠️ THIS IS A FALLBACK SAVE - FastAPI beacon likely failed!")
-        logger.info("=" * 80)
-        
-        st.error("🚨 **Emergency Save Detected** - Processing browser close save...")
-        if fallback == "true":
-            st.warning("⚠️ Using backup save method (primary method failed)")
-        st.info("Please wait, your conversation is being saved...")
-        
-        # Clear query parameters to prevent re-triggering on rerun
-        params_to_clear = ["event", "session_id", "reason", "fallback"]
-        for param in params_to_clear:
-            if param in st.query_params:
-                del st.query_params[param]
-        
-        try:
-            save_reason = f"{reason}_fallback" if fallback == "true" else reason
-            # Call process_emergency_save_from_query which handles the actual saving and active status.
-            # This is a Streamlit-level save, intended as a fallback if the beacon failed.
-            success = process_emergency_save_from_query(session_id, save_reason)
-            
-            if success:
-                st.success("✅ Emergency save completed successfully!")
-                logger.info("✅ Emergency save completed via query parameter successfully.")
-            else:
-                st.info("ℹ️ Emergency save completed (no CRM save needed or failed).")
-                logger.info("ℹ️ Emergency save completed via query parameter (not eligible for CRM save or internal error).")
-                
-        except Exception as e:
-            st.error(f"❌ An unexpected error occurred during emergency save: {str(e)}")
-            logger.critical(f"Emergency save processing crashed from query parameter: {e}", exc_info=True)
-        
-        st.stop()
-    else:
-        logger.debug("ℹ️ No emergency save requests found in current URL query parameters.")
-
-def handle_fingerprint_requests_from_query():
-    """Checks for and processes fingerprint data sent via URL query parameters."""
-    logger.info("🔍 FINGERPRINT HANDLER: Checking for query parameter fingerprint data...")
-    
-    query_params = st.query_params
-    event = query_params.get("event")
-    session_id = query_params.get("session_id")
-
-    if event == "fingerprint_complete" and session_id:
-        # Check if this session's fingerprint has ALREADY been processed.
-        if st.session_state.get('fingerprint_processed_for_session', {}).get(session_id, False):
-            logger.info(f"Fingerprint for session {session_id[:8]} already processed. Clearing params and skipping.")
-            # Clear query parameters to clean up the URL
-            params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
-            for param in st.query_params:
-                if param in st.query_params:
-                    del st.query_params[param]
-            st.rerun()
-            return
-
-        logger.info("=" * 80)
-        logger.info("🔍 FINGERPRINT DATA DETECTED VIA URL QUERY PARAMETERS!")
-        logger.info(f"Session ID: {session_id}, Event: {event}")
-        logger.info("=" * 80)
-        
-        fingerprint_id = query_params.get("fingerprint_id")
-        method = query_params.get("method")
-        privacy = query_params.get("privacy")
-        working_methods = query_params.get("working_methods", "").split(",") if query_params.get("working_methods") else []
-        
-        logger.info(f"Extracted - ID: {fingerprint_id}, Method: {method}, Privacy: {privacy}, Working Methods: {working_methods}")
-        
-        # Clear query parameters immediately after extraction
-        params_to_clear = ["event", "session_id", "fingerprint_id", "method", "privacy", "working_methods", "timestamp"]
-        for param in params_to_clear:
-            if param in st.query_params:
-                del st.query_params[param]
-        
-        if not fingerprint_id or not method:
-            st.error("❌ **Fingerprint Error** - Missing required data in redirect")
-            logger.error(f"Missing fingerprint data: ID={fingerprint_id}, Method={method}")
-            st.session_state.is_chat_ready = True # Unlock chat even on error to prevent getting stuck
-            st.rerun()
-            return
-        
-        try:
-            success = process_fingerprint_from_query(session_id, fingerprint_id, method, privacy, working_methods)
-            
-            # Mark this session's fingerprint as processed to avoid rerunning this logic
-            if 'fingerprint_processed_for_session' not in st.session_state:
-                st.session_state.fingerprint_processed_for_session = {}
-            st.session_state.fingerprint_processed_for_session[session_id] = True
-
-            logger.info(f"✅ Silent fingerprint processing complete. Success: {success}")
-            st.rerun() # Rerun to apply the new state and clean the URL
-            
-        except Exception as e:
-            logger.error(f"Silent fingerprint processing failed: {e}")
-            st.session_state.is_chat_ready = True # Unlock chat on failure
-            st.rerun()
-        
-        return
-    else:
-        logger.debug("ℹ️ No fingerprint requests found in current URL query parameters.")
+        st.session_state.fingerprint_client_side_completed = True
+        st.rerun()
+        return True
+    return False
 
 # =============================================================================
 # UI COMPONENTS
 # =============================================================================
-
-# Modified render_welcome_page function
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock and WordPress fallback UI."""
     
-    st.title("🤖 Welcome to FiFi AI Assistant")
-    st.subheader("Your Intelligent Food & Beverage Sourcing Companion")
+    st.header("Welcome to :rainbow[FiFi]")
+    st.subheader("Your :blue[AI sourcing] assistant")
 
-    # Show loading overlay if in loading state
     if show_loading_overlay():
         return
     
-    session = session_manager.get_session() if st.session_state.get('current_session_id') else None
-    
-    ## CHANGE: Only show fingerprint loading for non-REGISTERED users
-    if session and session.user_type != UserType.REGISTERED_USER and \
-       not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
-        
-        current_time_float = time.time()
-        wait_start = st.session_state.get('fingerprint_wait_start')
-        elapsed = current_time_float - wait_start
-        remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed)
-        
-        if remaining > 0:
-            st.info(f"🔒 **Initializing secure session...** ({remaining:.0f}s remaining)")
-            st.caption("Setting up device recognition and security features.")
-        else:
-            st.info("🔒 **Finalizing setup...** Almost ready!")
-        
-        # Add progress bar
-        progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0)
-        st.progress(progress_value, text="Initializing FiFi AI Assistant")
-    
     st.markdown("---")
-    # MOVED UP: Sign In/Start as Guest tabs (was previously below tiers)
     tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
     
     with tab1:
         if not session_manager.config.WORDPRESS_URL:
             st.warning("Sign-in is currently disabled because the authentication service (WordPress URL) is not configured in application secrets.")
         else:
-            # This is the outer if/elif/else chain for the WordPress tab content
             if st.session_state.get('wordpress_error', {}).get('show_fallback', False):
                 error_info = st.session_state.wordpress_error
                 
@@ -5858,7 +6146,10 @@ def render_welcome_page(session_manager: 'SessionManager'):
                     
                     if submit_email:
                         if fallback_email:
-                            temp_session = session_manager.get_session()
+                            # FIXED: Create session only when email is submitted
+                            temp_session = session_manager._create_and_save_new_session('email_fallback_attempt')
+                            st.session_state.current_session_id = temp_session.session_id
+                            
                             result = session_manager.handle_guest_email_verification(temp_session, fallback_email)
                             
                             if result['success']:
@@ -5907,7 +6198,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                                 
                                 if upgraded_session.user_type == UserType.REGISTERED_USER:
                                     if upgraded_session.is_degraded_login:
-                                        st.info("ℹ️ Logged in as Registered User via email due to WordPress issues.")
+                                        st.info("ℹ️ Logged in as Registered User via email (WordPress was unavailable)")
                                     st.success(f"✅ Welcome back! Your registered account has been restored.")
                                     st.balloons()
                                 else:
@@ -5928,7 +6219,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                     else:
                         st.error("Please enter a 6-digit code.")
             
-                col_resend_fallback, _ = st.columns([1,2])
+                col_resend_fallback, _ = st.columns()
                 with col_resend_fallback:
                     if st.button("🔄 Resend Code", use_container_width=True, key="resend_fallback_code"):
                         if email:
@@ -5942,16 +6233,16 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             st.error("Error: No email address found for resend. Please restart the login process.")
                         st.rerun()
 
-            else: # Standard WordPress login form
+            else: # Standard WordPress login form - REVERTED TO ORIGINAL LAYOUT
                 with st.form("login_form", clear_on_submit=True):
                     st.markdown("### 🔐 Sign In to Your Account")
                     username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
                     password = st.text_input("Password", type="password", help="Enter your WordPress password.")
                     
-                    st.markdown("")
+                    st.markdown("") # Original blank line for spacing
                     
-                    col1, col2, col3 = st.columns(3)
-                    with col2:
+                    col1, col2, col3 = st.columns(3) # Original columns for centering
+                    with col2: # Original context manager for centering button
                         submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
                     
                     if submit_button:
@@ -5964,8 +6255,9 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             set_loading_state(True, "Authenticating and preparing your session...")
                             st.rerun()
             
-            st.markdown("---")
             st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
+            # NEW: Forgot password link - ADDED HERE
+            st.markdown("[Forgot your password?](https://www.12taste.com/my-account/lost-password/)")
     
     with tab2:
         st.markdown(f"""
@@ -5974,7 +6266,6 @@ def render_welcome_page(session_manager: 'SessionManager'):
         ℹ️ **What to expect as a Guest:**
         - You get an initial allowance of **{GUEST_QUESTION_LIMIT} questions** to explore FiFi AI's capabilities.
         - After these {GUEST_QUESTION_LIMIT} questions, **email verification will be required** to continue (unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day).
-        - Our system utilizes **universal device fingerprinting** for security and to track usage across sessions.
         - You can always choose to **upgrade to a full registration** later for extended benefits.
         """)
         
@@ -5982,11 +6273,13 @@ def render_welcome_page(session_manager: 'SessionManager'):
         col1, col2, col3 = st.columns(3)
         with col2:
             if st.button("👤 Start as Guest", use_container_width=True):
+                # FIXED: Create session only when guest button is clicked
+                new_session = session_manager._create_and_save_new_session('guest')
+                st.session_state.current_session_id = new_session.session_id
                 st.session_state.loading_reason = 'start_guest'
                 set_loading_state(True, "Setting up your session and initializing AI assistant...")
                 st.rerun()
 
-    st.markdown("---")
     st.subheader("🎯 Usage Tiers")
     
     col1, col2, col3 = st.columns(3)
@@ -6006,35 +6299,32 @@ def render_welcome_page(session_manager: 'SessionManager'):
         st.warning("🔐 **Registered Users**")
         st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** with tier system:")
         st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break")
-        # Define tier1_upper_bound here, outside the if/elif/else chain, for universal access within this block
-        tier1_upper_bound = REGISTERED_USER_TIER_1_LIMIT # This is the crucial line moved
+        tier1_upper_bound = REGISTERED_USER_TIER_1_LIMIT
         st.markdown(f"  - **Tier 2**: Questions {tier1_upper_bound + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset")
-        st.markdown("• Cross-device tracking & chat saving")
-        st.markdown("• • Priority access during high usage")
         
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
     """Enhanced sidebar with tier progression display and login status."""
     with st.sidebar:
+        DEBUG_MODE = False # Set to True for debugging, False for production
+        # Terms of Service link
+        st.caption("By using this agent, you agree to our [Terms of Service](https://www.12taste.com/terms-conditions/).")
         st.title("🎛️ Dashboard")
         
-        ## START <<<<<<<<<<<<<<<< REPLACEMENT 3 OF 3
         if session.user_type.value == UserType.REGISTERED_USER.value:
             st.success("✅ **Registered User**")
             
-            # NEW: Show login method and any limitations
-            if session.is_degraded_login:
+            if DEBUG_MODE and session.is_degraded_login:
                 st.info("ℹ️ Logged in via email (WordPress was unavailable)")
-            st.caption(f"Login method: {session.login_method or 'WordPress'}")
+            # if DEBUG_MODE: # Hide "Login method:"
+            #     st.caption(f"Login method: {session.login_method or 'WordPress'}")
 
             if session.full_name: 
                 st.markdown(f"**Name:** {session.full_name}")
             if session.email: 
                 st.markdown(f"**Email:** {session.email}")
             
-            # ENHANCED: Show tier progression
             st.markdown(f"**Daily Questions:** {session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT}")
             
-            # Use a unique key for the progress bar
             progress_bar_key = f"registered_user_progress_{session.session_id}"
 
             if session.daily_question_count < REGISTERED_USER_TIER_1_LIMIT:
@@ -6045,24 +6335,20 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 if remaining_tier1 > 0:
                     st.caption(f"⏰ {remaining_tier1} questions until {TIER_1_BAN_HOURS}-hour break")
             elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
-                # Check if there's an active ban
                 if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
                     st.progress(1.0, text="Tier 1 Complete")
                     time_remaining = session.ban_end_time - datetime.now()
                     hours = int(time_remaining.total_seconds() // 3600)
                     minutes = int((time_remaining.total_seconds() % 3600) // 60)
                     st.caption(f"⏳ Tier 1 break: {hours}h {minutes}m remaining until Tier 2")
-                # FIX 2: Check tier1_completed_in_cycle to ensure correct message after ban expiry
                 elif session.tier1_completed_in_cycle:
-                    # Ban has expired and was served
                     st.progress(1.0, text="Tier 1 Complete ✅")
                     st.caption("📈 Ready to proceed to Tier 2!")
                 else:
-                    # User is at 10 questions but hasn't triggered/served the Tier 1 ban yet
                     st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0),
                                text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions")
-                    st.caption("📈 Next question will trigger a 1-hour break before Tier 2.")
-            else: # daily_question_count > REGISTERED_USER_TIER_1_LIMIT
+                    st.caption(f"📈 Next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.")
+            else:
                 tier2_questions_asked = session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT
                 tier2_limit = REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT
                 
@@ -6074,18 +6360,17 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     st.caption(f"⏰ {remaining_tier2} questions until {TIER_2_BAN_HOURS}-hour reset")
                 else:
                     st.caption(f"🚫 Daily limit reached - {TIER_2_BAN_HOURS}-hour reset required")
-        ## END <<<<<<<<<<<<<<<< REPLACEMENT 3 OF 3
                     
         elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
             st.info("📧 **Email Verified Guest**")
-            st.caption(f"Login method: {session.login_method or 'Email Verified'}") # NEW: Display login method
+            # if DEBUG_MODE: # Hide "Login method:"
+            #     st.caption(f"Login method: {session.login_method or 'Email Verified'}")
             if session.email:
                 st.markdown(f"**Email:** {session.email}")
             
-            st.markdown(f"**Daily Questions:** {session.daily_question_count}/{EMAIL_VERIFIED_QUESTION_LIMIT}") ## CHANGE: Use constant
-            st.progress(min(session.daily_question_count / EMAIL_VERIFIED_QUESTION_LIMIT, 1.0)) ## CHANGE: Use constant
+            st.markdown(f"**Daily Questions:** {session.daily_question_count}/{EMAIL_VERIFIED_QUESTION_LIMIT}")
+            st.progress(min(session.daily_question_count / EMAIL_VERIFIED_QUESTION_LIMIT, 1.0))
             
-            # Check if banned
             if session.ban_status == BanStatus.TWENTY_FOUR_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
                 time_remaining = session.ban_end_time - datetime.now()
                 hours = int(time_remaining.total_seconds() // 3600)
@@ -6093,7 +6378,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 st.error(f"🚫 Daily limit reached")
                 st.caption(f"Resets in: {hours}h {minutes}m")
             elif session.last_question_time:
-                # The daily_question_count logic handles the reset, this is a fallback display for expected reset.
                 expected_reset_time = session.last_question_time + timedelta(hours=DAILY_RESET_WINDOW_HOURS)
                 time_to_reset = expected_reset_time - datetime.now()
                 if time_to_reset.total_seconds() > 0:
@@ -6105,58 +6389,60 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             
         else: # Guest User
             st.warning("👤 **Guest User**")
-            st.caption(f"Login method: {session.login_method or 'Guest'}") # NEW: Display login method
-            st.markdown(f"**Questions:** {session.daily_question_count}/{GUEST_QUESTION_LIMIT}") ## CHANGE: Use constant
-            st.progress(min(session.daily_question_count / GUEST_QUESTION_LIMIT, 1.0)) ## CHANGE: Use constant
-            st.caption(f"Email verification unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day.") ## CHANGE: Use constant
+            # if DEBUG_MODE: # Hide "Login method:"
+            #     st.caption(f"Login method: {session.login_method or 'Guest'}")
+            st.markdown(f"**Questions:** {session.daily_question_count}/{GUEST_QUESTION_LIMIT}")
+            st.progress(min(session.daily_question_count / GUEST_QUESTION_LIMIT, 1.0))
+            st.caption(f"Email verification unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day.")
             if session.reverification_pending:
                 st.info("💡 An account is available for this device. Re-verify email to reclaim it!")
-            elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]: # Check for this state
-                st.info("💡 You are currently using guest questions. Verify your email to get more.") # Alternative message
+            elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
+                st.info("💡 You are currently using guest questions. Verify your email to get more.")
                 
         # Show fingerprint status
         if session.fingerprint_id:
-            ## CHANGE: Logic for displaying FP ID for registered users
             if session.user_type == UserType.REGISTERED_USER and session.fingerprint_id == "not_collected_registered_user":
-                st.markdown("**Device ID:** Not Collected")
-                st.caption("Fingerprinting not applicable for registered users (email primary)")
+                # st.markdown("**Device ID:** Not Collected")
+                # st.caption("Fingerprinting not applicable for registered users (email primary)")
+                pass
             elif session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-                st.markdown("**Device ID:** Identifying...")
-                st.caption("Fingerprinting in progress...")                
+                # st.markdown("**Device ID:** Identifying...")
+                # st.caption("Fingerprinting in progress...")
+                pass
             else:
-                st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
-                st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
+                # st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
+                # st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
+                pass
         else:
-            st.markdown("**Device ID:** Initializing...")
-            st.caption("Starting fingerprinting...")
+            # st.markdown("**Device ID:** Initializing...")
+            # st.caption("Starting fingerprinting...")
+            pass
 
-        # Display time since last activity
-        if session.last_activity is not None:
-            time_since_activity = datetime.now() - session.last_activity
-            minutes_inactive = time_since_activity.total_seconds() / 60
-            st.caption(f"Last activity: {int(minutes_inactive)} minutes ago")
-            
-            timeout_duration = SESSION_TIMEOUT_MINUTES ## CHANGE: Use constant
+        # Hide "Last activity"
+        # if DEBUG_MODE and session.last_activity is not None:
+        #    time_since_activity = datetime.now() - session.last_activity
+        #    minutes_inactive = time_since_activity.total_seconds() / 60
+        #    st.caption(f"Last activity: {int(minutes_inactive)} minutes ago")
+        #    
+        #    timeout_duration = SESSION_TIMEOUT_MINUTES
+        #    if minutes_inactive >= (timeout_duration - 1) and minutes_inactive < timeout_duration:
+        #        minutes_remaining = timeout_duration - minutes_inactive
+        #        st.warning(f"⚠️ Session expires in {minutes_remaining:.1f} minutes!")
+        #    elif minutes_inactive >= timeout_duration:
+        #        st.error(f"🚫 Session is likely expired. Type a question to check.")
+        # else:
+        #    if DEBUG_MODE: st.caption("Session timer will start with first interaction.")
 
-            if minutes_inactive >= (timeout_duration - 1) and minutes_inactive < timeout_duration:
-                minutes_remaining = timeout_duration - minutes_inactive
-                st.warning(f"⚠️ Session expires in {minutes_remaining:.1f} minutes!") ## CHANGE: Use constant
-            elif minutes_inactive >= timeout_duration:
-                st.error(f"🚫 Session is likely expired. Type a question to check.")
-        else:
-            st.caption("Session timer will start with first interaction.")
-
-        # AI Tools Status
+        # Hide "🤖 AI Tools Status" text and its contents
+        # if DEBUG_MODE:
         st.divider()
-        st.markdown("**🤖 AI Tools Status**")
+        # st.markdown("**🤖 AI Tools Status**")
         
         ai_system = session_manager.ai
         if ai_system:
-            # Enhanced component status display
             pinecone_status = error_handler.component_status.get("Pinecone", "healthy")
             tavily_status = error_handler.component_status.get("Tavily", "healthy")
             
-            # Pinecone status with health indicator
             if ai_system.pinecone_tool and ai_system.pinecone_tool.assistant:
                 if pinecone_status == "healthy":
                     st.success("🧠 Knowledge Base: Ready")
@@ -6169,7 +6455,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             else:
                 st.info("🧠 Knowledge Base: Not configured")
             
-            # Tavily status with health indicator
             if ai_system.tavily_agent:
                 if tavily_status == "healthy":
                     st.success("🌐 Web Search: Ready")
@@ -6180,31 +6465,55 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
             else:
                 st.info("🌐 Web Search: Not configured")
             
-            # OpenAI status
+            # Hide "💬 OpenAI: Ready"
+            # if DEBUG_MODE:
             if ai_system.openai_client:
-                st.success("💬 OpenAI: Ready")
+                # st.success("💬 OpenAI: Ready")
+                pass
             elif ai_system.config.OPENAI_API_KEY:
-                st.warning("💬 OpenAI: Error")
+                # st.warning("💬 OpenAI: Error")
+                pass
             else:
-                st.info("💬 OpenAI: Not configured")
+                # st.info("💬 OpenAI: Not configured")
+                pass
         else:
-            st.error("🤖 AI System: Not available")
+            # st.error("🤖 AI System: Not available")
+            pass
         
+        # Hide "🚫 CRM Integration: Registered users & verified guests only"
+        # if DEBUG_MODE:
         if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
             if session.zoho_contact_id: 
-                st.success("🔗 **CRM Linked**")
+                # st.success("🔗 **CRM Linked**")
+                pass
             else: 
-                st.info("📋 **CRM Ready** (will link on first save)")
+                # st.info("📋 **CRM Ready** (will link on first save)")
+                pass
             if session.timeout_saved_to_crm:
-                st.caption("💾 Auto-saved to CRM (after inactivity)")
+                # st.caption("💾 Auto-saved to CRM (after inactivity)")
+                pass
             else:
-                st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
+                # st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
+                pass
         else: 
-            st.caption("🚫 CRM Integration: Registered users & verified guests only")
+            # st.caption("🚫 CRM Integration: Registered users & verified guests only")
+            pass
+
+        # Display 12Taste Order Status
+        if session_manager.woocommerce and session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
+            # Removed await asyncio.to_thread, as test_connection will be called once per render.
+            # Using a simple check here is fine. If it's slow, consider caching.
+            status = session_manager.woocommerce.test_connection()
+            if status["status"] == "connected":
+                st.success("🛒12Taste Order Status: Ready")
+            else:
+                st.error(f"{status['status'].replace('_', ' ').title()}")
+                st.caption(status["message"])
+        else:
+            st.info("🛒 **12Taste Order Status**: Not configured or available") # Changed text
         
         st.divider()
         
-        # Show total messages in session
         total_messages = len(session.messages)
         visible_messages = len(session.messages) - session.display_message_offset
         
@@ -6214,13 +6523,14 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         else:
             st.markdown(f"**Messages in Chat:** {total_messages}")
             
-        st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
+        # st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
         
         if session.ban_status.value != BanStatus.NONE.value:
             st.error(f"🚫 **STATUS: RESTRICTED**")
             if session.ban_end_time:
-                time_remaining = session.ban_end_time - datetime.now()
-                if time_remaining.total_seconds() > 0:
+                time_remaining = datetime.now() - session.ban_end_time # Corrected calculation
+                if time_remaining.total_seconds() < 0: # Check if ban is still in future
+                    time_remaining = -time_remaining
                     hours = int(time_remaining.total_seconds() // 3600)
                     minutes = int((time_remaining.total_seconds() % 3600) // 60)
                     st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
@@ -6241,7 +6551,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 
         with col2:
             signout_help = "Ends your current session and returns to the welcome page."
-            ## CHANGE: Use CRM_SAVE_MIN_QUESTIONS constant
             if (session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and 
                 session.email and len(session.messages) >= CRM_SAVE_MIN_QUESTIONS):
                 signout_help += " Your conversation will be automatically saved to CRM before signing out."
@@ -6250,8 +6559,9 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 session_manager.end_session(session)
                 st.rerun()
 
-        ## CHANGE: Use CRM_SAVE_MIN_QUESTIONS constant
-        if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and len(session.messages) >= CRM_SAVE_MIN_QUESTIONS:
+        # Hide "Save to Zoho CRM" button
+        # if DEBUG_MODE and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and len(session.messages) >= CRM_SAVE_MIN_QUESTIONS:
+        if session_manager.zoho.config.ZOHO_ENABLED and session.email and len(session.messages) >= CRM_SAVE_MIN_QUESTIONS:
             st.divider()
             
             pdf_buffer = pdf_exporter.generate_chat_pdf(session)
@@ -6265,12 +6575,14 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                     help="Download the current chat conversation as a PDF document."
                 )
             
-            if session_manager.zoho.config.ZOHO_ENABLED and session.email:
+            # This button is hidden by default due to DEBUG_MODE = False
+            # To show it, you'd need to explicitly set DEBUG_MODE = True
+            if DEBUG_MODE:
                 if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Manually save your current chat transcript to your linked Zoho CRM contact."):
                     session_manager.manual_save_to_crm(session)
                 st.caption("💡 Chat automatically saves to CRM during Sign Out or browser/tab close.")
 
-# NEW FUNCTION FOR EMAIL PROMPT MANAGEMENT
+
 def display_email_prompt_if_needed(session_manager: 'SessionManager', session: UserSession) -> bool:
     """
     Renders email verification dialog if needed.
@@ -6278,35 +6590,22 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
     Controls `st.session_state.chat_blocked_by_dialog` and returns if chat input should be disabled.
     """
     
-    # Ensure we're working with the correct session
     if st.session_state.get('current_session_id') != session.session_id:
         logger.warning(f"Session mismatch in email prompt! State: {st.session_state.get('current_session_id', 'None')[:8]}, Param: {session.session_id[:8]}")
-        # Force correct session
         st.session_state.current_session_id = session.session_id
     
-    # Initialize relevant session states if not present
-    if 'verification_stage' not in st.session_state:
-        st.session_state.verification_stage = None
-    if 'guest_continue_active' not in st.session_state:
-        st.session_state.guest_continue_active = False
-    if 'final_answer_acknowledged' not in st.session_state:
-        st.session_state.final_answer_acknowledged = False
-    if 'gentle_prompt_shown' not in st.session_state:
-        st.session_state.gentle_prompt_shown = False
-    if 'email_verified_final_answer_acknowledged' not in st.session_state:
-        st.session_state.email_verified_final_answer_acknowledged = False
-    # NEW: Initialize 'must_verify_email_immediately' and 'skip_email_allowed' flags
-    if 'must_verify_email_immediately' not in st.session_state:
-        st.session_state.must_verify_email_immediately = False
-    if 'skip_email_allowed' not in st.session_state:
-        st.session_state.skip_email_allowed = True
+    if 'verification_stage' not in st.session_state: st.session_state.verification_stage = None
+    if 'guest_continue_active' not in st.session_state: st.session_state.guest_continue_active = False
+    if 'final_answer_acknowledged' not in st.session_state: st.session_state.final_answer_acknowledged = False
+    if 'gentle_prompt_shown' not in st.session_state: st.session_state.gentle_prompt_shown = False
+    if 'email_verified_final_answer_acknowledged' not in st.session_state: st.session_state.email_verified_final_answer_acknowledged = False
+    if 'must_verify_email_immediately' not in st.session_state: st.session_state.must_verify_email_immediately = False
+    if 'skip_email_allowed' not in st.session_state: st.session_state.skip_email_allowed = True
 
-    # NEW: Handle the actual email sending if flagged
     if st.session_state.get('send_code_now', False) and st.session_state.get('verification_email'):
         email_to_send = st.session_state.verification_email
         result = session_manager.handle_guest_email_verification(session, email_to_send)
         
-        # Clear the send flag
         del st.session_state['send_code_now']
         
         if result['success']:
@@ -6314,49 +6613,39 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             st.session_state.verification_stage = "code_entry"
         else:
             st.error(result['message'])
-            # The 'unusual activity' message is from evasion, which is now disabled.
-            # Keeping this check in case of future re-enabling or other types of unusual activity.
-            # No specific action for "unusual activity" currently as email evasion detection is disabled.
-            st.session_state.verification_stage = st.session_state.get('verification_stage', 'initial_check') # Fallback to avoid getting stuck
+            st.session_state.verification_stage = st.session_state.get('verification_stage', 'initial_check')
         
         st.rerun()
-        return True  # Block chat during this transition
+        return True
 
-    # Check if a hard block is in place first (non-email-verification related bans)
     limit_check = session_manager.question_limits.is_within_limits(session)
-    ## CHANGE: Use constants for comparison
     if not limit_check['allowed'] and limit_check.get('reason') not in ['guest_limit', 'email_verified_guest_limit', 'registered_user_tier1_limit', 'registered_user_tier2_limit']:
-        st.session_state.chat_blocked_by_dialog = True # Hard ban, block everything
-        return True # Disable chat input
+        st.session_state.chat_blocked_by_dialog = True
+        return True
 
-    # Determine current user status
     user_is_guest = (session.user_type.value == UserType.GUEST.value)
     user_is_email_verified = (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value)
-    guest_limit_value = GUEST_QUESTION_LIMIT ## CHANGE: Use constant
-    email_verified_limit_value = EMAIL_VERIFIED_QUESTION_LIMIT ## CHANGE: Use constant
+    guest_limit_value = GUEST_QUESTION_LIMIT
+    email_verified_limit_value = EMAIL_VERIFIED_QUESTION_LIMIT
     daily_q_value = session.daily_question_count
     is_guest_limit_hit = (user_is_guest and daily_q_value >= guest_limit_value)
     is_email_verified_limit_hit = (user_is_email_verified and daily_q_value >= email_verified_limit_value)
     
-    # NEW LOGIC: Only consider it "just hit limit" if the 'just_answered' flag is true
     user_just_hit_guest_limit = is_guest_limit_hit and st.session_state.get('just_answered', False)
     user_just_hit_email_verified_limit = is_email_verified_limit_hit and st.session_state.get('just_answered', False)
     
-    # NEW: Check if forced verification is required
     must_verify_immediately = st.session_state.get('must_verify_email_immediately', False)
     skip_allowed = st.session_state.get('skip_email_allowed', True)
 
     should_show_prompt = False
-    should_block_chat = True  # Default to blocking when prompt is shown
+    should_block_chat = True
 
-    # PRIORITY 1: Handle forced verification for returning guest (no skip option)
     if user_is_guest and must_verify_immediately and daily_q_value == 0:
         should_show_prompt = True
         should_block_chat = True
         if st.session_state.verification_stage is None:
             st.session_state.verification_stage = 'forced_verification'
 
-    # PRIORITY 2: Handle re-verification for recognized devices
     elif session.reverification_pending:
         should_show_prompt = True
         should_block_chat = True
@@ -6364,19 +6653,15 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
              st.session_state.verification_stage = 'initial_check'
              st.session_state.guest_continue_active = False
 
-    # PRIORITY 3: Handle guest who JUST hit their limit (GENTLE approach with the reading button)
     elif user_just_hit_guest_limit:
-        st.session_state.just_answered = False # Consume the flag
+        st.session_state.just_answered = False
         should_show_prompt = True
-        should_block_chat = False  # DON'T block immediately
+        should_block_chat = False
         
-        st.success(f"🎯 **You've explored FiFi AI with your {GUEST_QUESTION_LIMIT} guest questions!**") ## CHANGE: Use constant
-        st.info(f"Take your time to read this answer. When you're ready, verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions per day + chat history saving!") ## CHANGE: Use constant
+        st.success(f"🎯 **You've explored FiFi AI with your {GUEST_QUESTION_LIMIT} guest questions!**")
+        st.info(f"Take your time to read this answer. When you're ready, verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions per day + chat history saving!")
         
         with st.expander("📧 Ready to Unlock More Questions?", expanded=False):
-            st.markdown("### 🚀 What You'll Get After Email Verification:")
-            st.markdown(f"• **{EMAIL_VERIFIED_QUESTION_LIMIT} questions per day** • **Chat history saving** • **Cross-device sync**") ## CHANGE: Use constant
-            
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("📧 Yes, Let's Verify My Email!", use_container_width=True, key="gentle_verify_btn"):
@@ -6385,7 +6670,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.session_state.final_answer_acknowledged = True
                     st.rerun()
             with col2:
-                if skip_allowed: # Guest can still skip *after* the initial gentle prompt
+                if skip_allowed:
                     if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="continue_reading_btn"):
                         st.session_state.final_answer_acknowledged = True
                         st.success("Perfect! Take your time. The verification option will remain available above.")
@@ -6396,35 +6681,30 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         st.session_state.chat_blocked_by_dialog = False
         return False
 
-    # PRIORITY 4: Handle email verified guest who JUST hit their limit (GENTLE approach)
     elif user_just_hit_email_verified_limit:
-        st.session_state.just_answered = False # Consume the flag
+        st.session_state.just_answered = False
         should_show_prompt = True
         should_block_chat = False
         
-        st.success(f"🎯 **You've completed your {EMAIL_VERIFIED_QUESTION_LIMIT} daily questions!**") ## CHANGE: Use constant
-        st.info(f"Take your time to read this answer. Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!") ## CHANGE: Use constant
+        st.success(f"🎯 **You've completed your {EMAIL_VERIFIED_QUESTION_LIMIT} daily questions!**")
+        st.info(f"Take your time to read this answer. Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
         
         with st.expander("🚀 Want More Questions Daily?", expanded=False):
-            st.markdown("### 📈 Upgrade Benefits:")
-            st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** • **Tier system** • **Priority support**") ## CHANGE: Use constant
-            
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
-                    st.link_button("Register Here", "https://www.12taste.com/in/my-account/", use_container_width=True) # Direct link
+                    st.link_button("Register Here", "https://www.12taste.com/in/my-account/", use_container_width=True)
                     st.session_state.email_verified_final_answer_acknowledged = True
                     st.rerun()
             with col2:
                 if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="email_verified_continue_reading"):
                     st.session_state.email_verified_final_answer_acknowledged = True
-                    st.success(f"Perfect! Take your time reading. You'll need to wait {EMAIL_VERIFIED_BAN_HOURS} hours for more questions.") ## CHANGE: Use constant
+                    st.success(f"Perfect! Take your time reading. You'll need to wait {EMAIL_VERIFIED_BAN_HOURS} hours for more questions.")
                     st.rerun()
         
         st.session_state.chat_blocked_by_dialog = False
         return False
 
-    # PRIORITY 5: Handle guest who is at their limit but DID NOT just ask a question (e.g., new session)
     elif is_guest_limit_hit:
         should_show_prompt = True
         should_block_chat = True
@@ -6432,64 +6712,57 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             st.session_state.verification_stage = 'email_entry'
             st.session_state.guest_continue_active = False
 
-    # PRIORITY 6: Handle email verified guest who is at their limit but DID NOT just ask a question
     elif is_email_verified_limit_hit and not st.session_state.email_verified_final_answer_acknowledged:
         should_show_prompt = True
         should_block_chat = True
         st.error("🛑 **Daily Limit Reached**")
-        st.info(f"You've used your {EMAIL_VERIFIED_QUESTION_LIMIT} questions for today. Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!") ## CHANGE: Use constants
+        st.info(f"You've used your {EMAIL_VERIFIED_QUESTION_LIMIT} questions for today. Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
         
         col1, col2 = st.columns(2)
         with col1:
-            st.link_button(f"Register for {REGISTERED_USER_QUESTION_LIMIT} questions/day", "https://www.12taste.com/in/my-account/", use_container_width=True) ## CHANGE: Use constant
+            st.link_button(f"Register for {REGISTERED_USER_QUESTION_LIMIT} questions/day", "https://www.12taste.com/in/my-account/", use_container_width=True)
         with col2:
             if st.button("Return to Welcome Page", use_container_width=True):
                 session_manager.end_session(session)
                 app_base_url = os.getenv("APP_BASE_URL", "https://fifi-eu-121263692901.europe-west1.run.app/")
                 js_redirect = f"window.top.location.href = '{app_base_url}';"
-                st.components.v1.html(f"<script>{js_redirect}</script>", height=0, width=0)
+                st.components.v1.html(f"<script>{js_redirect}</script>", height=100, width=0)
                 st.rerun()
         
         st.session_state.chat_blocked_by_dialog = True
         return True
 
-    # PRIORITY 7: Handle declined recognized email scenario
     elif session.declined_recognized_email_at and not st.session_state.guest_continue_active and not is_guest_limit_hit:
         should_show_prompt = True
         should_block_chat = False
         if st.session_state.verification_stage is None:
             st.session_state.verification_stage = 'declined_recognized_email_prompt_only'
 
-    # If no prompt should be shown based on conditions, ensure state is clean
     if not should_show_prompt:
         st.session_state.chat_blocked_by_dialog = False
         st.session_state.verification_stage = None
-        if 'just_answered' in st.session_state: # Clean up the flag if not used
+        if 'just_answered' in st.session_state:
              del st.session_state.just_answered
         return False
 
-    # Set chat blocking state based on the type of prompt
     st.session_state.chat_blocked_by_dialog = should_block_chat
     
-    # Only show error header for blocking prompts
     if should_block_chat:
         st.error("📧 **Action Required**")
 
     current_stage = st.session_state.verification_stage
 
-    # NEW: Handle forced verification stage (no skip option)
     if current_stage == 'forced_verification':
         st.error("📧 **Email Verification Required**")
         
-        # Check if we have known emails for this device
         known_emails = st.session_state.get('known_device_emails', [])
         
         if known_emails:
             if len(known_emails) == 1:
-                st.info(f"This device was previously verified with **{session_manager._mask_email(known_emails[0])}**. Please verify an email to continue.")
+                st.info(f"This device was previously verified with **{session_manager._mask_email(known_emails)}**. Please verify an email to continue.")
             else:
                 st.info("This device was previously verified with multiple emails. Please verify one of your emails to continue:")
-                for email in known_emails[:3]:  # Show max 3 emails
+                for email in known_emails[:3]:
                     st.caption(f"• {session_manager._mask_email(email)}")
         else:
             st.info("This device has already been used with email verification. Please verify your email to continue using FiFi AI.")
@@ -6504,13 +6777,10 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             )
             submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
             
-            # NO SKIP BUTTON - verification is mandatory
-            
             if submit_email:
                 if current_email_input:
-                    # Reset the must_verify flag after a submission attempt
                     st.session_state.must_verify_email_immediately = False
-                    st.session_state.skip_email_allowed = True # Reset to default allowed after forced verification attempt
+                    st.session_state.skip_email_allowed = True
                     
                     result = session_manager.handle_guest_email_verification(session, current_email_input)
                     if result['success']:
@@ -6524,7 +6794,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.error("Please enter an email address to receive the code.")
 
     elif current_stage == 'initial_check':
-        # Use a container to ensure clean rendering
         prompt_container = st.container()
         
         with prompt_container:
@@ -6533,8 +6802,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
             st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
             
-            # FIXED: Use session ID for stable keys instead of timestamp
-            button_key_suffix = session.session_id[:8]  # First 8 chars of session ID
+            button_key_suffix = session.session_id[:8]
             
             col1, col2 = st.columns(2)
             with col1:
@@ -6542,7 +6810,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                             use_container_width=True, 
                             key=f"reverify_yes_{button_key_suffix}"):
                     
-                    # Add logging to debug
                     logger.info(f"Verify button clicked in session {session.session_id[:8]}")
                     
                     session.recognition_response = "yes_reverify"
@@ -6550,7 +6817,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.session_state.verification_email = email_to_reverify
                     st.session_state.verification_stage = "send_code_recognized"
                     
-                    # Ensure session ID is preserved
                     st.session_state.current_session_id = session.session_id
                     
                     session_manager.db.save_session(session)
@@ -6572,7 +6838,6 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     session.pending_zoho_contact_id = None
                     session.pending_wp_token = None
                     
-                    # Ensure session ID is preserved
                     st.session_state.current_session_id = session.session_id
                     
                     session_manager.db.save_session(session)
@@ -6583,19 +6848,16 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.rerun()
 
     elif current_stage == 'send_code_recognized':
-        # Don't show any buttons - just the sending status
         email_to_verify = st.session_state.get('verification_email')
         if email_to_verify:
             st.info(f"📧 **Sending verification code to {session_manager._mask_email(email_to_verify)}...**")
             
-            # Immediately perform the send (the actual sending happens after this renders)
             st.session_state.send_code_now = True
             st.rerun()
 
     elif current_stage == 'email_entry':
         skip_allowed = st.session_state.get('skip_email_allowed', True)
         
-        ## CHANGE: Use constants in prompt
         st.info(f"🚀 You've used your {GUEST_QUESTION_LIMIT} guest questions. Please verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions per day!")
         with st.form("email_verification_form", clear_on_submit=False):
             st.markdown("**📧 Enter your email address to receive a verification code:**")
@@ -6615,24 +6877,19 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     skip_button = st.form_submit_button("Skip for now", use_container_width=True)
                     
                 if skip_button:
-                    # NEW: End the session instead of just continuing
                     logger.info(f"User chose to skip email verification for session {session.session_id[:8]} - ending session")
                     
-                    # Mark session as inactive
                     session.active = False
                     session.last_activity = datetime.now()
                     
-                    # Save final session state
                     try:
                         session_manager.db.save_session(session)
                     except Exception as e:
                         logger.error(f"Failed to save session during skip: {e}")
                     
-                    # Clear Streamlit session state
                     for key in list(st.session_state.keys()):
                         del st.session_state[key]
                     
-                    # Reset to welcome page
                     st.session_state['page'] = None
                     
                     st.info("👋 Session ended. You can start a new session anytime.")
@@ -6693,14 +6950,12 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     if result['success']:
                         st.success(result['message'])
                         st.balloons()
-                        # Clean up verification state on success
                         st.session_state.chat_blocked_by_dialog = False
                         st.session_state.verification_stage = None
                         st.session_state.guest_continue_active = False
                         st.session_state.final_answer_acknowledged = False
                         st.session_state.gentle_prompt_shown = False
                         st.session_state.email_verified_final_answer_acknowledged = False
-                        # NEW: Clear must_verify_email_immediately and skip_email_allowed on successful verification
                         st.session_state.must_verify_email_immediately = False
                         st.session_state.skip_email_allowed = True
                         if 'just_answered' in st.session_state:
@@ -6714,12 +6969,11 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
                     st.error("Please enter the verification code you received.")
         
     elif current_stage == 'declined_recognized_email_prompt_only':
-        # Non-blocking prompt for users who declined recognized email
         st.session_state.chat_blocked_by_dialog = False
 
-        remaining_questions = GUEST_QUESTION_LIMIT - session.daily_question_count ## CHANGE: Use constant
+        remaining_questions = GUEST_QUESTION_LIMIT - session.daily_question_count
         st.info(f"✅ **Continuing as Guest** - You have **{remaining_questions} questions** remaining from your guest allowance.")
-        st.info(f"💡 **Pro Tip:** Verify your email anytime to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day + chat history saving.") ## CHANGE: Use constant
+        st.info(f"💡 **Pro Tip:** Verify your email anytime to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day + chat history saving.")
 
         with st.expander("📧 Want to Verify a Different Email?", expanded=False):
             col_opts1, col_opts2 = st.columns(2)
@@ -6742,29 +6996,15 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
     
-    st.title("🤖 FiFi AI Assistant")
+    st.title("FiFi AI Assistant")
     st.caption("Hello, I am FiFi, your AI-powered assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, explore recipe ideas, technical data, and more.")
 
     # NEW: Show fingerprint waiting status ONLY for non-registered users
-    ## CHANGE: Only show fingerprint wait for non-registered users
-    if session.user_type != UserType.REGISTERED_USER and \
-       not st.session_state.get('is_chat_ready', False) and st.session_state.get('fingerprint_wait_start'):
-        
-        current_time_float = time.time() # Use float for direct comparison with time.time()
-        wait_start = st.session_state.get('fingerprint_wait_start')
-        elapsed = current_time_float - wait_start
-        remaining = max(0, FINGERPRINT_TIMEOUT_SECONDS - elapsed) ## CHANGE: Use constant
-        
-        if remaining > 0:
-            st.info(f"🔒 **Securing your session...** ({remaining:.0f}s remaining)")
-            st.caption("FiFi is setting up device recognition for security and session management.")
-        else:
-            st.info("🔒 **Finalizing setup...** Almost ready!")
-        
-        # Add a subtle progress bar
-        progress_value = min(elapsed / FINGERPRINT_TIMEOUT_SECONDS, 1.0) ## CHANGE: Use constant
-        st.progress(progress_value, text="Session Security Setup")
-        st.markdown("---")
+    # This block is now handled higher up in main_fixed, so it won't be displayed here
+    # However, if for any reason it gets to this point and is still not ready,
+    # it means the fingerprinting is taking too long or failed, and main_fixed
+    # will have already triggered a rerun. This means this section will only
+    # execute once is_chat_ready is True.
 
     # Simple activity tracking
     if activity_result:
@@ -6785,12 +7025,9 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
         except Exception as e:
             logger.error(f"Browser close detection failed: {e}")
 
-    # Display email prompt if needed AND get status to disable chat input
     should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
 
-    # Render chat content ONLY if not blocked by a dialog
     if not st.session_state.get('chat_blocked_by_dialog', False):
-        # ENHANCED: Show tier warnings for registered users
         limit_check_for_display = session_manager.question_limits.is_within_limits(session)
         if (session.user_type.value == UserType.REGISTERED_USER.value and 
             limit_check_for_display.get('allowed') and 
@@ -6799,7 +7036,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             tier = limit_check_for_display.get('tier')
             remaining = limit_check_for_display.get('remaining', 0)
             
-            # Check actual ban status for accurate messaging
             has_active_tier1_ban = (
                 session.ban_status == BanStatus.ONE_HOUR and 
                 session.ban_end_time and 
@@ -6807,35 +7043,30 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             )
             
             if tier == 2 and remaining <= 3:
-                st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until {TIER_2_BAN_HOURS}-hour reset!") ## CHANGE: Use constant
+                st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until {TIER_2_BAN_HOURS}-hour reset!")
             elif tier == 1 and remaining <= 2 and remaining > 0:
-                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until {TIER_1_BAN_HOURS}-hour break.") ## CHANGE: Use constant
-            ## CHANGE: Use REGISTERED_USER_TIER_1_LIMIT constant
+                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until {TIER_1_BAN_HOURS}-hour break.")
             elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
-                # At exactly 10 questions - check ban status
                 if has_active_tier1_ban:
                     time_remaining = session.ban_end_time - datetime.now()
                     minutes = int(time_remaining.total_seconds() / 60)
                     hours = int(time_remaining.total_seconds() / 3600)
                     if hours >= 1:
-                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {hours} hour(s) remaining") ## CHANGE: Use constant
+                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {hours} hour(s) remaining")
                     else:
-                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {minutes} minutes remaining") ## CHANGE: Use constant
-                # FIX 2: Check tier1_completed_in_cycle to know if ban was already served
+                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {minutes} minutes remaining")
                 elif session.tier1_completed_in_cycle:
-                    # Ban has expired and was served
                     st.info("✅ **Tier 1 Complete**: You can now proceed to Tier 2!")
                 else:
-                    # User is at 10 questions but hasn't triggered/served the Tier 1 ban yet
-                    st.info(f"ℹ️ **Tier 1 Complete**: Your next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.") ## CHANGE: Use constant
+                    st.info(f"ℹ️ **Tier 1 Complete**: Your next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.")
 
-        # Display chat messages (respects soft clear offset)
         visible_messages = session.messages[session.display_message_offset:]
         for msg in visible_messages:
-            with st.chat_message(msg.get("role", "user")):
-                # NEW: Check if this is a pricing/stock redirect that should be visually hidden from chat
+            role = msg.get("role", "user")
+            avatar_icon = USER_AVATAR_B64 if role == "user" else FIFI_AVATAR_B64
+            with st.chat_message(role, avatar=avatar_icon):
                 if msg.get("display_only_notice", False) and msg.get("role") == "assistant":
-                    pass # Do not render this specific assistant message in the chat bubble
+                    pass
                 else:
                     st.markdown(msg.get("content", ""))
                 
@@ -6845,16 +7076,19 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         "Content Moderation": "🛡️", "System Fallback": "⚠️",
                         "Error Handler": "❌", "Session Analytics": "📈", 
                         "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
-                        "Business Rules": "⚙️" # NEW: Add icon for Business Rules
+                        "Business Rules": "⚙️",
+                        "12Taste Order Status": "🛒" # Changed source name
                     }.get(msg['source'], "🤖")
                     st.caption(f"{source_color} Source: {msg['source']}")
                 
-                indicators = []
-                if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
-                if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
-                if msg.get("is_meta_response"): indicators.append("📈 Session Analytics")
-                if msg.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
-                if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                # Removed "Enhanced with" block completely
+                # indicators = []
+                # if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
+                # if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
+                # if msg.get("is_meta_response"): indicators.append("📈 Session Analytics")
+                # if msg.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules")
+                # if msg.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce")
+                # if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                 
                 if msg.get("safety_override"):
                     st.warning("🛡️ Safety Override: Switched to verified sources")
@@ -6862,29 +7096,24 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 if msg.get("has_citations") and msg.get("has_inline_citations"):
                     st.caption("📚 Response includes verified citations")
                 
-    # Chat input section with inline error notifications + manual dismiss
-    # MODIFIED: Lock chat input until st.session_state.is_chat_ready is True
-    # And combine with other disabled conditions
     overall_chat_disabled = (
         not st.session_state.get('is_chat_ready', False) or 
         should_disable_chat_input_by_dialog or 
         session.ban_status.value != BanStatus.NONE.value or
-        st.session_state.get('is_processing_question', False)  # NEW: Disable during processing
+        st.session_state.get('is_processing_question', False)
     )
 
-    # Rate limit notification with manual dismiss
     if 'rate_limit_hit' in st.session_state:
         rate_limit_info = st.session_state.rate_limit_hit
         time_until_next = rate_limit_info.get('time_until_next', 0)
-        max_requests = RATE_LIMIT_REQUESTS ## CHANGE: Use constant
-        window_seconds = RATE_LIMIT_WINDOW_SECONDS ## CHANGE: Use constant
+        max_requests = RATE_LIMIT_REQUESTS
+        window_seconds = RATE_LIMIT_WINDOW_SECONDS
         
-        # Calculate remaining time dynamically
         current_time = datetime.now()
         elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
         remaining_time = max(0, int(time_until_next - elapsed))
         
-        col1, col2 = st.columns([5, 1])
+        col1, col2 = st.columns()
         with col1:
             if remaining_time > 0:
                 st.error(f"⏱️ **Rate limit exceeded** - Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
@@ -6895,14 +7124,13 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 del st.session_state.rate_limit_hit
                 st.rerun()
 
-    # Content moderation notification with manual dismiss
     if 'moderation_flagged' in st.session_state:
         moderation_info = st.session_state.moderation_flagged
         categories = moderation_info.get('categories', [])
         categories_text = ', '.join(categories) if categories else 'policy violation'
         message = moderation_info.get('message', 'Your message violates our content policy.')
         
-        col1, col2 = st.columns([5, 1])
+        col1, col2 = st.columns()
         with col1:
             st.error(f"🛡️ **Content Policy Violation** - {categories_text}")
             st.info(f"💡 **Guidance**: {message}")
@@ -6911,26 +7139,27 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 del st.session_state.moderation_flagged
                 st.rerun()
 
-    # Context error notification with manual dismiss
     if 'context_flagged' in st.session_state:
         context_info = st.session_state.context_flagged
         category = context_info.get('category', 'off-topic')
         confidence = context_info.get('confidence', 0.0)
         message = context_info.get('message', '')
         
-        col1, col2 = st.columns([5, 1])
+        col1, col2 = st.columns()
         with col1:
             if category == "unrelated_industry":
                 st.warning(f"🏭 **Outside Food Industry** - This question doesn't relate to food & beverage ingredients.")
             elif category in ["personal_cooking", "off_topic"]:
                 st.warning(f"👨‍🍳 **Personal vs Professional** - I'm designed for B2B food industry questions.")
-            elif category == "greeting_or_polite": # NEW: Display LLM-detected greetings as dismissible info
+            elif category == "greeting_or_polite":
                 st.info(f"👋 **Greeting Detected**")
                 st.markdown("Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?")
+            elif category == "order_query" and session.user_type == UserType.GUEST and not session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
+                st.info("🛒 **Order Inquiry** - Order lookup is available for registered users on supported e-commerce platforms. Please log in or enable WooCommerce in your configuration.")
             else:
-                st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or formulation.")
+                st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or market trends.")
             
-            if category != "greeting_or_polite": # Don't show guidance for greetings, as they're allowed
+            if category != "greeting_or_polite":
                 st.info(f"💡 **Guidance**: {message}")
             st.caption(f"Confidence: {confidence:.1%} | Category: {category}")
         with col2:
@@ -6938,13 +7167,12 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 del st.session_state.context_flagged
                 st.rerun()
     
-    # NEW: Pricing/Stock notice with manual dismiss
     if 'pricing_stock_notice' in st.session_state:
         notice_info = st.session_state.pricing_stock_notice
         query_type = notice_info.get('query_type', 'pricing')
         message = notice_info.get('message', '')
 
-        col1, col2 = st.columns([5, 1])
+        col1, col2 = st.columns()
         with col1:
             if query_type == 'pricing':
                 st.info("💰 **Pricing Information Notice**")
@@ -6957,12 +7185,10 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 del st.session_state.pricing_stock_notice
                 st.rerun()
 
-    # Show approaching limit warnings (Option 2 enhancement)
     if not overall_chat_disabled and not st.session_state.get('is_processing_question', False):
         user_type = session.user_type.value
         current_count = session.daily_question_count
         
-        ## CHANGE: Use constants for warnings
         if user_type == UserType.GUEST.value and current_count == GUEST_QUESTION_LIMIT - 1:
             st.warning(f"⚠️ **Final Guest Question Coming Up!** Your next question will be your last before email verification is required.")
             
@@ -6977,39 +7203,33 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
 
     prompt = st.chat_input(
         "Ask me about ingredients, suppliers, or market trends..." if not st.session_state.get('is_processing_question', False) 
-        else "Processing your question, please wait...",  # NEW: Show processing message
+        else "Processing your question, please wait...",
         disabled=overall_chat_disabled
     )
     
     if prompt:
         logger.info(f"🎯 Processing question from {session.session_id[:8]}")
         
-        # NEW: Set processing flag
         st.session_state.is_processing_question = True
         
-        # Check if attempting to exceed limits _before_ sending to AI
-        # This call will now also handle displaying appropriate messages/bans.
         if session_manager.check_if_attempting_to_exceed_limits(session):
-            st.session_state.is_processing_question = False  # Clear flag
-            # If `check_if_attempting_to_exceed_limits` returns True, it means a limit was hit
-            # and a message/ban has been displayed.
-            # For guest limit, we specifically set the verification stage.
+            st.session_state.is_processing_question = False
             if session.user_type.value == UserType.GUEST.value and \
-               session.daily_question_count >= GUEST_QUESTION_LIMIT: ## CHANGE: Use constant
+               session.daily_question_count >= GUEST_QUESTION_LIMIT:
                 st.session_state.verification_stage = 'email_entry'
                 st.session_state.chat_blocked_by_dialog = True
-                st.session_state.final_answer_acknowledged = True # Acknowledge the 'final answer' to trigger dialog
+                st.session_state.final_answer_acknowledged = True
             st.rerun()
             return
         
-        with st.chat_message("user"):
+        with st.chat_message("user", avatar=USER_AVATAR_B64):
             st.markdown(prompt)
         
-        with st.chat_message("assistant"):
+        with st.chat_message("assistant", avatar=FIFI_AVATAR_B64):
             with st.spinner("🔍 FiFi is processing your question and we request your patience..."):
                 try:
-                    response = session_manager.get_ai_response(session, prompt)
-                    st.session_state.just_answered = True # Set flag for gentle prompts
+                    response = asyncio.run(session_manager.get_ai_response(session, prompt))
+                    st.session_state.just_answered = True
                     
                     if response.get('requires_email'):
                         st.error("📧 Please verify your email to continue.")
@@ -7019,14 +7239,18 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                         st.error(response.get("content", 'Access restricted.'))
                         if response.get('time_remaining'):
                             time_remaining = response['time_remaining']
-                            hours = int(time_remaining.total_seconds() // 3600)
-                            minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                            # Ensure time_remaining is a timedelta or convert if it's an int/float (seconds)
+                            if isinstance(time_remaining, (int, float)):
+                                time_remaining_td = timedelta(seconds=time_remaining)
+                            else: # Assume it's already a timedelta from the BanStatus.ONE_HOUR / TWENTY_FOUR_HOUR messages
+                                time_remaining_td = time_remaining
+                            
+                            hours = int(time_remaining_td.total_seconds() // 3600)
+                            minutes = int((time_remaining_td.total_seconds() % 3600) // 60)
                             st.error(f"Time remaining: {hours}h {minutes}m")
-                    elif response.get('display_only_notice', False): # NEW: Check this flag
-                        # Do nothing here, as the notice is displayed separately and the chat content is empty.
+                    elif response.get('display_only_notice', False):
                         pass
                     else:
-                        # Show the AI response and metadata
                         st.markdown(response.get("content", "No response generated."))
                         if response.get("source"):
                             source_color = {
@@ -7034,16 +7258,19 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                                 "Content Moderation": "🛡️", "System Fallback": "⚠️",
                                 "Error Handler": "❌", "Session Analytics": "📈",
                                 "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
-                                "Business Rules": "⚙️" # NEW: Add icon for Business Rules
+                                "Business Rules": "⚙️",
+                                "12Taste Order Status": "🛒" # Changed source name
                             }.get(response['source'], "🤖")
                             st.caption(f"{source_color} Source: {response['source']}")
                         
-                        indicators = []
-                        if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
-                        if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
-                        if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
-                        if response.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules") # NEW: Add for pricing/stock redirects
-                        if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                        # Removed "Enhanced with" indicators
+                        # indicators = []
+                        # if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
+                        # if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
+                        # if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
+                        # if response.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules")
+                        # if response.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce")
+                        # if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
                         
                         if response.get("safety_override"): st.warning("🛡️ Safety Override: Switched to verified sources")
                         if response.get("has_citations") and response.get("has_inline_citations"): st.caption("📚 Response includes verified citations")
@@ -7054,14 +7281,11 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     logger.error(f"❌ AI response failed: {e}", exc_info=True)
                     st.error("⚠️ I encountered an error. Please try again.")
                 finally:
-                    # NEW: Always clear processing flag
                     st.session_state.is_processing_question = False
         
-        # Clear processing flag before rerun
         st.session_state.is_processing_question = False
         st.rerun()
 
-## CHANGE: Persistent state manager
 class PersistentState:
     """Manages state that must survive reruns"""
     
@@ -7077,7 +7301,7 @@ class PersistentState:
     def get(key: str, default=None):
         """Get a value if not expired"""
         data = st.session_state.get(f'_persistent_{key}')
-        if data and datetime.now() < data['expires']:
+        if data and datetime.now() and datetime.now() < data['expires']:
             return data['value']
         return default
     
@@ -7107,9 +7331,10 @@ def ensure_initialization_fixed():
                     'local_sessions': {},
                     'save_session': lambda self, session: None,
                     'load_session': lambda self, session_id: None,
+                    '_load_any_session': lambda self, session_id: None, # Need for FastAPI backend
                     'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
                     'find_sessions_by_email': lambda self, email: [],
-                    'cleanup_old_inactive_sessions': lambda self: None # Add dummy method
+                    'cleanup_old_inactive_sessions': lambda self: None
                 })()
             
             try:
@@ -7127,14 +7352,13 @@ def ensure_initialization_fixed():
                 logger.error(f"AI system failed: {e}")
                 ai_system = type('FallbackAI', (), {
                     "openai_client": None,
-                    '_needs_current_information': lambda self, prompt: False, # NEW: Add dummy for direct routing
+                    '_needs_current_information': lambda self, prompt: False,
                     'get_response': lambda self, prompt, history=None: {
                         "content": "AI system temporarily unavailable.",
                         "success": False
                     }
                 })()
             
-            ## CHANGE: Use constants for RateLimiter initialization
             rate_limiter = RateLimiter(max_requests=RATE_LIMIT_REQUESTS, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
             fingerprinting_manager = DatabaseManager.FingerprintingManager()
             
@@ -7153,11 +7377,20 @@ def ensure_initialization_fixed():
                 })()
             
             question_limit_manager = DatabaseManager.QuestionLimitManager()
-            
+
+            try:
+                if config.WOOCOMMERCE_ENABLED:
+                    woocommerce_manager = WooCommerceManager(config)
+                else:
+                    woocommerce_manager = None
+            except Exception as e:
+                logger.error(f"WooCommerce manager initialization failed: {e}")
+                woocommerce_manager = None
+
             st.session_state.session_manager = SessionManager(
                 config, st.session_state.db_manager, zoho_manager, ai_system, 
                 rate_limiter, fingerprinting_manager, email_verification_manager, 
-                question_limit_manager
+                question_limit_manager, woocommerce_manager
             )
             
             st.session_state.pdf_exporter = pdf_exporter
@@ -7169,17 +7402,16 @@ def ensure_initialization_fixed():
             st.session_state.chat_blocked_by_dialog = False
             st.session_state.verification_stage = None
             st.session_state.guest_continue_active = False
-            # NEW: Initialize chat readiness flag
-            st.session_state.is_chat_ready = False 
+            st.session_state.is_chat_ready = False
             
-            # NEW: Initialize WordPress fallback specific states
             st.session_state.wordpress_error = {'show_fallback': False}
             st.session_state.wordpress_fallback_active = False
             st.session_state.fallback_email = ''
             st.session_state.fallback_verification_stage = None
             st.session_state.fallback_verification_email = ''
             st.session_state.fallback_session_id = ''
-
+            st.session_state.fingerprint_client_side_completed = False # NEW: Client-side FP status
+            st.session_state.expecting_order_id = False # NEW: For WooCommerce order flow
 
             st.session_state.initialized = True
             logger.info("✅ Application initialized successfully")
@@ -7191,19 +7423,17 @@ def ensure_initialization_fixed():
     
     return True
 
-# Modified main function with proper loading state handling (from prompt)
 def main_fixed():
     """Main application entry point with optimized fingerprint handling."""
     try:
         st.set_page_config(
             page_title="FiFi AI Assistant", 
-            page_icon="🤖", 
+            page_icon=FIFI_AVATAR_B64 if FIFI_AVATAR_B64 else "🤖", 
             layout="wide"
         )
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
 
-    # NEW: Check for expired session flag and force welcome page
     if st.session_state.get('session_expired', False):
         logger.info("Session expired flag detected - forcing welcome page")
         st.session_state['page'] = None
@@ -7211,7 +7441,6 @@ def main_fixed():
             del st.session_state['session_expired']
         st.info("⏰ Your session expired. Please start a new session.")
 
-    # Initialize all necessary session state variables at once
     if 'initialized' not in st.session_state:
         defaults = {
             "initialized": False, "is_loading": False, "loading_message": "",
@@ -7221,146 +7450,177 @@ def main_fixed():
             "gentle_prompt_shown": False, "email_verified_final_answer_acknowledged": False,
             "must_verify_email_immediately": False, "skip_email_allowed": True,
             "page": None, "fingerprint_processed_for_session": {},
-            "is_processing_question": False,  # NEW: Add this
-            # Initialize WordPress fallback states here too if they weren't in init_fixed
+            "is_processing_question": False,
             "wordpress_error": {'show_fallback': False},
             "wordpress_fallback_active": False,
             "fallback_email": '',
             "fallback_verification_stage": None,
             "fallback_verification_email": '',
-            "fallback_session_id": ''
+            "fallback_session_id": '',
+            "fingerprint_client_side_completed": False,
+            "expecting_order_id": False
         }
         for key, value in defaults.items():
             if key not in st.session_state:
                 st.session_state[key] = value
         
-        # Perform initial setup
         init_success = ensure_initialization_fixed()
         if not init_success:
             st.error("⚠️ Application failed to initialize properly. Please refresh the page.")
             return
 
-    # --- OPTIMIZATION: Handle URL-based events EARLY, before any other logic ---
+    # Handle URL-based events EARLY, before any other logic
     handle_emergency_save_requests_from_query()
-    handle_fingerprint_requests_from_query()
+    if handle_fingerprint_status_update_from_query():
+        return
 
-    # Get session manager
     session_manager = st.session_state.get('session_manager')
     if not session_manager:
         st.error("❌ Session Manager not available. Please refresh the page.")
         return
 
-    # Handle loading states (e.g., after clicking "Start as Guest" or "Sign In")
-    if st.session_state.get('is_loading', False):
-        if show_loading_overlay():
-            pass # Overlay is shown, blocking further rendering
+    # REMOVED: No longer create sessions on initial load
 
-        try:
-            loading_reason = st.session_state.get('loading_reason', 'unknown')
-            session = None
-            
-            if loading_reason == 'start_guest':
-                session = session_manager.get_session()
-                if session and session.last_activity is None:
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
-                st.session_state.page = "chat"
+    if st.session_state.get('is_loading', False):
+        loading_reason = st.session_state.get('loading_reason', 'unknown')
+        session_id_for_loading = st.session_state.get('current_session_id')
+        session = None
+
+        if session_id_for_loading:
+            session = session_manager.db.load_session(session_id_for_loading)
+            if not session:
+                logger.error(f"Session {session_id_for_loading[:8]} not found during loading. Clearing state.")
+                set_loading_state(False)
+                st.session_state['page'] = None
+                if 'current_session_id' in st.session_state:
+                    del st.session_state['current_session_id']
+                st.rerun()
+                return
+
+        if loading_reason == 'start_guest':
+            set_loading_state(True, "Setting up device recognition...")
+
+            # Render fingerprint component ONLY if it hasn't been rendered or fingerprinting hasn't completed
+            fingerprint_rendered_key = f"fingerprint_rendered_{session_id_for_loading}"
+            if not st.session_state.get(fingerprint_rendered_key, False) and \
+               not st.session_state.get('fingerprint_client_side_completed', False):
                 
-            elif loading_reason == 'authenticate':
-                username = st.session_state.get('temp_username', '')
-                password = st.session_state.get('temp_password', '')
-                if username and password:
-                    authenticated_session = session_manager.authenticate_with_wordpress(username, password)
-                    if authenticated_session:
-                        session = authenticated_session
-                        st.session_state.current_session_id = authenticated_session.session_id
-                        st.session_state.page = "chat"
-                        st.session_state.is_chat_ready = True
-                        st.session_state.fingerprint_wait_start = None
-                        st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
-                        st.balloons()
-                    # Clear temp credentials regardless of success
-                    if 'temp_username' in st.session_state: del st.session_state['temp_username']
-                    if 'temp_password' in st.session_state: del st.session_state['temp_password']
+                session_manager.fingerprinting.render_fingerprint_component(session_id_for_loading)
+                st.session_state[fingerprint_rendered_key] = True
+                st.session_state.fingerprint_wait_start = time.time()
+                logger.info(f"✅ Fingerprint component rendered and timer started for {session_id_for_loading[:8]}. Rerunning.")
+                st.rerun()
+
+            # If fingerprint component was rendered, now wait for its completion or timeout
+            if st.session_state.get(fingerprint_rendered_key, False):
+                # Poll DB for fingerprint data
+                latest_session_from_db = session_manager.db.load_session(session_id_for_loading)
+                if latest_session_from_db:
+                    session.fingerprint_id = latest_session_from_db.fingerprint_id
+                    session.fingerprint_method = latest_session_from_db.fingerprint_method
+                    session.browser_privacy_level = latest_session_from_db.browser_privacy_level
+                    
+                    # FIXED: Check if fingerprint changed from temp to real and re-attempt inheritance
+                    if (session.fingerprint_id.startswith(("temp_py_", "temp_fp_")) and 
+                        latest_session_from_db.fingerprint_id and
+                        not latest_session_from_db.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))):
+                        
+                        logger.info(f"🔄 Fingerprint updated from temp to real: {latest_session_from_db.fingerprint_id[:12]}")
+                        session = latest_session_from_db
+                        session_manager._attempt_fingerprint_inheritance(session)
+                        session_manager.db.save_session(session)
+                        logger.info(f"✅ Re-attempted inheritance for Guest {session.session_id[:8]}, daily_q now: {session.daily_question_count}")
+                
+                fingerprint_is_stable = not (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")))
+                
+                wait_start = st.session_state.get('fingerprint_wait_start', time.time())
+                elapsed = time.time() - wait_start
+
+                if fingerprint_is_stable or elapsed > FINGERPRINT_TIMEOUT_SECONDS:
+                    st.session_state.is_chat_ready = True
+                    set_loading_state(False)
+                    if session and session.last_activity is None:
+                        session.last_activity = datetime.now()
+                        session_manager.db.save_session(session)
+                    logger.info(f"Fingerprinting for {session_id_for_loading[:8]} completed (stable={fingerprint_is_stable}, elapsed={elapsed:.1f}s). Chat ready.")
+                else:
+                    # Still waiting for fingerprint
+                    st.session_state.loading_message = f"Setting up device recognition... ({int(FINGERPRINT_TIMEOUT_SECONDS - elapsed)}s remaining)"
+                    time.sleep(0.5)
+                    st.rerun()
+                    return
+
+            st.session_state.page = "chat"
+            
+        elif loading_reason == 'authenticate':
+            username = st.session_state.get('temp_username', '')
+            password = st.session_state.get('temp_password', '')
+            if username and password:
+                authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                if authenticated_session:
+                    session = authenticated_session
+                    st.session_state.current_session_id = authenticated_session.session_id
+                    st.session_state.page = "chat"
+                    st.session_state.is_chat_ready = True
+                    st.session_state.fingerprint_wait_start = None
+                    st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
+                    st.balloons()
                 else:
                     set_loading_state(False)
-                    st.error("Authentication failed: Missing username or password.")
+                    st.session_state.page = None
+                    if 'temp_username' in st.session_state: del st.session_state['temp_username']
+                    if 'temp_password' in st.session_state: del st.session_state['temp_password']
+                    st.rerun()
                     return
+            else:
+                set_loading_state(False)
+                st.error("Authentication failed: Missing username or password.")
+                st.session_state.page = None
+                st.rerun()
+                return
             
-            if 'loading_reason' in st.session_state:
-                del st.session_state['loading_reason']
-
-            # Determine chat readiness after session is established
-            if session:
-                if session.user_type == UserType.REGISTERED_USER:
-                    st.session_state.is_chat_ready = True
-                else:
-                    fingerprint_is_stable = not (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")))
-                    if fingerprint_is_stable:
-                        st.session_state.is_chat_ready = True
-
             set_loading_state(False)
-            st.rerun()
-            return
+
+        if 'loading_reason' in st.session_state:
+            del st.session_state['loading_reason']
+
+        if session and not st.session_state.get('is_chat_ready', False):
+            if session.user_type == UserType.REGISTERED_USER:
+                st.session_state.is_chat_ready = True
+
+        set_loading_state(False)
+        st.rerun()
+        return
             
-        except Exception as e:
-            set_loading_state(False)
-            st.error(f"⚠️ Error during loading: {str(e)}")
-            logger.error(f"Loading state error: {e}", exc_info=True)
-            return
-
-    # --- Normal Page Rendering Logic ---
     current_page = st.session_state.get('page')
     
     if current_page != "chat":
         render_welcome_page(session_manager)
     else:
-        session = session_manager.get_session()
+        session = session_manager.get_session(create_if_missing=False)
         
         if session is None or not session.active:
             logger.warning("Expected active session for 'chat' page but got None or inactive. Forcing welcome.")
             for key in list(st.session_state.keys()):
-                if key != 'initialized': # Keep initialized flag
+                if key != 'initialized':
                     del st.session_state[key]
             st.session_state['page'] = None
             st.rerun()
             return
         
-        # Conditionally render fingerprinting component only for non-registered users who need it
-        if session.user_type != UserType.REGISTERED_USER:
-            fingerprint_needed = session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))
-            if fingerprint_needed:
-                fingerprint_key = f"fingerprint_rendered_{session.session_id}"
-                if not st.session_state.get(fingerprint_key, False):
-                    session_manager.fingerprinting.render_fingerprint_component(session.session_id)
-                    st.session_state[fingerprint_key] = True
-                    logger.info(f"✅ Fingerprint component rendered for session {session.session_id[:8]}")
-
-        # Set up fingerprint timeout logic ONLY for non-registered users waiting for a fingerprint
-        if session.user_type != UserType.REGISTERED_USER:
-            fingerprint_is_stable = not (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")))
-            if fingerprint_is_stable:
-                st.session_state.is_chat_ready = True
-                if 'fingerprint_wait_start' in st.session_state:
-                    del st.session_state['fingerprint_wait_start']
-            else:
-                if 'fingerprint_wait_start' not in st.session_state:
-                    st.session_state.fingerprint_wait_start = time.time()
-                
-                if time.time() - st.session_state.fingerprint_wait_start > FINGERPRINT_TIMEOUT_SECONDS:
-                    st.session_state.is_chat_ready = True
-                    logger.warning(f"Fingerprint timeout ({FINGERPRINT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
-                else:
-                    st.session_state.is_chat_ready = False
-        else: # Registered users are always ready
-            st.session_state.is_chat_ready = True
-            if 'fingerprint_wait_start' in st.session_state:
-                del st.session_state['fingerprint_wait_start']
-        
-        # If still waiting for fingerprint, rerun to show progress
         if not st.session_state.get('is_chat_ready', False):
-            st.rerun()
-            return
+            if 'fingerprint_wait_start' not in st.session_state:
+                 st.session_state.fingerprint_wait_start = time.time()
+            
+            if time.time() - st.session_state.fingerprint_wait_start > FINGERPRINT_TIMEOUT_SECONDS:
+                st.session_state.is_chat_ready = True
+                logger.warning(f"Failsafe: Fingerprint timeout in chat page ({FINGERPRINT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
+            else:
+                with st.chat_message("assistant", avatar=FIFI_AVATAR_B64):
+                    st.info("🔒 Initializing secure session and device recognition...")
+                    st.markdown(f"*Please wait, this ensures consistent experience and usage tracking.*")
+                st.rerun()
+                return
 
         # Render activity tracker and check for session timeout
         activity_data_from_js = None
