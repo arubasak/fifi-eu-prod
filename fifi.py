@@ -1989,7 +1989,74 @@ class WooCommerceManager:
         slug_to_name_map = {s.get('id'): s.get('name') for s in available_statuses if s.get('id') and s.get('name')}
         display_names = [slug_to_name_map.get(slug, slug.replace('-', ' ').title()) for slug in slugs]
         return display_names
-    
+
+    async def summarize_order_details_llm(self, order_data: Dict[str, Any], openai_client: Any) -> str:
+        """Generates a human-friendly summary of the order using an LLM."""
+        
+        # Fallback to manual formatting if LLM client is unavailable
+        if not openai_client:
+            # Assuming format_order_for_display is the fallback (pure Markdown/string)
+            return self.format_order_for_display(order_data)
+        
+        # --- Prune and process data for LLM ---
+        pruned_order_data = {
+            'id': order_data.get('id'),
+            'number': order_data.get('number'),
+            'status': order_data.get('status'),
+            'date_created': order_data.get('date_created'),
+            'total': order_data.get('total'),
+            'currency': order_data.get('currency'),
+            'line_items': [{'name': item.get('name'), 'quantity': item.get('quantity'), 'total': item.get('total')} for item in order_data.get('line_items', [])],
+            'billing': {k: order_data['billing'].get(k) for k in ['first_name', 'last_name', 'email', 'phone', 'address_1', 'city', 'kountry']},
+            'shipping': {k: order_data['shipping'].get(k) for k in ['address_1', 'city', 'country']}
+        }
+        
+        # Apply a pre-processing step to the status for the LLM
+        raw_status = pruned_order_data.get('status', 'unknown')
+        # If the status contains a hyphen, extract the part after the first hyphen
+        if '-' in raw_status:
+            display_status_hint = raw_status.split('-', 1)[-1].replace('-', ' ').title()
+        else:
+            display_status_hint = raw_status.replace('-', ' ').title()
+        
+        # Add the cleaner status hint to the data block for the LLM's reference
+        pruned_order_data['display_status_hint'] = display_status_hint
+
+        order_json_str = json.dumps(pruned_order_data, indent=2)
+
+        llm_prompt = f"""You are an intelligent, helpful AI assistant for a B2B food ingredients company. Your task is to generate a concise, user-friendly summary of the following WooCommerce order data.
+
+    **INSTRUCTIONS:**
+    1. Use clear, friendly language.
+    2. Highlight the **Order Number**, **Status**, and **Total** prominently (use Markdown bolding/headers).
+    3. **CRITICAL STATUS RULE:** The raw status in the JSON may contain a technical prefix (e.g., 'ywraq-'). You MUST use the part *after* the prefix (or the provided 'display_status_hint') as the main status. For example, show **'Pending'** or **'Completed'**, NOT 'Ywraq-Pending'.
+    4. List the main items purchased and their quantities.
+    5. Include the Customer Name and the first line of the Billing Address.
+    6. **Do NOT** include any technical IDs (like 'id', 'customer_id' or raw WooCommerce slugs like 'wc-pending').
+    7. Format the output using Markdown for readability.
+
+    **Order Data (JSON):**
+    {order_json_str}
+    """
+        try:
+            response = await asyncio.to_thread(openai_client.chat.completions.create,
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a specialized WooCommerce order summary generator. Generate a concise, well-formatted Markdown summary based ONLY on the provided JSON data. Adhere strictly to the CRITICAL STATUS RULE."},
+                    {"role": "user", "content": llm_prompt}
+                ],
+                max_tokens=400,
+                temperature=0.0
+            )
+            # Use the correct way to access the content
+            summary_content = response.choices[0].message.content.strip()
+            logger.info(f"LLM successfully generated summary for order #{order_data.get('number')} with cleaned status.")
+            return summary_content
+            
+        except Exception as e:
+            logger.error(f"LLM order summary failed: {e}. Falling back to manual formatting.", exc_info=True)
+            # Assuming format_order_for_display is the robust, pure Markdown fallback
+            return self.format_order_for_display(order_data)
     # --- NEW METHOD: detect_order_query_intent_llm ---
     async def detect_order_query_intent_llm(self, prompt: str, openai_client: Any) -> Dict[str, Any]:
         """
@@ -5268,77 +5335,164 @@ Respond ONLY with JSON:
 
             # 3.5 WooCommerce Order Check (ENHANCED with LLM Intent)
             logger.debug(f"Checking 12Taste Order Status query for: '{prompt}' with LLM intent.")
+            
+            # --- LLM Intent Detection with Error Handling ---
+            order_intent = {"order_query_type": "none"} # Initialize with 'none'
             if hasattr(self, 'woocommerce') and self.woocommerce and self.woocommerce.config.WOOCOMMERCE_ENABLED:
+                try:
+                    order_intent = await self.woocommerce.detect_order_query_intent_llm(
+                        prompt, self.ai.openai_client
+                    )
+                except Exception as e:
+                    # Log the error, but allow context check to proceed for the fallback trigger
+                    logger.error(f"Primary LLM order intent failed (AttributeError fix assumed in utility): {e}")
+
+            query_type = order_intent.get("order_query_type")
+            order_id = order_intent.get("order_id")
+            requested_statuses = order_intent.get("requested_statuses")
+            
+            # 4. LLM-driven Industry context check (Run here to inform routing)
+            logger.debug(f"Checking industry context for: '{prompt}'")
+            context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
+            context_category = context_result.get("category")
+            
+            # --- COMBINED GATE: Trigger WooCommerce if LLM detected intent OR Context identified it ---
+            is_woocommerce_query = (query_type != "none") or (context_category == "order_query")
+
+            if hasattr(self, 'woocommerce') and self.woocommerce and self.woocommerce.config.WOOCOMMERCE_ENABLED and is_woocommerce_query:
                 
-                # Use LLM to determine the order query intent
-                order_intent = await self.woocommerce.detect_order_query_intent_llm(
-                    prompt, self.ai.openai_client
-                )
-
-                query_type = order_intent.get("order_query_type")
-                order_id = order_intent.get("order_id")
-                requested_statuses = order_intent.get("requested_statuses")
+                # If primary LLM intent failed/returned none, but context identified an order query, 
+                # we must assume the LLM output was faulty and default to clarification logic.
+                if query_type == "none" and context_category == "order_query":
+                    logger.info("Context identified order query, but primary LLM failed/returned none. Defaulting to clarification.")
+                    query_type = "multiple_orders_clarification" 
                 
-                # If the LLM detected an order-related query type (not "none")
-                if query_type != "none":
-                    
-                    # Check authentication
-                    if not (session.user_type == UserType.REGISTERED_USER or session.user_type == UserType.EMAIL_VERIFIED_GUEST) or not session.email:
-                        message = "To check order status, please sign in as a Registered User or verify your email."
-                        session.messages.append({'role': 'user', 'content': prompt})
-                        session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
-                        self._update_activity(session)
-                        if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
-                        return {'content': message, 'success': False, 'source': '12Taste Order Status'}
+                # Check authentication
+                if not (session.user_type == UserType.REGISTERED_USER or session.user_type == UserType.EMAIL_VERIFIED_GUEST) or not session.email:
+                    message = "To check order status, please sign in as a Registered User or verify your email."
+                    session.messages.append({'role': 'user', 'content': prompt})
+                    session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                    self._update_activity(session)
+                    if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                    return {'content': message, 'success': False, 'source': '12Taste Order Status'}
 
-                    # Record question
-                    try:
-                        self.question_limits.record_question_and_check_ban(session, self)
-                    except Exception as e:
-                        logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
-                        return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
-                    
-                    # Get customer ID
-                    customer = await self.woocommerce.get_customer_by_email(session.email)
-                    customer_id = customer.get('id') if customer else None
+                # Record question (as this is a successful intent/context match, we record it now)
+                try:
+                    self.question_limits.record_question_and_check_ban(session, self)
+                except Exception as e:
+                    logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
+                    return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
+                
+                # Get customer ID
+                customer = await self.woocommerce.get_customer_by_email(session.email)
+                customer_id = customer.get('id') if customer else None
 
-                    if not customer_id:
-                        message = f"We could not find a customer account linked to your email ({session.email}). Please ensure you are logged in with the email used for your order."
+                if not customer_id:
+                    message = f"We could not find a customer account linked to your email ({session.email}). Please ensure you are logged in with the email used for your order."
+                    session.messages.append({'role': 'user', 'content': prompt})
+                    session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                    self._update_activity(session)
+                    if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                    return {
+                        'content': message,
+                        'success': False,
+                        'source': '12Taste Order Status'
+                    }
+
+                # --- Handle different query types based on LLM intent ---
+                if query_type == "single_order" and order_id:
+                    logger.info(f"LLM detected single order query for order ID: {order_id}. User email: {session.email}")
+                    order_data = await self.woocommerce.get_order(order_id, customer_id=customer_id)
+                    
+                    if order_data and not order_data.get("error"):
+                        # --- MODIFIED LINE: Use LLM for formatting ---
+                        formatted_order = await self.woocommerce.summarize_order_details_llm(
+                            order_data,
+                            self.ai.openai_client
+                        )
+                        # ------------------------------------------
+                        
                         session.messages.append({'role': 'user', 'content': prompt})
-                        session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                        session.messages.append({
+                            'role': 'assistant', 
+                            'content': formatted_order,
+                            'source': '12Taste Order Status',
+                            'order_id': order_id
+                        })
                         self._update_activity(session)
                         if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
                         return {
-                            'content': message,
+                            'content': formatted_order,
+                            'success': True,
+                            'source': '12Taste Order Status',
+                            'order_id': order_id
+                        }
+                    else:
+                        error_message = order_data.get("message", "Order not found or does not belong to your account.")
+                        session.messages.append({'role': 'user', 'content': prompt})
+                        session.messages.append({'role': 'assistant', 'content': f"❌ {error_message}", 'source': '12Taste Order Status'})
+                        self._update_activity(session)
+                        if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                        return {
+                            'content': f"❌ {error_message}",
                             'success': False,
                             'source': '12Taste Order Status'
                         }
+                
+                # --- Handle multiple order queries ---
+                elif query_type in ["multiple_orders_all", "multiple_orders_open", "multiple_orders_specific_status"]:
+                    logger.info(f"LLM detected multiple orders query ({query_type}). User email: {session.email}")
+                    
+                    status_filter = None 
+                    filter_display_name = ""
 
-                    # --- Handle different query types based on LLM intent ---
-                    if query_type == "single_order" and order_id:
-                        logger.info(f"LLM detected single order query for order ID: {order_id}. User email: {session.email}")
-                        order_data = await self.woocommerce.get_order(order_id, customer_id=customer_id)
+                    if query_type == "multiple_orders_all":
+                        filter_display_name = "All"
+                    elif query_type == "multiple_orders_open":
+                        status_filter = ['pending', 'on-hold', 'processing']
+                        filter_display_name = "Open"
+                    elif query_type == "multiple_orders_specific_status" and requested_statuses:
+                        status_filter = requested_statuses
+                        display_names = await self.woocommerce._get_display_names_for_slugs(requested_statuses)
+                        if len(display_names) > 1:
+                            filter_display_name = ", ".join(display_names[:-1]) + " & " + display_names[-1]
+                        else:
+                            filter_display_name = display_names[0] if display_names else ""
+                    else:
+                        # Safety check for empty requested_statuses
+                        query_type = "multiple_orders_clarification" 
+                        pass # Fall through to clarification below
+
+                    if query_type != "multiple_orders_clarification": 
+                        orders = await self.woocommerce.list_orders(
+                            customer_id=customer_id,
+                            status=status_filter, 
+                            per_page=50 
+                        )
                         
-                        if order_data and not order_data.get("error"):
-                            formatted_order = self.woocommerce.format_order_for_display(order_data)
+                        if orders is not None:
+                            formatted_orders = self.woocommerce.format_multiple_orders_display(orders, filter_display_name)
                             
                             session.messages.append({'role': 'user', 'content': prompt})
                             session.messages.append({
                                 'role': 'assistant', 
-                                'content': formatted_order,
+                                'content': formatted_orders,
                                 'source': '12Taste Order Status',
-                                'order_id': order_id
+                                'order_count': len(orders),
+                                'filter_type': filter_display_name,
+                                'specific_statuses': requested_statuses 
                             })
                             self._update_activity(session)
                             if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
                             return {
-                                'content': formatted_order,
+                                'content': formatted_orders,
                                 'success': True,
                                 'source': '12Taste Order Status',
-                                'order_id': order_id
+                                'order_count': len(orders),
+                                'filter_type': filter_display_name
                             }
                         else:
-                            error_message = order_data.get("message", "Order not found or does not belong to your account.")
+                            error_message = "Failed to retrieve your orders. Please try again later."
                             session.messages.append({'role': 'user', 'content': prompt})
                             session.messages.append({'role': 'assistant', 'content': f"❌ {error_message}", 'source': '12Taste Order Status'})
                             self._update_activity(session)
@@ -5348,135 +5502,65 @@ Respond ONLY with JSON:
                                 'success': False,
                                 'source': '12Taste Order Status'
                             }
-                    
-                    # --- Handle multiple order queries ---
-                    elif query_type in ["multiple_orders_all", "multiple_orders_open", "multiple_orders_specific_status"]:
-                        logger.info(f"LLM detected multiple orders query ({query_type}). User email: {session.email}")
-                        
-                        status_filter = None # Default to all orders if not specified for 'multiple_orders_all'
-                        filter_display_name = ""
 
-                        if query_type == "multiple_orders_all":
-                            filter_display_name = "All"
-                        elif query_type == "multiple_orders_open":
-                            status_filter = ['pending', 'on-hold', 'processing']
-                            filter_display_name = "Open"
-                        elif query_type == "multiple_orders_specific_status" and requested_statuses:
-                            status_filter = requested_statuses
-                            # Get human-readable names for display
-                            display_names = await self.woocommerce._get_display_names_for_slugs(requested_statuses)
-                            if len(display_names) > 1:
-                                filter_display_name = ", ".join(display_names[:-1]) + " & " + display_names[-1]
-                            else:
-                                filter_display_name = display_names if display_names else ""
-                        else:
-                            # This case should ideally be caught by 'multiple_orders_clarification' 
-                            # but serves as a safety net if 'multiple_orders_specific_status' is given
-                            # but requested_statuses is unexpectedly empty.
-                            query_type = "multiple_orders_clarification" 
-                            pass # Fall through to clarification block below
-
-                        if query_type != "multiple_orders_clarification": # Only proceed if the intent is clear
-                            orders = await self.woocommerce.list_orders(
-                                customer_id=customer_id,
-                                status=status_filter, # Will be None for 'all', or a list of slugs
-                                per_page=50 # Adjust as needed, consider pagination for very large results
-                            )
-                            
-                            if orders is not None:
-                                formatted_orders = self.woocommerce.format_multiple_orders_display(orders, filter_display_name)
-                                
-                                session.messages.append({'role': 'user', 'content': prompt})
-                                session.messages.append({
-                                    'role': 'assistant', 
-                                    'content': formatted_orders,
-                                    'source': '12Taste Order Status',
-                                    'order_count': len(orders),
-                                    'filter_type': filter_display_name,
-                                    'specific_statuses': requested_statuses # Log the slugs for debug/tracking
-                                })
-                                self._update_activity(session)
-                                if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
-                                return {
-                                    'content': formatted_orders,
-                                    'success': True,
-                                    'source': '12Taste Order Status',
-                                    'order_count': len(orders),
-                                    'filter_type': filter_display_name
-                                }
-                            else:
-                                error_message = "Failed to retrieve your orders. Please try again later."
-                                session.messages.append({'role': 'user', 'content': prompt})
-                                session.messages.append({'role': 'assistant', 'content': f"❌ {error_message}", 'source': '12Taste Order Status'})
-                                self._update_activity(session)
-                                if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
-                                return {
-                                    'content': f"❌ {error_message}",
-                                    'success': False,
-                                    'source': '12Taste Order Status'
-                                }
-
-                    # --- Handle clarification requests (and fallbacks from multiple orders) ---
-                    if query_type == "multiple_orders_clarification" or (query_type in ["multiple_orders_all", "multiple_orders_open", "multiple_orders_specific_status"] and not 'orders' in locals()):
-                        message = "I can help with your orders. Do you want to check a specific order (please provide the ID/number), list all your orders, or filter by a certain status (e.g., 'pending payment')?"
-                        session.messages.append({'role': 'user', 'content': prompt})
-                        session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
-                        self._update_activity(session)
-                        st.session_state.expecting_order_id = True # Set for potential follow-up if user provides just an ID next.
-                        return {
-                            'content': message,
-                            'success': True,
-                            'source': '12Taste Order Status'
-                        }
-                    
-                    # --- Final safety net for order query types ---
-                    else:
-                        message = "I detected an order-related question but need more clarity. Please provide an order ID, or specify if you want to see all orders, open orders, or orders with a particular status."
-                        session.messages.append({'role': 'user', 'content': prompt})
-                        session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
-                        self._update_activity(session)
-                        st.session_state.expecting_order_id = True
-                        return {
-                            'content': message,
-                            'success': True,
-                            'source': '12Taste Order Status'
-                        }
-                # If query_type is "none", it falls through to the rest of the get_ai_response logic (general AI, etc.)
+                # --- Handle clarification requests (and fallbacks from multiple orders/failed single order detection) ---
+                if query_type == "multiple_orders_clarification":
+                    message = "I can help with your orders. Do you want to check a specific order (please provide the ID/number), list all your orders, or filter by a certain status (e.g., 'pending payment')?"
+                    session.messages.append({'role': 'user', 'content': prompt})
+                    session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                    self._update_activity(session)
+                    st.session_state.expecting_order_id = True 
+                    return {
+                        'content': message,
+                        'success': True,
+                        'source': '12Taste Order Status'
+                    }
+                
+                # --- Final safety net for order query types ---
+                else:
+                    message = "I detected an order-related question but need more clarity. Please provide an order ID, or specify if you want to see all orders, open orders, or orders with a particular status."
+                    session.messages.append({'role': 'user', 'content': prompt})
+                    session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                    self._update_activity(session)
+                    st.session_state.expecting_order_id = True
+                    return {
+                        'content': message,
+                        'success': True,
+                        'source': '12Taste Order Status'
+                    }
             
+            # If not a WooCommerce query, ensure expecting_order_id is cleared
             if 'expecting_order_id' in st.session_state: 
                 del st.session_state['expecting_order_id']
 
 
-            # 4. LLM-driven Industry context check (NOW RUNS BEFORE META-DETECTION)
-            logger.debug(f"Checking industry context for: '{prompt}'")
-            context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
-            if context_result:
-                category = context_result.get("category")
-                is_relevant = context_result.get("relevant", True)
+            # 4. LLM-driven Industry context check (Result is available in context_result)
+            context_category = context_result.get("category")
+            is_relevant = context_result.get("relevant", True)
+            
+            # A. Handle greetings immediately and return
+            if context_category == "greeting_or_polite":
+                try:
+                    self.question_limits.record_question_and_check_ban(session, self)
+                except Exception as e:
+                    logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
+                    return {'content': 'An error occurred while tracking your question.', 'success': False, 'source': 'Question Tracker'}
 
-                # A. Handle greetings immediately and return
-                if category == "greeting_or_polite":
-                    try:
-                        self.question_limits.record_question_and_check_ban(session, self)
-                    except Exception as e:
-                        logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
-                        return {'content': 'An error occurred while tracking your question.', 'success': False, 'source': 'Question Tracker'}
+                session.messages.append({'role': 'user', 'content': prompt})
+                friendly_response = {"content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?", "success": True, "source": "FiFi", "is_meta_response": True}
+                session.messages.append({'role': 'assistant', 'content': friendly_response['content'], 'source': 'Greeting', 'is_meta_response': True})
+                self._update_activity(session)
+                return friendly_response
+            
+            # B. Block irrelevant questions
+            elif not is_relevant and context_category not in ["meta_conversation"]:
+                confidence = context_result.get("confidence", 0.0)
+                reason = context_result.get("reason", "Not relevant")
+                context_message = "I'm specialized in helping food & beverage industry professionals. Please ask me about ingredients, suppliers, or market trends."
+                st.session_state.context_flagged = {'timestamp': datetime.now(), 'category': context_category, 'confidence': confidence, 'reason': reason, 'message': context_message}
+                return {"content": context_message, "success": False, "source": "Industry Context Filter", "used_search": False, "used_pinecone": False, "has_citations": False, "has_inline_citations": False, "safety_override": False}
 
-                    session.messages.append({'role': 'user', 'content': prompt})
-                    friendly_response = {"content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?", "success": True, "source": "FiFi", "is_meta_response": True}
-                    session.messages.append({'role': 'assistant', 'content': friendly_response['content'], 'source': 'Greeting', 'is_meta_response': True})
-                    self._update_activity(session)
-                    return friendly_response
-                
-                # B. Block irrelevant questions, but specifically ALLOW meta_conversation and order_queries to pass
-                elif not is_relevant and category not in ["meta_conversation", "order_query"]:
-                    confidence = context_result.get("confidence", 0.0)
-                    reason = context_result.get("reason", "Not relevant")
-                    context_message = "I'm specialized in helping food & beverage industry professionals. Please ask me about ingredients, suppliers, or market trends."
-                    st.session_state.context_flagged = {'timestamp': datetime.now(), 'category': category, 'confidence': confidence, 'reason': reason, 'message': context_message}
-                    return {"content": context_message, "success": False, "source": "Industry Context Filter", "used_search": False, "used_pinecone": False, "has_citations": False, "has_inline_citations": False, "safety_override": False}
-
-            # 5. LLM-driven Meta-conversation query detection (NOW RUNS AFTER CONTEXT CHECK)
+            # 5. LLM-driven Meta-conversation query detection
             logger.debug(f"Checking meta-conversation for: '{prompt}'")
             meta_detection = self.detect_meta_conversation_query_llm(prompt)
             if meta_detection["is_meta"]:
