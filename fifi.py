@@ -2125,7 +2125,7 @@ Respond ONLY with a JSON object in the following format:
                 max_tokens=200,
                 temperature=0.0
             )
-            response_content = response.choices.message.content.strip()
+            response_content = response.choices[0].message.content.strip()
             response_content = response_content.replace('json', '').replace('```', '').strip()
             
             intent_data = json.loads(response_content)
@@ -4851,131 +4851,131 @@ class SessionManager:
         logger.info(f"No registered user history found for {email} - proceeding as email verified guest")
         return session
 
-def sync_ban_for_registered_user(self, email: str, banned_session: UserSession):
-    """Sync ban status with distributed lock to prevent race conditions"""
-    try:
-        lock_key = f"ban_sync_{email}"
-        now = datetime.now()
-        
-        if lock_key in self._ban_sync_locks:
-            lock_time = self._ban_sync_locks[lock_key]
-            if now - lock_time < self._ban_lock_timeout:
-                logger.warning(f"Ban sync already in progress for {email}, skipping")
-                return
-            else:
-                del self._ban_sync_locks[lock_key]
-        
-        self._ban_sync_locks[lock_key] = now
-        
+    def sync_ban_for_registered_user(self, email: str, banned_session: UserSession):
+        """Sync ban status with distributed lock to prevent race conditions"""
         try:
-            email_sessions = self.db.find_sessions_by_email(email)
-            active_registered_sessions = [s for s in email_sessions 
-                                          if s.active and s.user_type == UserType.REGISTERED_USER 
-                                          and s.session_id != banned_session.session_id]
+            lock_key = f"ban_sync_{email}"
+            now = datetime.now()
             
-            if not active_registered_sessions:
-                return
+            if lock_key in self._ban_sync_locks:
+                lock_time = self._ban_sync_locks[lock_key]
+                if now - lock_time < self._ban_lock_timeout:
+                    logger.warning(f"Ban sync already in progress for {email}, skipping")
+                    return
+                else:
+                    del self._ban_sync_locks[lock_key]
             
-            for sess in active_registered_sessions:
-                sess.ban_status = banned_session.ban_status
-                sess.ban_start_time = banned_session.ban_start_time
-                sess.ban_end_time = banned_session.ban_end_time
-                sess.ban_reason = banned_session.ban_reason
-                sess.question_limit_reached = banned_session.question_limit_reached
+            self._ban_sync_locks[lock_key] = now
+            
+            try:
+                email_sessions = self.db.find_sessions_by_email(email)
+                active_registered_sessions = [s for s in email_sessions 
+                                              if s.active and s.user_type == UserType.REGISTERED_USER 
+                                              and s.session_id != banned_session.session_id]
                 
-                sess.current_tier_cycle_id = banned_session.current_tier_cycle_id
-                sess.tier1_completed_in_cycle = banned_session.tier1_completed_in_cycle
-                sess.tier_cycle_started_at = banned_session.tier_cycle_started_at
+                if not active_registered_sessions:
+                    return
                 
-                self.db.save_session(sess)
-                logger.debug(f"Synced ban and cycle info to session {sess.session_id[:8]} for registered user {email}")
-            
-            logger.info(f"Synced ban across {len(active_registered_sessions)} sessions for registered user {email}")
-            
-        finally:
+                for sess in active_registered_sessions:
+                    sess.ban_status = banned_session.ban_status
+                    sess.ban_start_time = banned_session.ban_start_time
+                    sess.ban_end_time = banned_session.ban_end_time
+                    sess.ban_reason = banned_session.ban_reason
+                    sess.question_limit_reached = banned_session.question_limit_reached
+                    
+                    sess.current_tier_cycle_id = banned_session.current_tier_cycle_id
+                    sess.tier1_completed_in_cycle = banned_session.tier1_completed_in_cycle
+                    sess.tier_cycle_started_at = banned_session.tier_cycle_started_at
+                    
+                    self.db.save_session(sess)
+                    logger.debug(f"Synced ban and cycle info to session {sess.session_id[:8]} for registered user {email}")
+                
+                logger.info(f"Synced ban across {len(active_registered_sessions)} sessions for registered user {email}")
+                
+            finally:
+                if lock_key in self._ban_sync_locks:
+                    del self._ban_sync_locks[lock_key]
+                    
+        except Exception as e:
+            logger.error(f"Failed to sync ban for registered user {email}: {e}")
             if lock_key in self._ban_sync_locks:
                 del self._ban_sync_locks[lock_key]
-                
-    except Exception as e:
-        logger.error(f"Failed to sync ban for registered user {email}: {e}")
-        if lock_key in self._ban_sync_locks:
-            del self._ban_sync_locks[lock_key]
 
-def sync_email_verified_sessions(self, email: str, current_session_id: str):
-    """Sync question counts across all active email-verified sessions with the same email"""
-    try:
-        email_sessions = self.db.find_sessions_by_email(email)
-        active_email_verified_sessions = [
-            s for s in email_sessions 
-            if s.active and s.user_type == UserType.EMAIL_VERIFIED_GUEST
+    def sync_email_verified_sessions(self, email: str, current_session_id: str):
+        """Sync question counts across all active email-verified sessions with the same email"""
+        try:
+            email_sessions = self.db.find_sessions_by_email(email)
+            active_email_verified_sessions = [
+                s for s in email_sessions 
+                if s.active and s.user_type == UserType.EMAIL_VERIFIED_GUEST
+            ]
+            
+            if not active_email_verified_sessions:
+                return
+            
+            max_count_session = None
+            now = datetime.now()
+            for sess in active_email_verified_sessions:
+                if sess.last_question_time and (now - sess.last_question_time) < DAILY_RESET_WINDOW:
+                    if max_count_session is None or sess.daily_question_count > max_count_session.daily_question_count:
+                        max_count_session = sess
+            
+            if max_count_session is None:
+                logger.info(f"No recent active sessions for email-verified {email} to sync.")
+                return
+            
+            for sess in active_email_verified_sessions:
+                if sess.session_id != max_count_session.session_id:
+                    sess.daily_question_count = max_count_session.daily_question_count
+                    sess.total_question_count = max_count_session.total_question_count
+                    sess.last_question_time = max_count_session.last_question_time
+                    
+                    if max_count_session.ban_status != BanStatus.NONE:
+                        sess.ban_status = max_count_session.ban_status
+                        sess.ban_start_time = max_count_session.ban_start_time
+                        sess.ban_end_time = max_count_session.ban_end_time
+                        sess.ban_reason = max_count_session.ban_reason
+                        sess.question_limit_reached = max_count_session.question_limit_reached
+                    
+                    self.db.save_session(sess)
+                    logger.debug(f"Synced session {sess.session_id[:8]} to {max_count_session.daily_question_count} daily questions from {max_count_session.session_id[:8]}")
+            
+            logger.info(f"Synced {len(active_email_verified_sessions)} email-verified sessions for {email}")
+            
+        except Exception as e:
+            logger.error(f"Failed to sync email-verified sessions for {email}: {e}")
+
+    def detect_pricing_stock_question(self, prompt: str) -> bool:
+        """Detect if question is about pricing or stock availability."""
+
+        prompt_lower = prompt.lower()
+
+        pricing_indicators = [
+            "price", "pricing", "cost", "costs", "expensive", "cheap", "rate", "rates",
+            "quote", "quotation", "budget", "fee", "charge", "tariff"
         ]
-        
-        if not active_email_verified_sessions:
-            return
-        
-        max_count_session = None
-        now = datetime.now()
-        for sess in active_email_verified_sessions:
-            if sess.last_question_time and (now - sess.last_question_time) < DAILY_RESET_WINDOW:
-                if max_count_session is None or sess.daily_question_count > max_count_session.daily_question_count:
-                    max_count_session = sess
-        
-        if max_count_session is None:
-            logger.info(f"No recent active sessions for email-verified {email} to sync.")
-            return
-        
-        for sess in active_email_verified_sessions:
-            if sess.session_id != max_count_session.session_id:
-                sess.daily_question_count = max_count_session.daily_question_count
-                sess.total_question_count = max_count_session.total_question_count
-                sess.last_question_time = max_count_session.last_question_time
-                
-                if max_count_session.ban_status != BanStatus.NONE:
-                    sess.ban_status = max_count_session.ban_status
-                    sess.ban_start_time = max_count_session.ban_start_time
-                    sess.ban_end_time = max_count_session.ban_end_time
-                    sess.ban_reason = max_count_session.ban_reason
-                    sess.question_limit_reached = max_count_session.question_limit_reached
-                
-                self.db.save_session(sess)
-                logger.debug(f"Synced session {sess.session_id[:8]} to {max_count_session.daily_question_count} daily questions from {max_count_session.session_id[:8]}")
-        
-        logger.info(f"Synced {len(active_email_verified_sessions)} email-verified sessions for {email}")
-        
-    except Exception as e:
-        logger.error(f"Failed to sync email-verified sessions for {email}: {e}")
 
-def detect_pricing_stock_question(self, prompt: str) -> bool:
-    """Detect if question is about pricing or stock availability."""
+        stock_indicators = [
+            "stock", "stocks", "availability", "available", "in stock", "out of stock",
+            "inventory", "supply", "supplies", "quantity", "quantities", "lead time",
+            "delivery time", "MOQ", "minimum order"
+        ]
 
-    prompt_lower = prompt.lower()
+        has_pricing = any(indicator in prompt_lower for indicator in pricing_indicators)
+        has_stock = any(indicator in prompt_lower for indicator in stock_indicators)
 
-    pricing_indicators = [
-        "price", "pricing", "cost", "costs", "expensive", "cheap", "rate", "rates",
-        "quote", "quotation", "budget", "fee", "charge", "tariff"
-    ]
+        return has_pricing or has_stock
 
-    stock_indicators = [
-        "stock", "stocks", "availability", "available", "in stock", "out of stock",
-        "inventory", "supply", "supplies", "quantity", "quantities", "lead time",
-        "delivery time", "MOQ", "minimum order"
-    ]
+    # --- REMOVED: extract_order_id_from_query (Replaced by LLM in detect_order_query_intent_llm) ---
+    # --- REMOVED: is_order_query (Replaced by LLM in detect_order_query_intent_llm) ---
 
-    has_pricing = any(indicator in prompt_lower for indicator in pricing_indicators)
-    has_stock = any(indicator in prompt_lower for indicator in stock_indicators)
+    def detect_meta_conversation_query_llm(self, prompt: str) -> Dict[str, Any]:
+        """LLM-powered detection of meta-conversation queries."""
+        if not self.ai.openai_client:
+            logger.warning("OpenAI client not available for LLM meta-query detection. Falling back to keyword-based.")
+            return self.detect_meta_conversation_query_keyword_fallback(prompt)
 
-    return has_pricing or has_stock
-
-# --- REMOVED: extract_order_id_from_query (Replaced by LLM in detect_order_query_intent_llm) ---
-# --- REMOVED: is_order_query (Replaced by LLM in detect_order_query_intent_llm) ---
-
-def detect_meta_conversation_query_llm(self, prompt: str) -> Dict[str, Any]:
-    """LLM-powered detection of meta-conversation queries."""
-    if not self.ai.openai_client:
-        logger.warning("OpenAI client not available for LLM meta-query detection. Falling back to keyword-based.")
-        return self.detect_meta_conversation_query_keyword_fallback(prompt)
-
-    detection_prompt = f"""Analyze if this query is asking about the conversation/chat itself rather than food & beverage industry topics.
+        detection_prompt = f"""Analyze if this query is asking about the conversation/chat itself rather than food & beverage industry topics.
 
 QUERY: "{prompt}"
 
@@ -4995,504 +4995,440 @@ INDUSTRY QUESTIONS (NOT META):
 Respond ONLY with JSON:
 {{"is_meta": true, "type": "summarize|count|list|analyze|general|none", "confidence": 0.0-1.0}}"""
 
-    try:
-        response = self.ai.openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "You are a search query optimizer. Respond only with the optimized search query."},
-            {"role": "user", "content": detection_prompt}],
-            max_tokens=50,
-            temperature=0.1
-        )
-        response_content = response.choices[0].message.content.strip().replace('```json', '').replace('```', '').strip()
-        result = json.loads(response_content)
-        
-        if not isinstance(result, dict) or 'is_meta' not in result or 'type' not in result:
-            logger.warning(f"LLM meta-query detection returned invalid JSON: {response_content}. Falling back to keyword.")
+        try:
+            response = self.ai.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": "You are a search query optimizer. Respond only with the optimized search query."},
+                {"role": "user", "content": detection_prompt}],
+                max_tokens=50,
+                temperature=0.1
+            )
+            response_content = response.choices[0].message.content.strip().replace('```json', '').replace('```', '').strip()
+            result = json.loads(response_content)
+            
+            if not isinstance(result, dict) or 'is_meta' not in result or 'type' not in result:
+                logger.warning(f"LLM meta-query detection returned invalid JSON: {response_content}. Falling back to keyword.")
+                return self.detect_meta_conversation_query_keyword_fallback(prompt)
+
+            logger.info(f"LLM Meta-query detection: {prompt} -> {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
+            return result
+
+        except Exception as e:
+            logger.error(f"LLM meta-query detection failed: {e}. Falling back to keyword-based detection.", exc_info=True)
             return self.detect_meta_conversation_query_keyword_fallback(prompt)
 
-        logger.info(f"LLM Meta-query detection: {prompt} -> {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
-        return result
+    def detect_meta_conversation_query_keyword_fallback(self, prompt: str) -> Dict[str, Any]:
+        """Detect if user is asking about conversation history using static keywords (fallback)."""
+        prompt_lower = prompt.lower().strip()
+    
+        if prompt_lower.isdigit():
+            return {"is_meta": False, "type": "none", "confidence": 1.0}
 
-    except Exception as e:
-        logger.error(f"LLM meta-query detection failed: {e}. Falling back to keyword-based detection.", exc_info=True)
-        return self.detect_meta_conversation_query_keyword_fallback(prompt)
+        summary_patterns = [
+            "summarize", "summary of", "give me a summary", "can you summarize",
+            "overview of", "recap of", "sum up"
+        ]
 
-def detect_meta_conversation_query_keyword_fallback(self, prompt: str) -> Dict[str, Any]:
-    """Detect if user is asking about conversation history using static keywords (fallback)."""
-    prompt_lower = prompt.lower().strip()
+        question_patterns = [
+            "what did i ask", "what all did i ask", "what have i asked", 
+            "all my questions", "my previous questions", "my questions",
+            "list my questions", "show my questions", "questions i asked"
+        ]
 
-    if prompt_lower.isdigit():
+        count_patterns = [
+            "how many questions", "count my questions", "number of questions",
+            "how many times", "total questions"
+        ]
+
+        topic_patterns = [
+            "what topics", "what have we discussed", "topics we covered",
+            "what did we talk about", "conversation topics", "discussion topics"
+        ]
+
+        conversation_patterns = [
+            "conversation history", "chat history", "our conversation", 
+            "this conversation", "our chat", "this chat", "my session"
+        ]
+
+        if any(pattern in prompt_lower for pattern in summary_patterns):
+            return {"is_meta": True, "type": "summarize", "scope": "all"}
+        elif any(pattern in prompt_lower for pattern in question_patterns):
+            return {"is_meta": True, "type": "list", "scope": "questions"}
+        elif any(pattern in prompt_lower for pattern in count_patterns):
+            return {"is_meta": True, "type": "count", "scope": "questions"}
+        elif any(pattern in prompt_lower for pattern in topic_patterns):
+            return {"is_meta": True, "type": "analyze", "scope": "topics"}
+        elif any(pattern in prompt_lower for pattern in conversation_patterns):
+            return {"is_meta": True, "type": "general", "scope": "conversation"}
+        
         return {"is_meta": False, "type": "none", "confidence": 1.0}
 
-    summary_patterns = [
-        "summarize", "summary of", "give me a summary", "can you summarize",
-        "overview of", "recap of", "sum up"
-    ]
+    def handle_meta_conversation_query(self, session: UserSession, query_type: str, scope: str) -> Dict[str, Any]:
+        """Handle meta-conversation queries with code-based analysis (zero token cost)."""
+        
+        visible_messages = session.messages[session.display_message_offset:]
+        user_questions = [msg['content'] for msg in visible_messages if msg.get('role') == 'user']
 
-    question_patterns = [
-        "what did i ask", "what all did i ask", "what have i asked", 
-        "all my questions", "my previous questions", "my questions",
-        "list my questions", "show my questions", "questions i asked"
-    ]
-
-    count_patterns = [
-        "how many questions", "count my questions", "number of questions",
-        "how many times", "total questions"
-    ]
-
-    topic_patterns = [
-        "what topics", "what have we discussed", "topics we covered",
-        "what did we talk about", "conversation topics", "discussion topics"
-    ]
-
-    conversation_patterns = [
-        "conversation history", "chat history", "our conversation", 
-        "this conversation", "our chat", "this chat", "my session"
-    ]
-
-    if any(pattern in prompt_lower for pattern in summary_patterns):
-        return {"is_meta": True, "type": "summarize", "scope": "all"}
-    elif any(pattern in prompt_lower for pattern in question_patterns):
-        return {"is_meta": True, "type": "list", "scope": "questions"}
-    elif any(pattern in prompt_lower for pattern in count_patterns):
-        return {"is_meta": True, "type": "count", "scope": "questions"}
-    elif any(pattern in prompt_lower for pattern in topic_patterns):
-        return {"is_meta": True, "type": "analyze", "scope": "topics"}
-    elif any(pattern in prompt_lower for pattern in conversation_patterns):
-        return {"is_meta": True, "type": "general", "scope": "conversation"}
-    
-    return {"is_meta": False, "type": "none", "confidence": 1.0}
-
-def handle_meta_conversation_query(self, session: UserSession, query_type: str, scope: str) -> Dict[str, Any]:
-    """Handle meta-conversation queries with code-based analysis (zero token cost)."""
-    
-    visible_messages = session.messages[session.display_message_offset:]
-    user_questions = [msg['content'] for msg in visible_messages if msg.get('role') == 'user']
-
-    if query_type == "count":
-        return {
-            "content": f"""📊 **Session Statistics:**
+        if query_type == "count":
+            return {
+                "content": f"""📊 **Session Statistics:**
 
 • **Questions Asked**: {len(user_questions)}
 • **Total Messages**: {len(visible_messages)}
 • **Session Started**: {session.created_at.strftime('%B %d, %Y at %H:%M')}
 • **User Type**: {session.user_type.value.replace('_', ' ').title()}
 • **Daily Usage**: {session.daily_question_count}/{self.question_limits.question_limits[session.user_type.value]} questions today""",
-            "success": True,
-            "source": "Session Analytics"
-        }
+                "success": True,
+                "source": "Session Analytics"
+            }
 
-    elif query_type == "list":
-        if not user_questions:
+        elif query_type == "list":
+            if not user_questions:
+                return {
+                    "content": "You haven't asked any questions yet in this session.",
+                    "success": True,
+                    "source": "Session History"
+                }
+            
+            questions_to_show = user_questions[-20:] if len(user_questions) > 20 else user_questions
+            start_number = len(user_questions) - len(questions_to_show) + 1 if len(user_questions) > 20 else 1
+
+            questions_list = []
+            for i, q in enumerate(questions_to_show):
+                display_q = q[:100] + "..." if len(q) > 100 else q
+                questions_list.append(f"{start_number + i}. {display_q}")
+
+            response_content = f"📋 **Your Questions in This Session:**\n\n" + \
+                               "\n".join(questions_list)
+            
+            if len(user_questions) > 20:
+                response_content += f"\n\n*Showing last 20 questions out of {len(user_questions)} total.*"
+
             return {
-                "content": "You haven't asked any questions yet in this session.",
+                "content": response_content,
                 "success": True,
                 "source": "Session History"
             }
-        
-        questions_to_show = user_questions[-20:] if len(user_questions) > 20 else user_questions
-        start_number = len(user_questions) - len(questions_to_show) + 1 if len(user_questions) > 20 else 1
 
-        questions_list = []
-        for i, q in enumerate(questions_to_show):
-            display_q = q[:100] + "..." if len(q) > 100 else q
-            questions_list.append(f"{start_number + i}. {display_q}")
+        elif query_type in ["summarize", "general"]:
+            return self._generate_conversation_summary(user_questions, session)
 
-        response_content = f"📋 **Your Questions in This Session:**\n\n" + \
-                           "\n".join(questions_list)
-        
-        if len(user_questions) > 20:
-            response_content += f"\n\n*Showing last 20 questions out of {len(user_questions)} total.*"
+        elif query_type == "analyze":
+            return self._analyze_conversation_topics(user_questions, session)
 
-        return {
-            "content": response_content,
-            "success": True,
-            "source": "Session History"
+        return {"content": "I couldn't process that conversation query.", "success": False}
+
+    def _generate_conversation_summary(self, user_questions: List[str], session: UserSession) -> Dict[str, Any]:
+        """Generate conversation summary using code-based analysis."""
+
+        if not user_questions:
+            return {
+                "content": "No questions have been asked in this session yet.",
+                "success": True,
+                "source": "Session Summary"
+            }
+
+        topic_words = set()
+        question_categories = {
+            'pricing': 0, 'suppliers': 0, 'technical': 0, 'regulatory': 0, 'applications': 0
         }
 
-    elif query_type in ["summarize", "general"]:
-        return self._generate_conversation_summary(user_questions, session)
+        for question in user_questions:
+            q_lower = question.lower()
+            words = [w for w in q_lower.split() if len(w) > 4 and w not in ['what', 'where', 'when', 'about', 'would', 'could', 'should', 'which']]
+            topic_words.update(words[:3])
 
-    elif query_type == "analyze":
-        return self._analyze_conversation_topics(user_questions, session)
+            if any(word in q_lower for word in ['price', 'pricing', 'cost', 'expensive']):
+                question_categories['pricing'] += 1
+            elif any(word in q_lower for word in ['supplier', 'source', 'vendor', 'manufacturer']):
+                question_categories['suppliers'] += 1
+            elif any(word in q_lower for word in ['regulation', 'compliance', 'standard', 'certification']):
+                question_categories['regulatory'] += 1
+            elif any(word in q_lower for word in ['application', 'use', 'formulation', 'recipe']):
+                question_categories['applications'] += 1
+            else:
+                question_categories['technical'] += 1
 
-    return {"content": "I couldn't process that conversation query.", "success": False}
+        key_topics = list(topic_words)[:8]
+        active_categories = {k: v for k, v in question_categories.items() if v > 0}
 
-def _generate_conversation_summary(self, user_questions: List[str], session: UserSession) -> Dict[str, Any]:
-    """Generate conversation summary using code-based analysis."""
+        summary_parts = [
+            f"📈 **Conversation Summary:**\n",
+            f"• **Total Questions**: {len(user_questions)}",
+            f"• **Session Duration**: Started {session.created_at.strftime('%B %d at %H:%M')}",
+            f"• **Key Topics Discussed**: {', '.join(key_topics) if key_topics else 'General inquiries'}"
+        ]
 
-    if not user_questions:
+        if active_categories:
+            summary_parts.append("\n**Question Breakdown:**")
+            for category, count in active_categories.items():
+                summary_parts.append(f"• **{category.title()}**: {count} question{'s' if count > 1 else ''}")
+        
+        summary_parts.append(f"\n• **User Status**: {session.user_type.value.replace('_', ' ').title()}")
+
         return {
-            "content": "No questions have been asked in this session yet.",
+            "content": "\n".join(summary_parts),
             "success": True,
-            "source": "Session Summary"
+            "source": "Conversation Summary",
+            "analyzed_questions": len(user_questions)
         }
 
-    topic_words = set()
-    question_categories = {
-        'pricing': 0, 'suppliers': 0, 'technical': 0, 'regulatory': 0, 'applications': 0
-    }
+    def _analyze_conversation_topics(self, user_questions: List[str], session: UserSession) -> Dict[str, Any]:
+        """Analyze conversation topics using code-based extraction."""
 
-    for question in user_questions:
-        q_lower = question.lower()
-        words = [w for w in q_lower.split() if len(w) > 4 and w not in ['what', 'where', 'when', 'about', 'would', 'could', 'should', 'which']]
-        topic_words.update(words[:3])
+        if not user_questions:
+            return {
+                "content": "No topics to analyze - no questions asked yet.",
+                "success": True,
+                "source": "Topic Analysis"
+            }
 
-        if any(word in q_lower for word in ['price', 'pricing', 'cost', 'expensive']):
-            question_categories['pricing'] += 1
-        elif any(word in q_lower for word in ['supplier', 'source', 'vendor', 'manufacturer']):
-            question_categories['suppliers'] += 1
-        elif any(word in q_lower for word in ['regulation', 'compliance', 'standard', 'certification']):
-            question_categories['regulatory'] += 1
-        elif any(word in q_lower for word in ['application', 'use', 'formulation', 'recipe']):
-            question_categories['applications'] += 1
-        else:
-            question_categories['technical'] += 1
+        ingredients_mentioned = set()
+        business_aspects = set()
+        technical_terms = set()
 
-    key_topics = list(topic_words)[:8]
-    active_categories = {k: v for k, v in question_categories.items() if v > 0}
+        ingredient_indicators = ['extract', 'powder', 'oil', 'acid', 'syrup', 'sweetener', 'flavor', 'color']
 
-    summary_parts = [
-        f"📈 **Conversation Summary:**\n",
-        f"• **Total Questions**: {len(user_questions)}",
-        f"• **Session Duration**: Started {session.created_at.strftime('%B %d at %H:%M')}",
-        f"• **Key Topics Discussed**: {', '.join(key_topics) if key_topics else 'General inquiries'}"
-    ]
+        for question in user_questions:
+            words = question.split()
+            for i, word in enumerate(words):
+                word_lower = word.lower().strip('.,!?')
 
-    if active_categories:
-        summary_parts.append("\n**Question Breakdown:**")
-        for category, count in active_categories.items():
-            summary_parts.append(f"• **{category.title()}**: {count} question{'s' if count > 1 else ''}")
-    
-    summary_parts.append(f"\n• **User Status**: {session.user_type.value.replace('_', ' ').title()}")
+                if any(indicator in question.lower() for indicator in ingredient_indicators):
+                    if word.istitle() and len(word) > 3:
+                        ingredients_mentioned.add(word)
+                
+                if word_lower in ['supplier', 'vendor', 'sourcing', 'pricing', 'cost', 'availability', 'stock']:
+                    business_aspects.add(word_lower)
 
-    return {
-        "content": "\n".join(summary_parts),
-        "success": True,
-        "source": "Conversation Summary",
-        "analyzed_questions": len(user_questions)
-    }
+                if word_lower in ['formulation', 'application', 'specification', 'grade', 'purity', 'concentration']:
+                    technical_terms.add(word_lower)
 
-def _analyze_conversation_topics(self, user_questions: List[str], session: UserSession) -> Dict[str, Any]:
-    """Analyze conversation topics using code-based extraction."""
+        temp_topic_words = set()
+        for question in user_questions:
+            q_lower = question.lower()
+            words = [w for w in q_lower.split() if len(w) > 4 and w not in ['what', 'where', 'when', 'about', 'would', 'could', 'should', 'which']]
+            temp_topic_words.update(words[:3])
 
-    if not user_questions:
+        key_topics = list(temp_topic_words)[:8]
+        temp_question_categories = {
+            'pricing': 0, 'suppliers': 0, 'technical': 0, 'regulatory': 0, 'applications': 0
+        }
+        for question in user_questions:
+            q_lower = question.lower()
+            if any(word in q_lower for word in ['price', 'pricing', 'cost', 'expensive']):
+                temp_question_categories['pricing'] += 1
+            elif any(word in q_lower for word in ['supplier', 'source', 'vendor', 'manufacturer']):
+                temp_question_categories['suppliers'] += 1
+            elif any(word in q_lower for word in ['regulation', 'compliance', 'standard', 'certification']):
+                temp_question_categories['regulatory'] += 1
+            elif any(word in q_lower for word in ['application', 'use', 'formulation', 'recipe']):
+                temp_question_categories['applications'] += 1
+            else:
+                temp_question_categories['technical'] += 1
+
+        active_categories = {k: v for k, v in temp_question_categories.items() if v > 0}
+
+        analysis_parts = [
+            f"🔍 **Topic Analysis:**\n",
+            f"• **Questions Analyzed**: {len(user_questions)}"
+        ]
+
+        if ingredients_mentioned:
+            analysis_parts.append(f"• **Ingredients Discussed**: {', '.join(list(ingredients_mentioned)[:6])}")
+
+        if business_aspects:
+            analysis_parts.append(f"• **Business Aspects**: {', '.join(list(business_aspects))}")
+
+        if technical_terms:
+            analysis_parts.append(f"• **Technical Focus**: {', '.join(list(technical_terms))}")
+
+        focus_areas = []
+        combined_text = ' '.join(user_questions).lower()
+
+        if any(term in combined_text for term in ['bakery', 'bread', 'cake', 'pastry']):
+            focus_areas.append('Bakery')
+        if any(term in combined_text for term in ['beverage', 'drink', 'juice', 'soda']):
+            focus_areas.append('Beverages')
+        if any(term in combined_text for term in ['dairy', 'milk', 'cheese', 'yogurt']):
+            focus_areas.append('Dairy')
+        if any(term in combined_text for term in ['confection', 'candy', 'chocolate', 'sweet']):
+            focus_areas.append('Confectionery')
+
+        if focus_areas:
+            analysis_parts.append(f"• **Industry Focus**: {', '.join(focus_areas)}")
+
+
         return {
-            "content": "No topics to analyze - no questions asked yet.",
+            "content": "\n".join(analysis_parts),
             "success": True,
             "source": "Topic Analysis"
         }
-
-    ingredients_mentioned = set()
-    business_aspects = set()
-    technical_terms = set()
-
-    ingredient_indicators = ['extract', 'powder', 'oil', 'acid', 'syrup', 'sweetener', 'flavor', 'color']
-
-    for question in user_questions:
-        words = question.split()
-        for i, word in enumerate(words):
-            word_lower = word.lower().strip('.,!?')
-
-            if any(indicator in question.lower() for indicator in ingredient_indicators):
-                if word.istitle() and len(word) > 3:
-                    ingredients_mentioned.add(word)
+    
+    async def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
+        """Gets AI response and manages session state with a corrected processing pipeline."""
+        try:
+            logger.info(f"Processing prompt: '{prompt[:100]}' | Session: {session.session_id[:8]} | Type: {session.user_type.value}")
+            rate_limiter_id = session.fingerprint_id
+            if (session.user_type in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]) and session.email:
+                rate_limiter_id = f"email_{session.email.lower()}"
+                logger.debug(f"Rate limiter using email for {session.user_type.value}: {session.email}")
+            elif rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                rate_limiter_id = session.session_id
+                logger.debug(f"Rate limiter using session ID as fallback: {session.session_id[:8]}")
             
-            if word_lower in ['supplier', 'vendor', 'sourcing', 'pricing', 'cost', 'availability', 'stock']:
-                business_aspects.add(word_lower)
-
-            if word_lower in ['formulation', 'application', 'specification', 'grade', 'purity', 'concentration']:
-                technical_terms.add(word_lower)
-
-    temp_topic_words = set()
-    for question in user_questions:
-        q_lower = question.lower()
-        words = [w for w in q_lower.split() if len(w) > 4 and w not in ['what', 'where', 'when', 'about', 'would', 'could', 'should', 'which']]
-        temp_topic_words.update(words[:3])
-
-    key_topics = list(temp_topic_words)[:8]
-    temp_question_categories = {
-        'pricing': 0, 'suppliers': 0, 'technical': 0, 'regulatory': 0, 'applications': 0
-    }
-    for question in user_questions:
-        q_lower = question.lower()
-        if any(word in q_lower for word in ['price', 'pricing', 'cost', 'expensive']):
-            temp_question_categories['pricing'] += 1
-        elif any(word in q_lower for word in ['supplier', 'source', 'vendor', 'manufacturer']):
-            temp_question_categories['suppliers'] += 1
-        elif any(word in q_lower for word in ['regulation', 'compliance', 'standard', 'certification']):
-            temp_question_categories['regulatory'] += 1
-        elif any(word in q_lower for word in ['application', 'use', 'formulation', 'recipe']):
-            temp_question_categories['applications'] += 1
-        else:
-            temp_question_categories['technical'] += 1
-
-    active_categories = {k: v for k, v in temp_question_categories.items() if v > 0}
-
-    analysis_parts = [
-        f"🔍 **Topic Analysis:**\n",
-        f"• **Questions Analyzed**: {len(user_questions)}"
-    ]
-
-    if ingredients_mentioned:
-        analysis_parts.append(f"• **Ingredients Discussed**: {', '.join(list(ingredients_mentioned)[:6])}")
-
-    if business_aspects:
-        analysis_parts.append(f"• **Business Aspects**: {', '.join(list(business_aspects))}")
-
-    if technical_terms:
-        analysis_parts.append(f"• **Technical Focus**: {', '.join(list(technical_terms))}")
-
-    focus_areas = []
-    combined_text = ' '.join(user_questions).lower()
-
-    if any(term in combined_text for term in ['bakery', 'bread', 'cake', 'pastry']):
-        focus_areas.append('Bakery')
-    if any(term in combined_text for term in ['beverage', 'drink', 'juice', 'soda']):
-        focus_areas.append('Beverages')
-    if any(term in combined_text for term in ['dairy', 'milk', 'cheese', 'yogurt']):
-        focus_areas.append('Dairy')
-    if any(term in combined_text for term in ['confection', 'candy', 'chocolate', 'sweet']):
-        focus_areas.append('Confectionery')
-
-    if focus_areas:
-        analysis_parts.append(f"• **Industry Focus**: {', '.join(focus_areas)}")
-
-
-    return {
-        "content": "\n".join(analysis_parts),
-        "success": True,
-        "source": "Topic Analysis"
-    }
-
-async def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, Any]:
-    """Gets AI response and manages session state with a corrected processing pipeline."""
-    try:
-        logger.info(f"Processing prompt: '{prompt[:100]}' | Session: {session.session_id[:8]} | Type: {session.user_type.value}")
-        rate_limiter_id = session.fingerprint_id
-        if (session.user_type in [UserType.REGISTERED_USER, UserType.EMAIL_VERIFIED_GUEST]) and session.email:
-            rate_limiter_id = f"email_{session.email.lower()}"
-            logger.debug(f"Rate limiter using email for {session.user_type.value}: {session.email}")
-        elif rate_limiter_id is None or rate_limiter_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-            rate_limiter_id = session.session_id
-            logger.debug(f"Rate limiter using session ID as fallback: {session.session_id[:8]}")
-        
-        # 1. Rate limit check
-        rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
-        if not rate_limit_result['allowed']:
-            time_until_next = rate_limit_result.get('time_until_next', 0)
-            max_requests = RATE_LIMIT_REQUESTS
-            window_seconds = RATE_LIMIT_WINDOW_SECONDS
-            
-            st.session_state.rate_limit_hit = {
-                'timestamp': datetime.now(),
-                'time_until_next': time_until_next,
-                'message': f"Rate limit exceeded. Please wait {time_until_next} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)"
-            }
-            
-            return {
-                'content': st.session_state.rate_limit_hit['message'],
-                'success': False,
-                'source': 'Rate Limiter',
-                'time_until_next': time_until_next
-            }
-        
-        # 2. Content moderation check
-        moderation_result = check_content_moderation(prompt, self.ai.openai_client)
-        if moderation_result and moderation_result.get("flagged"):
-            categories = moderation_result.get('categories', [])
-            logger.warning(f"Input flagged by moderation for: {', '.join(categories)}")
-            
-            st.session_state.moderation_flagged = {
-                'timestamp': datetime.now(),
-                'categories': categories,
-                'message': moderation_result.get("message", "Your message violates our content policy. Please rephrase your question.")
-            }
-            
-            return {
-                "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
-                "success": False, "source": "Content Moderation", "used_search": False, "used_pinecone": False,
-                "has_citations": False, "has_inline_citations": False, "safety_override": False
-            }
-
-        # 3. Pricing/Stock check
-        logger.debug(f"Checking pricing/stock query for: '{prompt}'")
-        if self.detect_pricing_stock_question(prompt):
-            try:
-                self.question_limits.record_question_and_check_ban(session, self)
-            except Exception as e:
-                logger.error(f"Failed to record pricing/stock query for {session.session_id[:8]}: {e}")
-                return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
-
-            session.messages.append({'role': 'user', 'content': prompt})
-            st.session_state.pricing_stock_notice = {
-                'timestamp': datetime.now(),
-                'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost']) else 'stock',
-                'message': """Thank you for your interest in pricing information. For the most accurate and up-to-date pricing and quotes, please visit the product page directly on our website or contact our sales team at sales-eu@12taste.com for personalized assistance."""
-            }
-            self._update_activity(session)
-            return {'content': "", 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
-
-        # 3.5 WooCommerce Order Check (ENHANCED with LLM Intent)
-        logger.debug(f"Checking 12Taste Order Status query for: '{prompt}' with LLM intent.")
-        
-        # --- LLM Intent Detection with Error Handling ---
-        order_intent = {"order_query_type": "none"} # Initialize with 'none'
-        if hasattr(self, 'woocommerce') and self.woocommerce and self.woocommerce.config.WOOCOMMERCE_ENABLED:
-            try:
-                order_intent = await self.woocommerce.detect_order_query_intent_llm(
-                    prompt, self.ai.openai_client
-                )
-            except Exception as e:
-                # Log the error, but allow context check to proceed for the fallback trigger
-                logger.error(f"Primary LLM order intent failed (AttributeError fix assumed in utility): {e}")
-
-        query_type = order_intent.get("order_query_type")
-        order_id = order_intent.get("order_id")
-        requested_statuses = order_intent.get("requested_statuses")
-        
-        # 4. LLM-driven Industry context check (Run here to inform routing)
-        logger.debug(f"Checking industry context for: '{prompt}'")
-        context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
-        context_category = context_result.get("category")
-        
-        # --- COMBINED GATE: Trigger WooCommerce if LLM detected intent OR Context identified it ---
-        is_woocommerce_query = (query_type != "none") or (context_category == "order_query")
-
-        if hasattr(self, 'woocommerce') and self.woocommerce and self.woocommerce.config.WOOCOMMERCE_ENABLED and is_woocommerce_query:
-            
-            # If primary LLM intent failed/returned none, but context identified an order query, 
-            # we must assume the LLM output was faulty and default to clarification logic.
-            if query_type == "none" and context_category == "order_query":
-                logger.info("Context identified order query, but primary LLM failed/returned none. Defaulting to clarification.")
-                query_type = "multiple_orders_clarification" 
-            
-            # Check authentication
-            if not (session.user_type == UserType.REGISTERED_USER or session.user_type == UserType.EMAIL_VERIFIED_GUEST) or not session.email:
-                message = "To check order status, please sign in as a Registered User or verify your email."
-                session.messages.append({'role': 'user', 'content': prompt})
-                session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
-                self._update_activity(session)
-                if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
-                return {'content': message, 'success': False, 'source': '12Taste Order Status'}
-
-            # Record question (as this is a successful intent/context match, we record it now)
-            try:
-                self.question_limits.record_question_and_check_ban(session, self)
-            except Exception as e:
-                logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
-                return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
-            
-            # Get customer ID
-            customer = await self.woocommerce.get_customer_by_email(session.email)
-            customer_id = customer.get('id') if customer else None
-
-            if not customer_id:
-                message = f"We could not find a customer account linked to your email ({session.email}). Please ensure you are logged in with the email used for your your order."
-                session.messages.append({'role': 'user', 'content': prompt})
-                session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
-                self._update_activity(session)
-                if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+            # 1. Rate limit check
+            rate_limit_result = self.rate_limiter.is_allowed(rate_limiter_id)
+            if not rate_limit_result['allowed']:
+                time_until_next = rate_limit_result.get('time_until_next', 0)
+                max_requests = RATE_LIMIT_REQUESTS
+                window_seconds = RATE_LIMIT_WINDOW_SECONDS
+                
+                st.session_state.rate_limit_hit = {
+                    'timestamp': datetime.now(),
+                    'time_until_next': time_until_next,
+                    'message': f"Rate limit exceeded. Please wait {time_until_next} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)"
+                }
+                
                 return {
-                    'content': message,
+                    'content': st.session_state.rate_limit_hit['message'],
                     'success': False,
-                    'source': '12Taste Order Status'
+                    'source': 'Rate Limiter',
+                    'time_until_next': time_until_next
+                }
+            
+            # 2. Content moderation check
+            moderation_result = check_content_moderation(prompt, self.ai.openai_client)
+            if moderation_result and moderation_result.get("flagged"):
+                categories = moderation_result.get('categories', [])
+                logger.warning(f"Input flagged by moderation for: {', '.join(categories)}")
+                
+                st.session_state.moderation_flagged = {
+                    'timestamp': datetime.now(),
+                    'categories': categories,
+                    'message': moderation_result.get("message", "Your message violates our content policy. Please rephrase your question.")
+                }
+                
+                return {
+                    "content": moderation_result.get("message", "Your message violates our content policy. Please rephrase your question."),
+                    "success": False, "source": "Content Moderation", "used_search": False, "used_pinecone": False,
+                    "has_citations": False, "has_inline_citations": False, "safety_override": False
                 }
 
-            # --- Handle different query types based on LLM intent ---
-            if query_type == "single_order" and order_id:
-                logger.info(f"LLM detected single order query for order ID: {order_id}. User email: {session.email}")
-                order_data = await self.woocommerce.get_order(order_id, customer_id=customer_id)
-                
-                if order_data and not order_data.get("error"):
-                    # --- MODIFIED LINE: Use LLM for formatting ---
-                    formatted_order = await self.woocommerce.summarize_order_details_llm(
-                        order_data,
-                        self.ai.openai_client
+            # 3. Pricing/Stock check
+            logger.debug(f"Checking pricing/stock query for: '{prompt}'")
+            if self.detect_pricing_stock_question(prompt):
+                try:
+                    self.question_limits.record_question_and_check_ban(session, self)
+                except Exception as e:
+                    logger.error(f"Failed to record pricing/stock query for {session.session_id[:8]}: {e}")
+                    return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
+
+                session.messages.append({'role': 'user', 'content': prompt})
+                st.session_state.pricing_stock_notice = {
+                    'timestamp': datetime.now(),
+                    'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost']) else 'stock',
+                    'message': """Thank you for your interest in pricing information. For the most accurate and up-to-date pricing and quotes, please visit the product page directly on our website or contact our sales team at sales-eu@12taste.com for personalized assistance."""
+                }
+                self._update_activity(session)
+                return {'content': "", 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
+
+            # 3.5 WooCommerce Order Check (ENHANCED with LLM Intent)
+            logger.debug(f"Checking 12Taste Order Status query for: '{prompt}' with LLM intent.")
+            
+            # --- LLM Intent Detection with Error Handling ---
+            order_intent = {"order_query_type": "none"} # Initialize with 'none'
+            if hasattr(self, 'woocommerce') and self.woocommerce and self.woocommerce.config.WOOCOMMERCE_ENABLED:
+                try:
+                    order_intent = await self.woocommerce.detect_order_query_intent_llm(
+                        prompt, self.ai.openai_client
                     )
-                    # ------------------------------------------
-                    
+                except Exception as e:
+                    # Log the error, but allow context check to proceed for the fallback trigger
+                    logger.error(f"Primary LLM order intent failed (AttributeError fix assumed in utility): {e}")
+
+            query_type = order_intent.get("order_query_type")
+            order_id = order_intent.get("order_id")
+            requested_statuses = order_intent.get("requested_statuses")
+            
+            # 4. LLM-driven Industry context check (Run here to inform routing)
+            logger.debug(f"Checking industry context for: '{prompt}'")
+            context_result = check_industry_context(prompt, session.messages, self.ai.openai_client)
+            context_category = context_result.get("category")
+            
+            # --- COMBINED GATE: Trigger WooCommerce if LLM detected intent OR Context identified it ---
+            is_woocommerce_query = (query_type != "none") or (context_category == "order_query")
+
+            if hasattr(self, 'woocommerce') and self.woocommerce and self.woocommerce.config.WOOCOMMERCE_ENABLED and is_woocommerce_query:
+                
+                # If primary LLM intent failed/returned none, but context identified an order query, 
+                # we must assume the LLM output was faulty and default to clarification logic.
+                if query_type == "none" and context_category == "order_query":
+                    logger.info("Context identified order query, but primary LLM failed/returned none. Defaulting to clarification.")
+                    query_type = "multiple_orders_clarification" 
+                
+                # Check authentication
+                if not (session.user_type == UserType.REGISTERED_USER or session.user_type == UserType.EMAIL_VERIFIED_GUEST) or not session.email:
+                    message = "To check order status, please sign in as a Registered User or verify your email."
                     session.messages.append({'role': 'user', 'content': prompt})
-                    session.messages.append({
-                        'role': 'assistant', 
-                        'content': formatted_order,
-                        'source': '12Taste Order Status',
-                        'order_id': order_id
-                    })
+                    session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                    self._update_activity(session)
+                    if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                    return {'content': message, 'success': False, 'source': '12Taste Order Status'}
+
+                # Record question (as this is a successful intent/context match, we record it now)
+                try:
+                    self.question_limits.record_question_and_check_ban(session, self)
+                except Exception as e:
+                    logger.error(f"Failed to record order query for {session.session_id[:8]}: {e}")
+                    return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
+                
+                # Get customer ID
+                customer = await self.woocommerce.get_customer_by_email(session.email)
+                customer_id = customer.get('id') if customer else None
+
+                if not customer_id:
+                    message = f"We could not find a customer account linked to your email ({session.email}). Please ensure you are logged in with the email used for your order."
+                    session.messages.append({'role': 'user', 'content': prompt})
+                    session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
                     self._update_activity(session)
                     if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
                     return {
-                        'content': formatted_order,
-                        'success': True,
-                        'source': '12Taste Order Status',
-                        'order_id': order_id
-                    }
-                else:
-                    error_message = order_data.get("message", "Order not found or does not belong to your account.")
-                    session.messages.append({'role': 'user', 'content': prompt})
-                    session.messages.append({'role': 'assistant', 'content': f"❌ {error_message}", 'source': '12Taste Order Status'})
-                    self._update_activity(session)
-                    if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
-                    return {
-                        'content': f"❌ {error_message}",
+                        'content': message,
                         'success': False,
                         'source': '12Taste Order Status'
                     }
-            
-            # --- Handle multiple order queries ---
-            elif query_type in ["multiple_orders_all", "multiple_orders_open", "multiple_orders_specific_status"]:
-                logger.info(f"LLM detected multiple orders query ({query_type}). User email: {session.email}")
-                
-                status_filter = None 
-                filter_display_name = ""
 
-                if query_type == "multiple_orders_all":
-                    filter_display_name = "All"
-                elif query_type == "multiple_orders_open":
-                    status_filter = ['pending', 'on-hold', 'processing']
-                    filter_display_name = "Open"
-                elif query_type == "multiple_orders_specific_status" and requested_statuses:
-                    status_filter = requested_statuses
-                    display_names = await self.woocommerce._get_display_names_for_slugs(requested_statuses)
-                    if len(display_names) > 1:
-                        filter_display_name = ", ".join(display_names[:-1]) + " & " + display_names[-1]
-                    else:
-                        filter_display_name = display_names[0] if display_names else ""
-                else:
-                    # Safety check for empty requested_statuses
-                    query_type = "multiple_orders_clarification" 
-                    pass # Fall through to clarification below
-
-                if query_type != "multiple_orders_clarification": 
-                    orders = await self.woocommerce.list_orders(
-                        customer_id=customer_id,
-                        status=status_filter, 
-                        per_page=50 
-                    )
+                # --- Handle different query types based on LLM intent ---
+                if query_type == "single_order" and order_id:
+                    logger.info(f"LLM detected single order query for order ID: {order_id}. User email: {session.email}")
+                    order_data = await self.woocommerce.get_order(order_id, customer_id=customer_id)
                     
-                    if orders is not None:
-                        formatted_orders = self.woocommerce.format_multiple_orders_display(orders, filter_display_name)
+                    if order_data and not order_data.get("error"):
+                        # --- MODIFIED LINE: Use LLM for formatting ---
+                        formatted_order = await self.woocommerce.summarize_order_details_llm(
+                            order_data,
+                            self.ai.openai_client
+                        )
+                        # ------------------------------------------
                         
                         session.messages.append({'role': 'user', 'content': prompt})
                         session.messages.append({
                             'role': 'assistant', 
-                            'content': formatted_orders,
+                            'content': formatted_order,
                             'source': '12Taste Order Status',
-                            'order_count': len(orders),
-                            'filter_type': filter_display_name,
-                            'specific_statuses': requested_statuses 
+                            'order_id': order_id
                         })
                         self._update_activity(session)
                         if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
                         return {
-                            'content': formatted_orders,
+                            'content': formatted_order,
                             'success': True,
                             'source': '12Taste Order Status',
-                            'order_count': len(orders),
-                            'filter_type': filter_display_name
+                            'order_id': order_id
                         }
                     else:
-                        error_message = "Failed to retrieve your orders. Please try again later."
+                        error_message = order_data.get("message", "Order not found or does not belong to your account.")
                         session.messages.append({'role': 'user', 'content': prompt})
                         session.messages.append({'role': 'assistant', 'content': f"❌ {error_message}", 'source': '12Taste Order Status'})
                         self._update_activity(session)
@@ -5502,647 +5438,711 @@ async def get_ai_response(self, session: UserSession, prompt: str) -> Dict[str, 
                             'success': False,
                             'source': '12Taste Order Status'
                         }
-
-            # --- Handle clarification requests (and fallbacks from multiple orders/failed single order detection) ---
-            if query_type == "multiple_orders_clarification":
-                message = "I can help with your orders. Do you want to check a specific order (please provide the ID/number), list all your orders, or filter by a certain status (e.g., 'pending payment')?"
-                session.messages.append({'role': 'user', 'content': prompt})
-                session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
-                self._update_activity(session)
-                st.session_state.expecting_order_id = True 
-                return {
-                    'content': message,
-                    'success': True,
-                    'source': '12Taste Order Status'
-                }
-            
-            # --- Final safety net for order query types ---
-            else:
-                message = "I detected an order-related question but need more clarity. Please provide an order ID, or specify if you want to see all orders, open orders, or orders with a particular status."
-                session.messages.append({'role': 'user', 'content': prompt})
-                session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
-                self._update_activity(session)
-                st.session_state.expecting_order_id = True
-                return {
-                    'content': message,
-                    'success': True,
-                    'source': '12Taste Order Status'
-                }
-        
-        # If not a WooCommerce query, ensure expecting_order_id is cleared
-        if 'expecting_order_id' in st.session_state: 
-            del st.session_state['expecting_order_id']
-
-
-        # 4. LLM-driven Industry context check (Result is available in context_result)
-        context_category = context_result.get("category")
-        is_relevant = context_result.get("relevant", True)
-        
-        # A. Handle greetings immediately and return
-        if context_category == "greeting_or_polite":
-            try:
-                self.question_limits.record_question_and_check_ban(session, self)
-            except Exception as e:
-                logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
-                return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
-
-            session.messages.append({'role': 'user', 'content': prompt})
-            friendly_response = {"content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?", "success": True, "source": "FiFi", "is_meta_response": True}
-            session.messages.append({'role': 'assistant', 'content': friendly_response['content'], 'source': 'Greeting', 'is_meta_response': True})
-            self._update_activity(session)
-            return friendly_response
-        
-        # B. Block irrelevant questions
-        elif not is_relevant and context_category not in ["meta_conversation"]:
-            confidence = context_result.get("confidence", 0.0)
-            reason = context_result.get("reason", "Not relevant")
-            context_message = "I'm specialized in helping food & beverage industry professionals. Please ask me about ingredients, suppliers, or market trends."
-            st.session_state.context_flagged = {'timestamp': datetime.now(), 'category': context_category, 'confidence': confidence, 'reason': reason, 'message': context_message}
-            return {"content": context_message, "success": False, "source": "Industry Context Filter", "used_search": False, "used_pinecone": False, "has_citations": False, "has_inline_citations": False, "safety_override": False}
-
-        # 5. LLM-driven Meta-conversation query detection
-        logger.debug(f"Checking meta-conversation for: '{prompt}'")
-        meta_detection = self.detect_meta_conversation_query_llm(prompt)
-        if meta_detection["is_meta"]:
-            logger.info(f"Meta-conversation query detected: {meta_detection['type']}")
-            try:
-                self.question_limits.record_question_and_check_ban(session, self)
-            except Exception as e:
-                return {'content': 'An error occurred while tracking your question.', 'success': False, 'source': 'Question Tracker'}
-            
-            session.messages.append({'role': 'user', 'content': prompt})
-            meta_response = self.handle_meta_conversation_query(session, meta_detection["type"], meta_detection.get("scope", ""))
-            session.messages.append({'role': 'assistant', 'content': meta_response.get('content'), 'source': meta_response.get('source'), 'is_meta_response': True})
-            self._update_activity(session)
-            return meta_response
-
-        # --- If we've reached here, it's a valid, on-topic industry question ---
-        limit_check = self.question_limits.is_within_limits(session)
-        if not limit_check['allowed']:
-            message = limit_check.get('message', 'Access restricted due to usage policy.')
-            return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': limit_check.get('time_until_next')} # Ensure consistent key
-
-        self._clear_error_notifications()
-        sanitized_prompt = sanitize_input(prompt)
-        if not sanitized_prompt:
-            return {'content': 'Please enter a valid question.', 'success': False, 'source': 'Input Validation'}
-        
-        try:
-            question_record_status = self.question_limits.record_question_and_check_ban(session, self)
-            if question_record_status.get("ban_applied") or question_record_status.get("existing_ban_inherited"):
-                message = self.question_limits._get_ban_message(session, question_record_status.get("ban_type"))
-                time_remaining_td = session.ban_end_time - datetime.now() if session.ban_end_time else None
-                return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': time_remaining_td}
-        except Exception as e:
-            logger.error(f"❌ Critical error recording question: {e}")
-            return {'content': 'A critical error occurred while recording your question.', 'success': False, 'source': 'Question Tracking Error'}
-        
-        ai_response = await asyncio.to_thread(self.ai.get_response, sanitized_prompt, session.messages)
-        
-        user_message = {'role': 'user', 'content': sanitized_prompt}
-        assistant_message = {'role': 'assistant', 'content': ai_response.get('content', 'No response.'), 'source': ai_response.get('source'), **ai_response}
-        session.messages.extend([user_message, assistant_message])
-        self._update_activity(session)
-        
-        return ai_response
-        
-    except Exception as e:
-        logger.error(f"AI response generation failed: {e}", exc_info=True)
-        return {'content': 'I encountered an error processing your request.', 'success': False, 'source': 'Error Handler'}    
-    
-def clear_chat_history(self, session: UserSession):
-    """Clears chat history using soft clear mechanism."""
-    try:
-        if self._is_manual_crm_save_eligible(session):
-            logger.info(f"CRM Save triggered by Clear Chat for session {session.session_id[:8]}")
-            self.zoho.save_chat_transcript_sync(session, "Clear Chat")
-        
-        session.display_message_offset = len(session.messages)
-        self.db.save_session(session)
-        
-        logger.info(f"Soft cleared chat for session {session.session_id[:8]}: offset set to {session.display_message_offset}")
-        
-    except Exception as e:
-        logger.error(f"Failed to clear chat history for session {session.session_id[:8]}: {e}")
-
-def manual_save_to_crm(self, session: UserSession):
-    """Manually saves chat transcript to CRM (no 15-minute requirement)."""
-    try:
-        if self._is_manual_crm_save_eligible(session):
-            with st.spinner("Saving chat transcript to CRM..."):
-                success = self.zoho.save_chat_transcript_sync(session, "Manual Save")
                 
-            if success:
-                st.success("✅ Chat transcript saved to CRM successfully!")
-                logger.info(f"Manual CRM save successful for session {session.session_id[:8]}")
-            else:
-                st.error("❌ Failed to save to CRM. Please try again later.")
-                logger.warning(f"Manual CRM save failed for session {session.session_id[:8]}")
-        else:
-            st.warning("⚠️ CRM save not available. Ensure you have an email verified and at least 1 question asked.")
-            logger.info(f"Manual CRM save not eligible for session {session.session_id[:8]}")
-            
-    except Exception as e:
-        logger.error(f"Manual CRM save error: {e}")
-        st.error("❌ An error occurred while saving to CRM.")
+                # --- Handle multiple order queries ---
+                elif query_type in ["multiple_orders_all", "multiple_orders_open", "multiple_orders_specific_status"]:
+                    logger.info(f"LLM detected multiple orders query ({query_type}). User email: {session.email}")
+                    
+                    status_filter = None 
+                    filter_display_name = ""
 
-def end_session(self, session: UserSession):
-    """Ends the current session and performs cleanup."""
-    try:
-        if self._is_manual_crm_save_eligible(session):
-            with st.spinner("Saving your conversation..."):
-                try:
-                    success = self.zoho.save_chat_transcript_sync(session, "Sign Out")
-                    if success:
-                        st.success("✅ Conversation saved successfully!")
+                    if query_type == "multiple_orders_all":
+                        filter_display_name = "All"
+                    elif query_type == "multiple_orders_open":
+                        status_filter = ['pending', 'on-hold', 'processing']
+                        filter_display_name = "Open"
+                    elif query_type == "multiple_orders_specific_status" and requested_statuses:
+                        status_filter = requested_statuses
+                        display_names = await self.woocommerce._get_display_names_for_slugs(requested_statuses)
+                        if len(display_names) > 1:
+                            filter_display_name = ", ".join(display_names[:-1]) + " & " + display_names[-1]
+                        else:
+                            filter_display_name = display_names[0] if display_names else ""
                     else:
-                        st.warning("⚠️ Conversation save failed, but sign out will continue.")
+                        # Safety check for empty requested_statuses
+                        query_type = "multiple_orders_clarification" 
+                        pass # Fall through to clarification below
+
+                    if query_type != "multiple_orders_clarification": 
+                        orders = await self.woocommerce.list_orders(
+                            customer_id=customer_id,
+                            status=status_filter, 
+                            per_page=50 
+                        )
+                        
+                        if orders is not None:
+                            formatted_orders = self.woocommerce.format_multiple_orders_display(orders, filter_display_name)
+                            
+                            session.messages.append({'role': 'user', 'content': prompt})
+                            session.messages.append({
+                                'role': 'assistant', 
+                                'content': formatted_orders,
+                                'source': '12Taste Order Status',
+                                'order_count': len(orders),
+                                'filter_type': filter_display_name,
+                                'specific_statuses': requested_statuses 
+                            })
+                            self._update_activity(session)
+                            if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                            return {
+                                'content': formatted_orders,
+                                'success': True,
+                                'source': '12Taste Order Status',
+                                'order_count': len(orders),
+                                'filter_type': filter_display_name
+                            }
+                        else:
+                            error_message = "Failed to retrieve your orders. Please try again later."
+                            session.messages.append({'role': 'user', 'content': prompt})
+                            session.messages.append({'role': 'assistant', 'content': f"❌ {error_message}", 'source': '12Taste Order Status'})
+                            self._update_activity(session)
+                            if 'expecting_order_id' in st.session_state: del st.session_state['expecting_order_id']
+                            return {
+                                'content': f"❌ {error_message}",
+                                'success': False,
+                                'source': '12Taste Order Status'
+                            }
+
+                # --- Handle clarification requests (and fallbacks from multiple orders/failed single order detection) ---
+                if query_type == "multiple_orders_clarification":
+                    message = "I can help with your orders. Do you want to check a specific order (please provide the ID/number), list all your orders, or filter by a certain status (e.g., 'pending payment')?"
+                    session.messages.append({'role': 'user', 'content': prompt})
+                    session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                    self._update_activity(session)
+                    st.session_state.expecting_order_id = True 
+                    return {
+                        'content': message,
+                        'success': True,
+                        'source': '12Taste Order Status'
+                    }
+                
+                # --- Final safety net for order query types ---
+                else:
+                    message = "I detected an order-related question but need more clarity. Please provide an order ID, or specify if you want to see all orders, open orders, or orders with a particular status."
+                    session.messages.append({'role': 'user', 'content': prompt})
+                    session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
+                    self._update_activity(session)
+                    st.session_state.expecting_order_id = True
+                    return {
+                        'content': message,
+                        'success': True,
+                        'source': '12Taste Order Status'
+                    }
+            
+            # If not a WooCommerce query, ensure expecting_order_id is cleared
+            if 'expecting_order_id' in st.session_state: 
+                del st.session_state['expecting_order_id']
+
+
+            # 4. LLM-driven Industry context check (Result is available in context_result)
+            context_category = context_result.get("category")
+            is_relevant = context_result.get("relevant", True)
+            
+            # A. Handle greetings immediately and return
+            if context_category == "greeting_or_polite":
+                try:
+                    self.question_limits.record_question_and_check_ban(session, self)
                 except Exception as e:
-                    logger.error(f"CRM save during sign out failed: {e}")
-                    st.warning("⚠️ Conversation save failed, but sign out will continue.")
-        
-        session.active = False
-        session.last_activity = datetime.now()
-        
-        try:
-            self.db.save_session(session)
+                    logger.error(f"Failed to record greeting for {session.session_id[:8]}: {e}")
+                    return {'content': 'An error occurred while tracking your question.', 'success': False, 'source': 'Question Tracker'}
+
+                session.messages.append({'role': 'user', 'content': prompt})
+                friendly_response = {"content": "Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?", "success": True, "source": "FiFi", "is_meta_response": True}
+                session.messages.append({'role': 'assistant', 'content': friendly_response['content'], 'source': 'Greeting', 'is_meta_response': True})
+                self._update_activity(session)
+                return friendly_response
+            
+            # B. Block irrelevant questions
+            elif not is_relevant and context_category not in ["meta_conversation"]:
+                confidence = context_result.get("confidence", 0.0)
+                reason = context_result.get("reason", "Not relevant")
+                context_message = "I'm specialized in helping food & beverage industry professionals. Please ask me about ingredients, suppliers, or market trends."
+                st.session_state.context_flagged = {'timestamp': datetime.now(), 'category': context_category, 'confidence': confidence, 'reason': reason, 'message': context_message}
+                return {"content": context_message, "success": False, "source": "Industry Context Filter", "used_search": False, "used_pinecone": False, "has_citations": False, "has_inline_citations": False, "safety_override": False}
+
+            # 5. LLM-driven Meta-conversation query detection
+            logger.debug(f"Checking meta-conversation for: '{prompt}'")
+            meta_detection = self.detect_meta_conversation_query_llm(prompt)
+            if meta_detection["is_meta"]:
+                logger.info(f"Meta-conversation query detected: {meta_detection['type']}")
+                try:
+                    self.question_limits.record_question_and_check_ban(session, self)
+                except Exception as e:
+                    return {'content': 'An error occurred while tracking your question.', 'success': False, 'source': 'Question Tracker'}
+                
+                session.messages.append({'role': 'user', 'content': prompt})
+                meta_response = self.handle_meta_conversation_query(session, meta_detection["type"], meta_detection.get("scope", ""))
+                session.messages.append({'role': 'assistant', 'content': meta_response.get('content'), 'source': meta_response.get('source'), 'is_meta_response': True})
+                self._update_activity(session)
+                return meta_response
+
+            # --- If we've reached here, it's a valid, on-topic industry question ---
+            limit_check = self.question_limits.is_within_limits(session)
+            if not limit_check['allowed']:
+                message = limit_check.get('message', 'Access restricted due to usage policy.')
+                return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': limit_check.get('time_until_next')} # Ensure consistent key
+
+            self._clear_error_notifications()
+            sanitized_prompt = sanitize_input(prompt)
+            if not sanitized_prompt:
+                return {'content': 'Please enter a valid question.', 'success': False, 'source': 'Input Validation'}
+            
+            try:
+                question_record_status = self.question_limits.record_question_and_check_ban(session, self)
+                if question_record_status.get("ban_applied") or question_record_status.get("existing_ban_inherited"):
+                    message = self.question_limits._get_ban_message(session, question_record_status.get("ban_type"))
+                    time_remaining_td = session.ban_end_time - datetime.now() if session.ban_end_time else None
+                    return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': time_remaining_td}
+            except Exception as e:
+                logger.error(f"❌ Critical error recording question: {e}")
+                return {'content': 'A critical error occurred while recording your question.', 'success': False, 'source': 'Question Tracking Error'}
+            
+            ai_response = await asyncio.to_thread(self.ai.get_response, sanitized_prompt, session.messages)
+            
+            user_message = {'role': 'user', 'content': sanitized_prompt}
+            assistant_message = {'role': 'assistant', 'content': ai_response.get('content', 'No response.'), 'source': ai_response.get('source'), **ai_response}
+            session.messages.extend([user_message, assistant_message])
+            self._update_activity(session)
+            
+            return ai_response
+            
         except Exception as e:
-            logger.error(f"Failed to save session during end_session: {e}")
+            logger.error(f"AI response generation failed: {e}", exc_info=True)
+            return {'content': 'I encountered an error processing your request.', 'success': False, 'source': 'Error Handler'}    
         
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        
-        st.session_state['page'] = None
-        
-        st.success("👋 You have been signed out successfully!")
-        logger.info(f"Session {session.session_id[:8]} ended by user.")
-        
-    except Exception as e:
-        logger.error(f"Session end failed: {e}")
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.session_state['page'] = None
-
-def check_if_attempting_to_exceed_limits(self, session: UserSession) -> bool:
-    """
-    Check if user is attempting to ask a question beyond their limits.
-    This function displays UI messages and returns True/False to block chat input.
-    Only blocks for ACTIVE bans, not for "about to exceed" scenarios.
-    """
-    limit_check = self.question_limits.is_within_limits(session)
-    
-    if not limit_check.get('allowed', True):
-        reason = limit_check.get('reason')
-        message = limit_check.get('message', 'Access restricted due to usage policy.')
-        
-        if reason == 'banned':
-            ban_type = limit_check.get('ban_type', 'unknown')
-            time_remaining = limit_check.get('time_until_next')
+    def clear_chat_history(self, session: UserSession):
+        """Clears chat history using soft clear mechanism."""
+        try:
+            if self._is_manual_crm_save_eligible(session):
+                logger.info(f"CRM Save triggered by Clear Chat for session {session.session_id[:8]}")
+                self.zoho.save_chat_transcript_sync(session, "Clear Chat")
             
-            st.error("🚫 **Access Restricted**")
-            if time_remaining: # time_until_next is an int in seconds here
-                hours = time_remaining // 3600
-                minutes = (time_remaining % 3600) // 60
-                st.error(f"Time remaining: {hours}h {minutes}m")
-            st.info(message)
-            return True
+            session.display_message_offset = len(session.messages)
+            self.db.save_session(session)
             
-        elif reason == 'guest_limit':
-            st.error("🛑 **Guest Limit Reached**")
-            st.info(f"You've used your {GUEST_QUESTION_LIMIT} guest questions. Please verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} more questions per day!")
-            return True
+            logger.info(f"Soft cleared chat for session {session.session_id[:8]}: offset set to {session.display_message_offset}")
+            
+        except Exception as e:
+            logger.error(f"Failed to clear chat history for session {session.session_id[:8]}: {e}")
 
-        elif reason == 'email_verified_guest_limit':
-            st.error("🛑 **Daily Limit Reached**")
-            st.info(f"You've used your {EMAIL_VERIFIED_QUESTION_LIMIT} questions for today. Your questions reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
-            return True
+    def manual_save_to_crm(self, session: UserSession):
+        """Manually saves chat transcript to CRM (no 15-minute requirement)."""
+        try:
+            if self._is_manual_crm_save_eligible(session):
+                with st.spinner("Saving chat transcript to CRM..."):
+                    success = self.zoho.save_chat_transcript_sync(session, "Manual Save")
+                    
+                if success:
+                    st.success("✅ Chat transcript saved to CRM successfully!")
+                    logger.info(f"Manual CRM save successful for session {session.session_id[:8]}")
+                else:
+                    st.error("❌ Failed to save to CRM. Please try again later.")
+                    logger.warning(f"Manual CRM save failed for session {session.session_id[:8]}")
+            else:
+                st.warning("⚠️ CRM save not available. Ensure you have an email verified and at least 1 question asked.")
+                logger.info(f"Manual CRM save not eligible for session {session.session_id[:8]}")
+                
+        except Exception as e:
+            logger.error(f"Manual CRM save error: {e}")
+            st.error("❌ An error occurred while saving to CRM.")
+
+    def end_session(self, session: UserSession):
+        """Ends the current session and performs cleanup."""
+        try:
+            if self._is_manual_crm_save_eligible(session):
+                with st.spinner("Saving your conversation..."):
+                    try:
+                        success = self.zoho.save_chat_transcript_sync(session, "Sign Out")
+                        if success:
+                            st.success("✅ Conversation saved successfully!")
+                        else:
+                            st.warning("⚠️ Conversation save failed, but sign out will continue.")
+                    except Exception as e:
+                        logger.error(f"CRM save during sign out failed: {e}")
+                        st.warning("⚠️ Conversation save failed, but sign out will continue.")
+            
+            session.active = False
+            session.last_activity = datetime.now()
+            
+            try:
+                self.db.save_session(session)
+            except Exception as e:
+                logger.error(f"Failed to save session during end_session: {e}")
+            
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            
+            st.session_state['page'] = None
+            
+            st.success("👋 You have been signed out successfully!")
+            logger.info(f"Session {session.session_id[:8]} ended by user.")
+            
+        except Exception as e:
+            logger.error(f"Session end failed: {e}")
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.session_state['page'] = None
+
+    def check_if_attempting_to_exceed_limits(self, session: UserSession) -> bool:
+        """
+        Check if user is attempting to ask a question beyond their limits.
+        This function displays UI messages and returns True/False to block chat input.
+        Only blocks for ACTIVE bans, not for "about to exceed" scenarios.
+        """
+        limit_check = self.question_limits.is_within_limits(session)
         
-    return False
+        if not limit_check.get('allowed', True):
+            reason = limit_check.get('reason')
+            message = limit_check.get('message', 'Access restricted due to usage policy.')
+            
+            if reason == 'banned':
+                ban_type = limit_check.get('ban_type', 'unknown')
+                time_remaining = limit_check.get('time_until_next')
+                
+                st.error("🚫 **Access Restricted**")
+                if time_remaining: # time_until_next is an int in seconds here
+                    hours = time_remaining // 3600
+                    minutes = (time_remaining % 3600) // 60
+                    st.error(f"Time remaining: {hours}h {minutes}m")
+                st.info(message)
+                return True
+                
+            elif reason == 'guest_limit':
+                st.error("🛑 **Guest Limit Reached**")
+                st.info(f"You've used your {GUEST_QUESTION_LIMIT} guest questions. Please verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} more questions per day!")
+                return True
+
+            elif reason == 'email_verified_guest_limit':
+                st.error("🛑 **Daily Limit Reached**")
+                st.info(f"You've used your {EMAIL_VERIFIED_QUESTION_LIMIT} questions for today. Your questions reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
+                return True
+            
+        return False
 
 def log_security_event(event_type: str, session: UserSession, details: Dict[str, Any]):
-"""Log security-relevant events for audit trail"""
-logger.info(f"SECURITY_EVENT: {event_type} | "
-            f"session_id={session.session_id[:8]} | "
-            f"user_type={session.user_type.value} | "
-            f"email={session.email} | "
-            f"login_method={session.login_method} | "
-            f"is_degraded={session.is_degraded_login} | "
-            f"details={json.dumps(details)}")
+    """Log security-relevant events for audit trail"""
+    logger.info(f"SECURITY_EVENT: {event_type} | "
+                f"session_id={session.session_id[:8]} | "
+                f"user_type={session.user_type.value} | "
+                f"email={session.email} | "
+                f"login_method={session.login_method} | "
+                f"is_degraded={session.is_degraded_login} | "
+                f"details={json.dumps(details)}")
 
 
 def render_simple_activity_tracker(session_id: str):
-"""Renders a simple activity tracker that monitors user interactions."""
-if not session_id:
-    logger.warning("render_simple_activity_tracker called without session_id")
-    return None
+    """Renders a simple activity tracker that monitors user interactions."""
+    if not session_id:
+        logger.warning("render_simple_activity_tracker called without session_id")
+        return None
+    
+    safe_session_id = session_id.replace('-', '_')
+    component_key = f"activity_tracker_{safe_session_id}"
 
-safe_session_id = session_id.replace('-', '_')
-component_key = f"activity_tracker_{safe_session_id}"
-
-simple_tracker_js = f"""
-(() => {{
-    const sessionId = {json.dumps(session_id)};
-    const stateKey = 'fifi_activity_{safe_session_id}';
-    
-    if (!window[stateKey]) {{
-        window[stateKey] = {{
-            lastActivity: Date.now(),
-            listenersInitialized: false,
-            sessionId: sessionId
-        }};
-    }}
-    
-    const state = window[stateKey];
-    
-    if (!state.listenersInitialized) {{
-        console.log('📍 Simple activity tracker starting for', sessionId.substring(0, 8));
+    simple_tracker_js = f"""
+    (() => {{
+        const sessionId = {json.dumps(session_id)};
+        const stateKey = 'fifi_activity_{safe_session_id}';
         
-        function updateActivity() {{
-            state.lastActivity = Date.now();
+        if (!window[stateKey]) {{
+            window[stateKey] = {{
+                lastActivity: Date.now(),
+                listenersInitialized: false,
+                sessionId: sessionId
+            }};
         }}
         
-        const events = ['mousedown', 'mousemove', 'keydown', 'click', 'scroll', 'touchstart', 'focus'];
-        events.forEach(eventType => {{
-            document.addEventListener(eventType, updateActivity, {{ passive: true, capture: true }});
-        }});
+        const state = window[stateKey];
         
-        try {{
-            if (window.parent && window.parent !== window && window.parent.document) {{
-                events.forEach(eventType => {{
-                    window.parent.document.addEventListener(eventType, updateActivity, {{ passive: true, capture: true }});
-                }});
-            }}
-        }} catch (e) {{
-            // Cross-origin restriction, ignore
-        }}
-        
-        state.listenersInitialized = true;
-        console.log('✅ Simple activity tracker initialized');
-    }}
-    
-    const now = Date.now();
-    const timeSinceActivity = now - state.lastActivity;
-    const minutesSinceActivity = Math.floor(timeSinceActivity / 60000);
-    
-    return {{
-        type: 'activity_status',
-        session_id: sessionId,
-        minutes_inactive: minutesSinceActivity,
-        last_activity: state.lastActivity,
-        timestamp: now
-    }};
-}})()
-"""
-
-try:
-    result = st_javascript(js_code=simple_tracker_js, key=component_key)
-    
-    if result and isinstance(result, dict) and result.get('type') == 'activity_status':
-        return result
-    return None
-except Exception as e:
-    logger.error(f"Simple activity tracker failed: {e}")
-    logger.error(f"Problematic key in render_simple_activity_tracker: {component_key}")
-    return None
-
-def handle_emergency_save_requests_from_query():
-"""
-Checks for and processes emergency save requests sent via URL query parameters.
-This acts as a fallback if the FastAPI beacon failed.
-"""
-query_params = st.query_params
-event = query_params.get("event")
-session_id = query_params.get("session_id")
-reason = query_params.get("reason")
-fallback_flag = query_params.get("fallback")
-
-if event == "emergency_close" and session_id and reason and fallback_flag == "true":
-    logger.info(f"🚨 Received emergency_close event from query params (fallback mode) for session {session_id[:8]} (Reason: {reason})")
-    
-    # Clear query parameters to prevent re-triggering this logic on subsequent reruns
-    params_to_clear = ["event", "session_id", "reason", "fallback"]
-    for param in params_to_clear:
-        if param in st.query_params:
-            del st.query_params[param]
-    
-    # Process the emergency save using the Streamlit backend logic
-    processed_successfully = process_emergency_save_from_query(session_id, reason)
-    if processed_successfully:
-        logger.info(f"✅ Emergency save from query params processed successfully for session {session_id[:8]}.")
-    else:
-        logger.error(f"❌ Emergency save from query params failed to process for session {session_id[:8]}.")
-    
-    # Trigger a rerun if this was handled, to ensure UI state reflects the change
-    st.rerun()
-    return True
-return False
-
-def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]) -> bool:
-"""Check if timeout has occurred and trigger browser reload using a robust, non-blocking method."""
-if not session or not session.session_id:
-    logger.debug("No valid session for timeout check.")
-    return False
-
-fresh_session_from_db = session_manager.db.load_session(session.session_id)
-
-if fresh_session_from_db:
-    session.last_activity = fresh_session_from_db.last_activity
-    session.active = fresh_session_from_db.active
-    session.user_type = fresh_session_from_db.user_type
-    session.email = fresh_session_from_db.email
-    session.full_name = fresh_session_from_db.full_name
-    session.zoho_contact_id = fresh_session_from_db.zoho_contact_id
-    session.daily_question_count = fresh_session_from_db.daily_question_count
-    session.total_question_count = fresh_session_from_db.total_question_count
-    session.last_question_time = fresh_session_from_db.last_question_time
-    session.display_message_offset = fresh_session_from_db.display_message_offset
-    session.reverification_pending = fresh_session_from_db.reverification_pending
-    session.pending_user_type = fresh_session_from_db.pending_user_type
-    session.pending_email = fresh_session_from_db.pending_email
-    session.pending_full_name = fresh_session_from_db.pending_full_name
-    session.pending_zoho_contact_id = fresh_session_from_db.pending_zoho_contact_id
-    session.pending_wp_token = fresh_session_from_db.pending_wp_token
-    session.declined_recognized_email_at = fresh_session_from_db.declined_recognized_email_at
-    session.timeout_detected_at = fresh_session_from_db.timeout_detected_at
-    session.timeout_reason = fresh_session_from_db.timeout_reason
-    session.current_tier_cycle_id = fresh_session_from_db.current_tier_cycle_id
-    session.tier1_completed_in_cycle = fresh_session_from_db.tier1_completed_in_cycle
-    session.tier_cycle_started_at = fresh_session_from_db.tier_cycle_started_at
-    session.login_method = fresh_session_from_db.login_method
-    session.is_degraded_login = fresh_session_from_db.is_degraded_login
-    session.degraded_login_timestamp = fresh_session_from_db.degraded_login_timestamp
-else:
-    logger.warning(f"Session {session.session_id[:8]} from st.session_state not found in database. Forcing reset.")
-    session.active = False
-
-if not session.active:
-    logger.info(f"Session {session.session_id[:8]} is inactive. Triggering reload to welcome page.")
-    
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-
-    st.session_state['page'] = None
-    st.session_state['session_expired'] = True
-    
-    reload_script = "<script>parent.window.location.reload();</script>"
-    components.html(reload_script, height=100, width=0)
-    
-    st.info("🏠 Redirecting to home page...")
-    st.stop()
-    return True
-
-if session.last_activity is None:
-    logger.debug(f"Session {session.session_id[:8]}: last_activity is None, timer has not started.")
-    return False
-    
-if activity_result:
-    try:
-        js_last_activity_timestamp = activity_result.get('last_activity')
-        if js_last_activity_timestamp:
-            new_activity_dt = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
+        if (!state.listenersInitialized) {{
+            console.log('📍 Simple activity tracker starting for', sessionId.substring(0, 8));
             
-            if new_activity_dt > session.last_activity:
-                session.last_activity = new_activity_dt
-                session_manager._save_session_with_retry(session) 
-    except Exception as e:
-        logger.error(f"Error processing client JS activity timestamp for session {session.session_id[:8]}: {e}")
-
-time_since_activity = datetime.now() - session.last_activity
-minutes_inactive = time_since_activity.total_seconds() / 60
-
-logger.info(f"TIMEOUT CHECK: Session {session.session_id[:8]} | Inactive: {minutes_inactive:.1f}m | last_activity: {session.last_activity.strftime('%H:%M:%S')}")
-
-if minutes_inactive >= SESSION_TIMEOUT_MINUTES:
-    logger.info(f"⏰ TIMEOUT DETECTED: {session.session_id[:8]} inactive for {minutes_inactive:.1f} minutes")
-    
-    if session_manager._is_crm_save_eligible(session, "timeout_auto_reload"):
-        logger.info(f"💾 Performing emergency save (via FastAPI beacon) before auto-reload for {session.session_id[:8]}")
-        try:
-            emergency_data = {
-                "session_id": session.session_id,
-                "reason": "timeout_auto_reload",
-                "timestamp": int(time.time() * 1000)
-            }
-            requests.post(FASTAPI_EMERGENCY_SAVE_URL, json=emergency_data, timeout=FASTAPI_EMERGENCY_SAVE_TIMEOUT)
-            logger.info("✅ Emergency save beacon sent to FastAPI successfully")
-        except Exception as e:
-            logger.error(f"❌ Failed to send emergency save beacon to FastAPI: {e}")
-
-    session.active = False
-    session.timeout_detected_at = datetime.now()
-    session.timeout_reason = f"Streamlit client detected inactivity for {minutes_inactive:.1f} minutes."
-
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-    
-    st.session_state['page'] = None
-    st.session_state['session_expired'] = True
-    
-    st.error("⏰ **Session Timeout**")
-    st.info(f"Your session has expired due to {SESSION_TIMEOUT_MINUTES} minutes of inactivity.")
-    st.info("🏠 Redirecting to home page...")
-
-    reload_script = f"""
-        <script type="text/javascript">
-            setTimeout(function() {{
-                parent.window.location.reload();
-            }}, 2000);
-        </script>
-    """
-    components.html(reload_script, height=0, width=0)
-    
-    st.stop()
-    return True
-
-return False
-
-def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
-"""
-Processes an emergency save request received via URL query parameters.
-This acts as a fallback if the FastAPI beacon failed.
-"""
-session_manager = st.session_state.get('session_manager')
-if not session_manager:
-    logger.error("❌ Session manager not available for emergency save from query.")
-    return False
-
-session = session_manager.db.load_session(session_id)
-if not session:
-    logger.warning(f"Emergency save from query: Session '{session_id[:8]}' not found in database. Cannot save.")
-    return False
-
-logger.info(f"🚨 Processing emergency save for session '{session_id[:8]}' (Reason: {reason})")
-
-session.last_activity = datetime.now()
-session.active = False
-session.timeout_detected_at = datetime.now()
-session.timeout_reason = reason
-
-crm_saved = False
-try:
-    if session_manager._is_crm_save_eligible(session, "emergency_fallback"):
-        logger.info(f"Attempting CRM save from Streamlit query fallback for {session.session_id[:8]}")
-        crm_saved = session_manager.zoho.save_chat_transcript_sync(session, reason)
-        if crm_saved:
-            session.timeout_saved_to_crm = True
-        else:
-            logger.warning(f"CRM save failed during Streamlit query fallback for {session.session_id[:8]}.")
-    else:
-        logger.info(f"Session {session.session_id[:8]} not eligible for CRM save (Streamlit query fallback).")
-except Exception as e:
-    logger.error(f"Error during CRM save from Streamlit query fallback for {session.session_id[:8]}: {e}")
-
-try:
-    session_manager.db.save_session(session)
-    logger.info(f"✅ Session '{session_id[:8]}' marked inactive and saved in DB (query fallback). CRM_saved: {crm_saved}")
-    return True
-except Exception as e:
-    logger.error(f"❌ Failed to save session '{session_id[:8]}' during emergency query fallback: {e}")
-    return False
-
-def render_simplified_browser_close_detection(session_id: str):
-"""Enhanced browser close detection with eligibility check and redundancy for emergency saves."""
-if not session_id:
-    return
-
-session_manager = st.session_state.get('session_manager')
-if not session_manager:
-    logger.debug("No session manager available for browser close detection")
-    return
-        
-session = session_manager.db.load_session(session_id)
-if not session:
-    logger.debug(f"No session found for browser close detection: {session_id[:8]}")
-    return
-        
-if not session_manager._is_crm_save_eligible(session, "browser_close_check"):
-    logger.info(f"🚫 Session {session.session_id[:8]} not eligible for CRM save - skipping browser close detection")
-    return
-
-logger.info(f"✅ Setting up browser close detection for eligible session {session_id[:8]}")
-
-enhanced_close_js = f"""
-<script>
-(function() {{
-    const sessionId = {json.dumps(session_id)};
-    const FASTAPI_URL = {json.dumps(FASTAPI_EMERGENCY_SAVE_URL)};
-    const FASTAPI_TIMEOUT_MS = {FASTAPI_EMERGENCY_SAVE_TIMEOUT * 1000};
-    const STREAMLIT_FALLBACK_URL = window.location.origin + window.location.pathname; 
-    
-    if (window.fifi_close_enhanced_initialized) return;
-    window.fifi_close_enhanced_initialized = true;
-    
-    let saveAttempted = false;
-    
-    console.log('🛡️ Enhanced browser close detection initialized for eligible user');
-    
-    function sendBeaconOrFetch(data) {{
-        if (navigator.sendBeacon) {{
+            function updateActivity() {{
+                state.lastActivity = Date.now();
+            }}
+            
+            const events = ['mousedown', 'mousemove', 'keydown', 'click', 'scroll', 'touchstart', 'focus'];
+            events.forEach(eventType => {{
+                document.addEventListener(eventType, updateActivity, {{ passive: true, capture: true }});
+            }});
+            
             try {{
-                const sent = navigator.sendBeacon(
-                    FASTAPI_URL,
-                    new Blob([data], {{type: 'application/json'}})
-                );
-                if (sent) {{
-                    console.log('✅ Emergency save beacon sent to FastAPI');
-                    return true;
-                }} else {{
-                    console.warn('⚠️ Beacon send returned false, trying fetch...');
+                if (window.parent && window.parent !== window && window.parent.document) {{
+                    events.forEach(eventType => {{
+                        window.parent.document.addEventListener(eventType, updateActivity, {{ passive: true, capture: true }});
+                    }});
                 }}
             }} catch (e) {{
-                console.error('❌ Beacon failed:', e);
+                // Cross-origin restriction, ignore
             }}
+            
+            state.listenersInitialized = true;
+            console.log('✅ Simple activity tracker initialized');
         }}
         
-        try {{
-            fetch(FASTAPI_URL, {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: data,
-                keepalive: true,
-                signal: AbortSignal.timeout(FASTAPI_TIMEOUT_MS)
-            }}).then(response => {{
-                if (response.ok) {{
-                    console.log('✅ Emergency save via fetch successful');
-                }} else {{
-                    console.warn('⚠️ Fetch response not OK, status:', response.status);
-                }}
-            }}).catch(error => {{
-                console.error('❌ Fetch failed:', error);
-            }});
-            return true;
-        }} catch (e) {{
-            console.error('❌ Fetch setup failed:', e);
-        }}
-        return false;
-    }}
-
-    function triggerEmergencySave(reason) {{
-        if (saveAttempted) return;
-        saveAttempted = true;
+        const now = Date.now();
+        const timeSinceActivity = now - state.lastActivity;
+        const minutesSinceActivity = Math.floor(timeSinceActivity / 60000);
         
-        console.log('🚨 Triggering emergency save:', reason);
-        
-        const emergencyData = JSON.stringify({{
+        return {{
+            type: 'activity_status',
             session_id: sessionId,
-            reason: reason,
-            timestamp: Date.now()
+            minutes_inactive: minutesSinceActivity,
+            last_activity: state.lastActivity,
+            timestamp: now
+        }};
+    }})()
+    """
+    
+    try:
+        result = st_javascript(js_code=simple_tracker_js, key=component_key)
+        
+        if result and isinstance(result, dict) and result.get('type') == 'activity_status':
+            return result
+        return None
+    except Exception as e:
+        logger.error(f"Simple activity tracker failed: {e}")
+        logger.error(f"Problematic key in render_simple_activity_tracker: {component_key}")
+        return None
+
+def handle_emergency_save_requests_from_query():
+    """
+    Checks for and processes emergency save requests sent via URL query parameters.
+    This acts as a fallback if the FastAPI beacon failed.
+    """
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    reason = query_params.get("reason")
+    fallback_flag = query_params.get("fallback")
+
+    if event == "emergency_close" and session_id and reason and fallback_flag == "true":
+        logger.info(f"🚨 Received emergency_close event from query params (fallback mode) for session {session_id[:8]} (Reason: {reason})")
+        
+        # Clear query parameters to prevent re-triggering this logic on subsequent reruns
+        params_to_clear = ["event", "session_id", "reason", "fallback"]
+        for param in params_to_clear:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        # Process the emergency save using the Streamlit backend logic
+        processed_successfully = process_emergency_save_from_query(session_id, reason)
+        if processed_successfully:
+            logger.info(f"✅ Emergency save from query params processed successfully for session {session_id[:8]}.")
+        else:
+            logger.error(f"❌ Emergency save from query params failed to process for session {session_id[:8]}.")
+        
+        # Trigger a rerun if this was handled, to ensure UI state reflects the change
+        st.rerun()
+        return True
+    return False
+
+def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]) -> bool:
+    """Check if timeout has occurred and trigger browser reload using a robust, non-blocking method."""
+    if not session or not session.session_id:
+        logger.debug("No valid session for timeout check.")
+        return False
+    
+    fresh_session_from_db = session_manager.db.load_session(session.session_id)
+    
+    if fresh_session_from_db:
+        session.last_activity = fresh_session_from_db.last_activity
+        session.active = fresh_session_from_db.active
+        session.user_type = fresh_session_from_db.user_type
+        session.email = fresh_session_from_db.email
+        session.full_name = fresh_session_from_db.full_name
+        session.zoho_contact_id = fresh_session_from_db.zoho_contact_id
+        session.daily_question_count = fresh_session_from_db.daily_question_count
+        session.total_question_count = fresh_session_from_db.total_question_count
+        session.last_question_time = fresh_session_from_db.last_question_time
+        session.display_message_offset = fresh_session_from_db.display_message_offset
+        session.reverification_pending = fresh_session_from_db.reverification_pending
+        session.pending_user_type = fresh_session_from_db.pending_user_type
+        session.pending_email = fresh_session_from_db.pending_email
+        session.pending_full_name = fresh_session_from_db.pending_full_name
+        session.pending_zoho_contact_id = fresh_session_from_db.pending_zoho_contact_id
+        session.pending_wp_token = fresh_session_from_db.pending_wp_token
+        session.declined_recognized_email_at = fresh_session_from_db.declined_recognized_email_at
+        session.timeout_detected_at = fresh_session_from_db.timeout_detected_at
+        session.timeout_reason = fresh_session_from_db.timeout_reason
+        session.current_tier_cycle_id = fresh_session_from_db.current_tier_cycle_id
+        session.tier1_completed_in_cycle = fresh_session_from_db.tier1_completed_in_cycle
+        session.tier_cycle_started_at = fresh_session_from_db.tier_cycle_started_at
+        session.login_method = fresh_session_from_db.login_method
+        session.is_degraded_login = fresh_session_from_db.is_degraded_login
+        session.degraded_login_timestamp = fresh_session_from_db.degraded_login_timestamp
+    else:
+        logger.warning(f"Session {session.session_id[:8]} from st.session_state not found in database. Forcing reset.")
+        session.active = False
+
+    if not session.active:
+        logger.info(f"Session {session.session_id[:8]} is inactive. Triggering reload to welcome page.")
+        
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+
+        st.session_state['page'] = None
+        st.session_state['session_expired'] = True
+        
+        reload_script = "<script>parent.window.location.reload();</script>"
+        components.html(reload_script, height=100, width=0)
+        
+        st.info("🏠 Redirecting to home page...")
+        st.stop()
+        return True
+
+    if session.last_activity is None:
+        logger.debug(f"Session {session.session_id[:8]}: last_activity is None, timer has not started.")
+        return False
+        
+    if activity_result:
+        try:
+            js_last_activity_timestamp = activity_result.get('last_activity')
+            if js_last_activity_timestamp:
+                new_activity_dt = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
+                
+                if new_activity_dt > session.last_activity:
+                    session.last_activity = new_activity_dt
+                    session_manager._save_session_with_retry(session) 
+        except Exception as e:
+            logger.error(f"Error processing client JS activity timestamp for session {session.session_id[:8]}: {e}")
+
+    time_since_activity = datetime.now() - session.last_activity
+    minutes_inactive = time_since_activity.total_seconds() / 60
+    
+    logger.info(f"TIMEOUT CHECK: Session {session.session_id[:8]} | Inactive: {minutes_inactive:.1f}m | last_activity: {session.last_activity.strftime('%H:%M:%S')}")
+    
+    if minutes_inactive >= SESSION_TIMEOUT_MINUTES:
+        logger.info(f"⏰ TIMEOUT DETECTED: {session.session_id[:8]} inactive for {minutes_inactive:.1f} minutes")
+        
+        if session_manager._is_crm_save_eligible(session, "timeout_auto_reload"):
+            logger.info(f"💾 Performing emergency save (via FastAPI beacon) before auto-reload for {session.session_id[:8]}")
+            try:
+                emergency_data = {
+                    "session_id": session.session_id,
+                    "reason": "timeout_auto_reload",
+                    "timestamp": int(time.time() * 1000)
+                }
+                requests.post(FASTAPI_EMERGENCY_SAVE_URL, json=emergency_data, timeout=FASTAPI_EMERGENCY_SAVE_TIMEOUT)
+                logger.info("✅ Emergency save beacon sent to FastAPI successfully")
+            except Exception as e:
+                logger.error(f"❌ Failed to send emergency save beacon to FastAPI: {e}")
+
+        session.active = False
+        session.timeout_detected_at = datetime.now()
+        session.timeout_reason = f"Streamlit client detected inactivity for {minutes_inactive:.1f} minutes."
+
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        
+        st.session_state['page'] = None
+        st.session_state['session_expired'] = True
+        
+        st.error("⏰ **Session Timeout**")
+        st.info(f"Your session has expired due to {SESSION_TIMEOUT_MINUTES} minutes of inactivity.")
+        st.info("🏠 Redirecting to home page...")
+
+        reload_script = f"""
+            <script type="text/javascript">
+                setTimeout(function() {{
+                    parent.window.location.reload();
+                }}, 2000);
+            </script>
+        """
+        components.html(reload_script, height=0, width=0)
+        
+        st.stop()
+        return True
+    
+    return False
+
+def process_emergency_save_from_query(session_id: str, reason: str) -> bool:
+    """
+    Processes an emergency save request received via URL query parameters.
+    This acts as a fallback if the FastAPI beacon failed.
+    """
+    session_manager = st.session_state.get('session_manager')
+    if not session_manager:
+        logger.error("❌ Session manager not available for emergency save from query.")
+        return False
+    
+    session = session_manager.db.load_session(session_id)
+    if not session:
+        logger.warning(f"Emergency save from query: Session '{session_id[:8]}' not found in database. Cannot save.")
+        return False
+    
+    logger.info(f"🚨 Processing emergency save for session '{session_id[:8]}' (Reason: {reason})")
+    
+    session.last_activity = datetime.now()
+    session.active = False
+    session.timeout_detected_at = datetime.now()
+    session.timeout_reason = reason
+
+    crm_saved = False
+    try:
+        if session_manager._is_crm_save_eligible(session, "emergency_fallback"):
+            logger.info(f"Attempting CRM save from Streamlit query fallback for {session.session_id[:8]}")
+            crm_saved = session_manager.zoho.save_chat_transcript_sync(session, reason)
+            if crm_saved:
+                session.timeout_saved_to_crm = True
+            else:
+                logger.warning(f"CRM save failed during Streamlit query fallback for {session.session_id[:8]}.")
+        else:
+            logger.info(f"Session {session.session_id[:8]} not eligible for CRM save (Streamlit query fallback).")
+    except Exception as e:
+        logger.error(f"Error during CRM save from Streamlit query fallback for {session.session_id[:8]}: {e}")
+    
+    try:
+        session_manager.db.save_session(session)
+        logger.info(f"✅ Session '{session_id[:8]}' marked inactive and saved in DB (query fallback). CRM_saved: {crm_saved}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to save session '{session_id[:8]}' during emergency query fallback: {e}")
+        return False
+
+def render_simplified_browser_close_detection(session_id: str):
+    """Enhanced browser close detection with eligibility check and redundancy for emergency saves."""
+    if not session_id:
+        return
+
+    session_manager = st.session_state.get('session_manager')
+    if not session_manager:
+        logger.debug("No session manager available for browser close detection")
+        return
+            
+    session = session_manager.db.load_session(session_id)
+    if not session:
+        logger.debug(f"No session found for browser close detection: {session_id[:8]}")
+        return
+            
+    if not session_manager._is_crm_save_eligible(session, "browser_close_check"):
+        logger.info(f"🚫 Session {session.session_id[:8]} not eligible for CRM save - skipping browser close detection")
+        return
+
+    logger.info(f"✅ Setting up browser close detection for eligible session {session_id[:8]}")
+
+    enhanced_close_js = f"""
+    <script>
+    (function() {{
+        const sessionId = {json.dumps(session_id)};
+        const FASTAPI_URL = {json.dumps(FASTAPI_EMERGENCY_SAVE_URL)};
+        const FASTAPI_TIMEOUT_MS = {FASTAPI_EMERGENCY_SAVE_TIMEOUT * 1000};
+        const STREAMLIT_FALLBACK_URL = window.location.origin + window.location.pathname; 
+        
+        if (window.fifi_close_enhanced_initialized) return;
+        window.fifi_close_enhanced_initialized = true;
+        
+        let saveAttempted = false;
+        
+        console.log('🛡️ Enhanced browser close detection initialized for eligible user');
+        
+        function sendBeaconOrFetch(data) {{
+            if (navigator.sendBeacon) {{
+                try {{
+                    const sent = navigator.sendBeacon(
+                        FASTAPI_URL,
+                        new Blob([data], {{type: 'application/json'}})
+                    );
+                    if (sent) {{
+                        console.log('✅ Emergency save beacon sent to FastAPI');
+                        return true;
+                    }} else {{
+                        console.warn('⚠️ Beacon send returned false, trying fetch...');
+                    }}
+                }} catch (e) {{
+                    console.error('❌ Beacon failed:', e);
+                }}
+            }}
+            
+            try {{
+                fetch(FASTAPI_URL, {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: data,
+                    keepalive: true,
+                    signal: AbortSignal.timeout(FASTAPI_TIMEOUT_MS)
+                }}).then(response => {{
+                    if (response.ok) {{
+                        console.log('✅ Emergency save via fetch successful');
+                    }} else {{
+                        console.warn('⚠️ Fetch response not OK, status:', response.status);
+                    }}
+                }}).catch(error => {{
+                    console.error('❌ Fetch failed:', error);
+                }});
+                return true;
+            }} catch (e) {{
+                console.error('❌ Fetch setup failed:', e);
+            }}
+            return false;
+        }}
+
+        function triggerEmergencySave(reason) {{
+            if (saveAttempted) return;
+            saveAttempted = true;
+            
+            console.log('🚨 Triggering emergency save:', reason);
+            
+            const emergencyData = JSON.stringify({{
+                session_id: sessionId,
+                reason: reason,
+                timestamp: Date.now()
+            }});
+            
+            const sentViaNetwork = sendBeaconOrFetch(emergencyData);
+
+            const fallbackUrl = STREAMLIT_FALLBACK_URL + 
+                '?event=emergency_close' +
+                '&session_id=' + sessionId + 
+                '&reason=' + reason +
+                '&fallback=true';
+            
+            const img = new Image();
+            img.src = fallbackUrl;
+            img.style.display = 'none';
+            document.body.appendChild(img);
+            
+            console.log('✅ Streamlit fallback image beacon initiated');
+        }}
+        
+        window.addEventListener('beforeunload', () => triggerEmergencySave('beforeunload'), {{ capture: true, passive: true }});
+        window.addEventListener('unload', () => triggerEmergencySave('unload'), {{ capture: true, passive: true }});
+        window.addEventListener('pagehide', () => triggerEmergencySave('pagehide'), {{ capture: true, passive: true }});
+        
+        document.addEventListener('visibilitychange', function() {{
+            if (document.visibilityState === 'hidden') {{
+                console.log('📱 Tab became hidden - scheduling potential save');
+                setTimeout(() => {{
+                    if (document.visibilityState === 'hidden') {{
+                        console.log('🚨 Tab still hidden after delay - likely closed or backgrounded');
+                        triggerEmergencySave('visibility_hidden_background');
+                    }} else {{
+                        console.log('✅ Tab became visible during delay - canceling save');
+                        saveAttempted = false;
+                    }}
+                }}, 5000);
+            }}
         }});
         
-        const sentViaNetwork = sendBeaconOrFetch(emergencyData);
-
-        const fallbackUrl = STREAMLIT_FALLBACK_URL + 
-            '?event=emergency_close' +
-            '&session_id=' + sessionId + 
-            '&reason=' + reason +
-            '&fallback=true';
-        
-        const img = new Image();
-        img.src = fallbackUrl;
-        img.style.display = 'none';
-        document.body.appendChild(img);
-        
-        console.log('✅ Streamlit fallback image beacon initiated');
-    }}
-    
-    window.addEventListener('beforeunload', () => triggerEmergencySave('beforeunload'), {{ capture: true, passive: true }});
-    window.addEventListener('unload', () => triggerEmergencySave('unload'), {{ capture: true, passive: true }});
-    window.addEventListener('pagehide', () => triggerEmergencySave('pagehide'), {{ capture: true, passive: true }});
-    
-    document.addEventListener('visibilitychange', function() {{
-        if (document.visibilityState === 'hidden') {{
-            console.log('📱 Tab became hidden - scheduling potential save');
-            setTimeout(() => {{
-                if (document.visibilityState === 'hidden') {{
-                    console.log('🚨 Tab still hidden after delay - likely closed or backgrounded');
-                    triggerEmergencySave('visibility_hidden_background');
-                }} else {{
-                    console.log('✅ Tab became visible during delay - canceling save');
-                    saveAttempted = false;
-                }}
-            }}, 5000);
+        try {{
+            if (window.parent && window.parent !== window) {{
+                window.parent.addEventListener('beforeunload', () => triggerEmergencySave('parent_beforeunload'), {{ capture: true, passive: true }});
+                window.parent.addEventListener('unload', () => triggerEmergencySave('parent_unload'), {{ capture: true, passive: true }});
+                window.parent.addEventListener('pagehide', () => triggerEmergencySave('parent_pagehide'), {{ capture: true, passive: true }});
+            }}
+        }} catch (e) {{
+            console.debug('Cannot monitor parent events (cross-origin):', e);
         }}
-    }});
-    
-    try {{
-        if (window.parent && window.parent !== window) {{
-            window.parent.addEventListener('beforeunload', () => triggerEmergencySave('parent_beforeunload'), {{ capture: true, passive: true }});
-            window.parent.addEventListener('unload', () => triggerEmergencySave('parent_unload'), {{ capture: true, passive: true }});
-            window.parent.addEventListener('pagehide', () => triggerEmergencySave('parent_pagehide'), {{ capture: true, passive: true }});
-        }}
-    }} catch (e) {{
-        console.debug('Cannot monitor parent events (cross-origin):', e);
-    }}
-    
-    console.log('✅ Enhanced browser close detection ready');
-}})();
-</script>
-"""
-    
-try:
-    st.components.v1.html(enhanced_close_js, height=1, width=0)
-except Exception as e:
-    logger.error(f"Failed to render enhanced browser close detection: {e}")
+        
+        console.log('✅ Enhanced browser close detection ready');
+    }})();
+    </script>
+    """
+        
+    try:
+        st.components.v1.html(enhanced_close_js, height=1, width=0)
+    except Exception as e:
+        logger.error(f"Failed to render enhanced browser close detection: {e}")
 
 # THIS FUNCTION IS REMOVED as per the new FastAPI beacon strategy
 # def process_fingerprint_from_query(session_id: str, fingerprint_id: str, method: str, privacy: str, working_methods: List[str]) -> bool:
@@ -6153,1594 +6153,1594 @@ except Exception as e:
 #     pass # This function is no longer used.
 
 def handle_fingerprint_status_update_from_query():
-"""Checks for and processes fingerprint status update requests sent via URL query parameters (image beacon)."""
-query_params = st.query_params
-event = query_params.get("event")
-session_id = query_params.get("session_id")
-status = query_params.get("status")
-fp_id_short = query_params.get("fingerprint_id")
+    """Checks for and processes fingerprint status update requests sent via URL query parameters (image beacon)."""
+    query_params = st.query_params
+    event = query_params.get("event")
+    session_id = query_params.get("session_id")
+    status = query_params.get("status")
+    fp_id_short = query_params.get("fingerprint_id")
 
-if event == "fingerprint_status_update" and session_id:
-    logger.info(f"🔍 FINGERPRINT STATUS UPDATE received for session {session_id[:8]}: Status='{status}', FP_ID_Short='{fp_id_short}'")
-    
-    # Clear specific query parameters to prevent re-triggering this logic immediately
-    params_to_clear = ["event", "session_id", "status", "fingerprint_id"]
-    for param in params_to_clear:
-        if param in st.query_params:
-            del st.query_params[param]
-    
-    # FIXED: Force inheritance check after fingerprint is captured
-    session_manager = st.session_state.get('session_manager')
-    if session_manager and status == "success":
-        # Load the session fresh from DB to get the updated fingerprint
-        session = session_manager.db.load_session(session_id)
-        if session and session.user_type == UserType.GUEST:
-            logger.info(f"🔄 Re-attempting inheritance for Guest {session_id[:8]} after fingerprint capture")
-            # Re-attempt inheritance with the real fingerprint
-            session_manager._attempt_fingerprint_inheritance(session)
-            session_manager.db.save_session(session)
-            # Update the in-memory session in session_state if it exists
-            if st.session_state.get('current_session_id') == session_id:
-                st.session_state.temp_session_update = session
-    
-    st.session_state.fingerprint_client_side_completed = True
-    st.rerun()
-    return True
-return False
+    if event == "fingerprint_status_update" and session_id:
+        logger.info(f"🔍 FINGERPRINT STATUS UPDATE received for session {session_id[:8]}: Status='{status}', FP_ID_Short='{fp_id_short}'")
+        
+        # Clear specific query parameters to prevent re-triggering this logic immediately
+        params_to_clear = ["event", "session_id", "status", "fingerprint_id"]
+        for param in params_to_clear:
+            if param in st.query_params:
+                del st.query_params[param]
+        
+        # FIXED: Force inheritance check after fingerprint is captured
+        session_manager = st.session_state.get('session_manager')
+        if session_manager and status == "success":
+            # Load the session fresh from DB to get the updated fingerprint
+            session = session_manager.db.load_session(session_id)
+            if session and session.user_type == UserType.GUEST:
+                logger.info(f"🔄 Re-attempting inheritance for Guest {session_id[:8]} after fingerprint capture")
+                # Re-attempt inheritance with the real fingerprint
+                session_manager._attempt_fingerprint_inheritance(session)
+                session_manager.db.save_session(session)
+                # Update the in-memory session in session_state if it exists
+                if st.session_state.get('current_session_id') == session_id:
+                    st.session_state.temp_session_update = session
+        
+        st.session_state.fingerprint_client_side_completed = True
+        st.rerun()
+        return True
+    return False
 
 # =============================================================================
 # UI COMPONENTS
 # =============================================================================
 def render_welcome_page(session_manager: 'SessionManager'):
-"""Enhanced welcome page with loading lock and WordPress fallback UI."""
+    """Enhanced welcome page with loading lock and WordPress fallback UI."""
+    
+    st.header("Welcome to :rainbow[FiFi]")
+    st.subheader("Your :blue[AI sourcing] assistant")
 
-st.header("Welcome to :rainbow[FiFi]")
-st.subheader("Your :blue[AI sourcing] assistant")
-
-if show_loading_overlay():
-    return
-
-st.markdown("---")
-tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
-
-with tab1:
-    if not session_manager.config.WORDPRESS_URL:
-        st.warning("Sign-in is currently disabled because the authentication service (WordPress URL) is not configured in application secrets.")
-    else:
-        if st.session_state.get('wordpress_error', {}).get('show_fallback', False):
-            error_info = st.session_state.wordpress_error
-            
-            st.error(f"🚨 **WordPress Login Issue: {error_info['type']}**")
-            st.error(error_info['message'])
-            
-            st.info("💡 **Alternative Login Option Available**")
-            st.markdown(f"""
-            We can switch you to our **Email Verification** login method instead:
-            - Quick verification via email OTP (one-time password).
-            - If your email is associated with a registered account, your privileges will be automatically restored.
-            - If not, you'll gain **Email Verified Guest** access ({EMAIL_VERIFIED_QUESTION_LIMIT} questions/day).
-            """)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("📧 Switch to Email Login", use_container_width=True):
-                    st.session_state.wordpress_fallback_active = True
-                    st.session_state.fallback_email = error_info.get('username', '') if '@' in error_info.get('username', '') else ''
-                    st.session_state.wordpress_error['show_fallback'] = False
-                    st.rerun()
-                    
-            with col2:
-                if st.button("🔄 Try WordPress Again", use_container_width=True):
-                    if 'wordpress_error' in st.session_state:
-                        del st.session_state['wordpress_error']
-                    st.rerun()
-        
-        elif st.session_state.get('wordpress_fallback_active', False):
-            st.info("📧 **Email Verification Login (WordPress Fallback)**")
-            st.caption("Enter your email to receive a verification code. If you're a registered user, we'll restore your account.")
-            
-            with st.form("fallback_email_form", clear_on_submit=False):
-                fallback_email = st.text_input(
-                    "Email Address",
-                    value=st.session_state.get('fallback_email', ''),
-                    placeholder="your@email.com",
-                    key="fallback_email_input",
-                    help="We'll send an OTP to this email to verify your identity. If it's linked to a registered account, your status will be restored."
-                )
+    if show_loading_overlay():
+        return
+    
+    st.markdown("---")
+    tab1, tab2 = st.tabs(["🔐 Sign In", "👤 Continue as Guest"])
+    
+    with tab1:
+        if not session_manager.config.WORDPRESS_URL:
+            st.warning("Sign-in is currently disabled because the authentication service (WordPress URL) is not configured in application secrets.")
+        else:
+            if st.session_state.get('wordpress_error', {}).get('show_fallback', False):
+                error_info = st.session_state.wordpress_error
                 
-                submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+                st.error(f"🚨 **WordPress Login Issue: {error_info['type']}**")
+                st.error(error_info['message'])
                 
-                if submit_email:
-                    if fallback_email:
-                        # FIXED: Create session only when email is submitted
-                        temp_session = session_manager._create_and_save_new_session('email_fallback_attempt')
-                        st.session_state.current_session_id = temp_session.session_id
-                        
-                        result = session_manager.handle_guest_email_verification(temp_session, fallback_email)
-                        
-                        if result['success']:
-                            st.success(result['message'])
-                            st.session_state.fallback_verification_email = fallback_email
-                            st.session_state.fallback_verification_stage = "code_entry"
-                            st.session_state.fallback_session_id = temp_session.session_id
-                            st.rerun()
-                        else:
-                            st.error(result['message'])
-                    else:
-                        st.error("Please enter your email address")
-        
-        elif st.session_state.get('fallback_verification_stage') == 'code_entry':
-            email = st.session_state.get('fallback_verification_email')
-            st.success(f"📧 Code sent to **{session_manager._mask_email(email)}**")
-            
-            st.warning("""
-            ⚠️ **Important**: This is a recovery login method due to WordPress authentication issues.
-            Your chat access is fully functional, but WordPress profile-specific integrations might be unavailable.
-            """)
-            
-            with st.form("fallback_code_form", clear_on_submit=False):
-                code = st.text_input(
-                    "Enter 6-Digit Code", 
-                    placeholder="123456", 
-                    max_chars=6,
-                    key="fallback_code_input",
-                    help="Enter the 6-digit code from your email. Valid for 1 minute."
-                )
-                verify_btn = st.form_submit_button("✅ Verify & Login", use_container_width=True)
+                st.info("💡 **Alternative Login Option Available**")
+                st.markdown(f"""
+                We can switch you to our **Email Verification** login method instead:
+                - Quick verification via email OTP (one-time password).
+                - If your email is associated with a registered account, your privileges will be automatically restored.
+                - If not, you'll gain **Email Verified Guest** access ({EMAIL_VERIFIED_QUESTION_LIMIT} questions/day).
+                """)
                 
-                if verify_btn and code:
-                    temp_session_id = st.session_state.get('fallback_session_id')
-                    temp_session = session_manager.db.load_session(temp_session_id)
-                    
-                    if temp_session:
-                        result = session_manager.verify_email_code(temp_session, code)
-                        
-                        if result['success']:
-                            upgraded_session = session_manager._check_and_upgrade_to_registered(
-                                temp_session, 
-                                email,
-                                is_fallback_from_wordpress=True
-                            )
-                            
-                            if upgraded_session.user_type == UserType.REGISTERED_USER:
-                                if upgraded_session.is_degraded_login:
-                                    st.info("ℹ️ Logged in as Registered User via email (WordPress was unavailable)")
-                                st.success(f"✅ Welcome back! Your registered account has been restored.")
-                                st.balloons()
-                            else:
-                                st.success(f"✅ Email verified! You have Email Verified Guest access.")
-                            
-                            for key in ['wordpress_fallback_active', 'fallback_email', 
-                                       'fallback_verification_email', 'fallback_verification_stage',
-                                       'fallback_session_id', 'wordpress_error']:
-                                if key in st.session_state:
-                                    del st.session_state[key]
-                            
-                            st.session_state.current_session_id = upgraded_session.session_id
-                            st.session_state.page = "chat"
-                            st.session_state.is_chat_ready = True
-                            st.rerun()
-                        else:
-                            st.error(result['message'])
-                else:
-                    st.error("Please enter a 6-digit code.")
-        
-            col_resend_fallback, _ = st.columns(2)
-            with col_resend_fallback:
-                if st.button("🔄 Resend Code", use_container_width=True, key="resend_fallback_code"):
-                    if email:
-                        with st.spinner("Resending verification code..."):
-                            verification_sent = session_manager.email_verification.send_verification_code(email)
-                            if verification_sent:
-                                st.success("✅ New verification code sent! Check your email.")
-                            else:
-                                st.error("❌ Failed to resend code. Please try again later.")
-                    else:
-                        st.error("Error: No email address found for resend. Please restart the login process.")
-                    st.rerun()
-
-        else: # Standard WordPress login form - REVERTED TO ORIGINAL LAYOUT
-            with st.form("login_form", clear_on_submit=True):
-                st.markdown("### 🔐 Sign In to Your Account")
-                username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
-                password = st.text_input("Password", type="password", help="Enter your WordPress password.")
-                
-                st.markdown("") # Original blank line for spacing
-                
-                col1, col2, col3 = st.columns(3) # Original columns for centering
-                with col2: # Original context manager for centering button
-                    submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
-                
-                if submit_button:
-                    if not username or not password:
-                        st.error("Please enter both username and password to sign in.")
-                    else:
-                        st.session_state.temp_username = username
-                        st.session_state.temp_password = password
-                        st.session_state.loading_reason = 'authenticate'
-                        set_loading_state(True, "Authenticating and preparing your session...")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("📧 Switch to Email Login", use_container_width=True):
+                        st.session_state.wordpress_fallback_active = True
+                        st.session_state.fallback_email = error_info.get('username', '') if '@' in error_info.get('username', '') else ''
+                        st.session_state.wordpress_error['show_fallback'] = False
                         st.rerun()
-        
-        st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
-        # NEW: Forgot password link - ADDED HERE
-        st.markdown("[Forgot your password?](https://www.12taste.com/my-account/lost-password/)")
+                        
+                with col2:
+                    if st.button("🔄 Try WordPress Again", use_container_width=True):
+                        if 'wordpress_error' in st.session_state:
+                            del st.session_state['wordpress_error']
+                        st.rerun()
+            
+            elif st.session_state.get('wordpress_fallback_active', False):
+                st.info("📧 **Email Verification Login (WordPress Fallback)**")
+                st.caption("Enter your email to receive a verification code. If you're a registered user, we'll restore your account.")
+                
+                with st.form("fallback_email_form", clear_on_submit=False):
+                    fallback_email = st.text_input(
+                        "Email Address",
+                        value=st.session_state.get('fallback_email', ''),
+                        placeholder="your@email.com",
+                        key="fallback_email_input",
+                        help="We'll send an OTP to this email to verify your identity. If it's linked to a registered account, your status will be restored."
+                    )
+                    
+                    submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+                    
+                    if submit_email:
+                        if fallback_email:
+                            # FIXED: Create session only when email is submitted
+                            temp_session = session_manager._create_and_save_new_session('email_fallback_attempt')
+                            st.session_state.current_session_id = temp_session.session_id
+                            
+                            result = session_manager.handle_guest_email_verification(temp_session, fallback_email)
+                            
+                            if result['success']:
+                                st.success(result['message'])
+                                st.session_state.fallback_verification_email = fallback_email
+                                st.session_state.fallback_verification_stage = "code_entry"
+                                st.session_state.fallback_session_id = temp_session.session_id
+                                st.rerun()
+                            else:
+                                st.error(result['message'])
+                        else:
+                            st.error("Please enter your email address")
+            
+            elif st.session_state.get('fallback_verification_stage') == 'code_entry':
+                email = st.session_state.get('fallback_verification_email')
+                st.success(f"📧 Code sent to **{session_manager._mask_email(email)}**")
+                
+                st.warning("""
+                ⚠️ **Important**: This is a recovery login method due to WordPress authentication issues.
+                Your chat access is fully functional, but WordPress profile-specific integrations might be unavailable.
+                """)
+                
+                with st.form("fallback_code_form", clear_on_submit=False):
+                    code = st.text_input(
+                        "Enter 6-Digit Code", 
+                        placeholder="123456", 
+                        max_chars=6,
+                        key="fallback_code_input",
+                        help="Enter the 6-digit code from your email. Valid for 1 minute."
+                    )
+                    verify_btn = st.form_submit_button("✅ Verify & Login", use_container_width=True)
+                    
+                    if verify_btn and code:
+                        temp_session_id = st.session_state.get('fallback_session_id')
+                        temp_session = session_manager.db.load_session(temp_session_id)
+                        
+                        if temp_session:
+                            result = session_manager.verify_email_code(temp_session, code)
+                            
+                            if result['success']:
+                                upgraded_session = session_manager._check_and_upgrade_to_registered(
+                                    temp_session, 
+                                    email,
+                                    is_fallback_from_wordpress=True
+                                )
+                                
+                                if upgraded_session.user_type == UserType.REGISTERED_USER:
+                                    if upgraded_session.is_degraded_login:
+                                        st.info("ℹ️ Logged in as Registered User via email (WordPress was unavailable)")
+                                    st.success(f"✅ Welcome back! Your registered account has been restored.")
+                                    st.balloons()
+                                else:
+                                    st.success(f"✅ Email verified! You have Email Verified Guest access.")
+                                
+                                for key in ['wordpress_fallback_active', 'fallback_email', 
+                                           'fallback_verification_email', 'fallback_verification_stage',
+                                           'fallback_session_id', 'wordpress_error']:
+                                    if key in st.session_state:
+                                        del st.session_state[key]
+                                
+                                st.session_state.current_session_id = upgraded_session.session_id
+                                st.session_state.page = "chat"
+                                st.session_state.is_chat_ready = True
+                                st.rerun()
+                            else:
+                                st.error(result['message'])
+                    else:
+                        st.error("Please enter a 6-digit code.")
+            
+                col_resend_fallback, _ = st.columns()
+                with col_resend_fallback:
+                    if st.button("🔄 Resend Code", use_container_width=True, key="resend_fallback_code"):
+                        if email:
+                            with st.spinner("Resending verification code..."):
+                                verification_sent = session_manager.email_verification.send_verification_code(email)
+                                if verification_sent:
+                                    st.success("✅ New verification code sent! Check your email.")
+                                else:
+                                    st.error("❌ Failed to resend code. Please try again later.")
+                        else:
+                            st.error("Error: No email address found for resend. Please restart the login process.")
+                        st.rerun()
 
-with tab2:
-    st.markdown(f"""
-    **Continue as a guest** to get a quick start and try FiFi AI Assistant without signing in.
+            else: # Standard WordPress login form - REVERTED TO ORIGINAL LAYOUT
+                with st.form("login_form", clear_on_submit=True):
+                    st.markdown("### 🔐 Sign In to Your Account")
+                    username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
+                    password = st.text_input("Password", type="password", help="Enter your WordPress password.")
+                    
+                    st.markdown("") # Original blank line for spacing
+                    
+                    col1, col2, col3 = st.columns(3) # Original columns for centering
+                    with col2: # Original context manager for centering button
+                        submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
+                    
+                    if submit_button:
+                        if not username or not password:
+                            st.error("Please enter both username and password to sign in.")
+                        else:
+                            st.session_state.temp_username = username
+                            st.session_state.temp_password = password
+                            st.session_state.loading_reason = 'authenticate'
+                            set_loading_state(True, "Authenticating and preparing your session...")
+                            st.rerun()
+            
+            st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
+            # NEW: Forgot password link - ADDED HERE
+            st.markdown("[Forgot your password?](https://www.12taste.com/my-account/lost-password/)")
     
-    ℹ️ **What to expect as a Guest:**
-    - You get an initial allowance of **{GUEST_QUESTION_LIMIT} questions** to explore FiFi AI's capabilities.
-    - After these {GUEST_QUESTION_LIMIT} questions, **email verification will be required** to continue (unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day).
-    - You can always choose to **upgrade to a full registration** later for extended benefits.
-    """)
+    with tab2:
+        st.markdown(f"""
+        **Continue as a guest** to get a quick start and try FiFi AI Assistant without signing in.
+        
+        ℹ️ **What to expect as a Guest:**
+        - You get an initial allowance of **{GUEST_QUESTION_LIMIT} questions** to explore FiFi AI's capabilities.
+        - After these {GUEST_QUESTION_LIMIT} questions, **email verification will be required** to continue (unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day).
+        - You can always choose to **upgrade to a full registration** later for extended benefits.
+        """)
+        
+        st.markdown("")
+        col1, col2, col3 = st.columns(3)
+        with col2:
+            if st.button("👤 Start as Guest", use_container_width=True):
+                # FIXED: Create session only when guest button is clicked
+                new_session = session_manager._create_and_save_new_session('guest')
+                st.session_state.current_session_id = new_session.session_id
+                st.session_state.loading_reason = 'start_guest'
+                set_loading_state(True, "Setting up your session and initializing AI assistant...")
+                st.rerun()
+
+    st.subheader("🎯 Usage Tiers")
     
-    st.markdown("")
     col1, col2, col3 = st.columns(3)
+    with col1:
+        st.success("👤 **Guest Users**")
+        st.markdown(f"• **{GUEST_QUESTION_LIMIT} questions** to try FiFi AI")
+        st.markdown("• Email verification required to continue")
+        st.markdown("• Quick start, no registration needed")
+    
     with col2:
-        if st.button("👤 Start as Guest", use_container_width=True):
-            # FIXED: Create session only when guest button is clicked
-            new_session = session_manager._create_and_save_new_session('guest')
-            st.session_state.current_session_id = new_session.session_id
-            st.session_state.loading_reason = 'start_guest'
-            set_loading_state(True, "Setting up your session and initializing AI assistant...")
-            st.rerun()
-
-st.subheader("🎯 Usage Tiers")
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.success("👤 **Guest Users**")
-    st.markdown(f"• **{GUEST_QUESTION_LIMIT} questions** to try FiFi AI")
-    st.markdown("• Email verification required to continue")
-    st.markdown("• Quick start, no registration needed")
-
-with col2:
-    st.info("📧 **Email Verified Guest**")
-    st.markdown(f"• **{EMAIL_VERIFIED_QUESTION_LIMIT} questions per day** (rolling {DAILY_RESET_WINDOW_HOURS}-hour period)")
-    st.markdown("• Email verification for access")
-    st.markdown("• No full registration required")
-
-with col3:
-    st.warning("🔐 **Registered Users**")
-    st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** with tier system:")
-    st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break")
-    tier1_upper_bound = REGISTERED_USER_TIER_1_LIMIT
-    st.markdown(f"  - **Tier 2**: Questions {tier1_upper_bound + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset")
+        st.info("📧 **Email Verified Guest**")
+        st.markdown(f"• **{EMAIL_VERIFIED_QUESTION_LIMIT} questions per day** (rolling {DAILY_RESET_WINDOW_HOURS}-hour period)")
+        st.markdown("• Email verification for access")
+        st.markdown("• No full registration required")
     
+    with col3:
+        st.warning("🔐 **Registered Users**")
+        st.markdown(f"• **{REGISTERED_USER_QUESTION_LIMIT} questions per day** with tier system:")
+        st.markdown(f"  - **Tier 1**: Questions 1-{REGISTERED_USER_TIER_1_LIMIT} → {TIER_1_BAN_HOURS}-hour break")
+        tier1_upper_bound = REGISTERED_USER_TIER_1_LIMIT
+        st.markdown(f"  - **Tier 2**: Questions {tier1_upper_bound + 1}-{REGISTERED_USER_QUESTION_LIMIT} → {TIER_2_BAN_HOURS}-hour reset")
+        
 def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_exporter: PDFExporter):
-"""Enhanced sidebar with tier progression display and login status."""
-with st.sidebar:
-    DEBUG_MODE = False # Set to True for debugging, False for production
-    # Terms of Service link
-    st.caption("By using this agent, you agree to our [Terms of Service](https://www.12taste.com/terms-conditions/).")
-    st.title("🎛️ Dashboard")
-    
-    if session.user_type.value == UserType.REGISTERED_USER.value:
-        st.success("✅ **Registered User**")
+    """Enhanced sidebar with tier progression display and login status."""
+    with st.sidebar:
+        DEBUG_MODE = False # Set to True for debugging, False for production
+        # Terms of Service link
+        st.caption("By using this agent, you agree to our [Terms of Service](https://www.12taste.com/terms-conditions/).")
+        st.title("🎛️ Dashboard")
         
-        if DEBUG_MODE and session.is_degraded_login:
-            st.info("ℹ️ Logged in via email (WordPress was unavailable)")
-        # if DEBUG_MODE: # Hide "Login method:"
-        #     st.caption(f"Login method: {session.login_method or 'WordPress'}")
+        if session.user_type.value == UserType.REGISTERED_USER.value:
+            st.success("✅ **Registered User**")
+            
+            if DEBUG_MODE and session.is_degraded_login:
+                st.info("ℹ️ Logged in via email (WordPress was unavailable)")
+            # if DEBUG_MODE: # Hide "Login method:"
+            #     st.caption(f"Login method: {session.login_method or 'WordPress'}")
 
-        if session.full_name: 
-            st.markdown(f"**Name:** {session.full_name}")
-        if session.email: 
-            st.markdown(f"**Email:** {session.email}")
-        
-        st.markdown(f"**Daily Questions:** {session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT}")
-        
-        progress_bar_key = f"registered_user_progress_{session.session_id}"
+            if session.full_name: 
+                st.markdown(f"**Name:** {session.full_name}")
+            if session.email: 
+                st.markdown(f"**Email:** {session.email}")
+            
+            st.markdown(f"**Daily Questions:** {session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT}")
+            
+            progress_bar_key = f"registered_user_progress_{session.session_id}"
 
-        if session.daily_question_count < REGISTERED_USER_TIER_1_LIMIT:
-            st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0),
-                       text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions")
-                       
-            remaining_tier1 = REGISTERED_USER_TIER_1_LIMIT - session.daily_question_count
-            if remaining_tier1 > 0:
-                st.caption(f"⏰ {remaining_tier1} questions until {TIER_1_BAN_HOURS}-hour break")
-        elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
-            if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
-                st.progress(1.0, text="Tier 1 Complete")
+            if session.daily_question_count < REGISTERED_USER_TIER_1_LIMIT:
+                st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0),
+                           text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions")
+                           
+                remaining_tier1 = REGISTERED_USER_TIER_1_LIMIT - session.daily_question_count
+                if remaining_tier1 > 0:
+                    st.caption(f"⏰ {remaining_tier1} questions until {TIER_1_BAN_HOURS}-hour break")
+            elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
+                if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
+                    st.progress(1.0, text="Tier 1 Complete")
+                    time_remaining = session.ban_end_time - datetime.now()
+                    hours = int(time_remaining.total_seconds() // 3600)
+                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                    st.caption(f"⏳ Tier 1 break: {hours}h {minutes}m remaining until Tier 2")
+                elif session.tier1_completed_in_cycle:
+                    st.progress(1.0, text="Tier 1 Complete ✅")
+                    st.caption("📈 Ready to proceed to Tier 2!")
+                else:
+                    st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0),
+                               text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions")
+                    st.caption(f"📈 Next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.")
+            else:
+                tier2_questions_asked = session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT
+                tier2_limit = REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT
+                
+                tier2_progress = min(tier2_questions_asked / tier2_limit, 1.0)
+                st.progress(tier2_progress, text=f"Tier 2: {tier2_questions_asked}/{tier2_limit} questions")
+                
+                remaining_tier2 = REGISTERED_USER_QUESTION_LIMIT - session.daily_question_count
+                if remaining_tier2 > 0:
+                    st.caption(f"⏰ {remaining_tier2} questions until {TIER_2_BAN_HOURS}-hour reset")
+                else:
+                    st.caption(f"🚫 Daily limit reached - {TIER_2_BAN_HOURS}-hour reset required")
+                    
+        elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
+            st.info("📧 **Email Verified Guest**")
+            # if DEBUG_MODE: # Hide "Login method:"
+            #     st.caption(f"Login method: {session.login_method or 'Email Verified'}")
+            if session.email:
+                st.markdown(f"**Email:** {session.email}")
+            
+            st.markdown(f"**Daily Questions:** {session.daily_question_count}/{EMAIL_VERIFIED_QUESTION_LIMIT}")
+            st.progress(min(session.daily_question_count / EMAIL_VERIFIED_QUESTION_LIMIT, 1.0))
+            
+            if session.ban_status == BanStatus.TWENTY_FOUR_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
                 time_remaining = session.ban_end_time - datetime.now()
                 hours = int(time_remaining.total_seconds() // 3600)
                 minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                st.caption(f"⏳ Tier 1 break: {hours}h {minutes}m remaining until Tier 2")
-            elif session.tier1_completed_in_cycle:
-                st.progress(1.0, text="Tier 1 Complete ✅")
-                st.caption("📈 Ready to proceed to Tier 2!")
-            else:
-                st.progress(min(session.daily_question_count / REGISTERED_USER_TIER_1_LIMIT, 1.0),
-                           text=f"Tier 1: {session.daily_question_count}/{REGISTERED_USER_TIER_1_LIMIT} questions")
-                st.caption(f"📈 Next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.")
-        else:
-            tier2_questions_asked = session.daily_question_count - REGISTERED_USER_TIER_1_LIMIT
-            tier2_limit = REGISTERED_USER_QUESTION_LIMIT - REGISTERED_USER_TIER_1_LIMIT
-            
-            tier2_progress = min(tier2_questions_asked / tier2_limit, 1.0)
-            st.progress(tier2_progress, text=f"Tier 2: {tier2_questions_asked}/{tier2_limit} questions")
-            
-            remaining_tier2 = REGISTERED_USER_QUESTION_LIMIT - session.daily_question_count
-            if remaining_tier2 > 0:
-                st.caption(f"⏰ {remaining_tier2} questions until {TIER_2_BAN_HOURS}-hour reset")
-            else:
-                st.caption(f"🚫 Daily limit reached - {TIER_2_BAN_HOURS}-hour reset required")
-                
-    elif session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value:
-        st.info("📧 **Email Verified Guest**")
-        # if DEBUG_MODE: # Hide "Login method:"
-        #     st.caption(f"Login method: {session.login_method or 'Email Verified'}")
-        if session.email:
-            st.markdown(f"**Email:** {session.email}")
-        
-        st.markdown(f"**Daily Questions:** {session.daily_question_count}/{EMAIL_VERIFIED_QUESTION_LIMIT}")
-        st.progress(min(session.daily_question_count / EMAIL_VERIFIED_QUESTION_LIMIT, 1.0))
-        
-        if session.ban_status == BanStatus.TWENTY_FOUR_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
-            time_remaining = session.ban_end_time - datetime.now()
-            hours = int(time_remaining.total_seconds() // 3600)
-            minutes = int((time_remaining.total_seconds() % 3600) // 60)
-            st.error(f"🚫 Daily limit reached")
-            st.caption(f"Resets in: {hours}h {minutes}m")
-        elif session.last_question_time:
-            expected_reset_time = session.last_question_time + timedelta(hours=DAILY_RESET_WINDOW_HOURS)
-            time_to_reset = expected_reset_time - datetime.now()
-            if time_to_reset.total_seconds() > 0:
-                hours = int(time_to_reset.total_seconds() // 3600)
-                minutes = int((time_to_reset.total_seconds() % 3600) // 60)
+                st.error(f"🚫 Daily limit reached")
                 st.caption(f"Resets in: {hours}h {minutes}m")
-            else:
-                st.caption("Daily questions have reset!")
-        
-    else: # Guest User
-        st.warning("👤 **Guest User**")
-        # if DEBUG_MODE: # Hide "Login method:"
-        #     st.caption(f"Login method: {session.login_method or 'Guest'}")
-        st.markdown(f"**Questions:** {session.daily_question_count}/{GUEST_QUESTION_LIMIT}")
-        st.progress(min(session.daily_question_count / GUEST_QUESTION_LIMIT, 1.0))
-        st.caption(f"Email verification unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day.")
-        if session.reverification_pending:
-            st.info("💡 An account is available for this device. Re-verify email to reclaim it!")
-        elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
-            st.info("💡 You are currently using guest questions. Verify your email to get more.")
+            elif session.last_question_time:
+                expected_reset_time = session.last_question_time + timedelta(hours=DAILY_RESET_WINDOW_HOURS)
+                time_to_reset = expected_reset_time - datetime.now()
+                if time_to_reset.total_seconds() > 0:
+                    hours = int(time_to_reset.total_seconds() // 3600)
+                    minutes = int((time_to_reset.total_seconds() % 3600) // 60)
+                    st.caption(f"Resets in: {hours}h {minutes}m")
+                else:
+                    st.caption("Daily questions have reset!")
             
-    # Show fingerprint status
-    if session.fingerprint_id:
-        if session.user_type == UserType.REGISTERED_USER and session.fingerprint_id == "not_collected_registered_user":
-            # st.markdown("**Device ID:** Not Collected")
-            # st.caption("Fingerprinting not applicable for registered users (email primary)")
-            pass
-        elif session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
-            # st.markdown("**Device ID:** Identifying...")
-            # st.caption("Fingerprinting in progress...")
-            pass
-        else:
-            # st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
-            # st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
-            pass
-    else:
-        # st.markdown("**Device ID:** Initializing...")
-        # st.caption("Starting fingerprinting...")
-        pass
-
-    # Hide "Last activity"
-    # if DEBUG_MODE and session.last_activity is not None:
-    #    time_since_activity = datetime.now() - session.last_activity
-    #    minutes_inactive = time_since_activity.total_seconds() / 60
-    #    st.caption(f"Last activity: {int(minutes_inactive)} minutes ago")
-    #    
-    #    timeout_duration = SESSION_TIMEOUT_MINUTES
-    #    if minutes_inactive >= (timeout_duration - 1) and minutes_inactive < timeout_duration:
-    #        minutes_remaining = timeout_duration - minutes_inactive
-    #        st.warning(f"⚠️ Session expires in {minutes_remaining:.1f} minutes!")
-    #    elif minutes_inactive >= timeout_duration:
-    #        st.error(f"🚫 Session is likely expired. Type a question to check.")
-    # else:
-    #    if DEBUG_MODE: st.caption("Session timer will start with first interaction.")
-
-    # Hide "🤖 AI Tools Status" text and its contents
-    # if DEBUG_MODE:
-    st.divider()
-    # st.markdown("**🤖 AI Tools Status**")
-    
-    ai_system = session_manager.ai
-    if ai_system:
-        pinecone_status = error_handler.component_status.get("Pinecone", "healthy")
-        tavily_status = error_handler.component_status.get("Tavily", "healthy")
-        
-        if ai_system.pinecone_tool and ai_system.pinecone_tool.assistant:
-            if pinecone_status == "healthy":
-                st.success("🧠 Knowledge Base: Ready")
-            elif pinecone_status in ["rate_limit"]:
-                st.warning("🧠 Knowledge Base: Rate Limited")
+        else: # Guest User
+            st.warning("👤 **Guest User**")
+            # if DEBUG_MODE: # Hide "Login method:"
+            #     st.caption(f"Login method: {session.login_method or 'Guest'}")
+            st.markdown(f"**Questions:** {session.daily_question_count}/{GUEST_QUESTION_LIMIT}")
+            st.progress(min(session.daily_question_count / GUEST_QUESTION_LIMIT, 1.0))
+            st.caption(f"Email verification unlocks {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day.")
+            if session.reverification_pending:
+                st.info("💡 An account is available for this device. Re-verify email to reclaim it!")
+            elif session.declined_recognized_email_at and session.daily_question_count < session_manager.question_limits.question_limits[UserType.GUEST.value]:
+                st.info("💡 You are currently using guest questions. Verify your email to get more.")
+                
+        # Show fingerprint status
+        if session.fingerprint_id:
+            if session.user_type == UserType.REGISTERED_USER and session.fingerprint_id == "not_collected_registered_user":
+                # st.markdown("**Device ID:** Not Collected")
+                # st.caption("Fingerprinting not applicable for registered users (email primary)")
+                pass
+            elif session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                # st.markdown("**Device ID:** Identifying...")
+                # st.caption("Fingerprinting in progress...")
+                pass
             else:
-                st.error(f"🧠 Knowledge Base: {pinecone_status.replace('_', ' ').title()}")
-        elif ai_system.config.PINECONE_API_KEY:
-            st.warning("🧠 Knowledge Base: Error")
+                # st.markdown(f"**Device ID:** `{session.fingerprint_id[:12]}...`")
+                # st.caption(f"Method: {session.fingerprint_method or 'unknown'} (Privacy: {session.browser_privacy_level or 'standard'})")
+                pass
         else:
-            st.info("🧠 Knowledge Base: Not configured")
-        
-        if ai_system.tavily_agent:
-            if tavily_status == "healthy":
-                st.success("🌐 Web Search: Ready")
-            else:
-                st.warning(f"🌐 Web Search: {tavily_status.replace('_', ' ').title()}")
-        elif ai_system.config.TAVILY_API_KEY:
-            st.warning("🌐 Web Search: Error")
-        else:
-            st.info("🌐 Web Search: Not configured")
-        
-        # Hide "💬 OpenAI: Ready"
+            # st.markdown("**Device ID:** Initializing...")
+            # st.caption("Starting fingerprinting...")
+            pass
+
+        # Hide "Last activity"
+        # if DEBUG_MODE and session.last_activity is not None:
+        #    time_since_activity = datetime.now() - session.last_activity
+        #    minutes_inactive = time_since_activity.total_seconds() / 60
+        #    st.caption(f"Last activity: {int(minutes_inactive)} minutes ago")
+        #    
+        #    timeout_duration = SESSION_TIMEOUT_MINUTES
+        #    if minutes_inactive >= (timeout_duration - 1) and minutes_inactive < timeout_duration:
+        #        minutes_remaining = timeout_duration - minutes_inactive
+        #        st.warning(f"⚠️ Session expires in {minutes_remaining:.1f} minutes!")
+        #    elif minutes_inactive >= timeout_duration:
+        #        st.error(f"🚫 Session is likely expired. Type a question to check.")
+        # else:
+        #    if DEBUG_MODE: st.caption("Session timer will start with first interaction.")
+
+        # Hide "🤖 AI Tools Status" text and its contents
         # if DEBUG_MODE:
-        if ai_system.openai_client:
-            # st.success("💬 OpenAI: Ready")
-            pass
-        elif ai_system.config.OPENAI_API_KEY:
-            # st.warning("💬 OpenAI: Error")
-            pass
-        else:
-            # st.info("💬 OpenAI: Not configured")
-            pass
-    else:
-        # st.error("🤖 AI System: Not available")
-        pass
-    
-    # Hide "🚫 CRM Integration: Registered users & verified guests only"
-    # if DEBUG_MODE:
-    if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
-        if session.zoho_contact_id: 
-            # st.success("🔗 **CRM Linked**")
-            pass
-        else: 
-            # st.info("📋 **CRM Ready** (will link on first save)")
-            pass
-        if session.timeout_saved_to_crm:
-            # st.caption("💾 Auto-saved to CRM (after inactivity)")
-            pass
-        else:
-            # st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
-            pass
-    else: 
-        # st.caption("🚫 CRM Integration: Registered users & verified guests only")
-        pass
-
-    # Display 12Taste Order Status
-    if session_manager.woocommerce and session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
-        # Removed await asyncio.to_thread, as test_connection will be called once per render.
-        # Using a simple check here is fine. If it's slow, consider caching.
-        status = session_manager.woocommerce.test_connection()
-        if status["status"] == "connected":
-            st.success("🛒12Taste Order Status: Ready")
-        else:
-            st.error(f"{status['status'].replace('_', ' ').title()}")
-            st.caption(status["message"])
-    else:
-        st.info("🛒 **12Taste Order Status**: Not configured or available") # Changed text
-    
-    st.divider()
-    
-    total_messages = len(session.messages)
-    visible_messages = len(session.messages) - session.display_message_offset
-    
-    if session.display_message_offset > 0:
-        st.markdown(f"**Messages in Chat:** {visible_messages} (Total: {total_messages})")
-        st.caption(f"💡 {session.display_message_offset} messages hidden by Clear Chat")
-    else:
-        st.markdown(f"**Messages in Chat:** {total_messages}")
+        st.divider()
+        # st.markdown("**🤖 AI Tools Status**")
         
-    # st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
-    
-    if session.ban_status.value != BanStatus.NONE.value:
-        st.error(f"🚫 **STATUS: RESTRICTED**")
-        if session.ban_end_time:
-            time_remaining = datetime.now() - session.ban_end_time # Corrected calculation
-            if time_remaining.total_seconds() < 0: # Check if ban is still in future
-                time_remaining = -time_remaining
-                hours = int(time_remaining.total_seconds() // 3600)
-                minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
-        st.markdown(f"Reason: {session.ban_reason or 'Usage policy violation'}")
-    elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: 
-        st.warning("⚠️ **ACTION REQUIRED: Email Verification**")
-    
-    st.divider()
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        clear_chat_help = "Hides all messages from the current conversation display. Messages are preserved in the database and new messages can still be added."
-        
-        if st.button("🗑️ Clear Chat", use_container_width=True, help=clear_chat_help):
-            session_manager.clear_chat_history(session)
-            st.success("🗑️ Chat display cleared! Messages preserved in database.")
-            st.rerun()
+        ai_system = session_manager.ai
+        if ai_system:
+            pinecone_status = error_handler.component_status.get("Pinecone", "healthy")
+            tavily_status = error_handler.component_status.get("Tavily", "healthy")
             
-    with col2:
-        signout_help = "Ends your current session and returns to the welcome page."
-        if (session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and 
-            session.email and len(session.messages) >= CRM_SAVE_MIN_QUESTIONS):
-            signout_help += " Your conversation will be automatically saved to CRM before signing out."
+            if ai_system.pinecone_tool and ai_system.pinecone_tool.assistant:
+                if pinecone_status == "healthy":
+                    st.success("🧠 Knowledge Base: Ready")
+                elif pinecone_status in ["rate_limit"]:
+                    st.warning("🧠 Knowledge Base: Rate Limited")
+                else:
+                    st.error(f"🧠 Knowledge Base: {pinecone_status.replace('_', ' ').title()}")
+            elif ai_system.config.PINECONE_API_KEY:
+                st.warning("🧠 Knowledge Base: Error")
+            else:
+                st.info("🧠 Knowledge Base: Not configured")
+            
+            if ai_system.tavily_agent:
+                if tavily_status == "healthy":
+                    st.success("🌐 Web Search: Ready")
+                else:
+                    st.warning(f"🌐 Web Search: {tavily_status.replace('_', ' ').title()}")
+            elif ai_system.config.TAVILY_API_KEY:
+                st.warning("🌐 Web Search: Error")
+            else:
+                st.info("🌐 Web Search: Not configured")
+            
+            # Hide "💬 OpenAI: Ready"
+            # if DEBUG_MODE:
+            if ai_system.openai_client:
+                # st.success("💬 OpenAI: Ready")
+                pass
+            elif ai_system.config.OPENAI_API_KEY:
+                # st.warning("💬 OpenAI: Error")
+                pass
+            else:
+                # st.info("💬 OpenAI: Not configured")
+                pass
+        else:
+            # st.error("🤖 AI System: Not available")
+            pass
         
-        if st.button("🚪 Sign Out", use_container_width=True, help=signout_help):
-            session_manager.end_session(session)
-            st.rerun()
+        # Hide "🚫 CRM Integration: Registered users & verified guests only"
+        # if DEBUG_MODE:
+        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
+            if session.zoho_contact_id: 
+                # st.success("🔗 **CRM Linked**")
+                pass
+            else: 
+                # st.info("📋 **CRM Ready** (will link on first save)")
+                pass
+            if session.timeout_saved_to_crm:
+                # st.caption("💾 Auto-saved to CRM (after inactivity)")
+                pass
+            else:
+                # st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
+                pass
+        else: 
+            # st.caption("🚫 CRM Integration: Registered users & verified guests only")
+            pass
 
-    # Hide "Save to Zoho CRM" button
-    # if DEBUG_MODE and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and len(session.messages) >= CRM_SAVE_MIN_QUESTIONS:
-    if session_manager.zoho.config.ZOHO_ENABLED and session.email and len(session.messages) >= CRM_SAVE_MIN_QUESTIONS:
+        # Display 12Taste Order Status
+        if session_manager.woocommerce and session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
+            # Removed await asyncio.to_thread, as test_connection will be called once per render.
+            # Using a simple check here is fine. If it's slow, consider caching.
+            status = session_manager.woocommerce.test_connection()
+            if status["status"] == "connected":
+                st.success("🛒12Taste Order Status: Ready")
+            else:
+                st.error(f"{status['status'].replace('_', ' ').title()}")
+                st.caption(status["message"])
+        else:
+            st.info("🛒 **12Taste Order Status**: Not configured or available") # Changed text
+        
         st.divider()
         
-        pdf_buffer = pdf_exporter.generate_chat_pdf(session)
-        if pdf_buffer:
-            st.download_button(
-                label="📄 Download Chat PDF",
-                data=pdf_buffer,
-                file_name=f"fifi_chat_transcript_{session.session_id[:8]}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-                help="Download the current chat conversation as a PDF document."
-            )
+        total_messages = len(session.messages)
+        visible_messages = len(session.messages) - session.display_message_offset
         
-        # This button is hidden by default due to DEBUG_MODE = False
-        # To show it, you'd need to explicitly set DEBUG_MODE = True
-        if DEBUG_MODE:
-            if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Manually save your current chat transcript to your linked Zoho CRM contact."):
-                session_manager.manual_save_to_crm(session)
-            st.caption("💡 Chat automatically saves to CRM during Sign Out or browser/tab close.")
+        if session.display_message_offset > 0:
+            st.markdown(f"**Messages in Chat:** {visible_messages} (Total: {total_messages})")
+            st.caption(f"💡 {session.display_message_offset} messages hidden by Clear Chat")
+        else:
+            st.markdown(f"**Messages in Chat:** {total_messages}")
+            
+        # st.markdown(f"**Current Session ID:** `{session.session_id[:8]}...`")
+        
+        if session.ban_status.value != BanStatus.NONE.value:
+            st.error(f"🚫 **STATUS: RESTRICTED**")
+            if session.ban_end_time:
+                time_remaining = datetime.now() - session.ban_end_time # Corrected calculation
+                if time_remaining.total_seconds() < 0: # Check if ban is still in future
+                    time_remaining = -time_remaining
+                    hours = int(time_remaining.total_seconds() // 3600)
+                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                    st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
+            st.markdown(f"Reason: {session.ban_reason or 'Usage policy violation'}")
+        elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: 
+            st.warning("⚠️ **ACTION REQUIRED: Email Verification**")
+        
+        st.divider()
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            clear_chat_help = "Hides all messages from the current conversation display. Messages are preserved in the database and new messages can still be added."
+            
+            if st.button("🗑️ Clear Chat", use_container_width=True, help=clear_chat_help):
+                session_manager.clear_chat_history(session)
+                st.success("🗑️ Chat display cleared! Messages preserved in database.")
+                st.rerun()
+                
+        with col2:
+            signout_help = "Ends your current session and returns to the welcome page."
+            if (session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and 
+                session.email and len(session.messages) >= CRM_SAVE_MIN_QUESTIONS):
+                signout_help += " Your conversation will be automatically saved to CRM before signing out."
+            
+            if st.button("🚪 Sign Out", use_container_width=True, help=signout_help):
+                session_manager.end_session(session)
+                st.rerun()
+
+        # Hide "Save to Zoho CRM" button
+        # if DEBUG_MODE and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value] and len(session.messages) >= CRM_SAVE_MIN_QUESTIONS:
+        if session_manager.zoho.config.ZOHO_ENABLED and session.email and len(session.messages) >= CRM_SAVE_MIN_QUESTIONS:
+            st.divider()
+            
+            pdf_buffer = pdf_exporter.generate_chat_pdf(session)
+            if pdf_buffer:
+                st.download_button(
+                    label="📄 Download Chat PDF",
+                    data=pdf_buffer,
+                    file_name=f"fifi_chat_transcript_{session.session_id[:8]}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    help="Download the current chat conversation as a PDF document."
+                )
+            
+            # This button is hidden by default due to DEBUG_MODE = False
+            # To show it, you'd need to explicitly set DEBUG_MODE = True
+            if DEBUG_MODE:
+                if st.button("💾 Save to Zoho CRM", use_container_width=True, help="Manually save your current chat transcript to your linked Zoho CRM contact."):
+                    session_manager.manual_save_to_crm(session)
+                st.caption("💡 Chat automatically saves to CRM during Sign Out or browser/tab close.")
 
 
 def display_email_prompt_if_needed(session_manager: 'SessionManager', session: UserSession) -> bool:
-"""
-Renders email verification dialog if needed.
-Handles gentle prompts only when an answer was just given, otherwise shows a direct prompt.
-Controls `st.session_state.chat_blocked_by_dialog` and returns if chat input should be disabled.
-"""
-
-if st.session_state.get('current_session_id') != session.session_id:
-    logger.warning(f"Session mismatch in email prompt! State: {st.session_state.get('current_session_id', 'None')[:8]}, Param: {session.session_id[:8]}")
-    st.session_state.current_session_id = session.session_id
-
-if 'verification_stage' not in st.session_state: st.session_state.verification_stage = None
-if 'guest_continue_active' not in st.session_state: st.session_state.guest_continue_active = False
-if 'final_answer_acknowledged' not in st.session_state: st.session_state.final_answer_acknowledged = False
-if 'gentle_prompt_shown' not in st.session_state: st.session_state.gentle_prompt_shown = False
-if 'email_verified_final_answer_acknowledged' not in st.session_state: st.session_state.email_verified_final_answer_acknowledged = False
-if 'must_verify_email_immediately' not in st.session_state: st.session_state.must_verify_email_immediately = False
-if 'skip_email_allowed' not in st.session_state: st.session_state.skip_email_allowed = True
-
-if st.session_state.get('send_code_now', False) and st.session_state.get('verification_email'):
-    email_to_send = st.session_state.verification_email
-    result = session_manager.handle_guest_email_verification(session, email_to_send)
+    """
+    Renders email verification dialog if needed.
+    Handles gentle prompts only when an answer was just given, otherwise shows a direct prompt.
+    Controls `st.session_state.chat_blocked_by_dialog` and returns if chat input should be disabled.
+    """
     
-    del st.session_state['send_code_now']
+    if st.session_state.get('current_session_id') != session.session_id:
+        logger.warning(f"Session mismatch in email prompt! State: {st.session_state.get('current_session_id', 'None')[:8]}, Param: {session.session_id[:8]}")
+        st.session_state.current_session_id = session.session_id
     
-    if result['success']:
-        st.success(result['message'])
-        st.session_state.verification_stage = "code_entry"
-    else:
-        st.error(result['message'])
-        st.session_state.verification_stage = st.session_state.get('verification_stage', 'initial_check')
+    if 'verification_stage' not in st.session_state: st.session_state.verification_stage = None
+    if 'guest_continue_active' not in st.session_state: st.session_state.guest_continue_active = False
+    if 'final_answer_acknowledged' not in st.session_state: st.session_state.final_answer_acknowledged = False
+    if 'gentle_prompt_shown' not in st.session_state: st.session_state.gentle_prompt_shown = False
+    if 'email_verified_final_answer_acknowledged' not in st.session_state: st.session_state.email_verified_final_answer_acknowledged = False
+    if 'must_verify_email_immediately' not in st.session_state: st.session_state.must_verify_email_immediately = False
+    if 'skip_email_allowed' not in st.session_state: st.session_state.skip_email_allowed = True
+
+    if st.session_state.get('send_code_now', False) and st.session_state.get('verification_email'):
+        email_to_send = st.session_state.verification_email
+        result = session_manager.handle_guest_email_verification(session, email_to_send)
+        
+        del st.session_state['send_code_now']
+        
+        if result['success']:
+            st.success(result['message'])
+            st.session_state.verification_stage = "code_entry"
+        else:
+            st.error(result['message'])
+            st.session_state.verification_stage = st.session_state.get('verification_stage', 'initial_check')
+        
+        st.rerun()
+        return True
+
+    limit_check = session_manager.question_limits.is_within_limits(session)
+    if not limit_check['allowed'] and limit_check.get('reason') not in ['guest_limit', 'email_verified_guest_limit', 'registered_user_tier1_limit', 'registered_user_tier2_limit']:
+        st.session_state.chat_blocked_by_dialog = True
+        return True
+
+    user_is_guest = (session.user_type.value == UserType.GUEST.value)
+    user_is_email_verified = (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value)
+    guest_limit_value = GUEST_QUESTION_LIMIT
+    email_verified_limit_value = EMAIL_VERIFIED_QUESTION_LIMIT
+    daily_q_value = session.daily_question_count
+    is_guest_limit_hit = (user_is_guest and daily_q_value >= guest_limit_value)
+    is_email_verified_limit_hit = (user_is_email_verified and daily_q_value >= email_verified_limit_value)
     
-    st.rerun()
-    return True
+    user_just_hit_guest_limit = is_guest_limit_hit and st.session_state.get('just_answered', False)
+    user_just_hit_email_verified_limit = is_email_verified_limit_hit and st.session_state.get('just_answered', False)
+    
+    must_verify_immediately = st.session_state.get('must_verify_email_immediately', False)
+    skip_allowed = st.session_state.get('skip_email_allowed', True)
 
-limit_check = session_manager.question_limits.is_within_limits(session)
-if not limit_check['allowed'] and limit_check.get('reason') not in ['guest_limit', 'email_verified_guest_limit', 'registered_user_tier1_limit', 'registered_user_tier2_limit']:
-    st.session_state.chat_blocked_by_dialog = True
-    return True
-
-user_is_guest = (session.user_type.value == UserType.GUEST.value)
-user_is_email_verified = (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value)
-guest_limit_value = GUEST_QUESTION_LIMIT
-email_verified_limit_value = EMAIL_VERIFIED_QUESTION_LIMIT
-daily_q_value = session.daily_question_count
-is_guest_limit_hit = (user_is_guest and daily_q_value >= guest_limit_value)
-is_email_verified_limit_hit = (user_is_email_verified and daily_q_value >= email_verified_limit_value)
-
-user_just_hit_guest_limit = is_guest_limit_hit and st.session_state.get('just_answered', False)
-user_just_hit_email_verified_limit = is_email_verified_limit_hit and st.session_state.get('just_answered', False)
-
-must_verify_immediately = st.session_state.get('must_verify_email_immediately', False)
-skip_allowed = st.session_state.get('skip_email_allowed', True)
-
-should_show_prompt = False
-should_block_chat = True
-
-if user_is_guest and must_verify_immediately and daily_q_value == 0:
-    should_show_prompt = True
+    should_show_prompt = False
     should_block_chat = True
-    if st.session_state.verification_stage is None:
-        st.session_state.verification_stage = 'forced_verification'
 
-elif session.reverification_pending:
-    should_show_prompt = True
-    should_block_chat = True
-    if st.session_state.verification_stage is None:
-         st.session_state.verification_stage = 'initial_check'
-         st.session_state.guest_continue_active = False
+    if user_is_guest and must_verify_immediately and daily_q_value == 0:
+        should_show_prompt = True
+        should_block_chat = True
+        if st.session_state.verification_stage is None:
+            st.session_state.verification_stage = 'forced_verification'
 
-elif user_just_hit_guest_limit:
-    st.session_state.just_answered = False
-    should_show_prompt = True
-    should_block_chat = False
-    
-    st.success(f"🎯 **You've explored FiFi AI with your {GUEST_QUESTION_LIMIT} guest questions!**")
-    st.info(f"Take your time to read this answer. When you're ready, verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions per day + chat history saving!")
-    
-    with st.expander("📧 Ready to Unlock More Questions?", expanded=False):
+    elif session.reverification_pending:
+        should_show_prompt = True
+        should_block_chat = True
+        if st.session_state.verification_stage is None:
+             st.session_state.verification_stage = 'initial_check'
+             st.session_state.guest_continue_active = False
+
+    elif user_just_hit_guest_limit:
+        st.session_state.just_answered = False
+        should_show_prompt = True
+        should_block_chat = False
+        
+        st.success(f"🎯 **You've explored FiFi AI with your {GUEST_QUESTION_LIMIT} guest questions!**")
+        st.info(f"Take your time to read this answer. When you're ready, verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions per day + chat history saving!")
+        
+        with st.expander("📧 Ready to Unlock More Questions?", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📧 Yes, Let's Verify My Email!", use_container_width=True, key="gentle_verify_btn"):
+                    st.session_state.verification_stage = 'email_entry'
+                    st.session_state.chat_blocked_by_dialog = True
+                    st.session_state.final_answer_acknowledged = True
+                    st.rerun()
+            with col2:
+                if skip_allowed:
+                    if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="continue_reading_btn"):
+                        st.session_state.final_answer_acknowledged = True
+                        st.success("Perfect! Take your time. The verification option will remain available above.")
+                        st.rerun()
+                else:
+                    st.info("Email verification is required to continue.")
+        
+        st.session_state.chat_blocked_by_dialog = False
+        return False
+
+    elif user_just_hit_email_verified_limit:
+        st.session_state.just_answered = False
+        should_show_prompt = True
+        should_block_chat = False
+        
+        st.success(f"🎯 **You've completed your {EMAIL_VERIFIED_QUESTION_LIMIT} daily questions!**")
+        st.info(f"Take your time to read this answer. Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
+        
+        with st.expander("🚀 Want More Questions Daily?", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
+                    st.link_button("Register Here", "https://www.12taste.com/in/my-account/", use_container_width=True)
+                    st.session_state.email_verified_final_answer_acknowledged = True
+                    st.rerun()
+            with col2:
+                if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="email_verified_continue_reading"):
+                    st.session_state.email_verified_final_answer_acknowledged = True
+                    st.success(f"Perfect! Take your time reading. You'll need to wait {EMAIL_VERIFIED_BAN_HOURS} hours for more questions.")
+                    st.rerun()
+        
+        st.session_state.chat_blocked_by_dialog = False
+        return False
+
+    elif is_guest_limit_hit:
+        should_show_prompt = True
+        should_block_chat = True
+        if st.session_state.verification_stage is None:
+            st.session_state.verification_stage = 'email_entry'
+            st.session_state.guest_continue_active = False
+
+    elif is_email_verified_limit_hit and not st.session_state.email_verified_final_answer_acknowledged:
+        should_show_prompt = True
+        should_block_chat = True
+        st.error("🛑 **Daily Limit Reached**")
+        st.info(f"You've used your {EMAIL_VERIFIED_QUESTION_LIMIT} questions for today. Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
+        
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("📧 Yes, Let's Verify My Email!", use_container_width=True, key="gentle_verify_btn"):
+            st.link_button(f"Register for {REGISTERED_USER_QUESTION_LIMIT} questions/day", "https://www.12taste.com/in/my-account/", use_container_width=True)
+        with col2:
+            if st.button("Return to Welcome Page", use_container_width=True):
+                session_manager.end_session(session)
+                app_base_url = os.getenv("APP_BASE_URL", "https://fifi-eu-121263692901.europe-west1.run.app/")
+                js_redirect = f"window.top.location.href = '{app_base_url}';"
+                st.components.v1.html(f"<script>{js_redirect}</script>", height=100, width=0)
+                st.rerun()
+        
+        st.session_state.chat_blocked_by_dialog = True
+        return True
+
+    elif session.declined_recognized_email_at and not st.session_state.guest_continue_active and not is_guest_limit_hit:
+        should_show_prompt = True
+        should_block_chat = False
+        if st.session_state.verification_stage is None:
+            st.session_state.verification_stage = 'declined_recognized_email_prompt_only'
+
+    if not should_show_prompt:
+        st.session_state.chat_blocked_by_dialog = False
+        st.session_state.verification_stage = None
+        if 'just_answered' in st.session_state:
+             del st.session_state.just_answered
+        return False
+
+    st.session_state.chat_blocked_by_dialog = should_block_chat
+    
+    if should_block_chat:
+        st.error("📧 **Action Required**")
+
+    current_stage = st.session_state.verification_stage
+
+    if current_stage == 'forced_verification':
+        st.error("📧 **Email Verification Required**")
+        
+        known_emails = st.session_state.get('known_device_emails', [])
+        
+        if known_emails:
+            if len(known_emails) == 1:
+                st.info(f"This device was previously verified with **{session_manager._mask_email(known_emails)}**. Please verify an email to continue.")
+            else:
+                st.info("This device was previously verified with multiple emails. Please verify one of your emails to continue:")
+                for email in known_emails[:3]:
+                    st.caption(f"• {session_manager._mask_email(email)}")
+        else:
+            st.info("This device has already been used with email verification. Please verify your email to continue using FiFi AI.")
+        
+        with st.form("forced_email_verification_form", clear_on_submit=False):
+            st.markdown("**📧 Enter your email address to receive a verification code:**")
+            current_email_input = st.text_input(
+                "Email Address", 
+                placeholder="your@email.com",
+                key="forced_email_input",
+                help="Email verification is required to continue."
+            )
+            submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+            
+            if submit_email:
+                if current_email_input:
+                    st.session_state.must_verify_email_immediately = False
+                    st.session_state.skip_email_allowed = True
+                    
+                    result = session_manager.handle_guest_email_verification(session, current_email_input)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.session_state.verification_email = current_email_input
+                        st.session_state.verification_stage = "code_entry"
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter an email address to receive the code.")
+
+    elif current_stage == 'initial_check':
+        prompt_container = st.container()
+        
+        with prompt_container:
+            email_to_reverify = session.pending_email
+            masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
+            st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
+            st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
+            
+            button_key_suffix = session.session_id[:8]
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Verify this email", 
+                            use_container_width=True, 
+                            key=f"reverify_yes_{button_key_suffix}"):
+                    
+                    logger.info(f"Verify button clicked in session {session.session_id[:8]}")
+                    
+                    session.recognition_response = "yes_reverify"
+                    session.declined_recognized_email_at = None
+                    st.session_state.verification_email = email_to_reverify
+                    st.session_state.verification_stage = "send_code_recognized"
+                    
+                    st.session_state.current_session_id = session.session_id
+                    
+                    session_manager.db.save_session(session)
+                    st.rerun()
+            with col2:
+                if st.button("❌ No, I don't recognize the email", 
+                            use_container_width=True, 
+                            key=f"reverify_no_{button_key_suffix}"):
+                    
+                    logger.info(f"Decline button clicked in session {session.session_id[:8]}")
+                    
+                    session.recognition_response = "no_declined_reco"
+                    session.declined_recognized_email_at = datetime.now()
+                    session.user_type = UserType.GUEST 
+                    session.reverification_pending = False
+                    session.pending_user_type = None
+                    session.pending_email = None
+                    session.pending_full_name = None
+                    session.pending_zoho_contact_id = None
+                    session.pending_wp_token = None
+                    
+                    st.session_state.current_session_id = session.session_id
+                    
+                    session_manager.db.save_session(session)
+                    st.session_state.guest_continue_active = True
+                    st.session_state.chat_blocked_by_dialog = False
+                    st.session_state.verification_stage = None
+                    st.success("You can now continue as a Guest.")
+                    st.rerun()
+
+    elif current_stage == 'send_code_recognized':
+        email_to_verify = st.session_state.get('verification_email')
+        if email_to_verify:
+            st.info(f"📧 **Sending verification code to {session_manager._mask_email(email_to_verify)}...**")
+            
+            st.session_state.send_code_now = True
+            st.rerun()
+
+    elif current_stage == 'email_entry':
+        skip_allowed = st.session_state.get('skip_email_allowed', True)
+        
+        st.info(f"🚀 You've used your {GUEST_QUESTION_LIMIT} guest questions. Please verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions per day!")
+        with st.form("email_verification_form", clear_on_submit=False):
+            st.markdown("**📧 Enter your email address to receive a verification code:**")
+            current_email_input = st.text_input(
+                "Email Address", 
+                placeholder="your@email.com", 
+                value=st.session_state.get('verification_email', session.email or ""), 
+                key="manual_email_input",
+                help="We'll send you a 6-digit verification code that's valid for 1 minute."
+            )
+            
+            if skip_allowed:
+                col1, col2 = st.columns(2)
+                with col1:
+                    submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+                with col2:
+                    skip_button = st.form_submit_button("Skip for now", use_container_width=True)
+                    
+                if skip_button:
+                    logger.info(f"User chose to skip email verification for session {session.session_id[:8]} - ending session")
+                    
+                    session.active = False
+                    session.last_activity = datetime.now()
+                    
+                    try:
+                        session_manager.db.save_session(session)
+                    except Exception as e:
+                        logger.error(f"Failed to save session during skip: {e}")
+                    
+                    for key in list(st.session_state.keys()):
+                        del st.session_state[key]
+                    
+                    st.session_state['page'] = None
+                    
+                    st.info("👋 Session ended. You can start a new session anytime.")
+                    st.rerun()
+            else:
+                submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+            
+            if submit_email:
+                if current_email_input:
+                    result = session_manager.handle_guest_email_verification(session, current_email_input)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.session_state.verification_email = current_email_input
+                        st.session_state.verification_stage = "code_entry"
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                else:
+                    st.error("Please enter an email address to receive the code.")
+        
+    elif current_stage == 'code_entry':
+        verification_email = st.session_state.get('verification_email', session.email)
+        st.success(f"📧 **Verification code sent to** **{session_manager._mask_email(verification_email)}**")
+        st.info("📱 Check your email (including spam/junk folders). The code expires in 1 minute.")
+        
+        with st.form("code_verification_form", clear_on_submit=False):
+            code = st.text_input(
+                "Enter 6-Digit Verification Code", 
+                placeholder="123456", 
+                max_chars=6, 
+                key="verification_code_input",
+                help="Enter the 6-digit code from your email"
+            )
+            col_verify, col_resend = st.columns(2)
+            with col_verify:
+                submit_code = st.form_submit_button("✅ Verify Code", use_container_width=True)
+            with col_resend:
+                resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
+            
+            if resend_code:
+                if verification_email:
+                    with st.spinner("Resending verification code..."):
+                        verification_sent = session_manager.email_verification.send_verification_code(verification_email)
+                        if verification_sent:
+                            st.success("✅ New verification code sent! Check your email.")
+                            st.session_state.verification_stage = "code_entry"
+                        else:
+                            st.error("❌ Failed to resend code. Please try again later.")
+                else:
+                    st.error("Error: No email address found. Please go back and enter your email.")
+                    st.session_state.verification_stage = "email_entry"
+                st.rerun()
+
+            if submit_code:
+                if code and len(code) == 6:
+                    with st.spinner("🔍 Verifying your code..."):
+                        result = session_manager.verify_email_code(session, code)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.balloons()
+                        st.session_state.chat_blocked_by_dialog = False
+                        st.session_state.verification_stage = None
+                        st.session_state.guest_continue_active = False
+                        st.session_state.final_answer_acknowledged = False
+                        st.session_state.gentle_prompt_shown = False
+                        st.session_state.email_verified_final_answer_acknowledged = False
+                        st.session_state.must_verify_email_immediately = False
+                        st.session_state.skip_email_allowed = True
+                        if 'just_answered' in st.session_state:
+                             del st.session_state.just_answered
+                        st.rerun()
+                    else:
+                        st.error(result['message'])
+                elif code:
+                    st.error("Please enter a 6-digit verification code.")
+                else:
+                    st.error("Please enter the verification code you received.")
+        
+    elif current_stage == 'declined_recognized_email_prompt_only':
+        st.session_state.chat_blocked_by_dialog = False
+
+        remaining_questions = GUEST_QUESTION_LIMIT - session.daily_question_count
+        st.info(f"✅ **Continuing as Guest** - You have **{remaining_questions} questions** remaining from your guest allowance.")
+        st.info(f"💡 **Pro Tip:** Verify your email anytime to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day + chat history saving.")
+
+        with st.expander("📧 Want to Verify a Different Email?", expanded=False):
+            col_opts1, col_opts2 = st.columns(2)
+            with col_opts1:
+                if st.button("📧 Enter My Email for Verification", use_container_width=True, key="new_email_opt_btn"):
+                    st.session_state.verification_email = ""
+                    st.session_state.verification_stage = "email_entry"
+                    st.session_state.guest_continue_active = False
+                    st.rerun()
+            with col_opts2:
+                if st.button("👍 Continue as Guest", use_container_width=True, key="continue_guest_btn"):
+                    st.session_state.guest_continue_active = True
+                    st.session_state.chat_blocked_by_dialog = False
+                    st.session_state.verification_stage = None
+                    st.success("Perfect! You can continue as a Guest. The email verification option will always be available.")
+                    st.rerun()
+
+    return should_block_chat
+
+def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
+    """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
+    
+    st.title("FiFi AI Assistant")
+    st.caption("Hello, I am FiFi, your AI-powered assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, explore recipe ideas, technical data, and more.")
+
+    # NEW: Show fingerprint waiting status ONLY for non-registered users
+    # This block is now handled higher up in main_fixed, so it won't be displayed here
+    # However, if for any reason it gets to this point and is still not ready,
+    # it means the fingerprinting is taking too long or failed, and main_fixed
+    # will have already triggered a rerun. This means this section will only
+    # execute once is_chat_ready is True.
+
+    # Simple activity tracking
+    if activity_result:
+        js_last_activity_timestamp = activity_result.get('last_activity')
+        if js_last_activity_timestamp:
+            try:
+                new_activity = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
+                if session.last_activity is None or new_activity > session.last_activity:
+                    session.last_activity = new_activity
+                    session_manager._save_session_with_retry(session)
+            except Exception as e:
+                logger.error(f"Failed to update activity from JavaScript: {e}")
+
+    # Browser close detection for emergency saves
+    if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
+        try:
+            render_simplified_browser_close_detection(session.session_id)
+        except Exception as e:
+            logger.error(f"Browser close detection failed: {e}")
+
+    should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
+
+    if not st.session_state.get('chat_blocked_by_dialog', False):
+        limit_check_for_display = session_manager.question_limits.is_within_limits(session)
+        if (session.user_type.value == UserType.REGISTERED_USER.value and 
+            limit_check_for_display.get('allowed') and 
+            limit_check_for_display.get('tier')):
+            
+            tier = limit_check_for_display.get('tier')
+            remaining = limit_check_for_display.get('remaining', 0)
+            
+            has_active_tier1_ban = (
+                session.ban_status == BanStatus.ONE_HOUR and 
+                session.ban_end_time and 
+                datetime.now() < session.ban_end_time
+            )
+            
+            if tier == 2 and remaining <= 3:
+                st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until {TIER_2_BAN_HOURS}-hour reset!")
+            elif tier == 1 and remaining <= 2 and remaining > 0:
+                st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until {TIER_1_BAN_HOURS}-hour break.")
+            elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
+                if has_active_tier1_ban:
+                    time_remaining = session.ban_end_time - datetime.now()
+                    minutes = int(time_remaining.total_seconds() / 60)
+                    hours = int(time_remaining.total_seconds() / 3600)
+                    if hours >= 1:
+                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {hours} hour(s) remaining")
+                    else:
+                        st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {minutes} minutes remaining")
+                elif session.tier1_completed_in_cycle:
+                    st.info("✅ **Tier 1 Complete**: You can now proceed to Tier 2!")
+                else:
+                    st.info(f"ℹ️ **Tier 1 Complete**: Your next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.")
+
+        visible_messages = session.messages[session.display_message_offset:]
+        for msg in visible_messages:
+            role = msg.get("role", "user")
+            avatar_icon = USER_AVATAR_B64 if role == "user" else FIFI_AVATAR_B64
+            with st.chat_message(role, avatar=avatar_icon):
+                if msg.get("display_only_notice", False) and msg.get("role") == "assistant":
+                    pass
+                else:
+                    st.markdown(msg.get("content", ""))
+                
+                if msg.get("source"):
+                    source_color = {
+                        "FiFi": "🧠", "FiFi Web Search": "🌐", 
+                        "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                        "Error Handler": "❌", "Session Analytics": "📈", 
+                        "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
+                        "Business Rules": "⚙️",
+                        "12Taste Order Status": "🛒" # Changed source name
+                    }.get(msg['source'], "🤖")
+                    st.caption(f"{source_color} Source: {msg['source']}")
+                
+                # Removed "Enhanced with" block completely
+                # indicators = []
+                # if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
+                # if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
+                # if msg.get("is_meta_response"): indicators.append("📈 Session Analytics")
+                # if msg.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules")
+                # if msg.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce")
+                # if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                
+                if msg.get("safety_override"):
+                    st.warning("🛡️ Safety Override: Switched to verified sources")
+                
+                if msg.get("has_citations") and msg.get("has_inline_citations"):
+                    st.caption("📚 Response includes verified citations")
+                
+    overall_chat_disabled = (
+        not st.session_state.get('is_chat_ready', False) or 
+        should_disable_chat_input_by_dialog or 
+        session.ban_status.value != BanStatus.NONE.value or
+        st.session_state.get('is_processing_question', False)
+    )
+
+    if 'rate_limit_hit' in st.session_state:
+        rate_limit_info = st.session_state.rate_limit_hit
+        time_until_next = rate_limit_info.get('time_until_next', 0)
+        max_requests = RATE_LIMIT_REQUESTS
+        window_seconds = RATE_LIMIT_WINDOW_SECONDS
+        
+        current_time = datetime.now()
+        elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
+        remaining_time = max(0, int(time_until_next - elapsed))
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if remaining_time > 0:
+                st.error(f"⏱️ **Rate limit exceeded** - Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
+            else:
+                st.error(f"⏱️ **Rate limit exceeded** - Please wait a moment before asking another question.")
+        with col2:
+            if st.button("✕", key="dismiss_rate_limit", help="Dismiss this message", use_container_width=True):
+                del st.session_state.rate_limit_hit
+                st.rerun()
+
+    if 'moderation_flagged' in st.session_state:
+        moderation_info = st.session_state.moderation_flagged
+        categories = moderation_info.get('categories', [])
+        categories_text = ', '.join(categories) if categories else 'policy violation'
+        message = moderation_info.get('message', 'Your message violates our content policy.')
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.error(f"🛡️ **Content Policy Violation** - {categories_text}")
+            st.info(f"💡 **Guidance**: {message}")
+        with col2:
+            if st.button("✕", key="dismiss_moderation", help="Dismiss this message", use_container_width=True):
+                del st.session_state.moderation_flagged
+                st.rerun()
+
+    if 'context_flagged' in st.session_state:
+        context_info = st.session_state.context_flagged
+        category = context_info.get('category', 'off-topic')
+        confidence = context_info.get('confidence', 0.0)
+        message = context_info.get('message', '')
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if category == "unrelated_industry":
+                st.warning(f"🏭 **Outside Food Industry** - This question doesn't relate to food & beverage ingredients.")
+            elif category in ["personal_cooking", "off_topic"]:
+                st.warning(f"👨‍🍳 **Personal vs Professional** - I'm designed for B2B food industry questions.")
+            elif category == "greeting_or_polite":
+                st.info(f"👋 **Greeting Detected**")
+                st.markdown("Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?")
+            elif category == "order_query" and session.user_type == UserType.GUEST and not session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
+                st.info("🛒 **Order Inquiry** - Order lookup is available for registered users on supported e-commerce platforms. Please log in or enable WooCommerce in your configuration.")
+            else:
+                st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or market trends.")
+            
+            if category != "greeting_or_polite":
+                st.info(f"💡 **Guidance**: {message}")
+            st.caption(f"Confidence: {confidence:.1%} | Category: {category}")
+        with col2:
+            if st.button("✕", key="dismiss_context", help="Dismiss this message", use_container_width=True):
+                del st.session_state.context_flagged
+                st.rerun()
+    
+    if 'pricing_stock_notice' in st.session_state:
+        notice_info = st.session_state.pricing_stock_notice
+        query_type = notice_info.get('query_type', 'pricing')
+        message = notice_info.get('message', '')
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if query_type == 'pricing':
+                st.info("💰 **Pricing Information Notice**")
+            else:
+                st.info("📦 **Stock Availability Notice**")
+
+            st.markdown(message)
+        with col2:
+            if st.button("✕", key="dismiss_pricing_notice", help="Dismiss this message", use_container_width=True):
+                del st.session_state.pricing_stock_notice
+                st.rerun()
+
+    if not overall_chat_disabled and not st.session_state.get('is_processing_question', False):
+        user_type = session.user_type.value
+        current_count = session.daily_question_count
+        
+        if user_type == UserType.GUEST.value and current_count == GUEST_QUESTION_LIMIT - 1:
+            st.warning(f"⚠️ **Final Guest Question Coming Up!** Your next question will be your last before email verification is required.")
+            
+        elif user_type == UserType.EMAIL_VERIFIED_GUEST.value and current_count == EMAIL_VERIFIED_QUESTION_LIMIT - 1:
+            st.warning(f"⚠️ **Final Question Today!** Your next question will be your last for the next {EMAIL_VERIFIED_BAN_HOURS} hours.")
+            
+        elif user_type == UserType.REGISTERED_USER.value:
+            if current_count == REGISTERED_USER_TIER_1_LIMIT - 1:
+                st.warning(f"⚠️ **Tier 1 Final Question Coming Up!** After your next question, you'll need a {TIER_1_BAN_HOURS}-hour break.")
+            elif current_count == REGISTERED_USER_QUESTION_LIMIT - 1:
+                st.warning(f"⚠️ **Final Question Today!** Your next question will be your last for {TIER_2_BAN_HOURS} hours.")
+
+    prompt = st.chat_input(
+        "Ask me about ingredients, suppliers, or market trends..." if not st.session_state.get('is_processing_question', False) 
+        else "Processing your question, please wait...",
+        disabled=overall_chat_disabled
+    )
+    
+    if prompt:
+        logger.info(f"🎯 Processing question from {session.session_id[:8]}")
+        
+        st.session_state.is_processing_question = True
+        
+        if session_manager.check_if_attempting_to_exceed_limits(session):
+            st.session_state.is_processing_question = False
+            if session.user_type.value == UserType.GUEST.value and \
+               session.daily_question_count >= GUEST_QUESTION_LIMIT:
                 st.session_state.verification_stage = 'email_entry'
                 st.session_state.chat_blocked_by_dialog = True
                 st.session_state.final_answer_acknowledged = True
-                st.rerun()
-        with col2:
-            if skip_allowed:
-                if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="continue_reading_btn"):
-                    st.session_state.final_answer_acknowledged = True
-                    st.success("Perfect! Take your time. The verification option will remain available above.")
-                    st.rerun()
-            else:
-                st.info("Email verification is required to continue.")
-    
-    st.session_state.chat_blocked_by_dialog = False
-    return False
-
-elif user_just_hit_email_verified_limit:
-    st.session_state.just_answered = False
-    should_show_prompt = True
-    should_block_chat = False
-    
-    st.success(f"🎯 **You've completed your {EMAIL_VERIFIED_QUESTION_LIMIT} daily questions!**")
-    st.info(f"Take your time to read this answer. Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
-    
-    with st.expander("🚀 Want More Questions Daily?", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
-                st.link_button("Register Here", "https://www.12taste.com/in/my-account/", use_container_width=True)
-                st.session_state.email_verified_final_answer_acknowledged = True
-                st.rerun()
-        with col2:
-            if st.button("👀 Let Me Finish Reading First", use_container_width=True, key="email_verified_continue_reading"):
-                st.session_state.email_verified_final_answer_acknowledged = True
-                st.success(f"Perfect! Take your time reading. You'll need to wait {EMAIL_VERIFIED_BAN_HOURS} hours for more questions.")
-                st.rerun()
-    
-    st.session_state.chat_blocked_by_dialog = False
-    return False
-
-elif is_guest_limit_hit:
-    should_show_prompt = True
-    should_block_chat = True
-    if st.session_state.verification_stage is None:
-        st.session_state.verification_stage = 'email_entry'
-        st.session_state.guest_continue_active = False
-
-elif is_email_verified_limit_hit and not st.session_state.email_verified_final_answer_acknowledged:
-    should_show_prompt = True
-    should_block_chat = True
-    st.error("🛑 **Daily Limit Reached**")
-    st.info(f"You've used your {EMAIL_VERIFIED_QUESTION_LIMIT} questions for today. Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.link_button(f"Register for {REGISTERED_USER_QUESTION_LIMIT} questions/day", "https://www.12taste.com/in/my-account/", use_container_width=True)
-    with col2:
-        if st.button("Return to Welcome Page", use_container_width=True):
-            session_manager.end_session(session)
-            app_base_url = os.getenv("APP_BASE_URL", "https://fifi-eu-121263692901.europe-west1.run.app/")
-            js_redirect = f"window.top.location.href = '{app_base_url}';"
-            st.components.v1.html(f"<script>{js_redirect}</script>", height=100, width=0)
             st.rerun()
-    
-    st.session_state.chat_blocked_by_dialog = True
-    return True
-
-elif session.declined_recognized_email_at and not st.session_state.guest_continue_active and not is_guest_limit_hit:
-    should_show_prompt = True
-    should_block_chat = False
-    if st.session_state.verification_stage is None:
-        st.session_state.verification_stage = 'declined_recognized_email_prompt_only'
-
-if not should_show_prompt:
-    st.session_state.chat_blocked_by_dialog = False
-    st.session_state.verification_stage = None
-    if 'just_answered' in st.session_state:
-         del st.session_state.just_answered
-    return False
-
-st.session_state.chat_blocked_by_dialog = should_block_chat
-
-if should_block_chat:
-    st.error("📧 **Action Required**")
-
-current_stage = st.session_state.verification_stage
-
-if current_stage == 'forced_verification':
-    st.error("📧 **Email Verification Required**")
-    
-    known_emails = st.session_state.get('known_device_emails', [])
-    
-    if known_emails:
-        if len(known_emails) == 1:
-            st.info(f"This device was previously verified with **{session_manager._mask_email(known_emails)}**. Please verify an email to continue.")
-        else:
-            st.info("This device was previously verified with multiple emails. Please verify one of your emails to continue:")
-            for email in known_emails[:3]:
-                st.caption(f"• {session_manager._mask_email(email)}")
-    else:
-        st.info("This device has already been used with email verification. Please verify your email to continue using FiFi AI.")
-    
-    with st.form("forced_email_verification_form", clear_on_submit=False):
-        st.markdown("**📧 Enter your email address to receive a verification code:**")
-        current_email_input = st.text_input(
-            "Email Address", 
-            placeholder="your@email.com",
-            key="forced_email_input",
-            help="Email verification is required to continue."
-        )
-        submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
+            return
         
-        if submit_email:
-            if current_email_input:
-                st.session_state.must_verify_email_immediately = False
-                st.session_state.skip_email_allowed = True
-                
-                result = session_manager.handle_guest_email_verification(session, current_email_input)
-                if result['success']:
-                    st.success(result['message'])
-                    st.session_state.verification_email = current_email_input
-                    st.session_state.verification_stage = "code_entry"
-                    st.rerun()
-                else:
-                    st.error(result['message'])
-            else:
-                st.error("Please enter an email address to receive the code.")
-
-elif current_stage == 'initial_check':
-    prompt_container = st.container()
-    
-    with prompt_container:
-        email_to_reverify = session.pending_email
-        masked_email = session_manager._mask_email(email_to_reverify) if email_to_reverify else "your registered email"
-        st.info(f"🤝 **We recognize this device was previously used as a {session.pending_user_type.value.replace('_', ' ').title()} account.**")
-        st.info(f"Please verify **{masked_email}** to reclaim your status and higher question limits.")
+        with st.chat_message("user", avatar=USER_AVATAR_B64):
+            st.markdown(prompt)
         
-        button_key_suffix = session.session_id[:8]
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("✅ Verify this email", 
-                        use_container_width=True, 
-                        key=f"reverify_yes_{button_key_suffix}"):
-                
-                logger.info(f"Verify button clicked in session {session.session_id[:8]}")
-                
-                session.recognition_response = "yes_reverify"
-                session.declined_recognized_email_at = None
-                st.session_state.verification_email = email_to_reverify
-                st.session_state.verification_stage = "send_code_recognized"
-                
-                st.session_state.current_session_id = session.session_id
-                
-                session_manager.db.save_session(session)
-                st.rerun()
-        with col2:
-            if st.button("❌ No, I don't recognize the email", 
-                        use_container_width=True, 
-                        key=f"reverify_no_{button_key_suffix}"):
-                
-                logger.info(f"Decline button clicked in session {session.session_id[:8]}")
-                
-                session.recognition_response = "no_declined_reco"
-                session.declined_recognized_email_at = datetime.now()
-                session.user_type = UserType.GUEST 
-                session.reverification_pending = False
-                session.pending_user_type = None
-                session.pending_email = None
-                session.pending_full_name = None
-                session.pending_zoho_contact_id = None
-                session.pending_wp_token = None
-                
-                st.session_state.current_session_id = session.session_id
-                
-                session_manager.db.save_session(session)
-                st.session_state.guest_continue_active = True
-                st.session_state.chat_blocked_by_dialog = False
-                st.session_state.verification_stage = None
-                st.success("You can now continue as a Guest.")
-                st.rerun()
-
-elif current_stage == 'send_code_recognized':
-    email_to_verify = st.session_state.get('verification_email')
-    if email_to_verify:
-        st.info(f"📧 **Sending verification code to {session_manager._mask_email(email_to_verify)}...**")
-        
-        st.session_state.send_code_now = True
-        st.rerun()
-
-elif current_stage == 'email_entry':
-    skip_allowed = st.session_state.get('skip_email_allowed', True)
-    
-    st.info(f"🚀 You've used your {GUEST_QUESTION_LIMIT} guest questions. Please verify your email to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions per day!")
-    with st.form("email_verification_form", clear_on_submit=False):
-        st.markdown("**📧 Enter your email address to receive a verification code:**")
-        current_email_input = st.text_input(
-            "Email Address", 
-            placeholder="your@email.com", 
-            value=st.session_state.get('verification_email', session.email or ""), 
-            key="manual_email_input",
-            help="We'll send you a 6-digit verification code that's valid for 1 minute."
-        )
-        
-        if skip_allowed:
-            col1, col2 = st.columns(2)
-            with col1:
-                submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
-            with col2:
-                skip_button = st.form_submit_button("Skip for now", use_container_width=True)
-                
-            if skip_button:
-                logger.info(f"User chose to skip email verification for session {session.session_id[:8]} - ending session")
-                
-                session.active = False
-                session.last_activity = datetime.now()
-                
+        with st.chat_message("assistant", avatar=FIFI_AVATAR_B64):
+            with st.spinner("🔍 FiFi is processing your question and we request your patience..."):
                 try:
-                    session_manager.db.save_session(session)
-                except Exception as e:
-                    logger.error(f"Failed to save session during skip: {e}")
-                
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
-                
-                st.session_state['page'] = None
-                
-                st.info("👋 Session ended. You can start a new session anytime.")
-                st.rerun()
-        else:
-            submit_email = st.form_submit_button("📨 Send Verification Code", use_container_width=True)
-        
-        if submit_email:
-            if current_email_input:
-                result = session_manager.handle_guest_email_verification(session, current_email_input)
-                if result['success']:
-                    st.success(result['message'])
-                    st.session_state.verification_email = current_email_input
-                    st.session_state.verification_stage = "code_entry"
-                    st.rerun()
-                else:
-                    st.error(result['message'])
-            else:
-                st.error("Please enter an email address to receive the code.")
-    
-elif current_stage == 'code_entry':
-    verification_email = st.session_state.get('verification_email', session.email)
-    st.success(f"📧 **Verification code sent to** **{session_manager._mask_email(verification_email)}**")
-    st.info("📱 Check your email (including spam/junk folders). The code expires in 1 minute.")
-    
-    with st.form("code_verification_form", clear_on_submit=False):
-        code = st.text_input(
-            "Enter 6-Digit Verification Code", 
-            placeholder="123456", 
-            max_chars=6, 
-            key="verification_code_input",
-            help="Enter the 6-digit code from your email"
-        )
-        col_verify, col_resend = st.columns(2)
-        with col_verify:
-            submit_code = st.form_submit_button("✅ Verify Code", use_container_width=True)
-        with col_resend:
-            resend_code = st.form_submit_button("🔄 Resend Code", use_container_width=True)
-        
-        if resend_code:
-            if verification_email:
-                with st.spinner("Resending verification code..."):
-                    verification_sent = session_manager.email_verification.send_verification_code(verification_email)
-                    if verification_sent:
-                        st.success("✅ New verification code sent! Check your email.")
-                        st.session_state.verification_stage = "code_entry"
+                    response = asyncio.run(session_manager.get_ai_response(session, prompt))
+                    st.session_state.just_answered = True
+                    
+                    if response.get('requires_email'):
+                        st.error("📧 Please verify your email to continue.")
+                        st.session_state.verification_stage = 'email_entry' 
+                        st.session_state.chat_blocked_by_dialog = True
+                    elif response.get('banned'):
+                        st.error(response.get("content", 'Access restricted.'))
+                        if response.get('time_remaining'):
+                            time_remaining = response['time_remaining']
+                            # Ensure time_remaining is a timedelta or convert if it's an int/float (seconds)
+                            if isinstance(time_remaining, (int, float)):
+                                time_remaining_td = timedelta(seconds=time_remaining)
+                            else: # Assume it's already a timedelta from the BanStatus.ONE_HOUR / TWENTY_FOUR_HOUR messages
+                                time_remaining_td = time_remaining
+                            
+                            hours = int(time_remaining_td.total_seconds() // 3600)
+                            minutes = int((time_remaining_td.total_seconds() % 3600) // 60)
+                            st.error(f"Time remaining: {hours}h {minutes}m")
+                    elif response.get('display_only_notice', False):
+                        pass
                     else:
-                        st.error("❌ Failed to resend code. Please try again later.")
-            else:
-                st.error("Error: No email address found. Please go back and enter your email.")
-                st.session_state.verification_stage = "email_entry"
-            st.rerun()
-
-        if submit_code:
-            if code and len(code) == 6:
-                with st.spinner("🔍 Verifying your code..."):
-                    result = session_manager.verify_email_code(session, code)
-                if result['success']:
-                    st.success(result['message'])
-                    st.balloons()
-                    st.session_state.chat_blocked_by_dialog = False
-                    st.session_state.verification_stage = None
-                    st.session_state.guest_continue_active = False
-                    st.session_state.final_answer_acknowledged = False
-                    st.session_state.gentle_prompt_shown = False
-                    st.session_state.email_verified_final_answer_acknowledged = False
-                    st.session_state.must_verify_email_immediately = False
-                    st.session_state.skip_email_allowed = True
-                    if 'just_answered' in st.session_state:
-                         del st.session_state.just_answered
-                    st.rerun()
-                else:
-                    st.error(result['message'])
-            elif code:
-                st.error("Please enter a 6-digit verification code.")
-            else:
-                st.error("Please enter the verification code you received.")
-    
-elif current_stage == 'declined_recognized_email_prompt_only':
-    st.session_state.chat_blocked_by_dialog = False
-
-    remaining_questions = GUEST_QUESTION_LIMIT - session.daily_question_count
-    st.info(f"✅ **Continuing as Guest** - You have **{remaining_questions} questions** remaining from your guest allowance.")
-    st.info(f"💡 **Pro Tip:** Verify your email anytime to unlock {EMAIL_VERIFIED_QUESTION_LIMIT} questions/day + chat history saving.")
-
-    with st.expander("📧 Want to Verify a Different Email?", expanded=False):
-        col_opts1, col_opts2 = st.columns(2)
-        with col_opts1:
-            if st.button("📧 Enter My Email for Verification", use_container_width=True, key="new_email_opt_btn"):
-                st.session_state.verification_email = ""
-                st.session_state.verification_stage = "email_entry"
-                st.session_state.guest_continue_active = False
-                st.rerun()
-        with col_opts2:
-            if st.button("👍 Continue as Guest", use_container_width=True, key="continue_guest_btn"):
-                st.session_state.guest_continue_active = True
-                st.session_state.chat_blocked_by_dialog = False
-                st.session_state.verification_stage = None
-                st.success("Perfect! You can continue as a Guest. The email verification option will always be available.")
-                st.rerun()
-
-return should_block_chat
-
-def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
-"""Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
-
-st.title("FiFi AI Assistant")
-st.caption("Hello, I am FiFi, your AI-powered assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, explore recipe ideas, technical data, and more.")
-
-# NEW: Show fingerprint waiting status ONLY for non-registered users
-# This block is now handled higher up in main_fixed, so it won't be displayed here
-# However, if for any reason it gets to this point and is still not ready,
-# it means the fingerprinting is taking too long or failed, and main_fixed
-# will have already triggered a rerun. This means this section will only
-# execute once is_chat_ready is True.
-
-# Simple activity tracking
-if activity_result:
-    js_last_activity_timestamp = activity_result.get('last_activity')
-    if js_last_activity_timestamp:
-        try:
-            new_activity = datetime.fromtimestamp(js_last_activity_timestamp / 1000)
-            if session.last_activity is None or new_activity > session.last_activity:
-                session.last_activity = new_activity
-                session_manager._save_session_with_retry(session)
-        except Exception as e:
-            logger.error(f"Failed to update activity from JavaScript: {e}")
-
-# Browser close detection for emergency saves
-if session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
-    try:
-        render_simplified_browser_close_detection(session.session_id)
-    except Exception as e:
-        logger.error(f"Browser close detection failed: {e}")
-
-should_disable_chat_input_by_dialog = display_email_prompt_if_needed(session_manager, session)
-
-if not st.session_state.get('chat_blocked_by_dialog', False):
-    limit_check_for_display = session_manager.question_limits.is_within_limits(session)
-    if (session.user_type.value == UserType.REGISTERED_USER.value and 
-        limit_check_for_display.get('allowed') and 
-        limit_check_for_display.get('tier')):
-        
-        tier = limit_check_for_display.get('tier')
-        remaining = limit_check_for_display.get('remaining', 0)
-        
-        has_active_tier1_ban = (
-            session.ban_status == BanStatus.ONE_HOUR and 
-            session.ban_end_time and 
-            datetime.now() < session.ban_end_time
-        )
-        
-        if tier == 2 and remaining <= 3:
-            st.warning(f"⚠️ **Tier 2 Alert**: Only {remaining} questions remaining until {TIER_2_BAN_HOURS}-hour reset!")
-        elif tier == 1 and remaining <= 2 and remaining > 0:
-            st.info(f"ℹ️ **Tier 1**: {remaining} questions remaining until {TIER_1_BAN_HOURS}-hour break.")
-        elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
-            if has_active_tier1_ban:
-                time_remaining = session.ban_end_time - datetime.now()
-                minutes = int(time_remaining.total_seconds() / 60)
-                hours = int(time_remaining.total_seconds() / 3600)
-                if hours >= 1:
-                    st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {hours} hour(s) remaining")
-                else:
-                    st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {minutes} minutes remaining")
-            elif session.tier1_completed_in_cycle:
-                st.info("✅ **Tier 1 Complete**: You can now proceed to Tier 2!")
-            else:
-                st.info(f"ℹ️ **Tier 1 Complete**: Your next question will trigger a {TIER_1_BAN_HOURS}-hour break before Tier 2.")
-
-    visible_messages = session.messages[session.display_message_offset:]
-    for msg in visible_messages:
-        role = msg.get("role", "user")
-        avatar_icon = USER_AVATAR_B64 if role == "user" else FIFI_AVATAR_B64
-        with st.chat_message(role, avatar=avatar_icon):
-            if msg.get("display_only_notice", False) and msg.get("role") == "assistant":
-                pass
-            else:
-                st.markdown(msg.get("content", ""))
-            
-            if msg.get("source"):
-                source_color = {
-                    "FiFi": "🧠", "FiFi Web Search": "🌐", 
-                    "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                    "Error Handler": "❌", "Session Analytics": "📈", 
-                    "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
-                    "Business Rules": "⚙️",
-                    "12Taste Order Status": "🛒" # Changed source name
-                }.get(msg['source'], "🤖")
-                st.caption(f"{source_color} Source: {msg['source']}")
-            
-            # Removed "Enhanced with" block completely
-            # indicators = []
-            # if msg.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
-            # if msg.get("used_search"): indicators.append("🌐 FiFi Web Search")
-            # if msg.get("is_meta_response"): indicators.append("📈 Session Analytics")
-            # if msg.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules")
-            # if msg.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce")
-            # if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-            
-            if msg.get("safety_override"):
-                st.warning("🛡️ Safety Override: Switched to verified sources")
-            
-            if msg.get("has_citations") and msg.get("has_inline_citations"):
-                st.caption("📚 Response includes verified citations")
-            
-overall_chat_disabled = (
-    not st.session_state.get('is_chat_ready', False) or 
-    should_disable_chat_input_by_dialog or 
-    session.ban_status.value != BanStatus.NONE.value or
-    st.session_state.get('is_processing_question', False)
-)
-
-if 'rate_limit_hit' in st.session_state:
-    rate_limit_info = st.session_state.rate_limit_hit
-    time_until_next = rate_limit_info.get('time_until_next', 0)
-    max_requests = RATE_LIMIT_REQUESTS
-    window_seconds = RATE_LIMIT_WINDOW_SECONDS
-    
-    current_time = datetime.now()
-    elapsed = (current_time - rate_limit_info['timestamp']).total_seconds()
-    remaining_time = max(0, int(time_until_next - elapsed))
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if remaining_time > 0:
-            st.error(f"⏱️ **Rate limit exceeded** - Please wait {remaining_time} seconds before asking another question. ({max_requests} questions per {window_seconds} seconds allowed)")
-        else:
-            st.error(f"⏱️ **Rate limit exceeded** - Please wait a moment before asking another question.")
-    with col2:
-        if st.button("✕", key="dismiss_rate_limit", help="Dismiss this message", use_container_width=True):
-            del st.session_state.rate_limit_hit
-            st.rerun()
-
-if 'moderation_flagged' in st.session_state:
-    moderation_info = st.session_state.moderation_flagged
-    categories = moderation_info.get('categories', [])
-    categories_text = ', '.join(categories) if categories else 'policy violation'
-    message = moderation_info.get('message', 'Your message violates our content policy.')
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.error(f"🛡️ **Content Policy Violation** - {categories_text}")
-        st.info(f"💡 **Guidance**: {message}")
-    with col2:
-        if st.button("✕", key="dismiss_moderation", help="Dismiss this message", use_container_width=True):
-            del st.session_state.moderation_flagged
-            st.rerun()
-
-if 'context_flagged' in st.session_state:
-    context_info = st.session_state.context_flagged
-    category = context_info.get('category', 'off-topic')
-    confidence = context_info.get('confidence', 0.0)
-    message = context_info.get('message', '')
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if category == "unrelated_industry":
-            st.warning(f"🏭 **Outside Food Industry** - This question doesn't relate to food & beverage ingredients.")
-        elif category in ["personal_cooking", "off_topic"]:
-            st.warning(f"👨‍🍳 **Personal vs Professional** - I'm designed for B2B food industry questions.")
-        elif category == "greeting_or_polite":
-            st.info(f"👋 **Greeting Detected**")
-            st.markdown("Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?")
-        elif category == "order_query" and session.user_type == UserType.GUEST and not session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
-            st.info("🛒 **Order Inquiry** - Order lookup is available for registered users on supported e-commerce platforms. Please log in or enable WooCommerce in your configuration.")
-        else:
-            st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or market trends.")
-        
-        if category != "greeting_or_polite":
-            st.info(f"💡 **Guidance**: {message}")
-        st.caption(f"Confidence: {confidence:.1%} | Category: {category}")
-    with col2:
-        if st.button("✕", key="dismiss_context", help="Dismiss this message", use_container_width=True):
-            del st.session_state.context_flagged
-            st.rerun()
-
-if 'pricing_stock_notice' in st.session_state:
-    notice_info = st.session_state.pricing_stock_notice
-    query_type = notice_info.get('query_type', 'pricing')
-    message = notice_info.get('message', '')
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if query_type == 'pricing':
-            st.info("💰 **Pricing Information Notice**")
-        else:
-            st.info("📦 **Stock Availability Notice**")
-
-        st.markdown(message)
-    with col2:
-        if st.button("✕", key="dismiss_pricing_notice", help="Dismiss this message", use_container_width=True):
-            del st.session_state.pricing_stock_notice
-            st.rerun()
-
-if not overall_chat_disabled and not st.session_state.get('is_processing_question', False):
-    user_type = session.user_type.value
-    current_count = session.daily_question_count
-    
-    if user_type == UserType.GUEST.value and current_count == GUEST_QUESTION_LIMIT - 1:
-        st.warning(f"⚠️ **Final Guest Question Coming Up!** Your next question will be your last before email verification is required.")
-        
-    elif user_type == UserType.EMAIL_VERIFIED_GUEST.value and current_count == EMAIL_VERIFIED_QUESTION_LIMIT - 1:
-        st.warning(f"⚠️ **Final Question Today!** Your next question will be your last for the next {EMAIL_VERIFIED_BAN_HOURS} hours.")
-        
-    elif user_type == UserType.REGISTERED_USER.value:
-        if current_count == REGISTERED_USER_TIER_1_LIMIT - 1:
-            st.warning(f"⚠️ **Tier 1 Final Question Coming Up!** After your next question, you'll need a {TIER_1_BAN_HOURS}-hour break.")
-        elif current_count == REGISTERED_USER_QUESTION_LIMIT - 1:
-            st.warning(f"⚠️ **Final Question Today!** Your next question will be your last for {TIER_2_BAN_HOURS} hours.")
-
-prompt = st.chat_input(
-    "Ask me about ingredients, suppliers, or market trends..." if not st.session_state.get('is_processing_question', False) 
-    else "Processing your question, please wait...",
-    disabled=overall_chat_disabled
-)
-
-if prompt:
-    logger.info(f"🎯 Processing question from {session.session_id[:8]}")
-    
-    st.session_state.is_processing_question = True
-    
-    if session_manager.check_if_attempting_to_exceed_limits(session):
-        st.session_state.is_processing_question = False
-        if session.user_type.value == UserType.GUEST.value and \
-           session.daily_question_count >= GUEST_QUESTION_LIMIT:
-            st.session_state.verification_stage = 'email_entry'
-            st.session_state.chat_blocked_by_dialog = True
-            st.session_state.final_answer_acknowledged = True
-        st.rerun()
-        return
-    
-    with st.chat_message("user", avatar=USER_AVATAR_B64):
-        st.markdown(prompt)
-    
-    with st.chat_message("assistant", avatar=FIFI_AVATAR_B64):
-        with st.spinner("🔍 FiFi is processing your question and we request your patience..."):
-            try:
-                response = asyncio.run(session_manager.get_ai_response(session, prompt))
-                st.session_state.just_answered = True
-                
-                if response.get('requires_email'):
-                    st.error("📧 Please verify your email to continue.")
-                    st.session_state.verification_stage = 'email_entry' 
-                    st.session_state.chat_blocked_by_dialog = True
-                elif response.get('banned'):
-                    st.error(response.get("content", 'Access restricted.'))
-                    if response.get('time_remaining'):
-                        time_remaining = response['time_remaining']
-                        # Ensure time_remaining is a timedelta or convert if it's an int/float (seconds)
-                        if isinstance(time_remaining, (int, float)):
-                            time_remaining_td = timedelta(seconds=time_remaining)
-                        else: # Assume it's already a timedelta from the BanStatus.ONE_HOUR / TWENTY_FOUR_HOUR messages
-                            time_remaining_td = time_remaining
+                        st.markdown(response.get("content", "No response generated."))
+                        if response.get("source"):
+                            source_color = {
+                                "FiFi": "🧠", "FiFi Web Search": "🌐",
+                                "Content Moderation": "🛡️", "System Fallback": "⚠️",
+                                "Error Handler": "❌", "Session Analytics": "📈",
+                                "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
+                                "Business Rules": "⚙️",
+                                "12Taste Order Status": "🛒" # Changed source name
+                            }.get(response['source'], "🤖")
+                            st.caption(f"{source_color} Source: {response['source']}")
                         
-                        hours = int(time_remaining_td.total_seconds() // 3600)
-                        minutes = int((time_remaining_td.total_seconds() % 3600) // 60)
-                        st.error(f"Time remaining: {hours}h {minutes}m")
-                elif response.get('display_only_notice', False):
-                    pass
-                else:
-                    st.markdown(response.get("content", "No response generated."))
-                    if response.get("source"):
-                        source_color = {
-                            "FiFi": "🧠", "FiFi Web Search": "🌐",
-                            "Content Moderation": "🛡️", "System Fallback": "⚠️",
-                            "Error Handler": "❌", "Session Analytics": "📈",
-                            "Session History": "📜", "Conversation Summary": "📝", "Topic Analysis": "🔍",
-                            "Business Rules": "⚙️",
-                            "12Taste Order Status": "🛒" # Changed source name
-                        }.get(response['source'], "🤖")
-                        st.caption(f"{source_color} Source: {response['source']}")
-                    
-                    # Removed "Enhanced with" indicators
-                    # indicators = []
-                    # if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
-                    # if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
-                    # if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
-                    # if response.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules")
-                    # if response.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce")
-                    # if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
-                    
-                    if response.get("safety_override"): st.warning("🛡️ Safety Override: Switched to verified sources")
-                    if response.get("has_citations") and response.get("has_inline_citations"): st.caption("📚 Response includes verified citations")
-                    
-                    logger.info(f"✅ Question processed successfully")
+                        # Removed "Enhanced with" indicators
+                        # indicators = []
+                        # if response.get("used_pinecone"): indicators.append("🧠 FiFi Knowledge Base")
+                        # if response.get("used_search"): indicators.append("🌐 FiFi Web Search")
+                        # if response.get("is_meta_response"): indicators.append("📈 Session Analytics")
+                        # if response.get("is_pricing_stock_redirect"): indicators.append("⚙️ Business Rules")
+                        # if response.get("source") == "WooCommerce": indicators.append("🛒 WooCommerce")
+                        # if indicators: st.caption(f"Enhanced with: {', '.join(indicators)}")
+                        
+                        if response.get("safety_override"): st.warning("🛡️ Safety Override: Switched to verified sources")
+                        if response.get("has_citations") and response.get("has_inline_citations"): st.caption("📚 Response includes verified citations")
+                        
+                        logger.info(f"✅ Question processed successfully")
 
-            except Exception as e:
-                logger.error(f"❌ AI response failed: {e}", exc_info=True)
-                st.error("⚠️ I encountered an error. Please try again.")
-            finally:
-                st.session_state.is_processing_question = False
-    
-    st.session_state.is_processing_question = False
-    st.rerun()
+                except Exception as e:
+                    logger.error(f"❌ AI response failed: {e}", exc_info=True)
+                    st.error("⚠️ I encountered an error. Please try again.")
+                finally:
+                    st.session_state.is_processing_question = False
+        
+        st.session_state.is_processing_question = False
+        st.rerun()
 
 class PersistentState:
-"""Manages state that must survive reruns"""
-
-@staticmethod
-def set(key: str, value: Any, ttl_seconds: int = 300):
-    """Set a value with optional TTL"""
-    st.session_state[f'_persistent_{key}'] = {
-        'value': value,
-        'expires': datetime.now() + timedelta(seconds=ttl_seconds)
-    }
-
-@staticmethod
-def get(key: str, default=None):
-    """Get a value if not expired"""
-    data = st.session_state.get(f'_persistent_{key}')
-    if data and datetime.now() and datetime.now() < data['expires']:
-        return data['value']
-    return default
-
-@staticmethod
-def delete(key: str):
-    """Delete a persistent state key"""
-    if f'_persistent_{key}' in st.session_state:
-        del st.session_state[f'_persistent_{key}']
+    """Manages state that must survive reruns"""
+    
+    @staticmethod
+    def set(key: str, value: Any, ttl_seconds: int = 300):
+        """Set a value with optional TTL"""
+        st.session_state[f'_persistent_{key}'] = {
+            'value': value,
+            'expires': datetime.now() + timedelta(seconds=ttl_seconds)
+        }
+    
+    @staticmethod
+    def get(key: str, default=None):
+        """Get a value if not expired"""
+        data = st.session_state.get(f'_persistent_{key}')
+        if data and datetime.now() and datetime.now() < data['expires']:
+            return data['value']
+        return default
+    
+    @staticmethod
+    def delete(key: str):
+        """Delete a persistent state key"""
+        if f'_persistent_{key}' in st.session_state:
+            del st.session_state[f'_persistent_{key}']
 
 
 def ensure_initialization_fixed():
-"""Fixed version without duplicate spinner since we have loading overlay"""
-if 'initialized' not in st.session_state or not st.session_state.initialized:
-    logger.info("Starting application initialization sequence (no spinner shown, overlay is active)...")
-    
-    try:
-        config = Config()
-        pdf_exporter = PDFExporter()
+    """Fixed version without duplicate spinner since we have loading overlay"""
+    if 'initialized' not in st.session_state or not st.session_state.initialized:
+        logger.info("Starting application initialization sequence (no spinner shown, overlay is active)...")
         
         try:
-            db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
-            st.session_state.db_manager = db_manager
-        except Exception as db_e:
-            logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
-            st.session_state.db_manager = type('FallbackDB', (), {
-                'db_type': 'memory',
-                'local_sessions': {},
-                'save_session': lambda self, session: None,
-                'load_session': lambda self, session_id: None,
-                '_load_any_session': lambda self, session_id: None, # Need for FastAPI backend
-                'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
-                'find_sessions_by_email': lambda self, email: [],
-                'cleanup_old_inactive_sessions': lambda self: None
-            })()
-        
-        try:
-            zoho_manager = ZohoCRMManager(config, pdf_exporter)
-        except Exception as e:
-            logger.error(f"Zoho manager failed: {e}")
-            zoho_manager = type('FallbackZoho', (), {
-                'config': config,
-                'save_chat_transcript_sync': lambda self, session, reason: False
-            })()
-        
-        try:
-            ai_system = EnhancedAI(config)
-        except Exception as e:
-            logger.error(f"AI system failed: {e}")
-            ai_system = type('FallbackAI', (), {
-                "openai_client": None,
-                '_needs_current_information': lambda self, prompt: False,
-                'get_response': lambda self, prompt, history=None: {
-                    "content": "AI system temporarily unavailable.",
-                    "success": False
-                }
-            })()
-        
-        rate_limiter = RateLimiter(max_requests=RATE_LIMIT_REQUESTS, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
-        fingerprinting_manager = DatabaseManager.FingerprintingManager()
-        
-        try:
-            email_verification_manager = DatabaseManager.EmailVerificationManager(config)
-            if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
+            config = Config()
+            pdf_exporter = PDFExporter()
+            
+            try:
+                db_manager = DatabaseManager(config.SQLITE_CLOUD_CONNECTION)
+                st.session_state.db_manager = db_manager
+            except Exception as db_e:
+                logger.error(f"Database manager initialization failed: {db_e}", exc_info=True)
+                st.session_state.db_manager = type('FallbackDB', (), {
+                    'db_type': 'memory',
+                    'local_sessions': {},
+                    'save_session': lambda self, session: None,
+                    'load_session': lambda self, session_id: None,
+                    '_load_any_session': lambda self, session_id: None, # Need for FastAPI backend
+                    'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
+                    'find_sessions_by_email': lambda self, email: [],
+                    'cleanup_old_inactive_sessions': lambda self: None
+                })()
+            
+            try:
+                zoho_manager = ZohoCRMManager(config, pdf_exporter)
+            except Exception as e:
+                logger.error(f"Zoho manager failed: {e}")
+                zoho_manager = type('FallbackZoho', (), {
+                    'config': config,
+                    'save_chat_transcript_sync': lambda self, session, reason: False
+                })()
+            
+            try:
+                ai_system = EnhancedAI(config)
+            except Exception as e:
+                logger.error(f"AI system failed: {e}")
+                ai_system = type('FallbackAI', (), {
+                    "openai_client": None,
+                    '_needs_current_information': lambda self, prompt: False,
+                    'get_response': lambda self, prompt, history=None: {
+                        "content": "AI system temporarily unavailable.",
+                        "success": False
+                    }
+                })()
+            
+            rate_limiter = RateLimiter(max_requests=RATE_LIMIT_REQUESTS, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
+            fingerprinting_manager = DatabaseManager.FingerprintingManager()
+            
+            try:
+                email_verification_manager = DatabaseManager.EmailVerificationManager(config)
+                if hasattr(email_verification_manager, 'supabase') and not email_verification_manager.supabase:
+                    email_verification_manager = type('DummyEmail', (), {
+                        'send_verification_code': lambda self, email: False,
+                        'verify_code': lambda self, email, code: False
+                    })()
+            except Exception as e:
+                logger.error(f"Email verification failed: {e}")
                 email_verification_manager = type('DummyEmail', (), {
                     'send_verification_code': lambda self, email: False,
                     'verify_code': lambda self, email, code: False
                 })()
-        except Exception as e:
-            logger.error(f"Email verification failed: {e}")
-            email_verification_manager = type('DummyEmail', (), {
-                'send_verification_code': lambda self, email: False,
-                'verify_code': lambda self, email, code: False
-            })()
-        
-        question_limit_manager = DatabaseManager.QuestionLimitManager()
+            
+            question_limit_manager = DatabaseManager.QuestionLimitManager()
 
-        try:
-            if config.WOOCOMMERCE_ENABLED:
-                woocommerce_manager = WooCommerceManager(config)
-            else:
+            try:
+                if config.WOOCOMMERCE_ENABLED:
+                    woocommerce_manager = WooCommerceManager(config)
+                else:
+                    woocommerce_manager = None
+            except Exception as e:
+                logger.error(f"WooCommerce manager initialization failed: {e}")
                 woocommerce_manager = None
+
+            st.session_state.session_manager = SessionManager(
+                config, st.session_state.db_manager, zoho_manager, ai_system, 
+                rate_limiter, fingerprinting_manager, email_verification_manager, 
+                question_limit_manager, woocommerce_manager
+            )
+            
+            st.session_state.pdf_exporter = pdf_exporter
+            st.session_state.error_handler = error_handler
+            st.session_state.fingerprinting_manager = fingerprinting_manager
+            st.session_state.email_verification_manager = email_verification_manager
+            st.session_state.question_limit_manager = question_limit_manager
+
+            st.session_state.chat_blocked_by_dialog = False
+            st.session_state.verification_stage = None
+            st.session_state.guest_continue_active = False
+            st.session_state.is_chat_ready = False
+            
+            st.session_state.wordpress_error = {'show_fallback': False}
+            st.session_state.wordpress_fallback_active = False
+            st.session_state.fallback_email = ''
+            st.session_state.fallback_verification_stage = None
+            st.session_state.fallback_verification_email = ''
+            st.session_state.fallback_session_id = ''
+            st.session_state.fingerprint_client_side_completed = False # NEW: Client-side FP status
+            st.session_state.expecting_order_id = False # NEW: For WooCommerce order flow
+
+            st.session_state.initialized = True
+            logger.info("✅ Application initialized successfully")
+            
         except Exception as e:
-            logger.error(f"WooCommerce manager initialization failed: {e}")
-            woocommerce_manager = None
-
-        st.session_state.session_manager = SessionManager(
-            config, st.session_state.db_manager, zoho_manager, ai_system, 
-            rate_limiter, fingerprinting_manager, email_verification_manager, 
-            question_limit_manager, woocommerce_manager
-        )
-        
-        st.session_state.pdf_exporter = pdf_exporter
-        st.session_state.error_handler = error_handler
-        st.session_state.fingerprinting_manager = fingerprinting_manager
-        st.session_state.email_verification_manager = email_verification_manager
-        st.session_state.question_limit_manager = question_limit_manager
-
-        st.session_state.chat_blocked_by_dialog = False
-        st.session_state.verification_stage = None
-        st.session_state.guest_continue_active = False
-        st.session_state.is_chat_ready = False
-        
-        st.session_state.wordpress_error = {'show_fallback': False}
-        st.session_state.wordpress_fallback_active = False
-        st.session_state.fallback_email = ''
-        st.session_state.fallback_verification_stage = None
-        st.session_state.fallback_verification_email = ''
-        st.session_state.fallback_session_id = ''
-        st.session_state.fingerprint_client_side_completed = False # NEW: Client-side FP status
-        st.session_state.expecting_order_id = False # NEW: For WooCommerce order flow
-
-        st.session_state.initialized = True
-        logger.info("✅ Application initialized successfully")
-        
-    except Exception as e:
-        logger.critical(f"Critical initialization failure: {e}", exc_info=True)
-        st.session_state.initialized = False
-        return False
-
-return True
+            logger.critical(f"Critical initialization failure: {e}", exc_info=True)
+            st.session_state.initialized = False
+            return False
+    
+    return True
 
 def main_fixed():
-"""Main application entry point with optimized fingerprint handling."""
-try:
-    st.set_page_config(
-        page_title="FiFi AI Assistant", 
-        page_icon=FIFI_AVATAR_B64 if FIFI_AVATAR_B64 else "🤖", 
-        layout="wide"
-    )
-except Exception as e:
-    logger.error(f"Failed to set page config: {e}")
+    """Main application entry point with optimized fingerprint handling."""
+    try:
+        st.set_page_config(
+            page_title="FiFi AI Assistant", 
+            page_icon=FIFI_AVATAR_B64 if FIFI_AVATAR_B64 else "🤖", 
+            layout="wide"
+        )
+    except Exception as e:
+        logger.error(f"Failed to set page config: {e}")
 
-if st.session_state.get('session_expired', False):
-    logger.info("Session expired flag detected - forcing welcome page")
-    st.session_state['page'] = None
-    if 'session_expired' in st.session_state:
-        del st.session_state['session_expired']
-    st.info("⏰ Your session expired. Please start a new session.")
+    if st.session_state.get('session_expired', False):
+        logger.info("Session expired flag detected - forcing welcome page")
+        st.session_state['page'] = None
+        if 'session_expired' in st.session_state:
+            del st.session_state['session_expired']
+        st.info("⏰ Your session expired. Please start a new session.")
 
-if 'initialized' not in st.session_state:
-    defaults = {
-        "initialized": False, "is_loading": False, "loading_message": "",
-        "is_chat_ready": False, "fingerprint_complete": False,
-        "chat_blocked_by_dialog": False, "verification_stage": None,
-        "guest_continue_active": False, "final_answer_acknowledged": False,
-        "gentle_prompt_shown": False, "email_verified_final_answer_acknowledged": False,
-        "must_verify_email_immediately": False, "skip_email_allowed": True,
-        "page": None, "fingerprint_processed_for_session": {},
-        "is_processing_question": False,
-        "wordpress_error": {'show_fallback': False},
-        "wordpress_fallback_active": False,
-        "fallback_email": '',
-        "fallback_verification_stage": None,
-        "fallback_verification_email": '',
-        "fallback_session_id": '',
-        "fingerprint_client_side_completed": False,
-        "expecting_order_id": False
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-    
-    init_success = ensure_initialization_fixed()
-    if not init_success:
-        st.error("⚠️ Application failed to initialize properly. Please refresh the page.")
+    if 'initialized' not in st.session_state:
+        defaults = {
+            "initialized": False, "is_loading": False, "loading_message": "",
+            "is_chat_ready": False, "fingerprint_complete": False,
+            "chat_blocked_by_dialog": False, "verification_stage": None,
+            "guest_continue_active": False, "final_answer_acknowledged": False,
+            "gentle_prompt_shown": False, "email_verified_final_answer_acknowledged": False,
+            "must_verify_email_immediately": False, "skip_email_allowed": True,
+            "page": None, "fingerprint_processed_for_session": {},
+            "is_processing_question": False,
+            "wordpress_error": {'show_fallback': False},
+            "wordpress_fallback_active": False,
+            "fallback_email": '',
+            "fallback_verification_stage": None,
+            "fallback_verification_email": '',
+            "fallback_session_id": '',
+            "fingerprint_client_side_completed": False,
+            "expecting_order_id": False
+        }
+        for key, value in defaults.items():
+            if key not in st.session_state:
+                st.session_state[key] = value
+        
+        init_success = ensure_initialization_fixed()
+        if not init_success:
+            st.error("⚠️ Application failed to initialize properly. Please refresh the page.")
+            return
+
+    # Handle URL-based events EARLY, before any other logic
+    handle_emergency_save_requests_from_query()
+    if handle_fingerprint_status_update_from_query():
         return
 
-# Handle URL-based events EARLY, before any other logic
-handle_emergency_save_requests_from_query()
-if handle_fingerprint_status_update_from_query():
-    return
+    session_manager = st.session_state.get('session_manager')
+    if not session_manager:
+        st.error("❌ Session Manager not available. Please refresh the page.")
+        return
 
-session_manager = st.session_state.get('session_manager')
-if not session_manager:
-    st.error("❌ Session Manager not available. Please refresh the page.")
-    return
+    # REMOVED: No longer create sessions on initial load
 
-# REMOVED: No longer create sessions on initial load
+    if st.session_state.get('is_loading', False):
+        loading_reason = st.session_state.get('loading_reason', 'unknown')
+        session_id_for_loading = st.session_state.get('current_session_id')
+        session = None
 
-if st.session_state.get('is_loading', False):
-    loading_reason = st.session_state.get('loading_reason', 'unknown')
-    session_id_for_loading = st.session_state.get('current_session_id')
-    session = None
+        if session_id_for_loading:
+            session = session_manager.db.load_session(session_id_for_loading)
+            if not session:
+                logger.error(f"Session {session_id_for_loading[:8]} not found during loading. Clearing state.")
+                set_loading_state(False)
+                st.session_state['page'] = None
+                if 'current_session_id' in st.session_state:
+                    del st.session_state['current_session_id']
+                st.rerun()
+                return
 
-    if session_id_for_loading:
-        session = session_manager.db.load_session(session_id_for_loading)
-        if not session:
-            logger.error(f"Session {session_id_for_loading[:8]} not found during loading. Clearing state.")
-            set_loading_state(False)
-            st.session_state['page'] = None
-            if 'current_session_id' in st.session_state:
-                del st.session_state['current_session_id']
-            st.rerun()
-            return
+        if loading_reason == 'start_guest':
+            set_loading_state(True, "Setting up device recognition...")
 
-    if loading_reason == 'start_guest':
-        set_loading_state(True, "Setting up device recognition...")
-
-        # Render fingerprint component ONLY if it hasn't been rendered or fingerprinting hasn't completed
-        fingerprint_rendered_key = f"fingerprint_rendered_{session_id_for_loading}"
-        if not st.session_state.get(fingerprint_rendered_key, False) and \
-           not st.session_state.get('fingerprint_client_side_completed', False):
-            
-            session_manager.fingerprinting.render_fingerprint_component(session_id_for_loading)
-            st.session_state[fingerprint_rendered_key] = True
-            st.session_state.fingerprint_wait_start = time.time()
-            logger.info(f"✅ Fingerprint component rendered and timer started for {session_id_for_loading[:8]}. Rerunning.")
-            st.rerun()
-
-        # If fingerprint component was rendered, now wait for its completion or timeout
-        if st.session_state.get(fingerprint_rendered_key, False):
-            # Poll DB for fingerprint data
-            latest_session_from_db = session_manager.db.load_session(session_id_for_loading)
-            if latest_session_from_db:
-                session.fingerprint_id = latest_session_from_db.fingerprint_id
-                session.fingerprint_method = latest_session_from_db.fingerprint_method
-                session.browser_privacy_level = latest_session_from_db.browser_privacy_level
+            # Render fingerprint component ONLY if it hasn't been rendered or fingerprinting hasn't completed
+            fingerprint_rendered_key = f"fingerprint_rendered_{session_id_for_loading}"
+            if not st.session_state.get(fingerprint_rendered_key, False) and \
+               not st.session_state.get('fingerprint_client_side_completed', False):
                 
-                # FIXED: Check if fingerprint changed from temp to real and re-attempt inheritance
-                if (session.fingerprint_id.startswith(("temp_py_", "temp_fp_")) and 
-                    latest_session_from_db.fingerprint_id and
-                    not latest_session_from_db.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))):
+                session_manager.fingerprinting.render_fingerprint_component(session_id_for_loading)
+                st.session_state[fingerprint_rendered_key] = True
+                st.session_state.fingerprint_wait_start = time.time()
+                logger.info(f"✅ Fingerprint component rendered and timer started for {session_id_for_loading[:8]}. Rerunning.")
+                st.rerun()
+
+            # If fingerprint component was rendered, now wait for its completion or timeout
+            if st.session_state.get(fingerprint_rendered_key, False):
+                # Poll DB for fingerprint data
+                latest_session_from_db = session_manager.db.load_session(session_id_for_loading)
+                if latest_session_from_db:
+                    session.fingerprint_id = latest_session_from_db.fingerprint_id
+                    session.fingerprint_method = latest_session_from_db.fingerprint_method
+                    session.browser_privacy_level = latest_session_from_db.browser_privacy_level
                     
-                    logger.info(f"🔄 Fingerprint updated from temp to real: {latest_session_from_db.fingerprint_id[:12]}")
-                    session = latest_session_from_db
-                    session_manager._attempt_fingerprint_inheritance(session)
-                    session_manager.db.save_session(session)
-                    logger.info(f"✅ Re-attempted inheritance for Guest {session.session_id[:8]}, daily_q now: {session.daily_question_count}")
-            
-            fingerprint_is_stable = not (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")))
-            
-            wait_start = st.session_state.get('fingerprint_wait_start', time.time())
-            elapsed = time.time() - wait_start
+                    # FIXED: Check if fingerprint changed from temp to real and re-attempt inheritance
+                    if (session.fingerprint_id.startswith(("temp_py_", "temp_fp_")) and 
+                        latest_session_from_db.fingerprint_id and
+                        not latest_session_from_db.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))):
+                        
+                        logger.info(f"🔄 Fingerprint updated from temp to real: {latest_session_from_db.fingerprint_id[:12]}")
+                        session = latest_session_from_db
+                        session_manager._attempt_fingerprint_inheritance(session)
+                        session_manager.db.save_session(session)
+                        logger.info(f"✅ Re-attempted inheritance for Guest {session.session_id[:8]}, daily_q now: {session.daily_question_count}")
+                
+                fingerprint_is_stable = not (session.fingerprint_id is None or session.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")))
+                
+                wait_start = st.session_state.get('fingerprint_wait_start', time.time())
+                elapsed = time.time() - wait_start
 
-            if fingerprint_is_stable or elapsed > FINGERPRINT_TIMEOUT_SECONDS:
-                st.session_state.is_chat_ready = True
-                set_loading_state(False)
-                if session and session.last_activity is None:
-                    session.last_activity = datetime.now()
-                    session_manager.db.save_session(session)
-                logger.info(f"Fingerprinting for {session_id_for_loading[:8]} completed (stable={fingerprint_is_stable}, elapsed={elapsed:.1f}s). Chat ready.")
-            else:
-                # Still waiting for fingerprint
-                st.session_state.loading_message = f"Setting up device recognition... ({int(FINGERPRINT_TIMEOUT_SECONDS - elapsed)}s remaining)"
-                time.sleep(0.5)
-                st.rerun()
-                return
+                if fingerprint_is_stable or elapsed > FINGERPRINT_TIMEOUT_SECONDS:
+                    st.session_state.is_chat_ready = True
+                    set_loading_state(False)
+                    if session and session.last_activity is None:
+                        session.last_activity = datetime.now()
+                        session_manager.db.save_session(session)
+                    logger.info(f"Fingerprinting for {session_id_for_loading[:8]} completed (stable={fingerprint_is_stable}, elapsed={elapsed:.1f}s). Chat ready.")
+                else:
+                    # Still waiting for fingerprint
+                    st.session_state.loading_message = f"Setting up device recognition... ({int(FINGERPRINT_TIMEOUT_SECONDS - elapsed)}s remaining)"
+                    time.sleep(0.5)
+                    st.rerun()
+                    return
 
-        st.session_state.page = "chat"
-        
-    elif loading_reason == 'authenticate':
-        username = st.session_state.get('temp_username', '')
-        password = st.session_state.get('temp_password', '')
-        if username and password:
-            authenticated_session = session_manager.authenticate_with_wordpress(username, password)
-            if authenticated_session:
-                session = authenticated_session
-                st.session_state.current_session_id = authenticated_session.session_id
-                st.session_state.page = "chat"
-                st.session_state.is_chat_ready = True
-                st.session_state.fingerprint_wait_start = None
-                st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
-                st.balloons()
+            st.session_state.page = "chat"
+            
+        elif loading_reason == 'authenticate':
+            username = st.session_state.get('temp_username', '')
+            password = st.session_state.get('temp_password', '')
+            if username and password:
+                authenticated_session = session_manager.authenticate_with_wordpress(username, password)
+                if authenticated_session:
+                    session = authenticated_session
+                    st.session_state.current_session_id = authenticated_session.session_id
+                    st.session_state.page = "chat"
+                    st.session_state.is_chat_ready = True
+                    st.session_state.fingerprint_wait_start = None
+                    st.success(f"🎉 Welcome back, {authenticated_session.full_name}!")
+                    st.balloons()
+                else:
+                    set_loading_state(False)
+                    st.session_state.page = None
+                    if 'temp_username' in st.session_state: del st.session_state['temp_username']
+                    if 'temp_password' in st.session_state: del st.session_state['temp_password']
+                    st.rerun()
+                    return
             else:
                 set_loading_state(False)
+                st.error("Authentication failed: Missing username or password.")
                 st.session_state.page = None
-                if 'temp_username' in st.session_state: del st.session_state['temp_username']
-                if 'temp_password' in st.session_state: del st.session_state['temp_password']
                 st.rerun()
                 return
-        else:
+            
             set_loading_state(False)
-            st.error("Authentication failed: Missing username or password.")
-            st.session_state.page = None
-            st.rerun()
-            return
-        
+
+        if 'loading_reason' in st.session_state:
+            del st.session_state['loading_reason']
+
+        if session and not st.session_state.get('is_chat_ready', False):
+            if session.user_type == UserType.REGISTERED_USER:
+                st.session_state.is_chat_ready = True
+
         set_loading_state(False)
-
-    if 'loading_reason' in st.session_state:
-        del st.session_state['loading_reason']
-
-    if session and not st.session_state.get('is_chat_ready', False):
-        if session.user_type == UserType.REGISTERED_USER:
-            st.session_state.is_chat_ready = True
-
-    set_loading_state(False)
-    st.rerun()
-    return
-        
-current_page = st.session_state.get('page')
-
-if current_page != "chat":
-    render_welcome_page(session_manager)
-else:
-    session = session_manager.get_session(create_if_missing=False)
-    
-    if session is None or not session.active:
-        logger.warning("Expected active session for 'chat' page but got None or inactive. Forcing welcome.")
-        for key in list(st.session_state.keys()):
-            if key != 'initialized':
-                del st.session_state[key]
-        st.session_state['page'] = None
         st.rerun()
         return
+            
+    current_page = st.session_state.get('page')
     
-    if not st.session_state.get('is_chat_ready', False):
-        if 'fingerprint_wait_start' not in st.session_state:
-             st.session_state.fingerprint_wait_start = time.time()
+    if current_page != "chat":
+        render_welcome_page(session_manager)
+    else:
+        session = session_manager.get_session(create_if_missing=False)
         
-        if time.time() - st.session_state.fingerprint_wait_start > FINGERPRINT_TIMEOUT_SECONDS:
-            st.session_state.is_chat_ready = True
-            logger.warning(f"Failsafe: Fingerprint timeout in chat page ({FINGERPRINT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
-        else:
-            with st.chat_message("assistant", avatar=FIFI_AVATAR_B64):
-                st.info("🔒 Initializing secure session and device recognition...")
-                st.markdown(f"*Please wait, this ensures consistent experience and usage tracking.*")
+        if session is None or not session.active:
+            logger.warning("Expected active session for 'chat' page but got None or inactive. Forcing welcome.")
+            for key in list(st.session_state.keys()):
+                if key != 'initialized':
+                    del st.session_state[key]
+            st.session_state['page'] = None
             st.rerun()
             return
+        
+        if not st.session_state.get('is_chat_ready', False):
+            if 'fingerprint_wait_start' not in st.session_state:
+                 st.session_state.fingerprint_wait_start = time.time()
+            
+            if time.time() - st.session_state.fingerprint_wait_start > FINGERPRINT_TIMEOUT_SECONDS:
+                st.session_state.is_chat_ready = True
+                logger.warning(f"Failsafe: Fingerprint timeout in chat page ({FINGERPRINT_TIMEOUT_SECONDS}s) - enabling chat with fallback for session {session.session_id[:8]}")
+            else:
+                with st.chat_message("assistant", avatar=FIFI_AVATAR_B64):
+                    st.info("🔒 Initializing secure session and device recognition...")
+                    st.markdown(f"*Please wait, this ensures consistent experience and usage tracking.*")
+                st.rerun()
+                return
 
-    # Render activity tracker and check for session timeout
-    activity_data_from_js = None
-    if session and session.session_id:
-        activity_data_from_js = render_simple_activity_tracker(session.session_id)
-        st.session_state.latest_activity_data_from_js = activity_data_from_js
-    
-    timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
-    if timeout_triggered:
-        return
+        # Render activity tracker and check for session timeout
+        activity_data_from_js = None
+        if session and session.session_id:
+            activity_data_from_js = render_simple_activity_tracker(session.session_id)
+            st.session_state.latest_activity_data_from_js = activity_data_from_js
+        
+        timeout_triggered = check_timeout_and_trigger_reload(session_manager, session, activity_data_from_js)
+        if timeout_triggered:
+            return
 
-    # Render the main UI
-    render_sidebar(session_manager, session, st.session_state.pdf_exporter)
-    render_chat_interface_simplified(session_manager, session, activity_data_from_js)
+        # Render the main UI
+        render_sidebar(session_manager, session, st.session_state.pdf_exporter)
+        render_chat_interface_simplified(session_manager, session, activity_data_from_js)
 
 if __name__ == "__main__":
-main_fixed()
+    main_fixed()
