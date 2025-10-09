@@ -4968,37 +4968,43 @@ class SessionManager:
 
     # --- REMOVED: extract_order_id_from_query (Replaced by LLM in detect_order_query_intent_llm) ---
     # --- REMOVED: is_order_query (Replaced by LLM in detect_order_query_intent_llm) ---
-
+    
     def detect_meta_conversation_query_llm(self, prompt: str) -> Dict[str, Any]:
         """LLM-powered detection of meta-conversation queries."""
         if not self.ai.openai_client:
             logger.warning("OpenAI client not available for LLM meta-query detection. Falling back to keyword-based.")
             return self.detect_meta_conversation_query_keyword_fallback(prompt)
 
-        detection_prompt = f"""Analyze if this query is asking about the conversation/chat itself rather than food & beverage industry topics.
+        detection_prompt = f"""You are a specialized conversation intent classifier for a B2B food and beverage AI assistant (FiFi).
 
-QUERY: "{prompt}"
+        **Your core task is to strictly classify the user's current query into two groups:**
+        1.  **META-CONVERSATION:** Questions about the ongoing chat, history, session statistics, or the AI's role/functionality.
+        2.  **INDUSTRY/CONTENT QUERY:** Questions about the food and beverage industry, ingredients, suppliers, market trends, or any topic that requires external knowledge or retrieval.
 
-META-CONVERSATION INDICATORS:
-- Asking for summaries of our chat
-- Counting questions or messages
-- Listing what was discussed
-- Analyzing conversation topics/history
-- Requesting chat statistics
+        **CURRENT USER QUESTION:** "{prompt}"
 
-INDUSTRY QUESTIONS (NOT META):
-- Questions about food/beverage products, ingredients, suppliers
-- Technical queries about processing, formulation
-- Regulatory or compliance questions
-- Any actual business question
+        **META-CONVERSATION INDICATORS (Classify as is_meta: true):**
+        -   "Summarize our chat."
+        -   "How many questions have I asked?"
+        -   "What topics did we cover?"
+        -   "Show my conversation history."
 
-Respond ONLY with JSON:
-{{"is_meta": true, "type": "summarize|count|list|analyze|general|none", "confidence": 0.0-1.0}}"""
+        **INDUSTRY/CONTENT QUERY EXAMPLES (Classify as is_meta: false):**
+        -   **Definitions:** "What is the meaning of market trends?" | "Define sustainability in food packaging."
+        -   **Sourcing:** "Where can I find a good supplier for vanilla extract?"
+        -   **Technical:** "What is the application of sucralose?"
+        -   **General Industry:** "Latest news on the dairy market."
+
+        **CRITICAL RULE:** A question asking for the *definition* of a topic (e.g., 'What is X?', 'What is the meaning of Y?') is **always** an **INDUSTRY/CONTENT QUERY** (is_meta: false), even if it sounds generic or is a single sentence. Only classify as meta if the intent clearly relates to the chat history or statistics.
+
+        Respond ONLY with JSON:
+        {{"is_meta": true/false, "type": "summarize|count|list|analyze|general|none", "confidence": 0.0-1.0}}"""
 
         try:
+            # ... (rest of the function, including the OpenAI call and JSON parsing, remains the same)
             response = self.ai.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "system", "content": "You are a search query optimizer. Respond only with the optimized search query."},
+                messages=[{"role": "system", "content": "You are a specialized conversation intent classifier. Respond only with valid JSON."},
                 {"role": "user", "content": detection_prompt}],
                 max_tokens=50,
                 temperature=0.1
@@ -5006,9 +5012,13 @@ Respond ONLY with JSON:
             response_content = response.choices[0].message.content.strip().replace('```json', '').replace('```', '').strip()
             result = json.loads(response_content)
             
+            # Basic validation
             if not isinstance(result, dict) or 'is_meta' not in result or 'type' not in result:
                 logger.warning(f"LLM meta-query detection returned invalid JSON: {response_content}. Falling back to keyword.")
                 return self.detect_meta_conversation_query_keyword_fallback(prompt)
+
+            # Note: The keyword override from the previous answer is removed, as the improved prompt 
+            # should handle the generic/definition questions more reliably.
 
             logger.info(f"LLM Meta-query detection: {prompt} -> {result['is_meta']} ({result.get('type')}) Confidence: {result.get('confidence', 0.0):.2f}")
             return result
@@ -5016,6 +5026,7 @@ Respond ONLY with JSON:
         except Exception as e:
             logger.error(f"LLM meta-query detection failed: {e}. Falling back to keyword-based detection.", exc_info=True)
             return self.detect_meta_conversation_query_keyword_fallback(prompt)
+
 
     def detect_meta_conversation_query_keyword_fallback(self, prompt: str) -> Dict[str, Any]:
         """Detect if user is asking about conversation history using static keywords (fallback)."""
