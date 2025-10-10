@@ -2393,8 +2393,10 @@ Respond ONLY with a JSON object in the following format:
         all_present_statuses = sorted(status_groups.keys(), key=lambda x: common_status_order.index(x) if x in common_status_order else len(common_status_order))
         
         for status_slug in all_present_statuses:
-            status_formatted = self._format_status(status_slug) # Uses the existing _format_status method
+            # --- FIX: Use the _format_status helper to clean the slug for display ---
+            status_formatted = self._format_status(status_slug) 
             response += f"### {status_formatted}\n\n"
+            # --- END FIX ---
             
             for order in status_groups[status_slug]:
                 order_number = order.get('number', order.get('id', 'N/A'))
@@ -2418,12 +2420,23 @@ Respond ONLY with a JSON object in the following format:
                 
                 response += "\n"
         
-        response += "\n---\n*Click on any order number to view full details.*"
+        # --- FIX: Removed hallucinated/misleading instructions: "Click on any order number to view full details." ---
+        # The line that was removed was: response += "\n---\n*Click on any order number to view full details.*"
+        # Since it is a chat interface, there is nothing to click.
+        
         return response
-    # --- END MODIFIED format_multiple_orders_display ---
     
     def _format_status(self, status: str) -> str:
-        """Format order status with emoji."""
+        """Format order status with emoji, removing custom prefixes."""
+        
+        # --- FIX: Strip any custom prefixes (like 'ywraq-') before mapping/title-casing ---
+        if '-' in status:
+            # Split the slug and take the last part. Example: 'ywraq-pending' -> 'pending'
+            clean_status = status.split('-', 1)[-1] 
+        else:
+            clean_status = status
+        # --- END FIX ---
+
         status_map = {
             'pending': '🕐 Pending',
             'processing': '⚙️ Processing',
@@ -2433,7 +2446,8 @@ Respond ONLY with a JSON object in the following format:
             'refunded': '💰 Refunded',
             'failed': '❌ Failed'
         }
-        return status_map.get(status, status.title())
+        # Use clean_status for the lookup, and fall back to title-casing the clean_status if not in map
+        return status_map.get(clean_status, clean_status.replace('-', ' ').title())
     
     def _format_date(self, date_str: str) -> str:
         """Format ISO date string to readable format."""
