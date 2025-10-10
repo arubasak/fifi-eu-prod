@@ -2704,21 +2704,23 @@ class PineconeAssistantTool:
             # Apply UTM tracking to all URLs
             content = re.sub(r'(\[.*?\])\((https?://[^)]+)\)', add_utm_to_url, content)
         
-            # --- FIX START: Robust URL extraction and Source section generation ---
+            # --- FIX START: Restore numbering for the Sources list ---
             
             # Find ALL unique URLs from the Pinecone response
             url_pattern = r'\[.*?\]\((https?://[^)]+)\)'
             found_urls_with_utm = re.findall(url_pattern, content)
             
             # Use a set to ensure only unique URLs are listed
-            unique_urls = set(found_urls_with_utm) 
+            unique_urls = list(set(found_urls_with_utm)) # Convert to list to enable consistent numbering
             
             # Check if a Sources section exists (ignoring content after the header)
             has_sources_section = bool(re.search(r'\*\*Sources:\*\*', content, re.IGNORECASE))
-        
+            
             if unique_urls:
-                
-                citations_list = "\n".join([f"- {url}" for url in unique_urls])
+                # --- NEW/FIXED LOGIC: Create numbered list for Sources block ---
+                citations_list_items = [f"[{i+1}] {url}" for i, url in enumerate(unique_urls)]
+                citations_list = "\n".join(citations_list_items)
+                # --- END NEW/FIXED LOGIC ---
                 
                 if not has_sources_section:
                     # If URLs exist but the LLM didn't create the section, append it
@@ -2727,16 +2729,12 @@ class PineconeAssistantTool:
                     content += citations_header + citations_list
                 
                 else:
-                    # If the LLM included the Sources header but the content is either missing or fabricated 
-                    # (which it is, as seen by the "🧠 Source: FiFi" immediately following the header in the bug example),
-                    # we inject the list of URLs right after the header, and ensure the trailing markdown is still handled.
+                    # If the LLM included the Sources header but the content is either missing or fabricated,
+                    # we inject the list of URLs right after the header.
                     
-                    # This pattern specifically targets **Sources:** up to the end of the string or the next markdown block
                     logger.info(f"Injecting {len(unique_urls)} URLs into existing Sources section (LLM source hallucination/omission detected).")
                     
-                    # Use a negative lookahead to prevent matching the existing closing tags, 
-                    # replacing everything between the Sources header and the end of the output.
-                    # This is aggressive but necessary when the LLM fabricates filler like '🧠 Source: FiFi'.
+                    # This pattern replaces all content between the **Sources:** header and the end of the output
                     content = re.sub(
                         r'(\*\*Sources:\*\*)\s*([\s\S]*?)(\Z|\*\*|\n---)', 
                         r'\1\n' + citations_list + r'\3', 
@@ -2748,6 +2746,7 @@ class PineconeAssistantTool:
             # --- FIX END ---
         
             # Re-check for citations. If any unique URLs were found, we count it as having citations.
+            # This is fine as long as the LLM correctly adds citations [1], [2] in the body.
             has_citations = bool(re.search(r'\[\d+\]', content) or unique_urls)
         
             return {
