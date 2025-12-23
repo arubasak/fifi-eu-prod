@@ -6847,7 +6847,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("🔗 Go to Registration", use_container_width=True, key="register_upgrade_btn"):
-                    st.link_button("Register Here", "https://www.12taste.com/in/my-account/", use_container_width=True)
+                    st.link_button("Register Here", "https://www.12taste.com/my-account/", use_container_width=True)
                     st.session_state.email_verified_final_answer_acknowledged = True
                     st.rerun()
             with col2:
@@ -6874,7 +6874,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         
         col1, col2 = st.columns(2)
         with col1:
-            st.link_button(f"Register for {REGISTERED_USER_QUESTION_LIMIT} questions/day", "https://www.12taste.com/in/my-account/", use_container_width=True)
+            st.link_button(f"Register for {REGISTERED_USER_QUESTION_LIMIT} questions/day", "https://www.12taste.com/my-account/", use_container_width=True)
         with col2:
             if st.button("Return to Welcome Page", use_container_width=True):
                 session_manager.end_session(session)
