@@ -1513,7 +1513,7 @@ class DatabaseManager:
             """Specific message for email-verified guests hitting their daily limit."""
             return (f"You've reached your daily limit of {EMAIL_VERIFIED_QUESTION_LIMIT} questions. "
                     f"Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hour{'s' if EMAIL_VERIFIED_BAN_HOURS > 1 else ''}. "
-                    f"To increase the limit, please Register: https://www.12taste.com/in/my-account/ and come back here to the Welcome page to Sign In.")
+                    f"To increase the limit, please Register: https://www.12taste.com/my-account/ and come back here to the Welcome page to Sign In.")
 
 # =============================================================================
 # PDF EXPORTER & ZOHO CRM MANAGER (MOVED OUT OF DATABASEMANAGER)
