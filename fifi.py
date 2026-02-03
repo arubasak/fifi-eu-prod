@@ -7572,12 +7572,17 @@ def main_fixed():
     """Main application entry point with optimized fingerprint handling."""
     try:
         st.set_page_config(
-            page_title="FiFi AI Assistant", 
-            page_icon=FIFI_AVATAR_B64 if FIFI_AVATAR_B64 else "🤖", 
+            page_title="FiFi AI Assistant",
+            page_icon=FIFI_AVATAR_B64 if FIFI_AVATAR_B64 else "🤖",
             layout="wide"
         )
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
+
+    # Block direct access to the Cloud Run URL — app must be embedded via iframe
+    if "embed" not in st.query_params:
+        st.markdown("### Access this assistant through [12taste.com](https://www.12taste.com)")
+        st.stop()
 
     if st.session_state.get('session_expired', False):
         logger.info("Session expired flag detected - forcing welcome page")
