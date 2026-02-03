@@ -4398,7 +4398,10 @@ class SessionManager:
                         session.ban_reason = inherited_ban_info['reason']
                         session.question_limit_reached = True
                     else:
-                        session.ban_status = BanStatus.NONE # Clear any temporary ban status
+                        session.ban_status = BanStatus.NONE
+                        session.ban_start_time = None
+                        session.ban_end_time = None
+                        session.ban_reason = None
                         session.question_limit_reached = False
 
                     # Apply tier cycle info
@@ -5756,8 +5759,12 @@ class SessionManager:
                 else:
                     st.error("🚫 **Access Restricted**")
                 if time_remaining:
-                    hours = time_remaining // 3600
-                    minutes = (time_remaining % 3600) // 60
+                    if isinstance(time_remaining, timedelta):
+                        hours = max(0, int(time_remaining.total_seconds() // 3600))
+                        minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                    else:
+                        hours = max(0, int(time_remaining // 3600))
+                        minutes = int((time_remaining % 3600) // 60)
                     st.info(f"Time remaining: {hours}h {minutes}m") if is_tier_break else st.error(f"Time remaining: {hours}h {minutes}m")
                 st.info(message)
                 return True
@@ -6687,13 +6694,11 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         
         if session.ban_status.value != BanStatus.NONE.value:
             st.error(f"🚫 **STATUS: RESTRICTED**")
-            if session.ban_end_time:
-                time_remaining = datetime.now() - session.ban_end_time # Corrected calculation
-                if time_remaining.total_seconds() < 0: # Check if ban is still in future
-                    time_remaining = -time_remaining
-                    hours = int(time_remaining.total_seconds() // 3600)
-                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                    st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
+            if session.ban_end_time and datetime.now() < session.ban_end_time:
+                time_remaining = session.ban_end_time - datetime.now()
+                hours = int(time_remaining.total_seconds() // 3600)
+                minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                st.markdown(f"**Time Remaining:** {hours}h {minutes}m")
             st.markdown(f"Reason: {session.ban_reason or 'Usage policy violation'}")
         elif session.question_limit_reached and session.user_type.value == UserType.GUEST.value: 
             st.warning("⚠️ **ACTION REQUIRED: Email Verification**")
@@ -7206,8 +7211,8 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
                 if has_active_tier1_ban:
                     time_remaining = session.ban_end_time - datetime.now()
-                    minutes = int(time_remaining.total_seconds() / 60)
-                    hours = int(time_remaining.total_seconds() / 3600)
+                    hours = int(time_remaining.total_seconds() // 3600)
+                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
                     if hours >= 1:
                         st.warning(f"⏳ **{TIER_1_BAN_HOURS}-hour break in progress**: {hours} hour(s) remaining")
                     else:
