@@ -3968,8 +3968,10 @@ class SessionManager:
                         time_remaining = limit_check.get('time_remaining')
 
                         is_tier_break = session.ban_status.value in (BanStatus.ONE_HOUR.value, BanStatus.TWENTY_FOUR_HOUR.value) and session.user_type.value == UserType.REGISTERED_USER.value
-                        if is_tier_break:
-                            st.info("**Taking a short break**")
+                        if session.ban_status.value == BanStatus.ONE_HOUR.value and session.user_type.value == UserType.REGISTERED_USER.value:
+                            st.info("Induced a temporary break for a fair usage policy - helps other users to use our service and also reduces token usage.")
+                        elif session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value and session.user_type.value == UserType.REGISTERED_USER.value:
+                            st.info("🌙 **Daily questions used up!**")
                         else:
                             st.error(f"🚫 **Access Restricted**")
                         if isinstance(time_remaining, timedelta):
@@ -5747,8 +5749,10 @@ class SessionManager:
                 time_remaining = limit_check.get('time_remaining')
 
                 is_tier_break = session.ban_status.value in (BanStatus.ONE_HOUR.value, BanStatus.TWENTY_FOUR_HOUR.value) and session.user_type.value == UserType.REGISTERED_USER.value
-                if is_tier_break:
-                    st.info("**Taking a short break**")
+                if session.ban_status.value == BanStatus.ONE_HOUR.value and session.user_type.value == UserType.REGISTERED_USER.value:
+                    st.info("Induced a temporary break for a fair usage policy - helps other users to use our service and also reduces token usage.")
+                elif session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value and session.user_type.value == UserType.REGISTERED_USER.value:
+                    st.info("🌙 **Daily questions used up!**")
                 else:
                     st.error("🚫 **Access Restricted**")
                 if time_remaining:
