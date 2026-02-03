@@ -6356,6 +6356,9 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             set_loading_state(True, "Authenticating and preparing your session...")
                             st.rerun()
 
+            st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
+            st.markdown("[Forgot your password?](https://www.12taste.com/my-account/lost-password/)")
+
     with tab2:
         st.markdown(f"""
         **Continue as a guest** to get a quick start and try FiFi AI Assistant without signing in.
