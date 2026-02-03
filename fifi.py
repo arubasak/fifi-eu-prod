@@ -1113,7 +1113,7 @@ class DatabaseManager:
 
             if row:
                 messages = safe_json_loads(row[0], default_value=[])
-                offset = row[1] if row[1] else 0
+                offset = row[1] if row[1] is not None else 0
                 if messages:
                     logger.info(f"💬 [CHAT_RECOVERY] Found {len(messages)} messages from inactive session (DB)")
                     return {'messages': messages, 'display_message_offset': offset}
@@ -1560,6 +1560,8 @@ class DatabaseManager:
                         return f"{minutes} minute{'s' if minutes != 1 else ''}"
                     else:
                         return "less than a minute"
+                else:
+                    return "less than a minute"
             return f"{fallback_hours} hour{'s' if fallback_hours > 1 else ''}"
 
         def _get_ban_message(self, session: UserSession, ban_reason_from_limit_check: Optional[str] = None) -> str:
@@ -3969,7 +3971,7 @@ class SessionManager:
 
         if recovered and recovered['messages']:
             session.messages = recovered['messages']
-            session.display_message_offset = recovered.get('display_message_offset', 0)
+            session.display_message_offset = 0  # Reset to show all recovered messages
             st.session_state[recovery_key] = True
             logger.info(f"💬 [CHAT_RECOVERY] Recovered {len(recovered['messages'])} messages for session {session.session_id[:8]}")
             return True
