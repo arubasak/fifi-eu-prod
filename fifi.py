@@ -5412,7 +5412,7 @@ class SessionManager:
                 
                 # Check authentication
                 if not (session.user_type == UserType.REGISTERED_USER or session.user_type == UserType.EMAIL_VERIFIED_GUEST) or not session.email:
-                    message = "To check order status, please Sign Out from this Guest session provided in the sidebar of this chat app and return to sign in as a Registered User. If you have not completed your registration, you can go to https://www.12taste.com/my-account/ for completing the registration process. Alternatively, you can choose to verify your email address after completing the four complimentary questions."
+                    message = "To check order status, please Sign Out from this Guest session provided in the sidebar of this chat app and return to sign in as a Registered User. If you have not completed your registration, you can go to https://www.12taste.com/in/my-account/ for completing the registration process. Alternatively, you can choose to verify your email address after completing the four complimentary questions."
                     session.messages.append({'role': 'user', 'content': prompt})
                     session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
                     self._update_activity(session)
@@ -7572,17 +7572,12 @@ def main_fixed():
     """Main application entry point with optimized fingerprint handling."""
     try:
         st.set_page_config(
-            page_title="FiFi AI Assistant",
-            page_icon=FIFI_AVATAR_B64 if FIFI_AVATAR_B64 else "🤖",
+            page_title="FiFi AI Assistant", 
+            page_icon=FIFI_AVATAR_B64 if FIFI_AVATAR_B64 else "🤖", 
             layout="wide"
         )
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
-
-    # Block direct access to the Cloud Run URL — app must be embedded via iframe
-    if "embed" not in st.query_params:
-        st.markdown("### Access this assistant through [12taste.com](https://www.12taste.com)")
-        st.stop()
 
     if st.session_state.get('session_expired', False):
         logger.info("Session expired flag detected - forcing welcome page")
