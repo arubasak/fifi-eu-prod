@@ -1494,9 +1494,9 @@ class DatabaseManager:
             if session.ban_status.value == BanStatus.EVASION_BLOCK.value:
                 return "Access restricted due to policy violation. Please try again later."
             elif ban_reason_from_limit_check == 'registered_user_tier1_limit' or session.ban_status.value == BanStatus.ONE_HOUR.value:
-                return f"You've reached the Tier 1 limit ({REGISTERED_USER_TIER_1_LIMIT} questions). Please wait {TIER_1_BAN_HOURS} hour{'s' if TIER_1_BAN_HOURS > 1 else ''} to access Tier 2."
+                return f"You've used your first {REGISTERED_USER_TIER_1_LIMIT} questions! More questions will be available in {TIER_1_BAN_HOURS} hour{'s' if TIER_1_BAN_HOURS > 1 else ''}."
             elif ban_reason_from_limit_check == 'registered_user_tier2_limit' or (session.user_type.value == UserType.REGISTERED_USER.value and session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value):
-                return f"Daily limit of {REGISTERED_USER_QUESTION_LIMIT} questions reached. Please retry in {TIER_2_BAN_HOURS} hours."
+                return f"You've used all {REGISTERED_USER_QUESTION_LIMIT} questions for today. Your questions will reset in {TIER_2_BAN_HOURS} hours."
             elif ban_reason_from_limit_check == 'email_verified_guest_limit' or (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value and session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value):
                 return self._get_email_verified_limit_message()
             elif session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value:
@@ -3568,7 +3568,7 @@ class SessionManager:
     
     def _clear_error_notifications(self):
         """Clear all error notification states when a successful question is processed."""
-        error_keys = ['rate_limit_hit', 'moderation_flagged', 'context_flagged', 'pricing_stock_notice']
+        error_keys = ['rate_limit_hit', 'moderation_flagged', 'context_flagged']
         cleared_errors = []
     
         for key in error_keys:
@@ -3967,15 +3967,19 @@ class SessionManager:
                         message = limit_check.get('message', 'Access restricted due to usage policy.')
                         time_remaining = limit_check.get('time_remaining')
 
-                        st.error(f"🚫 **Access Restricted**")
+                        is_tier_break = session.ban_status.value in (BanStatus.ONE_HOUR.value, BanStatus.TWENTY_FOUR_HOUR.value) and session.user_type.value == UserType.REGISTERED_USER.value
+                        if is_tier_break:
+                            st.info("**Taking a short break**")
+                        else:
+                            st.error(f"🚫 **Access Restricted**")
                         if isinstance(time_remaining, timedelta):
                             hours = max(0, int(time_remaining.total_seconds() // 3600))
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                            st.error(f"Time remaining: {hours}h {minutes}m")
+                            st.info(f"Time remaining: {hours}h {minutes}m") if is_tier_break else st.error(f"Time remaining: {hours}h {minutes}m")
                         elif isinstance(time_remaining, (int, float)):
                             hours = max(0, int(time_remaining // 3600))
                             minutes = int((time_remaining % 3600) // 60)
-                            st.error(f"Time remaining: {hours}h {minutes}m")
+                            st.info(f"Time remaining: {hours}h {minutes}m") if is_tier_break else st.error(f"Time remaining: {hours}h {minutes}m")
 
                         st.info(message)
                         logger.info(f"🚫 [GET_SESSION] Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
@@ -5368,11 +5372,11 @@ class SessionManager:
                     return {'content': 'An error occurred while tracking your question. Please try again.', 'success': False, 'source': 'Question Tracker'}
 
                 session.messages.append({'role': 'user', 'content': prompt})
-                st.session_state.pricing_stock_notice = {
-                    'timestamp': datetime.now(),
-                    'query_type': 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost']) else 'stock',
-                    'message': """Thank you for your interest in pricing information. For the most accurate and up-to-date pricing and quotes, please visit the product page directly on our website or contact our sales team at sales-eu@12taste.com for personalized assistance."""
-                }
+                query_type = 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost']) else 'stock'
+                if query_type == 'pricing':
+                    st.toast("For pricing and quotes, please contact our sales team at sales-eu@12taste.com", icon="💰")
+                else:
+                    st.toast("For stock availability, please contact our sales team at sales-eu@12taste.com", icon="📦")
                 self._update_activity(session)
                 return {'content': "", 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
 
@@ -5742,11 +5746,15 @@ class SessionManager:
                 ban_type = limit_check.get('ban_type', 'unknown')
                 time_remaining = limit_check.get('time_remaining')
 
-                st.error("🚫 **Access Restricted**")
+                is_tier_break = session.ban_status.value in (BanStatus.ONE_HOUR.value, BanStatus.TWENTY_FOUR_HOUR.value) and session.user_type.value == UserType.REGISTERED_USER.value
+                if is_tier_break:
+                    st.info("**Taking a short break**")
+                else:
+                    st.error("🚫 **Access Restricted**")
                 if time_remaining:
                     hours = time_remaining // 3600
                     minutes = (time_remaining % 3600) // 60
-                    st.error(f"Time remaining: {hours}h {minutes}m")
+                    st.info(f"Time remaining: {hours}h {minutes}m") if is_tier_break else st.error(f"Time remaining: {hours}h {minutes}m")
                 st.info(message)
                 return True
                 
@@ -7312,24 +7320,6 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                 del st.session_state.context_flagged
                 st.rerun()
     
-    if 'pricing_stock_notice' in st.session_state:
-        notice_info = st.session_state.pricing_stock_notice
-        query_type = notice_info.get('query_type', 'pricing')
-        message = notice_info.get('message', '')
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if query_type == 'pricing':
-                st.info("💰 **Pricing Information Notice**")
-            else:
-                st.info("📦 **Stock Availability Notice**")
-
-            st.markdown(message)
-        with col2:
-            if st.button("✕", key="dismiss_pricing_notice", help="Dismiss this message", use_container_width=True):
-                del st.session_state.pricing_stock_notice
-                st.rerun()
-
     if not overall_chat_disabled and not st.session_state.get('is_processing_question', False):
         user_type = session.user_type.value
         current_count = session.daily_question_count
@@ -7621,7 +7611,7 @@ def main_fixed():
 
     session_manager = st.session_state.get('session_manager')
     if not session_manager:
-        st.error("❌ Session Manager not available. Please refresh the page.")
+        st.warning("Your session has expired due to inactivity. Please refresh the page to continue.")
         return
 
     # REMOVED: No longer create sessions on initial load
