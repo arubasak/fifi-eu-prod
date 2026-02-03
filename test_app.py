@@ -890,7 +890,7 @@ class DatabaseManager:
             loaded_timeout_reason = row[40] if len(row) > 40 else None
             loaded_current_tier_cycle_id = row[41] if len(row) > 41 else None
             loaded_tier1_completed_in_cycle = bool(row[42]) if len(row) > 42 else False
-            loaded_tier_cycle_started_at = datetime.fromisoformat(row[43]) if row[43] else None
+            loaded_tier_cycle_started_at = datetime.fromisoformat(row[43]) if len(row) > 43 and row[43] else None
             loaded_login_method = row[44] if len(row) > 44 else None
             loaded_is_degraded_login = bool(row[45]) if len(row) > 45 else False
             loaded_degraded_login_timestamp = datetime.fromisoformat(row[46]) if len(row) > 46 and row[46] else None
@@ -952,11 +952,6 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to create UserSession object from row for active session {session_id[:8]}: {e}", exc_info=True)
             logger.error(f"Problematic row data (truncated): {str(row)[:200]}")
-            return None
-                
-
-        except Exception as e:
-            logger.error(f"Failed to load active session {session_id[:8]}: {e}", exc_info=True)
             return None
 
     @handle_api_errors("Database", "Find by Fingerprint")
@@ -1874,8 +1869,8 @@ class ZohoCRMManager:
             except Exception as e:
                 logger.error(f"ZOHO NOTE ADD FAILED on attempt {attempt_note + 1} with an exception.")
                 logger.error(f"Error: {type(e).__name__}: {str(e)}", exc_info=True)
-                if attempt_note < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                if attempt_note < max_retries_note - 1:
+                    time.sleep(2 ** attempt_note)
                 else:
                     logger.error("Max retries for note addition reached. Aborting save.")
                     return False
@@ -2007,7 +2002,7 @@ class WooCommerceManager:
             'total': order_data.get('total'),
             'currency': order_data.get('currency'),
             'line_items': [{'name': item.get('name'), 'quantity': item.get('quantity'), 'total': item.get('total')} for item in order_data.get('line_items', [])],
-            'billing': {k: order_data['billing'].get(k) for k in ['first_name', 'last_name', 'email', 'phone', 'address_1', 'city', 'kountry']},
+            'billing': {k: order_data['billing'].get(k) for k in ['first_name', 'last_name', 'email', 'phone', 'address_1', 'city', 'country']},
             'shipping': {k: order_data['shipping'].get(k) for k in ['address_1', 'city', 'country']}
         }
         
@@ -3933,7 +3928,7 @@ class SessionManager:
                     
                         ban_type = limit_check.get('ban_type', 'unknown')
                         message = limit_check.get('message', 'Access restricted due to usage policy.')
-                        time_remaining = limit_check.get('time_until_next')
+                        time_remaining = limit_check.get('time_remaining')
 
                         st.error(f"🚫 **Access Restricted**")
                         if isinstance(time_remaining, timedelta):
@@ -4846,7 +4841,7 @@ class SessionManager:
             return session
         
         session.login_method = 'email_verified'
-        session.is_degraded_login_timestamp = None
+        session.degraded_login_timestamp = None
         session.wp_token = None
         logger.info(f"No registered user history found for {email} - proceeding as email verified guest")
         return session
@@ -5580,7 +5575,7 @@ Respond ONLY with JSON:
             limit_check = self.question_limits.is_within_limits(session)
             if not limit_check['allowed']:
                 message = limit_check.get('message', 'Access restricted due to usage policy.')
-                return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': limit_check.get('time_until_next')} # Ensure consistent key
+                return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': limit_check.get('time_remaining')}
 
             self._clear_error_notifications()
             sanitized_prompt = sanitize_input(prompt)
@@ -5697,8 +5692,8 @@ Respond ONLY with JSON:
             
             if reason == 'banned':
                 ban_type = limit_check.get('ban_type', 'unknown')
-                time_remaining = limit_check.get('time_until_next')
-                
+                time_remaining = limit_check.get('time_remaining')
+
                 st.error("🚫 **Access Restricted**")
                 if time_remaining: # time_until_next is an int in seconds here
                     hours = time_remaining // 3600
