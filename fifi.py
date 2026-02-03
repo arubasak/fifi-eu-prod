@@ -1063,6 +1063,66 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Failed to clean up old sessions: {e}")
 
+    def recover_chat_history(self, email: Optional[str] = None, fingerprint_id: Optional[str] = None) -> Optional[Dict]:
+        """Recover messages from the most recent inactive session matching email or fingerprint.
+        Returns {'messages': [...], 'display_message_offset': int} or None."""
+        if not email and not fingerprint_id:
+            return None
+
+        self._ensure_connection_healthy()
+
+        if self.db_type == "memory":
+            best = None
+            for s in self.local_sessions.values():
+                if not s.active and s.messages:
+                    matched = False
+                    if email and s.email and s.email.lower() == email.lower():
+                        matched = True
+                    elif fingerprint_id and not fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")) and s.fingerprint_id == fingerprint_id:
+                        matched = True
+                    if matched and (best is None or (s.last_activity and (best.last_activity is None or s.last_activity > best.last_activity))):
+                        best = s
+            if best:
+                logger.info(f"💬 [CHAT_RECOVERY] Found {len(best.messages)} messages from inactive session {best.session_id[:8]} (memory)")
+                return {'messages': copy.deepcopy(best.messages), 'display_message_offset': best.display_message_offset}
+            return None
+
+        try:
+            conditions = []
+            params = []
+            if email:
+                conditions.append("LOWER(email) = LOWER(?)")
+                params.append(email)
+            if fingerprint_id and not fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_")):
+                conditions.append("fingerprint_id = ?")
+                params.append(fingerprint_id)
+
+            if not conditions:
+                return None
+
+            where_clause = " OR ".join(conditions)
+            cursor = self.conn.execute(f"""
+                SELECT messages, display_message_offset FROM sessions
+                WHERE ({where_clause})
+                AND active = 0
+                AND messages != '[]'
+                ORDER BY last_activity DESC
+                LIMIT 1
+            """, params)
+            row = cursor.fetchone()
+
+            if row:
+                messages = safe_json_loads(row[0], default_value=[])
+                offset = row[1] if row[1] else 0
+                if messages:
+                    logger.info(f"💬 [CHAT_RECOVERY] Found {len(messages)} messages from inactive session (DB)")
+                    return {'messages': messages, 'display_message_offset': offset}
+
+            return None
+        except Exception as e:
+            logger.error(f"❌ [CHAT_RECOVERY] Failed to recover chat history: {e}")
+            return None
+
     # =============================================================================
     # FEATURE MANAGERS (nested within DatabaseManager as they access self.db)
     # =============================================================================
@@ -3890,6 +3950,33 @@ class SessionManager:
 
         logger.info(f"✅ [INHERIT] Final inheritance status for {session.session_id[:8]}: user_type={session.user_type.value}, daily_q={session.daily_question_count}, total_q={session.total_question_count}, ban_status={session.ban_status.value}, rev_pending={session.reverification_pending}, pending_type={session.pending_user_type.value if session.pending_user_type else 'None'}, declined_at={session.declined_recognized_email_at}")
 
+    def _recover_chat_history(self, session: UserSession) -> bool:
+        """Recover chat messages from a previous inactive session.
+        Only recovers if the current session has no messages yet.
+        Uses email (if available) or fingerprint_id to find the previous session."""
+        recovery_key = f'messages_recovered_{session.session_id}'
+        if st.session_state.get(recovery_key, False):
+            return False
+
+        if len(session.messages) > 0:
+            logger.debug(f"💬 [CHAT_RECOVERY] Session {session.session_id[:8]} already has {len(session.messages)} messages, skipping recovery")
+            return False
+
+        recovered = self.db.recover_chat_history(
+            email=session.email,
+            fingerprint_id=session.fingerprint_id
+        )
+
+        if recovered and recovered['messages']:
+            session.messages = recovered['messages']
+            session.display_message_offset = recovered.get('display_message_offset', 0)
+            st.session_state[recovery_key] = True
+            logger.info(f"💬 [CHAT_RECOVERY] Recovered {len(recovered['messages'])} messages for session {session.session_id[:8]}")
+            return True
+
+        logger.debug(f"💬 [CHAT_RECOVERY] No messages to recover for session {session.session_id[:8]}")
+        return False
+
     def get_session(self, create_if_missing: bool = True) -> Optional[UserSession]:
         """Gets or creates the current user session with enhanced validation."""
         logger.info(f"🔍 [GET_SESSION] Start for session_id in state: {st.session_state.get('current_session_id', 'None')[:8]} (create_if_missing={create_if_missing})")
@@ -4033,6 +4120,7 @@ class SessionManager:
             if new_session.user_type != UserType.REGISTERED_USER:
                 self._attempt_fingerprint_inheritance(new_session)
                 st.session_state[f'fingerprint_checked_for_inheritance_{new_session.session_id}'] = True
+                self._recover_chat_history(new_session)
             else:
                 new_session.fingerprint_id = "not_collected_registered_user"
                 new_session.fingerprint_method = "email_primary"
@@ -4040,6 +4128,7 @@ class SessionManager:
                 new_session.tier1_completed_in_cycle = False
                 new_session.tier_cycle_started_at = datetime.now()
                 logger.info(f"✅ [GET_SESSION] New REGISTERED_USER session {new_session.session_id[:8]} fingerprint marked as not collected. New tier cycle started.")
+                self._recover_chat_history(new_session)
 
             self.db.save_session(new_session)
             logger.info(f"✅ [GET_SESSION] Created and stored new session {new_session.session_id[:8]} (post-inheritance check), active={new_session.active}, rev_pending={new_session.reverification_pending}, Daily_Q: {new_session.daily_question_count}, Last_Q_Time: {new_session.last_question_time}")
@@ -4542,6 +4631,9 @@ class SessionManager:
                 if session.last_activity is None:
                     session.last_activity = now # Use current time
 
+                # Recover chat history from previous session now that email is available
+                self._recover_chat_history(session)
+
                 try:
                     self.db.save_session(session)
                     # Sync with other sessions based on the final user type
@@ -4769,11 +4861,14 @@ class SessionManager:
                     st.session_state.is_chat_ready = True
                     st.session_state.fingerprint_wait_start = None
 
+                    # Recover chat history from previous session now that email is available
+                    self._recover_chat_history(current_session)
+
                     try:
                         self.db.save_session(current_session)
                         logger.info(f"DEBUG AUTH: Session {current_session.session_id[:8]} saved after WordPress login. Final daily_q: {current_session.daily_question_count}.")
                         logger.info(f"✅ REGISTERED_USER setup complete: {user_email}, {current_session.daily_question_count}/{REGISTERED_USER_QUESTION_LIMIT} questions. Chat enabled immediately.")
-                        
+
                         self.sync_registered_user_sessions(user_email, current_session.session_id)
 
                     except Exception as e:
