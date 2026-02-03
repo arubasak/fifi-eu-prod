@@ -1486,28 +1486,49 @@ class DatabaseManager:
 
             logger.info(f"Ban applied: Type={ban_type.value}, Duration={ban_hours}h, Start={session.ban_start_time}, Reason='{reason}'.")
         
+        def _format_time_remaining(self, ban_end_time: Optional[datetime], fallback_hours: int) -> str:
+            """Format actual remaining time from ban_end_time, falling back to static hours if unavailable."""
+            if ban_end_time:
+                remaining = ban_end_time - datetime.now()
+                if remaining.total_seconds() > 0:
+                    total_secs = remaining.total_seconds()
+                    hours = int(total_secs // 3600)
+                    minutes = int((total_secs % 3600) // 60)
+                    if hours >= 1:
+                        return f"{hours}h {minutes}m"
+                    elif minutes >= 1:
+                        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+                    else:
+                        return "less than a minute"
+            return f"{fallback_hours} hour{'s' if fallback_hours > 1 else ''}"
+
         def _get_ban_message(self, session: UserSession, ban_reason_from_limit_check: Optional[str] = None) -> str:
             """
             Provides a user-friendly message for current bans,
             now differentiating between registered user tier limits.
+            Uses actual remaining time from session.ban_end_time when available.
             """
             if session.ban_status.value == BanStatus.EVASION_BLOCK.value:
                 return "Access restricted due to policy violation. Please try again later."
             elif ban_reason_from_limit_check == 'registered_user_tier1_limit' or session.ban_status.value == BanStatus.ONE_HOUR.value:
-                return f"You've used your first {REGISTERED_USER_TIER_1_LIMIT} questions! More questions will be available in {TIER_1_BAN_HOURS} hour{'s' if TIER_1_BAN_HOURS > 1 else ''}."
+                time_str = self._format_time_remaining(session.ban_end_time, TIER_1_BAN_HOURS)
+                return f"You've used your first {REGISTERED_USER_TIER_1_LIMIT} questions! More questions will be available in {time_str}."
             elif ban_reason_from_limit_check == 'registered_user_tier2_limit' or (session.user_type.value == UserType.REGISTERED_USER.value and session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value):
-                return f"You've used all {REGISTERED_USER_QUESTION_LIMIT} questions for today. Your questions will reset in {TIER_2_BAN_HOURS} hours."
+                time_str = self._format_time_remaining(session.ban_end_time, TIER_2_BAN_HOURS)
+                return f"You've used all {REGISTERED_USER_QUESTION_LIMIT} questions for today. Your questions will reset in {time_str}."
             elif ban_reason_from_limit_check == 'email_verified_guest_limit' or (session.user_type.value == UserType.EMAIL_VERIFIED_GUEST.value and session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value):
-                return self._get_email_verified_limit_message()
+                return self._get_email_verified_limit_message(session.ban_end_time)
             elif session.ban_status.value == BanStatus.TWENTY_FOUR_HOUR.value:
-                return f"Daily limit reached. Please retry in {TIER_2_BAN_HOURS} hours."
+                time_str = self._format_time_remaining(session.ban_end_time, TIER_2_BAN_HOURS)
+                return f"Daily limit reached. Please retry in {time_str}."
             else:
                 return "Access restricted due to usage policy."
         
-        def _get_email_verified_limit_message(self) -> str:
+        def _get_email_verified_limit_message(self, ban_end_time: Optional[datetime] = None) -> str:
             """Specific message for email-verified guests hitting their daily limit."""
+            time_str = self._format_time_remaining(ban_end_time, EMAIL_VERIFIED_BAN_HOURS)
             return (f"You've reached your daily limit of {EMAIL_VERIFIED_QUESTION_LIMIT} questions. "
-                    f"Your questions will reset in {EMAIL_VERIFIED_BAN_HOURS} hour{'s' if EMAIL_VERIFIED_BAN_HOURS > 1 else ''}. "
+                    f"Your questions will reset in {time_str}. "
                     f"To increase the limit, please Register: https://www.12taste.com/my-account/ and come back here to the Welcome page to Sign In.")
 
 # =============================================================================
@@ -5776,9 +5797,26 @@ class SessionManager:
 
             elif reason == 'email_verified_guest_limit':
                 st.error("🛑 **Daily Limit Reached**")
-                st.info(f"You've used your {EMAIL_VERIFIED_QUESTION_LIMIT} questions for today. Your questions reset in {EMAIL_VERIFIED_BAN_HOURS} hours, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
+                if session.ban_end_time and datetime.now() < session.ban_end_time:
+                    evg_remaining = session.ban_end_time - datetime.now()
+                    evg_hours = int(evg_remaining.total_seconds() // 3600)
+                    evg_minutes = int((evg_remaining.total_seconds() % 3600) // 60)
+                    evg_time_str = f"{evg_hours}h {evg_minutes}m" if evg_hours >= 1 else f"{evg_minutes} minutes"
+                else:
+                    evg_time_str = f"{EMAIL_VERIFIED_BAN_HOURS} hours"
+                st.info(f"You've used your {EMAIL_VERIFIED_QUESTION_LIMIT} questions for today. Your questions reset in {evg_time_str}, or consider registering for {REGISTERED_USER_QUESTION_LIMIT} questions/day!")
                 return True
-            
+
+            elif reason == 'registered_user_tier2_limit':
+                st.error("🛑 **Daily Limit Reached**")
+                if session.ban_end_time and datetime.now() < session.ban_end_time:
+                    t2_remaining = session.ban_end_time - datetime.now()
+                    t2_hours = int(t2_remaining.total_seconds() // 3600)
+                    t2_minutes = int((t2_remaining.total_seconds() % 3600) // 60)
+                    st.info(f"Time remaining: {t2_hours}h {t2_minutes}m")
+                st.info(message)
+                return True
+
         return False
 
 def log_security_event(event_type: str, session: UserSession, details: Dict[str, Any]):
@@ -6525,6 +6563,11 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 remaining_tier2 = REGISTERED_USER_QUESTION_LIMIT - session.daily_question_count
                 if remaining_tier2 > 0:
                     st.caption(f"⏰ {remaining_tier2} questions until {TIER_2_BAN_HOURS}-hour reset")
+                elif session.ban_status == BanStatus.TWENTY_FOUR_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
+                    time_remaining = session.ban_end_time - datetime.now()
+                    hours = int(time_remaining.total_seconds() // 3600)
+                    minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                    st.caption(f"⏳ Tier 2 reset: {hours}h {minutes}m remaining")
                 else:
                     st.caption(f"🚫 Daily limit reached - {TIER_2_BAN_HOURS}-hour reset required")
                     
