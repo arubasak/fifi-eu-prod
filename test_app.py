@@ -6355,11 +6355,10 @@ def render_welcome_page(session_manager: 'SessionManager'):
                             st.session_state.loading_reason = 'authenticate'
                             set_loading_state(True, "Authenticating and preparing your session...")
                             st.rerun()
-            
+
             st.info("Don't have an account? [Register here](https://www.12taste.com/in/my-account/) to unlock full features!")
-            # NEW: Forgot password link - ADDED HERE
             st.markdown("[Forgot your password?](https://www.12taste.com/my-account/lost-password/)")
-    
+
     with tab2:
         st.markdown(f"""
         **Continue as a guest** to get a quick start and try FiFi AI Assistant without signing in.
@@ -7525,12 +7524,17 @@ def main_fixed():
     """Main application entry point with optimized fingerprint handling."""
     try:
         st.set_page_config(
-            page_title="FiFi AI Assistant", 
-            page_icon=FIFI_AVATAR_B64 if FIFI_AVATAR_B64 else "🤖", 
+            page_title="FiFi AI Assistant",
+            page_icon=FIFI_AVATAR_B64 if FIFI_AVATAR_B64 else "🤖",
             layout="wide"
         )
     except Exception as e:
         logger.error(f"Failed to set page config: {e}")
+
+    # Block direct access to the Cloud Run URL — app must be embedded via iframe
+    if "embed" not in st.query_params:
+        st.markdown("### Access this assistant through [12taste.com](https://www.12taste.com)")
+        st.stop()
 
     if st.session_state.get('session_expired', False):
         logger.info("Session expired flag detected - forcing welcome page")
