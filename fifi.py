@@ -6410,8 +6410,8 @@ def handle_fingerprint_status_update_from_query():
 def render_welcome_page(session_manager: 'SessionManager'):
     """Enhanced welcome page with loading lock and WordPress fallback UI."""
     
-    st.header("Welcome to :rainbow[FiFi]")
-    st.subheader("Your :blue[AI sourcing] assistant")
+    st.header("Welcome to :rainbow[FiFi]", anchor=False)
+    st.subheader("Your :blue[AI sourcing] assistant", anchor=False)
 
     if show_loading_overlay():
         return
@@ -6557,7 +6557,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
 
             else: # Standard WordPress login form - REVERTED TO ORIGINAL LAYOUT
                 with st.form("login_form", clear_on_submit=True):
-                    st.markdown("### 🔐 Sign In to Your Account")
+                    st.subheader("🔐 Sign In to Your Account", anchor=False)
                     username = st.text_input("Username or Email", help="Enter your WordPress username or email.")
                     password = st.text_input("Password", type="password", help="Enter your WordPress password.")
                     
@@ -6601,7 +6601,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                 set_loading_state(True, "Setting up your session and initializing AI assistant...")
                 st.rerun()
 
-    st.subheader("🎯 Usage Tiers")
+    st.subheader("🎯 Usage Tiers", anchor=False)
     
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -6629,7 +6629,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         DEBUG_MODE = False # Set to True for debugging, False for production
         # Terms of Service link
         st.caption("By using this agent, you agree to our [Terms of Service](https://www.12taste.com/terms-conditions/).")
-        st.title("🎛️ Dashboard")
+        st.title("🎛️ Dashboard", anchor=False)
         
         if session.user_type.value == UserType.REGISTERED_USER.value:
             st.success("✅ **Registered User**")
@@ -7317,7 +7317,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
 def render_chat_interface_simplified(session_manager: 'SessionManager', session: UserSession, activity_result: Optional[Dict[str, Any]]):
     """Chat interface with enhanced tier system notifications and Option 2 gentle approach."""
     
-    st.title("FiFi AI Assistant")
+    st.title("FiFi AI Assistant", anchor=False)
     st.caption("Hello, I am FiFi, your AI-powered assistant, designed to support you across the sourcing and product development journey. Find the right ingredients, explore recipe ideas, technical data, and more.")
 
     # NEW: Show fingerprint waiting status ONLY for non-registered users
