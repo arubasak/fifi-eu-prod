@@ -7637,7 +7637,8 @@ def ensure_initialization_fixed():
                     '_load_any_session': lambda self, session_id: None, # Need for FastAPI backend
                     'find_sessions_by_fingerprint': lambda self, fingerprint_id: [],
                     'find_sessions_by_email': lambda self, email: [],
-                    'cleanup_old_inactive_sessions': lambda self: None
+                    'cleanup_old_inactive_sessions': lambda self: None,
+                    'recover_chat_history': lambda self, email=None, fingerprint_id=None: None
                 })()
             
             try:
@@ -7655,6 +7656,9 @@ def ensure_initialization_fixed():
                 logger.error(f"AI system failed: {e}")
                 ai_system = type('FallbackAI', (), {
                     "openai_client": None,
+                    "pinecone_tool": None,
+                    "tavily_agent": None,
+                    "config": config,
                     '_needs_current_information': lambda self, prompt: False,
                     'get_response': lambda self, prompt, history=None: {
                         "content": "AI system temporarily unavailable.",
