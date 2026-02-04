@@ -6049,10 +6049,23 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         session.email = fresh_session_from_db.email
         session.full_name = fresh_session_from_db.full_name
         session.zoho_contact_id = fresh_session_from_db.zoho_contact_id
+        session.wp_token = fresh_session_from_db.wp_token
         session.daily_question_count = fresh_session_from_db.daily_question_count
         session.total_question_count = fresh_session_from_db.total_question_count
         session.last_question_time = fresh_session_from_db.last_question_time
+        session.question_limit_reached = fresh_session_from_db.question_limit_reached
         session.display_message_offset = fresh_session_from_db.display_message_offset
+        session.timeout_saved_to_crm = fresh_session_from_db.timeout_saved_to_crm
+        session.fingerprint_id = fresh_session_from_db.fingerprint_id
+        session.fingerprint_method = fresh_session_from_db.fingerprint_method
+        session.browser_privacy_level = fresh_session_from_db.browser_privacy_level
+        session.ban_status = fresh_session_from_db.ban_status
+        session.ban_start_time = fresh_session_from_db.ban_start_time
+        session.ban_end_time = fresh_session_from_db.ban_end_time
+        session.ban_reason = fresh_session_from_db.ban_reason
+        session.evasion_count = fresh_session_from_db.evasion_count
+        session.current_penalty_hours = fresh_session_from_db.current_penalty_hours
+        session.escalation_level = fresh_session_from_db.escalation_level
         session.reverification_pending = fresh_session_from_db.reverification_pending
         session.pending_user_type = fresh_session_from_db.pending_user_type
         session.pending_email = fresh_session_from_db.pending_email
@@ -6128,6 +6141,12 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         session.active = False
         session.timeout_detected_at = datetime.now()
         session.timeout_reason = f"Streamlit client detected inactivity for {minutes_inactive:.1f} minutes."
+
+        try:
+            session_manager.db.save_session(session)
+            logger.info(f"✅ Session {session.session_id[:8]} saved to DB before clearing state (timeout)")
+        except Exception as e:
+            logger.error(f"❌ Failed to save session to DB before clearing state: {e}")
 
         for key in list(st.session_state.keys()):
             del st.session_state[key]
@@ -6522,7 +6541,7 @@ def render_welcome_page(session_manager: 'SessionManager'):
                     else:
                         st.error("Please enter a 6-digit code.")
             
-                col_resend_fallback, _ = st.columns()
+                col_resend_fallback, _ = st.columns(2)
                 with col_resend_fallback:
                     if st.button("🔄 Resend Code", use_container_width=True, key="resend_fallback_code"):
                         if email:
@@ -7061,7 +7080,7 @@ def display_email_prompt_if_needed(session_manager: 'SessionManager', session: U
         
         if known_emails:
             if len(known_emails) == 1:
-                st.info(f"This device was previously verified with **{session_manager._mask_email(known_emails)}**. Please verify an email to continue.")
+                st.info(f"This device was previously verified with **{session_manager._mask_email(known_emails[0])}**. Please verify an email to continue.")
             else:
                 st.info("This device was previously verified with multiple emails. Please verify one of your emails to continue:")
                 for email in known_emails[:3]:
@@ -7456,7 +7475,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             elif category == "greeting_or_polite":
                 st.info(f"👋 **Greeting Detected**")
                 st.markdown("Hello! I'm FiFi, your AI assistant for the food & beverage industry. How can I help you today?")
-            elif category == "order_query" and session.user_type == UserType.GUEST and not session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
+            elif category == "order_query" and session.user_type == UserType.GUEST and (not session_manager.woocommerce or not session_manager.woocommerce.config.WOOCOMMERCE_ENABLED):
                 st.info("🛒 **Order Inquiry** - Order lookup is available for registered users on supported e-commerce platforms. Please log in or enable WooCommerce in your configuration.")
             else:
                 st.warning(f"🎯 **Off-Topic Question** - Please ask about food ingredients, suppliers, or market trends.")
@@ -7585,7 +7604,7 @@ class PersistentState:
     def get(key: str, default=None):
         """Get a value if not expired"""
         data = st.session_state.get(f'_persistent_{key}')
-        if data and datetime.now() and datetime.now() < data['expires']:
+        if data and datetime.now() < data['expires']:
             return data['value']
         return default
     
@@ -7800,12 +7819,13 @@ def main_fixed():
                 # Poll DB for fingerprint data
                 latest_session_from_db = session_manager.db.load_session(session_id_for_loading)
                 if latest_session_from_db:
+                    old_fingerprint_id = session.fingerprint_id
                     session.fingerprint_id = latest_session_from_db.fingerprint_id
                     session.fingerprint_method = latest_session_from_db.fingerprint_method
                     session.browser_privacy_level = latest_session_from_db.browser_privacy_level
-                    
-                    # FIXED: Check if fingerprint changed from temp to real and re-attempt inheritance
-                    if (session.fingerprint_id.startswith(("temp_py_", "temp_fp_")) and 
+
+                    # Check if fingerprint changed from temp to real and re-attempt inheritance
+                    if (old_fingerprint_id and old_fingerprint_id.startswith(("temp_py_", "temp_fp_")) and
                         latest_session_from_db.fingerprint_id and
                         not latest_session_from_db.fingerprint_id.startswith(("temp_py_", "temp_fp_", "fallback_"))):
                         
