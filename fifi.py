@@ -685,12 +685,16 @@ class DatabaseManager:
             
             try:
                 json_messages = json.dumps(session.messages)
+            except (TypeError, ValueError) as e:
+                logger.error(f"Messages not JSON serializable for {session.session_id[:8]}: {e}. Resetting messages to empty list.")
+                json_messages = "[]"
+                session.messages = []
+
+            try:
                 json_emails_used = json.dumps(session.email_addresses_used)
             except (TypeError, ValueError) as e:
-                logger.error(f"Session data not JSON serializable for {session.session_id[:8]}: {e}. Resetting data to empty lists.")
-                json_messages = "[]"
+                logger.error(f"Email addresses not JSON serializable for {session.session_id[:8]}: {e}. Resetting emails to empty list.")
                 json_emails_used = "[]"
-                session.messages = []
                 session.email_addresses_used = []
             
             last_activity_iso = session.last_activity.isoformat() if session.last_activity else None
@@ -3630,10 +3634,11 @@ class SessionManager:
             session.messages = []
 
         try:
-            self.db.save_session(session)
+            self._save_session_with_retry(session)
             logger.debug(f"Activity update saved for {session.session_id[:8]} with {len(session.messages)} messages")
         except Exception as e:
-            logger.error(f"Failed to save session during activity update: {e}", exc_info=True)
+            logger.error(f"CRITICAL: Failed to save session during activity update after retries for {session.session_id[:8]}: {e}", exc_info=True)
+            raise
 
     def _save_session_with_retry(self, session: UserSession, max_retries: int = 3):
         """Save session with retry logic"""
@@ -7593,7 +7598,14 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
                     st.error("⚠️ I encountered an error. Please try again.")
                 finally:
                     st.session_state.is_processing_question = False
-        
+
+        # Safety-net: ensure session messages are persisted before rerun
+        try:
+            session_manager._save_session_with_retry(session)
+            logger.debug(f"Safety-net save completed for {session.session_id[:8]} with {len(session.messages)} messages before rerun")
+        except Exception as e:
+            logger.error(f"Safety-net save failed for {session.session_id[:8]}: {e}", exc_info=True)
+
         st.session_state.is_processing_question = False
         st.rerun()
 
