@@ -6759,85 +6759,95 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         # else:
         #    if DEBUG_MODE: st.caption("Session timer will start with first interaction.")
 
-        # Hide "🤖 AI Tools Status" text and its contents
-        # if DEBUG_MODE:
+        # Service Status - Compact Traffic Light Indicators
         st.divider()
-        # st.markdown("**🤖 AI Tools Status**")
-        
+
+        kb_color, kb_tip = "gray", "Knowledge Base: Not configured"
+        web_color, web_tip = "gray", "Web Search: Not configured"
+        orders_color, orders_tip = "gray", "12Taste Orders: Not configured"
+
         ai_system = session_manager.ai
         if ai_system:
             pinecone_status = error_handler.component_status.get("Pinecone", "healthy")
             tavily_status = error_handler.component_status.get("Tavily", "healthy")
-            
+
+            # Knowledge Base (Pinecone)
             if ai_system.pinecone_tool and ai_system.pinecone_tool.assistant:
                 if pinecone_status == "healthy":
-                    st.success("🧠 Knowledge Base: Ready")
+                    kb_color, kb_tip = "green", "Knowledge Base: Ready"
                 elif pinecone_status in ["rate_limit"]:
-                    st.warning("🧠 Knowledge Base: Rate Limited")
+                    kb_color, kb_tip = "yellow", "Knowledge Base: Rate Limited"
                 else:
-                    st.error(f"🧠 Knowledge Base: {pinecone_status.replace('_', ' ').title()}")
+                    kb_color, kb_tip = "red", f"Knowledge Base: {pinecone_status.replace('_', ' ').title()}"
             elif ai_system.config.PINECONE_API_KEY:
-                st.warning("🧠 Knowledge Base: Error")
-            else:
-                st.info("🧠 Knowledge Base: Not configured")
-            
+                kb_color, kb_tip = "yellow", "Knowledge Base: Error"
+
+            # Web Search (Tavily)
             if ai_system.tavily_agent:
                 if tavily_status == "healthy":
-                    st.success("🌐 Web Search: Ready")
+                    web_color, web_tip = "green", "Web Search: Ready"
                 else:
-                    st.warning(f"🌐 Web Search: {tavily_status.replace('_', ' ').title()}")
+                    web_color, web_tip = "yellow", f"Web Search: {tavily_status.replace('_', ' ').title()}"
             elif ai_system.config.TAVILY_API_KEY:
-                st.warning("🌐 Web Search: Error")
-            else:
-                st.info("🌐 Web Search: Not configured")
-            
-            # Hide "💬 OpenAI: Ready"
-            # if DEBUG_MODE:
+                web_color, web_tip = "yellow", "Web Search: Error"
+
+            # Hidden: OpenAI
             if ai_system.openai_client:
-                # st.success("💬 OpenAI: Ready")
                 pass
             elif ai_system.config.OPENAI_API_KEY:
-                # st.warning("💬 OpenAI: Error")
                 pass
             else:
-                # st.info("💬 OpenAI: Not configured")
                 pass
         else:
-            # st.error("🤖 AI System: Not available")
-            pass
-        
-        # Hide "🚫 CRM Integration: Registered users & verified guests only"
-        # if DEBUG_MODE:
-        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
-            if session.zoho_contact_id: 
-                # st.success("🔗 **CRM Linked**")
-                pass
-            else: 
-                # st.info("📋 **CRM Ready** (will link on first save)")
-                pass
-            if session.timeout_saved_to_crm:
-                # st.caption("💾 Auto-saved to CRM (after inactivity)")
-                pass
-            else:
-                # st.caption("💾 Auto-save enabled (on sign out or browser/tab close)")
-                pass
-        else: 
-            # st.caption("🚫 CRM Integration: Registered users & verified guests only")
             pass
 
-        # Display 12Taste Order Status
+        # Hidden: CRM Integration
+        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
+            if session.zoho_contact_id:
+                pass
+            else:
+                pass
+            if session.timeout_saved_to_crm:
+                pass
+            else:
+                pass
+        else:
+            pass
+
+        # 12Taste Orders (WooCommerce)
         if session_manager.woocommerce and session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
-            # Removed await asyncio.to_thread, as test_connection will be called once per render.
-            # Using a simple check here is fine. If it's slow, consider caching.
             status = session_manager.woocommerce.test_connection()
             if status["status"] == "connected":
-                st.success("🛒12Taste Order Status: Ready")
+                orders_color, orders_tip = "green", "12Taste Orders: Connected"
             else:
-                st.error(f"{status['status'].replace('_', ' ').title()}")
-                st.caption(status["message"])
-        else:
-            st.info("🛒 **12Taste Order Status**: Not configured or available") # Changed text
-        
+                orders_color, orders_tip = "red", f"12Taste Orders: {status['status'].replace('_', ' ').title()}"
+
+        # Render compact traffic-light status dots with glow
+        _glow_colors = {
+            "green":  ("#28a745", "rgba(40,167,69,0.55)"),
+            "yellow": ("#ffc107", "rgba(255,193,7,0.55)"),
+            "red":    ("#dc3545", "rgba(220,53,69,0.55)"),
+            "gray":   ("#6c757d", "rgba(108,117,125,0.25)"),
+        }
+
+        def _status_dot(color, emoji, tooltip):
+            bg, glow = _glow_colors[color]
+            return (
+                f'<div style="display:flex;flex-direction:column;align-items:center;gap:5px;cursor:default;" title="{tooltip}">'
+                f'<div style="width:14px;height:14px;border-radius:50%;background:{bg};box-shadow:0 0 10px 4px {glow};"></div>'
+                f'<span style="font-size:13px;line-height:1;">{emoji}</span>'
+                f'</div>'
+            )
+
+        st.markdown(
+            f'<div style="display:flex;justify-content:center;align-items:flex-start;gap:32px;padding:10px 0 6px 0;">'
+            f'{_status_dot(kb_color, "🧠", kb_tip)}'
+            f'{_status_dot(web_color, "🌐", web_tip)}'
+            f'{_status_dot(orders_color, "🛒", orders_tip)}'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
         st.divider()
         
         total_messages = len(session.messages)
