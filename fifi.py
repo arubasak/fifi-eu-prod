@@ -6630,7 +6630,94 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         # Terms of Service link
         st.caption("By using this agent, you agree to our [Terms of Service](https://www.12taste.com/terms-conditions/).")
         st.title("🎛️ Dashboard", anchor=False)
-        
+
+        # Service Status - Compact Traffic Light Indicators
+        kb_color, kb_tip = "gray", "Knowledge Base: Not configured"
+        web_color, web_tip = "gray", "Web Search: Not configured"
+        orders_color, orders_tip = "gray", "12Taste Orders: Not configured"
+
+        ai_system = session_manager.ai
+        if ai_system:
+            pinecone_status = error_handler.component_status.get("Pinecone", "healthy")
+            tavily_status = error_handler.component_status.get("Tavily", "healthy")
+
+            # Knowledge Base (Pinecone)
+            if ai_system.pinecone_tool and ai_system.pinecone_tool.assistant:
+                if pinecone_status == "healthy":
+                    kb_color, kb_tip = "green", "Knowledge Base: Ready"
+                elif pinecone_status in ["rate_limit"]:
+                    kb_color, kb_tip = "yellow", "Knowledge Base: Rate Limited"
+                else:
+                    kb_color, kb_tip = "red", f"Knowledge Base: {pinecone_status.replace('_', ' ').title()}"
+            elif ai_system.config.PINECONE_API_KEY:
+                kb_color, kb_tip = "yellow", "Knowledge Base: Error"
+
+            # Web Search (Tavily)
+            if ai_system.tavily_agent:
+                if tavily_status == "healthy":
+                    web_color, web_tip = "green", "Web Search: Ready"
+                else:
+                    web_color, web_tip = "yellow", f"Web Search: {tavily_status.replace('_', ' ').title()}"
+            elif ai_system.config.TAVILY_API_KEY:
+                web_color, web_tip = "yellow", "Web Search: Error"
+
+            # Hidden: OpenAI
+            if ai_system.openai_client:
+                pass
+            elif ai_system.config.OPENAI_API_KEY:
+                pass
+            else:
+                pass
+        else:
+            pass
+
+        # Hidden: CRM Integration
+        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
+            if session.zoho_contact_id:
+                pass
+            else:
+                pass
+            if session.timeout_saved_to_crm:
+                pass
+            else:
+                pass
+        else:
+            pass
+
+        # 12Taste Orders (WooCommerce)
+        if session_manager.woocommerce and session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
+            status = session_manager.woocommerce.test_connection()
+            if status["status"] == "connected":
+                orders_color, orders_tip = "green", "12Taste Orders: Connected"
+            else:
+                orders_color, orders_tip = "red", f"12Taste Orders: {status['status'].replace('_', ' ').title()}"
+
+        # Render compact traffic-light status dots with glow
+        _glow_colors = {
+            "green":  ("#28a745", "rgba(40,167,69,0.55)"),
+            "yellow": ("#ffc107", "rgba(255,193,7,0.55)"),
+            "red":    ("#dc3545", "rgba(220,53,69,0.55)"),
+            "gray":   ("#6c757d", "rgba(108,117,125,0.25)"),
+        }
+
+        def _status_dot(color, emoji, tooltip):
+            bg, glow = _glow_colors[color]
+            return (
+                f'<div style="display:flex;flex-direction:column;align-items:center;gap:5px;cursor:default;" title="{tooltip}">'
+                f'<div style="width:14px;height:14px;border-radius:50%;background:{bg};box-shadow:0 0 10px 4px {glow};"></div>'
+                f'<span style="font-size:13px;line-height:1;">{emoji}</span>'
+                f'</div>'
+            )
+
+        st.markdown(
+            f'<div style="display:flex;justify-content:center;align-items:flex-start;gap:32px;padding:10px 0 6px 0;">'
+            f'{_status_dot(kb_color, "🧠", kb_tip)}'
+            f'{_status_dot(web_color, "🌐", web_tip)}'
+            f'{_status_dot(orders_color, "🛒", orders_tip)}'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
         if session.user_type.value == UserType.REGISTERED_USER.value:
             st.success("✅ **Registered User**")
             
@@ -6758,95 +6845,6 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
         #        st.error(f"🚫 Session is likely expired. Type a question to check.")
         # else:
         #    if DEBUG_MODE: st.caption("Session timer will start with first interaction.")
-
-        # Service Status - Compact Traffic Light Indicators
-        st.divider()
-
-        kb_color, kb_tip = "gray", "Knowledge Base: Not configured"
-        web_color, web_tip = "gray", "Web Search: Not configured"
-        orders_color, orders_tip = "gray", "12Taste Orders: Not configured"
-
-        ai_system = session_manager.ai
-        if ai_system:
-            pinecone_status = error_handler.component_status.get("Pinecone", "healthy")
-            tavily_status = error_handler.component_status.get("Tavily", "healthy")
-
-            # Knowledge Base (Pinecone)
-            if ai_system.pinecone_tool and ai_system.pinecone_tool.assistant:
-                if pinecone_status == "healthy":
-                    kb_color, kb_tip = "green", "Knowledge Base: Ready"
-                elif pinecone_status in ["rate_limit"]:
-                    kb_color, kb_tip = "yellow", "Knowledge Base: Rate Limited"
-                else:
-                    kb_color, kb_tip = "red", f"Knowledge Base: {pinecone_status.replace('_', ' ').title()}"
-            elif ai_system.config.PINECONE_API_KEY:
-                kb_color, kb_tip = "yellow", "Knowledge Base: Error"
-
-            # Web Search (Tavily)
-            if ai_system.tavily_agent:
-                if tavily_status == "healthy":
-                    web_color, web_tip = "green", "Web Search: Ready"
-                else:
-                    web_color, web_tip = "yellow", f"Web Search: {tavily_status.replace('_', ' ').title()}"
-            elif ai_system.config.TAVILY_API_KEY:
-                web_color, web_tip = "yellow", "Web Search: Error"
-
-            # Hidden: OpenAI
-            if ai_system.openai_client:
-                pass
-            elif ai_system.config.OPENAI_API_KEY:
-                pass
-            else:
-                pass
-        else:
-            pass
-
-        # Hidden: CRM Integration
-        if session_manager.zoho.config.ZOHO_ENABLED and session.user_type.value in [UserType.REGISTERED_USER.value, UserType.EMAIL_VERIFIED_GUEST.value]:
-            if session.zoho_contact_id:
-                pass
-            else:
-                pass
-            if session.timeout_saved_to_crm:
-                pass
-            else:
-                pass
-        else:
-            pass
-
-        # 12Taste Orders (WooCommerce)
-        if session_manager.woocommerce and session_manager.woocommerce.config.WOOCOMMERCE_ENABLED:
-            status = session_manager.woocommerce.test_connection()
-            if status["status"] == "connected":
-                orders_color, orders_tip = "green", "12Taste Orders: Connected"
-            else:
-                orders_color, orders_tip = "red", f"12Taste Orders: {status['status'].replace('_', ' ').title()}"
-
-        # Render compact traffic-light status dots with glow
-        _glow_colors = {
-            "green":  ("#28a745", "rgba(40,167,69,0.55)"),
-            "yellow": ("#ffc107", "rgba(255,193,7,0.55)"),
-            "red":    ("#dc3545", "rgba(220,53,69,0.55)"),
-            "gray":   ("#6c757d", "rgba(108,117,125,0.25)"),
-        }
-
-        def _status_dot(color, emoji, tooltip):
-            bg, glow = _glow_colors[color]
-            return (
-                f'<div style="display:flex;flex-direction:column;align-items:center;gap:5px;cursor:default;" title="{tooltip}">'
-                f'<div style="width:14px;height:14px;border-radius:50%;background:{bg};box-shadow:0 0 10px 4px {glow};"></div>'
-                f'<span style="font-size:13px;line-height:1;">{emoji}</span>'
-                f'</div>'
-            )
-
-        st.markdown(
-            f'<div style="display:flex;justify-content:center;align-items:flex-start;gap:32px;padding:10px 0 6px 0;">'
-            f'{_status_dot(kb_color, "🧠", kb_tip)}'
-            f'{_status_dot(web_color, "🌐", web_tip)}'
-            f'{_status_dot(orders_color, "🛒", orders_tip)}'
-            f'</div>',
-            unsafe_allow_html=True
-        )
 
         st.divider()
         
