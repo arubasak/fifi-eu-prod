@@ -5502,11 +5502,14 @@ class SessionManager:
                 session.messages.append({'role': 'user', 'content': prompt})
                 query_type = 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost']) else 'stock'
                 if query_type == 'pricing':
-                    st.toast("For pricing and quotes, please contact our sales team at sales-eu@12taste.com", icon="💰")
+                    redirect_message = "For pricing and quotes, please contact our sales team at sales-eu@12taste.com"
+                    st.toast(redirect_message, icon="💰")
                 else:
-                    st.toast("For stock availability, please contact our sales team at sales-eu@12taste.com", icon="📦")
+                    redirect_message = "For stock availability, please contact our sales team at sales-eu@12taste.com"
+                    st.toast(redirect_message, icon="📦")
+                session.messages.append({'role': 'assistant', 'content': redirect_message, 'source': 'Business Rules', 'is_pricing_stock_redirect': True})
                 self._update_activity(session)
-                return {'content': "", 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
+                return {'content': redirect_message, 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
 
             # 3.5 WooCommerce Order Check (ENHANCED with LLM Intent)
             logger.debug(f"Checking 12Taste Order Status query for: '{prompt}' with LLM intent.")
@@ -6045,10 +6048,15 @@ def check_timeout_and_trigger_reload(session_manager: 'SessionManager', session:
         logger.debug("No valid session for timeout check.")
         return False
     
+    current_last_activity = session.last_activity
     fresh_session_from_db = session_manager.db.load_session(session.session_id)
-    
+
     if fresh_session_from_db:
-        session.last_activity = fresh_session_from_db.last_activity
+        # Use most recent last_activity to prevent false timeouts when a prior DB save failed
+        if current_last_activity and fresh_session_from_db.last_activity:
+            session.last_activity = max(current_last_activity, fresh_session_from_db.last_activity)
+        else:
+            session.last_activity = fresh_session_from_db.last_activity or current_last_activity
         session.active = fresh_session_from_db.active
         session.user_type = fresh_session_from_db.user_type
         session.email = fresh_session_from_db.email
@@ -6746,7 +6754,7 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                            
                 remaining_tier1 = REGISTERED_USER_TIER_1_LIMIT - session.daily_question_count
                 if remaining_tier1 > 0:
-                    st.caption(f"⏰ {remaining_tier1} questions until {TIER_1_BAN_HOURS}-hour break")
+                    st.caption(f"⏰ {remaining_tier1} {'question' if remaining_tier1 == 1 else 'questions'} until {TIER_1_BAN_HOURS}-hour mandatory break")
             elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
                 if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
                     st.progress(1.0, text="Tier 1 Complete")
@@ -7513,7 +7521,7 @@ def render_chat_interface_simplified(session_manager: 'SessionManager', session:
             
         elif user_type == UserType.REGISTERED_USER.value:
             if current_count == REGISTERED_USER_TIER_1_LIMIT - 1:
-                st.warning(f"⚠️ **Tier 1 Final Question Coming Up!** After your next question, you'll need a {TIER_1_BAN_HOURS}-hour break.")
+                st.warning(f"⚠️ **Tier 1 Final Question Coming Up!** After your next question, you'll need to take a {TIER_1_BAN_HOURS}-hour mandatory break.")
             elif current_count == REGISTERED_USER_QUESTION_LIMIT - 1:
                 st.warning(f"⚠️ **Final Question Today!** Your next question will be your last for {TIER_2_BAN_HOURS} hours.")
 
