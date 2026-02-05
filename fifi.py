@@ -5503,10 +5503,10 @@ class SessionManager:
                 query_type = 'pricing' if any(word in prompt.lower() for word in ['price', 'pricing', 'cost']) else 'stock'
                 if query_type == 'pricing':
                     redirect_message = "For pricing and quotes, please contact our sales team at sales-eu@12taste.com"
-                    st.toast(redirect_message, icon="💰")
+                    st.warning(f"💰 {redirect_message}")
                 else:
                     redirect_message = "For stock availability, please contact our sales team at sales-eu@12taste.com"
-                    st.toast(redirect_message, icon="📦")
+                    st.warning(f"📦 {redirect_message}")
                 session.messages.append({'role': 'assistant', 'content': redirect_message, 'source': 'Business Rules', 'is_pricing_stock_redirect': True})
                 self._update_activity(session)
                 return {'content': redirect_message, 'success': True, 'source': 'Business Rules', 'is_pricing_stock_redirect': True, 'display_only_notice': True}
