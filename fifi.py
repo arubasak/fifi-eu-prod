@@ -4092,11 +4092,17 @@ class SessionManager:
                         if isinstance(time_remaining, timedelta):
                             hours = max(0, int(time_remaining.total_seconds() // 3600))
                             minutes = int((time_remaining.total_seconds() % 3600) // 60)
-                            st.info(f"Time remaining: {hours}h {minutes}m") if is_tier_break else st.error(f"Time remaining: {hours}h {minutes}m")
+                            if is_tier_break:
+                                st.info(f"Time remaining: {hours}h {minutes}m")
+                            else:
+                                st.error(f"Time remaining: {hours}h {minutes}m")
                         elif isinstance(time_remaining, (int, float)):
                             hours = max(0, int(time_remaining // 3600))
                             minutes = int((time_remaining % 3600) // 60)
-                            st.info(f"Time remaining: {hours}h {minutes}m") if is_tier_break else st.error(f"Time remaining: {hours}h {minutes}m")
+                            if is_tier_break:
+                                st.info(f"Time remaining: {hours}h {minutes}m")
+                            else:
+                                st.error(f"Time remaining: {hours}h {minutes}m")
 
                         st.info(message)
                         logger.info(f"🚫 [GET_SESSION] Session {session_id[:8]} is currently banned: Type={ban_type}, Reason='{message}'.")
@@ -5891,7 +5897,10 @@ class SessionManager:
                     else:
                         hours = max(0, int(time_remaining // 3600))
                         minutes = int((time_remaining % 3600) // 60)
-                    st.info(f"Time remaining: {hours}h {minutes}m") if is_tier_break else st.error(f"Time remaining: {hours}h {minutes}m")
+                    if is_tier_break:
+                        st.info(f"Time remaining: {hours}h {minutes}m")
+                    else:
+                        st.error(f"Time remaining: {hours}h {minutes}m")
                 st.info(message)
                 return True
                 
