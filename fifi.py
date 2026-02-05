@@ -5553,7 +5553,7 @@ class SessionManager:
                 
                 # Check authentication
                 if not (session.user_type == UserType.REGISTERED_USER or session.user_type == UserType.EMAIL_VERIFIED_GUEST) or not session.email:
-                    message = "To check order status, please Sign Out from this Guest session provided in the sidebar of this chat app and return to sign in as a Registered User. If you have not completed your registration, you can go to https://www.12taste.com/in/my-account/ for completing the registration process. Alternatively, you can choose to verify your email address after completing the four complimentary questions."
+                    message = "To check order status, please Sign Out from this Guest session provided in the sidebar of this chat app and return to sign in as a Registered User. If you have not completed your registration, you can go to https://www.12taste.com/my-account/ for completing the registration process. Alternatively, you can choose to verify your email address after completing the four complimentary questions."
                     session.messages.append({'role': 'user', 'content': prompt})
                     session.messages.append({'role': 'assistant', 'content': message, 'source': '12Taste Order Status'})
                     self._update_activity(session)
