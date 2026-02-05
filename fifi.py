@@ -5776,6 +5776,10 @@ class SessionManager:
                 if question_record_status.get("ban_applied") or question_record_status.get("existing_ban_inherited"):
                     message = self.question_limits._get_ban_message(session, question_record_status.get("ban_type"))
                     time_remaining_td = session.ban_end_time - datetime.now() if session.ban_end_time else None
+                    # Append messages before returning so they are counted
+                    session.messages.append({'role': 'user', 'content': sanitized_prompt})
+                    session.messages.append({'role': 'assistant', 'content': message, 'source': 'Question Limiter', 'is_ban_message': True})
+                    self._update_activity(session)
                     return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': time_remaining_td}
             except Exception as e:
                 logger.error(f"❌ Critical error recording question: {e}")
