@@ -5776,6 +5776,10 @@ class SessionManager:
                 if question_record_status.get("ban_applied") or question_record_status.get("existing_ban_inherited"):
                     message = self.question_limits._get_ban_message(session, question_record_status.get("ban_type"))
                     time_remaining_td = session.ban_end_time - datetime.now() if session.ban_end_time else None
+                    # Append messages before returning so they are counted
+                    session.messages.append({'role': 'user', 'content': sanitized_prompt})
+                    session.messages.append({'role': 'assistant', 'content': message, 'source': 'Question Limiter', 'is_ban_message': True})
+                    self._update_activity(session)
                     return {'content': message, 'success': False, 'source': 'Question Limiter', 'banned': True, 'time_remaining': time_remaining_td}
             except Exception as e:
                 logger.error(f"❌ Critical error recording question: {e}")
@@ -6765,13 +6769,17 @@ def render_sidebar(session_manager: 'SessionManager', session: UserSession, pdf_
                 if remaining_tier1 > 0:
                     st.caption(f"⏰ {remaining_tier1} {'question' if remaining_tier1 == 1 else 'questions'} until {TIER_1_BAN_HOURS}-hour mandatory break")
             elif session.daily_question_count == REGISTERED_USER_TIER_1_LIMIT:
-                if session.ban_status == BanStatus.ONE_HOUR and session.ban_end_time and datetime.now() < session.ban_end_time:
+                # Check if actively in Tier 1 break (ban is active) - use ban_end_time as primary indicator
+                is_in_tier1_break = session.ban_end_time and datetime.now() < session.ban_end_time
+                if is_in_tier1_break:
+                    # Show break status regardless of ban_status value (defensive)
                     st.progress(1.0, text="Tier 1 Complete")
                     time_remaining = session.ban_end_time - datetime.now()
                     hours = int(time_remaining.total_seconds() // 3600)
                     minutes = int((time_remaining.total_seconds() % 3600) // 60)
                     st.caption(f"⏳ Tier 1 break: {hours}h {minutes}m remaining until Tier 2")
                 elif session.tier1_completed_in_cycle:
+                    # Ban has expired, ready to proceed
                     st.progress(1.0, text="Tier 1 Complete ✅")
                     st.caption("📈 Ready to proceed to Tier 2!")
                 else:
